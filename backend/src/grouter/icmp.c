@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <math.h>
 #include <signal.h>
+#include "verbose.h"
 
 // state information on outstanding ping..
 pingstat_t pstat;
@@ -162,7 +163,7 @@ void ICMPProcessTTLExpired(gpacket_t *in_pkt)
 	int iphdrlen = ipkt->ip_hdr_len *4;
 	icmphdr_t *icmphdr = (icmphdr_t *)((uchar *)ipkt + iphdrlen);
 	ushort cksum;
-	char tmpbuf[MAX_TMPBUF_LEN];
+	uchar tmpbuf[MAX_TMPBUF_LEN];
 	int iprevlen = iphdrlen + 8;  // IP header + 64 bits
 	uchar prevbytes[MAX_IPREVLENGTH_ICMP];
 
@@ -185,7 +186,10 @@ void ICMPProcessTTLExpired(gpacket_t *in_pkt)
 
 	// send the message back to the IP module for further processing ..
 	// set the messsage as REPLY_PACKET
-	IPOutgoingPacket(in_pkt, gNtohl(tmpbuf, ipkt->ip_src), 8+iprevlen, 1, ICMP_PROTOCOL);
+	{
+		uchar tmp[4];
+		IPOutgoingPacket(in_pkt, gNtohl(tmp, ipkt->ip_src), 8+iprevlen, 1, ICMP_PROTOCOL);
+	}
 }
 
 
@@ -239,7 +243,7 @@ void ICMPProcessEchoReply(gpacket_t *in_pkt)
 
 	struct timeval tv;
 	struct timezone tz;
-	char tmpbuf[MAX_TMPBUF_LEN];
+	uchar tmpbuf[MAX_TMPBUF_LEN];
 	double elapsed_time;
 
 	if (icmphdr->type == ICMP_ECHO_REPLY)
@@ -272,7 +276,7 @@ void ICMPProcessRedirect(gpacket_t *in_pkt, uchar *gw_addr)
 	icmphdr_t *icmphdr = (icmphdr_t *)((uchar *)ipkt + iphdrlen);
 	int iprevlen = iphdrlen + 8;  // IP header + 64 bits
 	ushort cksum;
-	char tmpbuf[MAX_TMPBUF_LEN];
+	uchar tmpbuf[MAX_TMPBUF_LEN];
 	uchar prevbytes[MAX_IPREVLENGTH_ICMP];
 	memcpy(prevbytes, (uchar *)ipkt, iprevlen);
 
@@ -290,7 +294,10 @@ void ICMPProcessRedirect(gpacket_t *in_pkt, uchar *gw_addr)
 
 	// send the message back to the IP routine for further processing ..
 	// set the messsage as REPLY_PACKET
-	IPOutgoingPacket(in_pkt, gNtohl(tmpbuf, ipkt->ip_src), (8 + iprevlen), 0, ICMP_PROTOCOL);
+	{
+		uchar tmp[4];
+		IPOutgoingPacket(in_pkt, gNtohl(tmp, ipkt->ip_src), (8 + iprevlen), 0, ICMP_PROTOCOL);
+	}
 }
 
 
@@ -306,7 +313,7 @@ void ICMPProcessFragNeeded(gpacket_t *in_pkt, int interface_mtu)
 	icmphdr_t *icmphdr = (icmphdr_t *)((uchar *)ipkt + iphdrlen);
 	int iprevlen = iphdrlen + 8;  // IP header + 64 bits
 	ushort cksum;
-	char tmpbuf[MAX_TMPBUF_LEN];
+	uchar tmpbuf[MAX_TMPBUF_LEN];
 	uchar prevbytes[MAX_IPREVLENGTH_ICMP];
 	memcpy(prevbytes, (uchar *)ipkt, iprevlen);            // save OLD portions of IP packet
 

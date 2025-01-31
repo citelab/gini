@@ -23,6 +23,10 @@
 #include <slack/fio.h>
 #include <sys/stat.h>
 #include "gpcap.h"
+#include "verbose.h"
+#include "message.h"
+#include <sys/socket.h>
+#include <sys/un.h>
 
 /*
  * Some global variables! These global variables are used for visualizing the
@@ -96,9 +100,9 @@ vpl_data_t *vpl_connect(char *vsock_name)
 	verbose(2, "[vpl_connect]:: starting connection.. ");
 	vpl_data_t *pri = (vpl_data_t *)calloc(1, sizeof(vpl_data_t));
 	pri->sock_type = "unix";
-	pri->ctl_sock = strdup(vsock_name);
-	pri->ctl_addr = new_addr(pri->ctl_sock,
-				 strlen(pri->ctl_sock) + 1);
+	pri->ctl_sock = (struct sockaddr_un *)strdup(vsock_name);
+	pri->ctl_addr = (struct sockaddr_un *)new_addr(pri->ctl_sock,
+				 strlen(vsock_name) + 1);
 	pri->data_addr = NULL;
 	pri->data = -1;
 	pri->control = -1;
@@ -106,7 +110,7 @@ vpl_data_t *vpl_connect(char *vsock_name)
 	name.pid = getpid();
 	gettimeofday(&temp_wtime, NULL);
 	name.usecs = temp_wtime.tv_usec;
-	pri->local_addr = new_addr(&name, sizeof(struct name_t));
+	pri->local_addr = (struct sockaddr_un *)new_addr(&name, sizeof(struct name_t));
 
 	if((pri->control = socket(AF_UNIX, SOCK_STREAM, 0)) < 0){
 		verbose(2, "[vpl_connect]:: control socket failed, error = %s", strerror(errno));
@@ -166,7 +170,7 @@ vpl_data_t *vpl_connect(char *vsock_name)
 		close(pri->control);
 		return NULL;
 	}
-	pri->data_addr = sun;
+	pri->data_addr = (struct sockaddr_un *)sun;
 	pri->data = fd;
 
 	return pri;
@@ -198,7 +202,7 @@ vpl_data_t *vpl_create_server(char *name)
 		return NULL;
 	}
 	vdata->sock_type = "unix";
-	vdata->ctl_sock = strdup(name);
+	vdata->ctl_sock = (struct sockaddr_un *)strdup(name);
 	vdata->data_addr = NULL;
 
 	// setup control socket
@@ -214,7 +218,7 @@ vpl_data_t *vpl_create_server(char *name)
 		return NULL;
 	}
 
-	vdata->ctl_addr = new_addr(name, strlen(name)+1);
+	vdata->ctl_addr = (struct sockaddr_un *)new_addr(name, strlen(name)+1);
 	if(bind(vdata->control, (struct sockaddr *)vdata->ctl_addr,
 		sizeof(struct sockaddr_un)) < 0)
 	{
@@ -254,7 +258,7 @@ vpl_data_t *vpl_create_server(char *name)
 	sname.pid = getpid();
 	gettimeofday(&temp_wtime, NULL);
 	sname.usecs = temp_wtime.tv_usec;
-	vdata->local_addr = new_addr(&sname, sizeof(struct name_t));
+	vdata->local_addr = (struct sockaddr_un *)new_addr(&sname, sizeof(struct name_t));
 
 	if(bind(vdata->data, (struct sockaddr *)vdata->local_addr,
 		sizeof(struct sockaddr_un)) < 0)
@@ -277,7 +281,7 @@ int vpl_accept_connect(vpl_data_t *v)
 	int insock, rbytes;
 	struct sockaddr addr;
 	struct request_v3 req;
-	int len;
+	socklen_t len;
 
 	len = sizeof(struct sockaddr);
 	if ((v == NULL) || (v->control < 0))
@@ -309,7 +313,7 @@ int vpl_accept_connect(vpl_data_t *v)
 
 	verbose(2, "[vpl_accept_connect]:: done reading remote address");
 	// read the above into data addr
-	v->data_addr = dup_addr(&req.sock);
+	v->data_addr = (struct sockaddr_un *)dup_addr((struct sockaddr_un *)&req.sock);
 
 
 	return 1;

@@ -18,6 +18,11 @@
 
 #include <slack/std.h>
 #include <slack/err.h>
+#include <slack/prog.h>
+#include <slack/map.h>
+#include "verbose.h"  // For fatal()
+#include "message.h"
+#include "grouter.h"
 
 
 // create a classifier with the given name
@@ -157,7 +162,7 @@ void printClassifier(classlist_t *cl)
 
 	printf("\nRule ID\tRule Tag\tSrc IP\t<Src Port Range>\tDst IP\t<Dst Port Range>\tProtocol\tTOS\n");
 	lstr = lister_create(cl->deftab);
-	while (ptr = ((classdef_t*)lister_next(lstr)))
+	while ((ptr = ((classdef_t*)lister_next(lstr))) != NULL)
 		printClassDef(ptr);
 
 	lister_release(lstr);
@@ -171,7 +176,7 @@ int insertIPSpec(classlist_t *clas, char *cname, int srcside, ip_spec_t *ipspec)
 	classdef_t *ptr;
 
 	lstr = lister_create(clas->deftab);
-	while (ptr = ((classdef_t *)lister_next(lstr)))
+	while ((ptr = ((classdef_t*)lister_next(lstr))) != NULL)
 	{
 		if (!strcmp(ptr->cname, cname))
 		{
@@ -192,7 +197,7 @@ int insertPortRangeSpec(classlist_t *clas, char *cname, int srcside, port_range_
 	classdef_t *ptr;
 
 	lstr = lister_create(clas->deftab);
-	while (ptr = ((classdef_t *)lister_next(lstr)))
+	while ((ptr = ((classdef_t*)lister_next(lstr))) != NULL)
 	{
 		if (!strcmp(ptr->cname, cname))
 		{
@@ -213,7 +218,7 @@ int insertProtSpec(classlist_t *clas, char *cname, int prot)
 	classdef_t *ptr;
 
 	lstr = lister_create(clas->deftab);
-	while (ptr = ((classdef_t *)lister_next(lstr)))
+	while ((ptr = ((classdef_t*)lister_next(lstr))) != NULL)
 	{
 		if (!strcmp(ptr->cname, cname))
 		{
@@ -231,7 +236,7 @@ int insertTOSSpec(classlist_t *clas, char *cname, int tos)
 	classdef_t *ptr;
 
 	lstr = lister_create(clas->deftab);
-	while (ptr = ((classdef_t *)lister_next(lstr)))
+	while ((ptr = ((classdef_t*)lister_next(lstr))) != NULL)
 	{
 		if (!strcmp(ptr->cname, cname))
 		{
@@ -259,7 +264,10 @@ int compareIP2Spec(uchar ip[], ip_spec_t *ips)
 	preflen = ips->preflen;
 	prefbytes = preflen/8;
 
-	bcopy(gHtonl(tmpbuf, ips->ip_addr), spec, 4);
+	{
+		uchar tmp[4];
+		bcopy(gHtonl(tmp, ips->ip_addr), spec, 4);
+	}
 
 	for (i = 0; i < prefbytes; i++)
 		temp[i] = ip[i];

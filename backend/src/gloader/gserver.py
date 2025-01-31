@@ -1,6 +1,6 @@
-#!/usr/bin/python2
+#!/usr/bin/env python3
 
-from PyQt4 import QtNetwork, QtCore
+from PyQt5 import QtNetwork, QtCore
 from TaskManager import *
 import os, sys, readline, time, subprocess, signal
 
@@ -219,14 +219,14 @@ class ReceiveInitStartCommand(Command):
 
         # make data dir if necessary
         if not os.access(data_dir, os.F_OK):
-            os.mkdir(data_dir, 0755)
+            os.mkdir(data_dir, 0o755)
 
         subprocess.call(["/bin/bash", "-c", "rm -rf %s/Router_* %s/Switch_*" % (data_dir, data_dir)])
 
         # make mobile_data dir if necessary
         mobile_dir = data_dir + "/mobile_data"
         if not os.access(mobile_dir, os.F_OK):
-            os.mkdir(mobile_dir, 0755)
+            os.mkdir(mobile_dir, 0o755)
 
 
 class ReceiveCanvasInfoCommand(Command):

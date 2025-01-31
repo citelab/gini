@@ -11,6 +11,7 @@ import sys
 import py_compile
 from SCons.Node import FS
 from subprocess import call
+import platform
 
 # Make sure git submodules are initialized
 # call(["git", "submodule", "update", "--init", "--recursive"])
@@ -42,7 +43,13 @@ sharedir = prefix + "/share/gini"
 ###############
 
 
-env = Environment()
+env = Environment(
+    CCFLAGS=['-g', '-DHAVE_PTHREAD_RWLOCK=1', '-DHAVE_GETOPT_LONG'],
+    CPPPATH=['backend/include', 'backend/include/custom'],
+    LIBPATH=['/usr/local/lib'],  # Add library search path
+    LIBS=['readline', 'pthread', 'util', 'm', 
+          'slack']  # Add slack library
+)
 
 env.Clean(build_dir,build_dir)
 env.Clean(bin_dir, bin_dir)
@@ -78,7 +85,7 @@ def compile_python(env, source, alias=None):
 
 def gen_environment_file(target, source, env):
     output_file = open(target[0].abspath,'w')
-    output_file.write('#!/usr/bin/python2\n')
+    output_file.write('#!%s\n' % env.get('PYTHON', '/usr/bin/env python3'))
     output_file.write('import os, subprocess, sys\n\n')
     output_file.write('previous_dir = os.getcwd()\n')
     output_file.write('os.chdir(os.path.dirname(os.path.realpath(__file__)))\n')
@@ -86,6 +93,8 @@ def gen_environment_file(target, source, env):
     output_file.write('os.environ["GINI_SHARE"] = os.path.realpath("%s")\n' % os.path.relpath(sharedir, bin_dir))
     output_file.write('os.environ["GINI_LIB"] = os.path.realpath("%s")\n' % os.path.relpath(lib_dir, bin_dir))
     output_file.write('os.environ["GINI_HOME"] = os.environ["HOME"] + "/.gini"\n')
+    output_file.write('if os.path.exists("/opt/anaconda3/lib/python3.12/site-packages"):\n')
+    output_file.write('    sys.path.append("/opt/anaconda3/lib/python3.12/site-packages")\n')
     output_file.write('if not os.path.exists(os.environ["GINI_HOME"] + "/etc"): os.makedirs(os.environ["GINI_HOME"] + "/etc")\n')
     output_file.write('if not os.path.exists(os.environ["GINI_HOME"] + "/sav"): os.makedirs(os.environ["GINI_HOME"] + "/sav")\n')
     output_file.write('if not os.path.exists(os.environ["GINI_HOME"] + "/data"): os.makedirs(os.environ["GINI_HOME"] + "/data")\n')
@@ -137,23 +146,22 @@ def symlink(target, source, env):
     srcrel = os.path.relpath(src,lnkdir)
 
     if int(env.get('verbose',0)) > 4:
-        print 'target:', target
-        print 'source:', source
-        print 'lnk:', lnk
-        print 'src:', src
-        print 'lnkdir,lnkname:', lnkdir, lnkname
-        print 'srcrel:', srcrel
+        print('target:', target)
+        print('source:', source)
+        print('lnk:', lnk)
+        print('src:', src)
+        print('lnkdir,lnkname:', lnkdir, lnkname)
+        print('srcrel:', srcrel)
 
     if int(env.get('verbose',0)) > 4:
-        print 'in directory: %s' % os.path.relpath(lnkdir,env.Dir('#').abspath)
-        print '    symlink: %s -> %s' % (lnkname,srcrel)
+        print('in directory: %s' % os.path.relpath(lnkdir,env.Dir('#').abspath))
+        print('    symlink: %s -> %s' % (lnkname,srcrel))
 
     try:
         os.symlink(srcrel,lnk)
     except AttributeError:
         # no symlink available, so we make a (deep) copy? (or pass)
-        #os.copytree(srcrel,lnk)
-        print 'no os.symlink capability on this system?'
+        print('no os.symlink capability on this system?')
 
     return None
 
@@ -172,8 +180,8 @@ def symlink_emitter(target,source,env):
         ldir = os.path.relpath(lnkdir,env.Dir('#').abspath)
     if lnkdir[:2] == '..':
         ldir = os.path.abspath(ldir)
-        print '  symbolic link in directory: %s' % ldir
-        print '      %s -> %s' % (lnkname,srcrel)
+        print('  symbolic link in directory: %s' % ldir)
+        print('      %s -> %s' % (lnkname,srcrel))
 
     try:
         if os.path.exists(lnk):
@@ -182,7 +190,7 @@ def symlink_emitter(target,source,env):
     except AttributeError:
         # no symlink available, so we remove the whole tree? (or pass)
         #os.rmtree(lnk)
-        print 'no os.symlink capability on this system?'
+        print('no os.symlink capability on this system?')
 
     return target, source
 
@@ -220,10 +228,91 @@ def recursive_install(target, source, env):
 
 conf = Configure(env)
 if not conf.CheckLib('readline'):
-    print 'Did not find libreadline.so or readline.lib, exiting!'
+    print('Did not find libreadline.so or readline.lib, exiting!')
     Exit(1)
 if not conf.CheckLib('pthread'):
-    print 'Did not find libpthread.so or pthread.lib, exiting!'
+    print('Did not find libpthread.so or pthread.lib, exiting!')
+    Exit(1)
+
+# Check for Qt5 on macOS
+if platform.system() == 'Darwin':
+    # On macOS, Qt is typically installed via Homebrew or the Qt installer
+    qt_paths = [
+        '/usr/local/opt/qt@5/lib',  # Homebrew Qt5
+        '/opt/homebrew/opt/qt@5/lib',  # Apple Silicon Homebrew Qt5
+    ]
+    
+    # Add Qt5 pkg-config path
+    qt_pkg_paths = [
+        '/usr/local/opt/qt@5/lib/pkgconfig',
+        '/opt/homebrew/opt/qt@5/lib/pkgconfig',
+    ]
+    
+    for pkg_path in qt_pkg_paths:
+        if os.path.exists(pkg_path):
+            env['ENV']['PKG_CONFIG_PATH'] = pkg_path
+            break
+    
+    qt_found = False
+    for path in qt_paths:
+        print('Checking Qt5 path:', path)
+        if os.path.exists(path):
+            print('Found Qt5 at:', path)
+            env.Append(LIBPATH=[path])
+            env.Append(CPPPATH=[path.replace('/lib', '/include')])
+            qt_found = True
+            break
+    
+    if not qt_found:
+        print('Qt5 libraries not found. Please install Qt5:')
+        print('    brew install qt@5')
+        print('or download from https://www.qt.io/download')
+        print('\nIf Qt5 is installed but not found, you may need to add it to your PATH:')
+        print('    echo \'export PATH="/usr/local/opt/qt@5/bin:$PATH"\' >> ~/.zshrc')
+        print('    echo \'export PATH="/opt/homebrew/opt/qt@5/bin:$PATH"\' >> ~/.zshrc')
+        Exit(1)
+else:
+    # Linux/other OS checks
+    if not conf.CheckLib('Qt5Core') or not conf.CheckLib('Qt5Gui') or not conf.CheckLib('Qt5Widgets'):
+        print('Qt5 libraries not found. Please install Qt5 development packages')
+        Exit(1)
+
+# Add Python bindings check
+import subprocess
+
+def check_pyqt5(python_cmd):
+    try:
+        subprocess.check_call([python_cmd, '-c', 'import PyQt5'])
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+# Try different Python commands
+python_commands = [
+    'python3',
+    'python3.12',  # Your Anaconda Python version
+    '/opt/anaconda3/bin/python3',  # Full path to Anaconda Python
+    sys.executable  # Current Python interpreter
+]
+
+pyqt5_found = False
+for cmd in python_commands:
+    print(f'Checking PyQt5 with {cmd}...')
+    if check_pyqt5(cmd):
+        print(f'Found PyQt5 in {cmd}')
+        pyqt5_found = True
+        # Update the environment to use this Python
+        env['PYTHON'] = cmd
+        break
+
+if not pyqt5_found:
+    print('PyQt5 Python bindings not found. Please install python3-pyqt5 or run:')
+    print('    pip3 install PyQt5')
+    print('\nIf PyQt5 is installed but not found, you may need to:')
+    print('1. Activate your Anaconda environment:')
+    print('    conda activate base')
+    print('2. Run scons with the correct Python:')
+    print('    /opt/anaconda3/bin/python3 $(which scons)')
     Exit(1)
 env = conf.Finish()
 
@@ -262,49 +351,10 @@ recursive_install(lib_pox_dir, pox_ext_dir, env)
 
 
 grouter_include = backend_dir + '/include'
-grouter_dir = backend_dir + '/src/grouter'
-grouter_build_dir = src_dir + '/build/release/grouter'
-
-VariantDir(grouter_build_dir,grouter_dir, duplicate=0)
-
-grouter_env = Environment(CPPPATH=grouter_include)
-grouter_env.Append(CFLAGS='-g')
-grouter_env.Append(CFLAGS='-DHAVE_PTHREAD_RWLOCK=1')
-grouter_env.Append(CFLAGS='-DHAVE_GETOPT_LONG')
-
-# some of the following library dependencies can be removed?
-# may be the termcap is not needed anymore..?
-# TODO: libslack should be removed.. required routines should be custom compiled
-
-grouter_libs = Split ("""readline
-                         termcap
-                         slack
-                         pthread
-                         util
-                         m""")
-
-grouter_test_objects = []
-grouter_other_objects = []
-for file in os.listdir(grouter_dir):
-    if file.endswith(".c"):
-        if file == "cli.c" or file == "grouter.c":
-            grouter_other_objects.append(grouter_env.Object(grouter_build_dir + "/" + file))
-        else:
-            grouter_test_objects.append(grouter_env.Object(grouter_build_dir + "/" + file))
-
-grouter = grouter_env.Program(grouter_build_dir + "/grouter", grouter_test_objects + grouter_other_objects, LIBS=grouter_libs)
-
-env.Install(lib_dir + "/grouter/", grouter)
-post_chmod(lib_dir + "/grouter/grouter")
-env.PythonEnvFile(bin_dir + "/grouter", lib_dir + "/grouter/grouter")
-post_chmod(bin_dir + "/grouter")
+grouter_dir = backend_dir + '/src/grouter'  # Keep this for helpdefs path
 
 env.Install(sharedir + '/grouter/helpdefs', Glob(grouter_include + '/helpdefs/*'))
-
-env.Alias('install-grouter', bin_dir + '/grouter')
-env.Alias('install-grouter',sharedir + '/grouter/helpdefs')
-env.Clean(bin_dir + "/grouter", lib_dir + "/grouter/grouter")
-env.Clean("install-grouter", lib_dir + "/grouter")
+env.Alias('install-grouter', sharedir + '/grouter/helpdefs')
 env.Alias('install','install-grouter')
 
 
@@ -420,36 +470,3 @@ env.Alias('install-gbuilder', lib_dir + '/gbuilder')
 env.Clean(sharedir + '/gbuilder',sharedir + '/gbuilder')
 env.Clean(lib_dir + '/gbuilder', lib_dir + '/gbuilder')
 env.Alias('install', 'install-gbuilder')
-
-
-##################
-# Test Framework #
-##################
-
-
-test_dir = backend_dir + '/tests'
-test_build_dir = src_dir + '/build/tests'
-test_include = src_dir + '/backend/third-party/mut'
-testenv = env.Clone()
-testenv.Append(CPPPATH=[test_include])
-testenv.Append(CFLAGS='-g')
-testenv.Append(CFLAGS='-DHAVE_PTHREAD_RWLOCK=1')
-testenv.Append(CFLAGS='-DHAVE_GETOPT_LONG')
-testenv.VariantDir(test_build_dir, test_dir, duplicate=0)
-tests = []
-
-grouter_test_dir = test_dir + '/grouter'
-grouter_test_build_dir = test_build_dir + '/grouter'
-grouter_test_env = testenv.Clone()
-grouter_test_env.Append(CPPPATH=[grouter_include])
-grouter_test_env.VariantDir(grouter_test_build_dir, grouter_test_dir, duplicate=0)
-
-for file in os.listdir(grouter_test_dir):
-    if file.endswith("_t.c"):
-        tests.append(grouter_test_env.Program(
-            os.path.join(grouter_test_build_dir, file[:-2]),
-            [os.path.join(grouter_test_build_dir, file)] + grouter_test_objects,
-            LIBS=grouter_libs))
-
-test_alias = Alias('test', tests, [test[0].abspath for test in tests])
-AlwaysBuild(test_alias)

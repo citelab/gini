@@ -3,13 +3,13 @@ import warnings
 warnings.simplefilter('ignore', numpy.RankWarning)
 
 from numpy.lib.polynomial import *
-from matplotlib.backends.backend_qt4agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt4agg import NavigationToolbar2QTAgg as NavigationToolbar
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import mainWidgets
-from Dockable import *
+from .Dockable import *
 
 
 class RouterQueue:

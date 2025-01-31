@@ -1,5 +1,5 @@
 from Core.Interfaceable import *
-from PyQt4.QtCore import QPoint
+from PyQt5.QtCore import QPoint
 
 
 class Cloud(Interfaceable):

@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <netinet/in.h>
@@ -11,7 +10,16 @@
 
 #include <slack/std.h>
 #include <slack/err.h>
+#include "verbose.h"
 
+// Define IPTOS macros if not defined
+#ifndef IPTOS_PREC
+#define IPTOS_PREC(tos)          ((tos) & 0xe0)
+#endif
+
+#ifndef IPTOS_TOS
+#define IPTOS_TOS(tos)           ((tos) & 0x1e)
+#endif
 
 gpacket_t *duplicatePacket(gpacket_t *inpkt)
 {
@@ -26,8 +34,6 @@ gpacket_t *duplicatePacket(gpacket_t *inpkt)
 	return cpptr;
 }
 
-
-
 void printSepLine(char *start, char *end, int count, char sep)
 {
 	int i;
@@ -37,7 +43,6 @@ void printSepLine(char *start, char *end, int count, char sep)
 		printf("%c", sep);
 	printf("%s", end);
 }
-
 
 void printGPktFrame(gpacket_t *msg, char *routine)
 {
@@ -51,7 +56,6 @@ void printGPktFrame(gpacket_t *msg, char *routine)
 	printf(" NEXT HOP addr : \t %s\n", IP2Dot(tmpbuf, msg->frame.nxth_ip_addr));
 }
 
-
 void printGPacket(gpacket_t *msg, int level, char *routine)
 {
 	printSepLine("", "\n", 70, '=');
@@ -62,7 +66,6 @@ void printGPacket(gpacket_t *msg, int level, char *routine)
 
 	printSepLine("\n", "\n", 70, '=');
 }
-
 
 void printGPktPayload(gpacket_t *msg, int level)
 {
@@ -93,7 +96,6 @@ void printGPktPayload(gpacket_t *msg, int level)
 	}
 }
 
-
 int printEthernetHeader(gpacket_t *msg)
 {
 	char tmpbuf[MAX_TMPBUF_LEN];
@@ -107,7 +109,6 @@ int printEthernetHeader(gpacket_t *msg)
 
 	return prot;
 }
-
 
 int printIPPacket(gpacket_t *msg)
 {
@@ -154,12 +155,14 @@ int printIPPacket(gpacket_t *msg)
 
 	printf("IP: Protocol       : %d", ip_pkt->ip_prot);
 	printf("IP: Checksum       : 0x%X\n", ntohs(ip_pkt->ip_cksum));
-	printf("IP: Source         : %s", IP2Dot(tmpbuf, gNtohl((tmpbuf+20), ip_pkt->ip_src)));
-	printf("IP: Destination    : %s", IP2Dot(tmpbuf, gNtohl((tmpbuf+20), ip_pkt->ip_dst)));
+	{
+		uchar tmp[4];
+		printf("IP: Source         : %s", IP2Dot(tmpbuf, gNtohl(tmp, ip_pkt->ip_src)));
+		printf("IP: Destination    : %s", IP2Dot(tmpbuf, gNtohl(tmp, ip_pkt->ip_dst)));
+	}
 
 	return ip_pkt->ip_prot;
 }
-
 
 void printARPPacket(gpacket_t *msg)
 {
@@ -179,20 +182,17 @@ void printARPPacket(gpacket_t *msg)
 	printf(" ARP dst ip addr %s \n", IP2Dot(tmpbuf, gNtohl((uchar *)tmpbuf, apkt->dst_ip_addr)));
 }
 
-
 void printICMPPacket(gpacket_t *msg)
 {
 
 	printf("\n ICMP PACKET display NOT YET IMPLEMENTED !! \n");
 }
 
-
 void printUDPPacket(gpacket_t *msg)
 {
 
 	printf("\n UDP PACKET display NOT YET IMPLEMENTED !! \n");
 }
-
 
 void printTCPPacket(gpacket_t *msg)
 {

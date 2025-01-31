@@ -23,6 +23,12 @@
 #include "filter.h"
 #include "openflow_ctrl_iface.h"
 #include "openflow_pkt_proc.h"
+#include "verbose.h"
+#include "message.h"
+#include "grouter.h"
+#include "info.h"
+#include "openflow.h"
+#include "openflow_flowtable.h"
 
 router_config rconfig = {.router_name=NULL, .gini_home=NULL, .cli_flag=0, .config_file=NULL, .config_dir=NULL, .openflow=0, .ghandler=0, .clihandler= 0, .scheduler=0, .worker=0, .openflow_worker=0, .openflow_controller_iface=0, .openflow_flowtable_timeout=0, .schedcycle=0};
 pktcore_t *pcore;
@@ -98,11 +104,19 @@ int main(int ac, char *av[])
 	// char *qname, char *dqisc, double qweight, double delay_us, int nslots);
 	addPktCoreQueue(pcore, "default", "taildrop", 1.0, 0.0, 0);
 	rconfig.scheduler = PktCoreSchedulerInit(pcore);
-	rconfig.worker = PktCoreWorkerInit(pcore);
+	{
+		pthread_t worker_thread;
+		if (PktCoreWorkerInit(pcore, &worker_thread) == 0)
+			rconfig.worker = worker_thread;
+	}
 
 	// Initialize OpenFlow packet processor
 	if (rconfig.openflow) {
-		rconfig.openflow_worker = PktCoreOpenflowWorkerInit(pcore);
+		{
+			pthread_t openflow_thread;
+			if (PktCoreOpenflowWorkerInit(pcore, &openflow_thread) == 0)
+				rconfig.openflow_worker = openflow_thread;
+		}
 	}
 
 	infoInit(rconfig.config_dir, rconfig.router_name);
@@ -117,7 +131,11 @@ int main(int ac, char *av[])
 	if (rconfig.openflow) {
 		rconfig.openflow_controller_iface = openflow_ctrl_iface_init(
 				rconfig.openflow);
-		rconfig.openflow_flowtable_timeout = openflow_flowtable_timeout_init();
+		{
+			pthread_t timeout_thread;
+			if (openflow_flowtable_timeout_init(&timeout_thread) == 0)
+				rconfig.openflow_flowtable_timeout = timeout_thread;
+		}
 	}
 
 	// start the CLI..

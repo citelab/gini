@@ -1,12 +1,12 @@
 """The system tray used by the main window"""
 
 import sys, os
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import *
-from Tutorial import Tutorial
+from .Tutorial import Tutorial
 
 
-class Systray(QtGui.QMainWindow):
+class Systray(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
         """
         Create a system tray window to appear in the taskbar.
@@ -20,11 +20,7 @@ class Systray(QtGui.QMainWindow):
         self.icon = QtGui.QIcon(environ["images"] + "giniLogo.png")
         self.setIcon(self.icon)
 
-        QtCore.QObject.connect(
-            self.trayIcon,
-            QtCore.SIGNAL("activated(QSystemTrayIcon::ActivationReason)"),
-            self.iconActivated
-        )
+        self.trayIcon.activated.connect(self.iconActivated)
 
     def quit(self):
         """
@@ -72,117 +68,81 @@ class Systray(QtGui.QMainWindow):
         else:
             self.loadLayout()
 
+    def getWindowList(self):
+        """
+        Get a list of window names.
+        """
+        for key, window in self.docks.items():
+            if window.isVisible():
+                yield key
+
     def saveLayout(self, filename=""):
         """
-        Save the layout.
+        Save the current layout to a file.
         """
-        def getGeometry(window):
+        def getGeometryString(window):
             geo = window.geometry()
             return "(%d,%d,%d,%d)" % (geo.x(), geo.y(), geo.width(), geo.height())
 
-        def getWindowList():
-            wlist = []
-            for key, window in self.docks.iteritems():
-                if not wlist:
-                    wlist.append(key)
-                    continue
-                for i in range(len(wlist)):
-                    geo1 = self.docks[wlist[i]].geometry()
-                    geo2 = window.geometry()
-                    if geo1.x() > geo2.x():
-                        break
-                    elif geo1.x() == geo2.x() and geo1.y() > geo2.y():
-                        break
-                wlist.insert(i, key)
-
-            return wlist
-
         try:
             if filename:
-                outfile = open(filename, "w")
+                file = open(filename, "w")
             else:
-                outfile = open(environ["config"] + "layout", "w")
+                file = open(environ["config"] + "layout", "w")
+
+            for key in self.getWindowList():
+                window = self.docks[key]
+                geometry = window.geometry()
+                file.write(key + ":" + 
+                          str(geometry.x()) + "," + 
+                          str(geometry.y()) + "," + 
+                          str(geometry.width()) + "," + 
+                          str(geometry.height()) + "," + 
+                          str(window.isFloating()) + "\n")
+            file.close()
         except:
-            return
-
-        for key in ["main", "tab"]:
-            window = mainWidgets[key]
-            outfile.write(key + ":")
-            outfile.write("visible=" + str(window.isVisible()) + ";")
-            outfile.write("geometry=" + getGeometry(window) + "\n")
-
-        for key in getWindowList():
-            window = self.docks[key]
-            outfile.write(key + ":")
-            outfile.write("visible=" + str(window.isVisible()) + ";")
-            outfile.write("floating=" + str(window.isFloating()) + ";")
-            outfile.write("location=" + str(window.getLocation()) + ";")
-            outfile.write("geometry=" + getGeometry(window) + "\n")
-
-        outfile.write("project:" + self.project)
-        outfile.close()
+            print("Failed to save layout")
 
     def loadLayout(self, filename=""):
         """
-        Load the layout.
+        Load a saved layout from a file.
         """
-        def parse(text):
-            if text == "True":
-                return True
-            elif text == "False":
-                return False
-            else:
-                areas = [
-                    QtCore.Qt.LeftDockWidgetArea,
-                    QtCore.Qt.RightDockWidgetArea,
-                    QtCore.Qt.TopDockWidgetArea,
-                    QtCore.Qt.BottomDockWidgetArea,
-                    QtCore.Qt.LeftDockWidgetArea
-                ]
-                for area in areas:
-                    if int(text) == area:
-                        return area
-
         try:
             if filename:
-                infile = open(filename, "r")
+                file = open(filename, "r")
             else:
-                infile = open(environ["config"] + "layout", "r")
+                file = open(environ["config"] + "layout", "r")
         except:
             return
 
-        lines = infile.readlines()
-
-        windows = self.docks.copy()
-        windows["main"] = mainWidgets["main"]
-        windows["tab"] = mainWidgets["tab"]
-        windows["tm"] = mainWidgets["tm"]
-
-        for line in lines:
-            name, properties = line.strip().split(":", 1)
-            if name == "project":
-                self.project = properties
+        for line in file:
+            try:
+                # New format: key:x,y,width,height,floating
+                key, geometry = line.strip().split(":")
+                if not key in self.docks:
+                    continue
+                
+                x, y, width, height, floating = geometry.split(",")
+                window = self.docks[key]
+                
+                # Create QRect for geometry
+                rect = QtCore.QRect(int(x), int(y), int(width), int(height))
+                
+                # Set window geometry and state
+                window.setGeometry(rect)
+                window.setFloating(floating.lower() == "true")
+                
+            except Exception as e:
+                print(f"Error loading layout entry: {e}")
                 continue
-            window = windows[name]
-            for entry in properties.split(";"):
-                prop, val = entry.split("=", 1)
-                if prop == "visible":
-                    window.setVisible(parse(val))
-                elif prop == "geometry":
-                    x, y, w, h = val.strip("()").split(",", 3)
-                    rect = QtCore.QRect(int(x), int(y), int(w), int(h))
-                    window.setGeometry(rect)
-                elif prop == "floating":
-                    floating = parse(val)
-                    window.setFloating(floating)
-                elif prop == "location":
-                    self.addDockWidget(parse(val), window)
+
+        file.close()
 
     def setVisible(self, visible):
         """
         Set the visibility of the window and the tray.
         """
-        QtGui.QMainWindow.setVisible(self, visible)
+        QtWidgets.QMainWindow.setVisible(self, visible)
 
         if not options["systray"]:
             return
@@ -223,7 +183,7 @@ class Systray(QtGui.QMainWindow):
         """
         Handle mouse clicks to the message.
         """
-        QtGui.QMessageBox.information(None,
+        QtWidgets.QMessageBox.information(None,
                                       self.tr("Systray"),
                                       self.tr("Goto whatever"))
 
@@ -231,31 +191,23 @@ class Systray(QtGui.QMainWindow):
         """
         Create the right click tray actions.
         """
-        self.minimizeAction = QtGui.QAction(self.tr("&Minimize"), self)
-        QtCore.QObject.connect(self.minimizeAction,
-                               QtCore.SIGNAL("triggered()"),
-                               self, QtCore.SLOT("hide()"))
+        self.minimizeAction = QtWidgets.QAction(self.tr("&Minimize"), self)
+        self.minimizeAction.triggered.connect(self.hide)
 
-        self.maximizeAction = QtGui.QAction(self.tr("&Maximize"), self)
-        QtCore.QObject.connect(self.maximizeAction,
-                               QtCore.SIGNAL("triggered()"), self,
-                               QtCore.SLOT("showMaximized()"))
+        self.maximizeAction = QtWidgets.QAction(self.tr("&Maximize"), self)
+        self.maximizeAction.triggered.connect(self.showMaximized)
 
-        self.restoreAction = QtGui.QAction(self.tr("&Restore"), self)
-        QtCore.QObject.connect(self.restoreAction,
-                               QtCore.SIGNAL("triggered()"), self,
-                               QtCore.SLOT("showNormal()"))
+        self.restoreAction = QtWidgets.QAction(self.tr("&Restore"), self)
+        self.restoreAction.triggered.connect(self.showNormal)
 
-        self.quitAction = QtGui.QAction(self.tr("&Quit"), self)
-        QtCore.QObject.connect(self.quitAction,
-                               QtCore.SIGNAL("triggered()"),
-                               QtGui.qApp, QtCore.SLOT("quit()"))
+        self.quitAction = QtWidgets.QAction(self.tr("&Quit"), self)
+        self.quitAction.triggered.connect(self.quit)
 
     def createTrayIcon(self):
         """
         Create the tray icon and menu.
         """
-        self.trayIconMenu = QtGui.QMenu(self)
+        self.trayIconMenu = QtWidgets.QMenu(self)
         self.trayIconMenu.setPalette(defaultOptions["palette"])
         self.trayIconMenu.addAction(self.minimizeAction)
         self.trayIconMenu.addAction(self.maximizeAction)
@@ -263,12 +215,12 @@ class Systray(QtGui.QMainWindow):
         self.trayIconMenu.addSeparator()
         self.trayIconMenu.addAction(self.quitAction)
 
-        self.trayIcon = QtGui.QSystemTrayIcon(self)
+        self.trayIcon = QtWidgets.QSystemTrayIcon(self)
         self.trayIcon.setContextMenu(self.trayIconMenu)
 
 
 if __name__ == '__main__':
-    app = QtGui.QApplication(sys.argv)
+    app = QtWidgets.QApplication(sys.argv)
     systray = Systray()
     systray.show()
     sys.exit(app.exec_())

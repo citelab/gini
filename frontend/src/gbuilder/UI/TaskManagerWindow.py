@@ -1,8 +1,8 @@
 """The task manager window to display and kill processes"""
 
-from PyQt4 import QtGui, QtCore
+from PyQt5 import QtGui, QtCore, QtWidgets
 from Core.globals import mainWidgets
-from Dockable import *
+from .Dockable import *
 
 
 class TaskManagerWindow(Dockable):
@@ -12,20 +12,18 @@ class TaskManagerWindow(Dockable):
         """
         super(TaskManagerWindow, self).__init__(parent=parent)
 
-        self.widget = QtGui.QWidget()
-        self.layout = QtGui.QVBoxLayout()
-        self.list = QtGui.QListWidget()
-        self.button = QtGui.QPushButton("Kill")
+        self.widget = QtWidgets.QWidget()
+        self.layout = QtWidgets.QVBoxLayout()
+        self.list = QtWidgets.QListWidget()
+        self.button = QtWidgets.QPushButton("Kill")
         self.layout.addWidget(self.list)
         self.layout.addWidget(self.button)
         self.widget.setLayout(self.layout)
 
         self.setWidget(self.widget)
 
-        self.connect(self.button, QtCore.SIGNAL("clicked()"), self.kill)
-        self.connect(self,
-                     QtCore.SIGNAL("topLevelChanged(bool)"),
-                     self.dockChanged)
+        self.button.clicked.connect(self.kill)
+        self.topLevelChanged.connect(self.dockChanged)
 
     def dockChanged(self, floating):
         """

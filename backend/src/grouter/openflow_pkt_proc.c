@@ -2,13 +2,11 @@
  * openflow_pkt_proc.c - OpenFlow packet processing
  */
 
-
 #include <inttypes.h>
 #include <arpa/inet.h>
-
 #include <slack/std.h>
 #include <slack/err.h>
-
+#include "verbose.h"
 #include "grouter.h"
 #include "ip.h"
 #include "openflow.h"

@@ -16,7 +16,7 @@
 /**
  * Initializes the OpenFlow flowtable timeout thread.
  */
-pthread_t openflow_flowtable_timeout_init();
+int openflow_flowtable_timeout_init(pthread_t *thread);
 
 /**
  * Initializes the flowtable.

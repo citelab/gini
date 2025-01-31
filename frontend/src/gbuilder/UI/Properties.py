@@ -1,9 +1,9 @@
 """The properties window for display item properties"""
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import mainWidgets
-from Dockable import *
-from PropertyComboBox import PropertyComboBox
+from .Dockable import *
+from .PropertyComboBox import PropertyComboBox
 
 
 class ConnectM:
@@ -16,12 +16,12 @@ class ConnectM:
                       "m2": ConnectM("m1", "ip2", "mac2", "port2")}
 
 
-class PropertyCheckBox(QtGui.QCheckBox):
+class PropertyCheckBox(QtWidgets.QCheckBox):
     def __init__(self, item, prop, parent=None):
         super(PropertyCheckBox, self).__init__(parent)
         self.item = item
         self.prop = prop
-        self.connect(self, QtCore.SIGNAL("stateChanged(int)"), self.changeState)
+        self.stateChanged.connect(self.changeState)
 
     def changeState(self, state):
         if state:
@@ -30,54 +30,41 @@ class PropertyCheckBox(QtGui.QCheckBox):
             self.item.setProperty(self.prop, "False")
 
 
-class PropertiesWindow(Dockable):
+class PropertiesWindow(QtWidgets.QDockWidget):
     def __init__(self, parent=None):
         """
-        Create a properties window to display properties of selected items.
+        Create a properties window.
         """
-        super(PropertiesWindow, self).__init__(parent=parent)
-        self.createView()
-        self.setWidget(self.sourceView)
+        super(PropertiesWindow, self).__init__(parent)
+        
+        # Initialize the table
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Property", "Value"])
+        self.table.setColumnWidth(0, 100)
+        self.table.setColumnWidth(1, 100)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(True)
 
-    def createView(self):
-        """
-        Create the view and model of the window.
-        """
-        self.currentItem = None
-        self.sourceView = QtGui.QTreeView()
-
-        self.model = QtGui.QStandardItemModel(0, 2, self)
-        self.model.setHeaderData(0, QtCore.Qt.Horizontal, QtCore.QVariant("Property"), QtCore.Qt.DisplayRole)
-        self.model.setHeaderData(1, QtCore.Qt.Horizontal, QtCore.QVariant("Value"))
-
-        self.sourceView.setEditTriggers(QtGui.QAbstractItemView.CurrentChanged)
-        self.sourceView.setModel(self.model)
-
-        self.connect(self,
-                     QtCore.SIGNAL("topLevelChanged(bool)"),
-                     self.dockChanged)
-        self.connect(self.model, QtCore.SIGNAL("dataChanged(QModelIndex,QModelIndex)"), self.changed)
-
+        # Set up the model
+        self.model = QtGui.QStandardItemModel()
+        self.model.setHorizontalHeaderLabels(["Property", "Value"])
+        
+        # Connect signals
+        self.table.itemChanged.connect(self.changed)
 
     def addProperty(self, prop, value, editable=True, checkable=False, combo=False, enabled=True):
         """
         Add a property to display in the window.
         """
-        pr = QtGui.QStandardItem()
-        pr.setData(QtCore.QVariant(prop), QtCore.Qt.DisplayRole)
+        pr = QtGui.QStandardItem(prop)
         pr.setEditable(False)
 
-        val = QtGui.QStandardItem()
+        val = QtGui.QStandardItem(value)
         if not (checkable or combo):
-            val.setData(QtCore.QVariant(value), QtCore.Qt.EditRole)
-
-        if mainWidgets["main"].isRunning():
-            val.setEnabled(False)
-        elif not editable:
             val.setEditable(False)
         if prop == "id":
             self.model.insertRow(0, [pr, val])
-	    #TODO: find the bug that generated "Name" and "name" (The following 2 lines for temp use)
         elif prop == "name":
             pass
         else:
@@ -88,7 +75,7 @@ class PropertiesWindow(Dockable):
                 checkbox.setEnabled(enabled)
                 if mainWidgets["main"].isRunning():
                     checkbox.setEnabled(False)
-                self.sourceView.setIndexWidget(index, checkbox)
+                self.view.setIndexWidget(index, checkbox)
                 if value == "True":
                     checkbox.setChecked(True)
 
@@ -97,122 +84,67 @@ class PropertiesWindow(Dockable):
             combobox = PropertyComboBox(self.currentItem, self, prop, value)
             selectedIndex = combobox.findText(self.currentItem.properties[prop])
             combobox.setCurrentIndex(selectedIndex)
-            self.sourceView.setIndexWidget(index, combobox)
+            self.view.setIndexWidget(index, combobox)
             combobox.currentIndexChanged.connect(combobox.comboBoxChanged)
 
-
-
-    def changed(self, index, index2):
+    def changed(self, item):
         """
-        Handle a change in the properties of the current item.
+        Handle changes to properties.
         """
-        value = self.model.data(index)
-        propertyIndex = self.model.index(index.row(), index.column()-1)
-        prop = self.model.data(propertyIndex)
-        if prop.toString() == "id":
-            name = str(value.toString())
-            if name.find(self.currentItem.device_type + "_") == 0:
-                try:
-                    devType, index = name.rsplit("_", 1)
-                    index = int(index)
-                    if index - 1 in range(126) and mainWidgets["canvas"].scene().findItem(name) is not None:
-                        self.currentItem.setIndex(index)
-                        return
-                except:
-                    pass
+        if not self.currentItem or item.column() != 1:
+            return
 
-            popup = mainWidgets["popup"]
-            popup.setWindowTitle("Invalid Name Change")
-            popup.setText("Only the index of the name can be changed!  The index must be unique and in the range 1-126.")
-            popup.show()
-        else:
-            self.currentItem.setProperty(prop.toString(), value.toString())
+        prop = self.model.item(item.row(), 0).text()
+        value = item.text()
 
-    def dockChanged(self, floating):
-        """
-        Handle a change in the dock location or state.
-        """
-        if floating:
-            self.setWindowOpacity(0.8)
+        self.currentItem.setProperty(prop, value)
+        if prop == "Name":
+            self.currentItem.updateToolTip()
 
-    def setCurrent(self, item):
+    def display(self, item):
         """
-        Set the current item.
+        Display the properties of the specified item.
         """
         self.currentItem = item
+        self.model.removeRows(0, self.model.rowCount())
 
-    def display(self):
-        """
-        Show the properties of the current item.
-        """
-        if not self.currentItem:
+        if not item:
             return
-        self.removeRows()
-        for prop, value in self.currentItem.getProperties().iteritems():
-            editable = True
-            checkable = False
-            combo = False
-            enabled = True
-            if prop in ["Hub mode", "OVS mode"]:
-                checkable = True
-            elif prop == "Hosts":
-                combo = True
-            elif prop == "os":
-                combo = True
-                value = ["glinux","buster","jessie"]
-            elif self.currentItem.device_type in ["Switch", "OVSwitch"]:
-                if prop == "subnet" or prop == "mask":
-                    continue    # editable = False
-            if self.currentItem.device_type == "OVSwitch" or \
-                    (self.currentItem.device_type == "Switch" and prop == "OVS mode"):
-                enabled = False
-            self.addProperty(prop, value, editable, checkable, combo, enabled)
+
+        properties = item.getProperties()
+        for prop, value in properties.items():
+            propItem = QtGui.QStandardItem(prop)
+            propItem.setEditable(False)
+            valueItem = QtGui.QStandardItem(value)
+            self.model.appendRow([propItem, valueItem])
 
     def clear(self):
         """
-        Clear the properties window and release the current item.
+        Clear the properties window.
         """
         self.currentItem = None
-        self.removeRows()
-
-    def removeRows(self):
-        """
-        Clear the rows of the properties window.
-        """
-        count = self.model.rowCount()
-        if count:
-            self.model.removeRows(0, count)
+        self.model.removeRows(0, self.model.rowCount())
 
 
 class InterfacesWindow(PropertiesWindow):
-    def __init__(self, parent = None):
+    def __init__(self, parent):
         """
-        Create an interfaces window.
+        Create an interfaces window to store interfaces.
         """
         super(InterfacesWindow, self).__init__(parent)
-        self.createView()
+        
+        self.interfaces = {}
+        self.current = None
+        self.running = False
 
-        self.currentInterface = 1
-        self.leftScroll = QtGui.QPushButton("<")
-        self.rightScroll = QtGui.QPushButton(">")
-        self.routesButton = QtGui.QPushButton("Routes")
-
-        chooserLayout = QtGui.QHBoxLayout()
-        chooserLayout.addWidget(self.leftScroll)
-        chooserLayout.addWidget(self.routesButton)
-        chooserLayout.addWidget(self.rightScroll)
-
-        mainLayout = QtGui.QVBoxLayout()
-        mainLayout.addWidget(self.sourceView)
-        mainLayout.addLayout(chooserLayout)
-
-        self.widget = QtGui.QWidget()
-        self.widget.setLayout(mainLayout)
-
-        self.setWidget(self.widget)
-
-        self.connect(self.leftScroll, QtCore.SIGNAL("clicked()"), self.scrollLeft)
-        self.connect(self.rightScroll, QtCore.SIGNAL("clicked()"), self.scrollRight)
+    def clear(self):
+        """
+        Clear all interfaces from the window.
+        """
+        # Replace removeRows() with proper table clearing
+        self.table.setRowCount(0)
+        self.interfaces.clear()
+        self.current = None
 
     def setCurrent(self, item):
         """
@@ -295,15 +227,6 @@ class InterfacesWindow(PropertiesWindow):
         prop = self.model.data(propertyIndex)
         self.currentItem.setInterfaceProperty(prop.toString(), value.toString(), index=self.currentInterface - 1)
 
-    def clear(self):
-        """
-        Clear the interfaces window and release the current item.
-        """
-        self.currentItem = None
-        self.currentInterface = 1
-        self.setWindowTitle("Interfaces")
-        self.removeRows()
-
     def getCurrent(self):
         """
         Return the current item.
@@ -311,53 +234,88 @@ class InterfacesWindow(PropertiesWindow):
         return self.currentItem
 
 
-class RoutesWindow(InterfacesWindow):
-    def __init__(self, interfacesWindow, parent=None):
+class RoutesWindow(PropertiesWindow):
+    def __init__(self, interfaces, parent=None):
         """
-        Create a routes window.
+        Create a routes window to store routes.
         """
         super(RoutesWindow, self).__init__(parent)
-        self.interfacesWindow = interfacesWindow
+        
+        self.interfaces = interfaces
+        self.currentItem = None
         self.currentInterface = 1
         self.currentRoute = 1
+        
+        # Create UI elements
+        self.leftScroll = QtWidgets.QPushButton("<")
+        self.rightScroll = QtWidgets.QPushButton(">")
+        self.upScroll = QtWidgets.QPushButton("^")
+        self.downScroll = QtWidgets.QPushButton("v")
+        
+        # Create layouts
+        scrollLayout = QtWidgets.QHBoxLayout()
+        scrollLayout.addWidget(self.leftScroll)
+        scrollLayout.addWidget(self.rightScroll)
+        scrollLayout.addWidget(self.upScroll)
+        scrollLayout.addWidget(self.downScroll)
+        
+        mainLayout = QtWidgets.QVBoxLayout()
+        mainLayout.addWidget(self.table)
+        mainLayout.addLayout(scrollLayout)
+        
+        # Create central widget
+        self.widget = QtWidgets.QWidget()
+        self.widget.setLayout(mainLayout)
+        self.setWidget(self.widget)
+        
+        # Connect signals
+        self.leftScroll.clicked.connect(self.decInterface)
+        self.rightScroll.clicked.connect(self.incInterface)
+        self.upScroll.clicked.connect(self.decRoute)
+        self.downScroll.clicked.connect(self.incRoute)
 
-        self.connect(self.interfacesWindow.leftScroll, QtCore.SIGNAL("clicked()"), self.decInterface)
-        self.connect(self.interfacesWindow.rightScroll, QtCore.SIGNAL("clicked()"), self.incInterface)
-        self.connect(self.interfacesWindow.routesButton, QtCore.SIGNAL("clicked()"), self.show)
+    def decRoute(self):
+        """
+        Decrement the current route number.
+        """
+        if not self.currentItem:
+            return
+        if self.currentRoute > 1:
+            self.currentRoute -= 1
+            self.display()
 
-        self.routesButton.setVisible(False)
+    def incRoute(self):
+        """
+        Increment the current route number.
+        """
+        if not self.currentItem:
+            return
+        routes = self.currentItem.getInterfaces()[self.currentInterface-1].get("routing", [])
+        if self.currentRoute < len(routes):
+            self.currentRoute += 1
+            self.display()
 
     def decInterface(self):
         """
-        Handle the interfaces window changing to the previous interface.
+        Decrement the current interface number.
         """
         if not self.currentItem:
             return
-        from Core.Interfaceable import Interfaceable
-        if not isinstance(self.currentItem, Interfaceable):
-            return
-
-        if self.currentInterface == 1:
-            return
-
-        self.currentRoute = 1
-        self.display(-1)
+        if self.currentInterface > 1:
+            self.currentInterface -= 1
+            self.currentRoute = 1
+            self.display()
 
     def incInterface(self):
         """
-        Handle the interfaces window changing to the next interface.
+        Increment the current interface number.
         """
         if not self.currentItem:
             return
-        from Core.Interfaceable import Interfaceable
-        if not isinstance(self.currentItem, Interfaceable):
-            return
-
-        if self.currentInterface == len(self.currentItem.getInterfaces()):
-            return
-
-        self.currentRoute = 1
-        self.display(1)
+        if self.currentInterface < len(self.currentItem.getInterfaces()):
+            self.currentInterface += 1
+            self.currentRoute = 1
+            self.display()
 
     def display(self, interfaceInc=0, routeInc=0):
         """
@@ -424,16 +382,6 @@ class RoutesWindow(InterfacesWindow):
             return
 
         self.display(0, 1)
-
-    def clear(self):
-        """
-        Clear the routes window and release the current item.
-        """
-        self.currentItem = None
-        self.currentInterface = 1
-        self.currentRoute = 1
-        self.setWindowTitle("Routes")
-        self.removeRows()
 
     def changed(self, index, index2):
         """

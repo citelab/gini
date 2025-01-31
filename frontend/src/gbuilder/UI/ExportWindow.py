@@ -1,24 +1,24 @@
 """The export window to save as image"""
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import options, mainWidgets
 
 
-class ExportWindow(QtGui.QDialog):
+class ExportWindow(QtWidgets.QDialog):
     def __init__(self, parent=None):
         """
         Create an export window to save the current canvas as an image.
         """
         super(ExportWindow, self).__init__(parent)
 
-        self.gridCheckBox = QtGui.QCheckBox(self.tr("Save with grid"))
-        self.namesCheckBox = QtGui.QCheckBox(self.tr("Save with names"))
+        self.gridCheckBox = QtWidgets.QCheckBox(self.tr("Save with grid"))
+        self.namesCheckBox = QtWidgets.QCheckBox(self.tr("Save with names"))
         self.gridCheckBox.setChecked(True)
         self.namesCheckBox.setChecked(True)
 
-        chooseButton = QtGui.QPushButton("Select File")
+        chooseButton = QtWidgets.QPushButton("Select File")
 
-        layout = QtGui.QVBoxLayout()
+        layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.gridCheckBox)
         layout.addWidget(self.namesCheckBox)
         layout.addWidget(chooseButton)
@@ -28,14 +28,14 @@ class ExportWindow(QtGui.QDialog):
         self.resize(200, 150)
         self.setWindowTitle("Export Image")
 
-        self.connect(chooseButton, QtCore.SIGNAL("clicked()"), self.chooseFile)
+        chooseButton.clicked.connect(self.chooseFile)
 
     def chooseFile(self):
         """
         Pop up a file dialog box to determine a save filename, then save it.
         """
         self.hide()
-        filename = QtGui.QFileDialog.getSaveFileName(
+        filename = QtWidgets.QFileDialog.getSaveFileName(
             self,
             self.tr("Choose a file name"), ".",
             self.tr("PNG (*.png)")

@@ -1,4 +1,5 @@
 from Core.Device import *
+from Devices.Switch import Switch
 
 """
 This class implements a hub device. Work is in progress

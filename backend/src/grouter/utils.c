@@ -14,6 +14,10 @@
 #include <netinet/in.h>
 #include <stdint.h>
 #include <arpa/inet.h>
+#include "verbose.h"
+#include "message.h"
+#include <sys/types.h>
+#include <unistd.h>
 
 
 int netMaskLen(uchar nmask[])
@@ -167,25 +171,22 @@ void redefineSignalHandler(int sigid, void (*my_func)(int signum))
  * compute the checksum of a buffer, by adding 2-byte words
  * and returning their one's complement
  */
-ushort checksum(uchar *buf, int iwords)
+uint16_t checksum(uchar *buf, int len)
 {
-	unsigned long cksum = 0;
+	uint32_t cksum = 0;
+	uint16_t *p = (uint16_t *)buf;
 	int i;
 
-	for(i = 0; i < iwords; i++)
+	for (i = 0; i < len; i++)
 	{
-		cksum += buf[0] << 8;
-		cksum += buf[1];
-		buf += 2;
+		cksum += ntohs(*p);
+		p++;
 	}
-
-	// add in all carries
-	while (cksum >> 16)
-		cksum = (cksum & 0xFFFF) + (cksum >> 16);
+	cksum = (cksum >> 16) + (cksum & 0xFFFF);
+	cksum += (cksum >> 16);
 
 	verbose(2, "[checksum]:: computed %x ..", ~cksum);
-
-	return (unsigned short) (~cksum);
+	return (uint16_t)(~cksum);
 }
 
 double subTimeVal(struct timeval *v2, struct timeval *v1)
@@ -202,16 +203,4 @@ double subTimeVal(struct timeval *v2, struct timeval *v1)
 void printTimeVal(struct timeval *v)
 {
 	printf("Time val = %d sec, %d usec \n", (int)v->tv_sec, (int)v->tv_usec);
-}
-
-uint64_t ntohll(uint64_t arg)
-{
-	if (ntohs(0xFE) == 0xEF) return __builtin_bswap64(arg);
-	else return arg;
-}
-
-uint64_t htonll(uint64_t arg)
-{
-	if (htons(0xFE) == 0xEF) return __builtin_bswap64(arg);
-	else return arg;
 }

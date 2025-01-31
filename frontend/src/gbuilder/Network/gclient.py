@@ -1,4 +1,4 @@
-from PyQt4 import QtNetwork, QtCore
+from PyQt5 import QtNetwork, QtCore
 import os, sys, time
 from Core.globals import environ, mainWidgets
 
@@ -14,35 +14,41 @@ class Client(QtCore.QThread):
 
         if not parent:
             return
-        parent.connect(self.tcpSocket, QtCore.SIGNAL("readyRead()"), self.read)
-        parent.connect(self.tcpSocket, QtCore.SIGNAL("connected()"), self.setConnected)
-        parent.connect(self.tcpSocket, QtCore.SIGNAL("error(QAbstractSocket::SocketError)"), self.displayError)
+        self.tcpSocket.readyRead.connect(self.read)
+        self.tcpSocket.connected.connect(self.setConnected)
+        self.tcpSocket.error.connect(self.displayError)
 
         global client
         client = self
 
+    def connectTo(self, address="localhost", port=9000, user="maheswar"):
+        """Connect to the server."""
+        if self.connecting:
+            return
+        
+        self.connecting = True
+        
+        self.username = user  # Store username
+        self.tcpSocket.connectToHost(address, port)
+        
+        if not self.tcpSocket.waitForConnected(1000):
+            mainWidgets["log"].append("Failed to connect to server!")
+            self.connecting = False
+            return False
+            
+        return True
+
     def isReady(self):
         return self.tcpSocket.bytesToWrite() == 0
 
-    def connectTo(self, ip, port, attempts=1):
-        connected = False
-        tries = 0
-        self.connecting = True
-
-        while not connected and tries != attempts:
-            self.tcpSocket.abort()
-            self.tcpSocket.connectToHost(ip, port)
-            connected = self.tcpSocket.waitForConnected(1500)
-            tries += 1
-
-        self.connecting = False
-        print "-- gclient output --"
-
     def isConnected(self):
+        """Check if connected to server."""
         return self.connected
 
     def setConnected(self):
+        """Handle successful connection."""
         self.connected = True
+        self.connecting = False
 
     def displayError(self, socketError):
         if self.connecting:
@@ -55,20 +61,20 @@ class Client(QtCore.QThread):
             mainWidgets["canvas"].scene().pauseRefresh()
 
         if socketError == QtNetwork.QAbstractSocket.RemoteHostClosedError:
-            print "Lost connection to server."
+            print("Lost connection to server.")
         elif socketError == QtNetwork.QAbstractSocket.HostNotFoundError:
-            print "The host was not found. Please check the host name and port settings."
+            print("The host was not found. Please check the host name and port settings.")
         elif socketError == QtNetwork.QAbstractSocket.ConnectionRefusedError:
-            print "The connection was refused by the peer. Make sure the server is running,"
-            print "and check that the host name and port settings are correct."
+            print("The connection was refused by the peer. Make sure the server is running,")
+            print("and check that the host name and port settings are correct.")
         else:
-            print "The following error occurred: %s." % self.tcpSocket.errorString()
+            print(f"The following error occurred: {self.tcpSocket.errorString()}.")
 
         self.connected = False
         self.terminate()
 
     def read(self):
-        instring = self.waitForMessage(str(self.tcpSocket.readAll()))
+        instring = self.waitForMessage(str(self.tcpSocket.readAll(), 'utf-8'))
         if instring:
             self.process(instring)
 
@@ -110,31 +116,30 @@ class Client(QtCore.QThread):
         try:
             command = Command.create(commandType, args)
             command.execute()
-        except Exception, inst:
-            print type(inst)
-            print inst.args
-            print "invalid command"
-            print commandType, args
+        except Exception as inst:
+            print(type(inst))
+            print(inst.args)
+            print("invalid command")
+            print(commandType, args)
 
         self.process(self.waitForMessage(""))
 
     def send(self, message):
         length = str(len(message))
-        self.tcpSocket.writeData(length + " " + message)
+        self.tcpSocket.writeData((length + " " + message).encode('utf-8'))
 
     def disconnect(self, *args):
         self.tcpSocket.disconnectFromHost()
 
     def run(self):
-
         while not self.isConnected():
             time.sleep(1)
-        print "connected!"
+        print("connected!")
 
-        message = raw_input("gclient> ")
+        message = input("gclient> ")
         while message != "exit":
             self.process(message)
-            message = raw_input("gclient> ")
+            message = input("gclient> ")
 
         self.disconnect()
 
@@ -161,7 +166,7 @@ class Command:
 
 class ReceivePathCommand(Command):
     def execute(self):
-        print "setting remote path to " + self.args
+        print(f"setting remote path to {self.args}")
         environ["remotepath"] = self.args + "/"
 
 
@@ -169,28 +174,27 @@ class SendFileCommand(Command):
     def execute(self):
         targetDir, path = self.args.split(" ", 1)
         filename = self.isolateFilename(path)
-        print "sending file " + filename
-        infile = open(path, "rb")
-        self.client.send("file " + targetDir + "/" + filename + " " + infile.read())
-        infile.close()
+        print(f"sending file {filename}")
+        with open(path, "rb") as infile:
+            self.client.send("file " + targetDir + "/" + filename + " " + infile.read().decode('utf-8'))
 
 
 class SendStartCommand(Command):
     def execute(self):
         filename = self.isolateFilename(self.args)
-        print "sending start " + filename
+        print(f"sending start {filename}")
         self.client.send("start " + filename)
 
 
 class SendStopCommand(Command):
     def execute(self):
-        print "sending stop"
+        print("sending stop")
         self.client.send("stop")
 
 
 class SendKillCommand(Command):
     def execute(self):
-        print "killing " + self.args
+        print(f"killing {self.args}")
         self.client.send("kill " + self.args)
 
 
@@ -237,7 +241,7 @@ if __name__ == "__main__":
     app = QtCore.QCoreApplication(sys.argv)
     client.connectTo("localhost", 9000)
 
-    text = raw_input("gclient> ")
+    text = input("gclient> ")
     while text:
         client.send(text)
-        text = raw_input("gclient> ")
+        text = input("gclient> ")

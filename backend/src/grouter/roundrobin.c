@@ -9,6 +9,10 @@
 #include "packetcore.h"
 #include "message.h"
 #include "grouter.h"
+#include "simplequeue.h"
+#include "qdisc.h"
+#include "roundrobin.h"
+#include "verbose.h"
 
 /*
  * Roundrobin scheduler implementation -- when the roundrobin scheme is used, we need to use

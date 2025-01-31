@@ -1,12 +1,12 @@
 """The graphical representation of connections of nodes"""
 
 import math
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.Item import *
 from Core.globals import options, mainWidgets, defaultOptions
 
 
-class Edge(QtGui.QGraphicsLineItem, Item):
+class Edge(QtWidgets.QGraphicsLineItem, Item):
     def __init__(self, startItem, endItem, parent=None, scene=None):
         """
         Create an edge between two nodes, linking them together graphically.
@@ -24,7 +24,7 @@ class Edge(QtGui.QGraphicsLineItem, Item):
         self.interfaces = []
 
         self.setPen(QtGui.QPen(QtCore.Qt.black, 2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
-        self.setFlag(QtGui.QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
 
         self.adjust()
 
@@ -67,7 +67,7 @@ class Edge(QtGui.QGraphicsLineItem, Item):
         """
         Get the shape of the edge.
         """
-        return QtGui.QGraphicsLineItem.shape(self)
+        return QtWidgets.QGraphicsLineItem.shape(self)
 
     def adjust(self):
         """
@@ -132,7 +132,7 @@ class Edge(QtGui.QGraphicsLineItem, Item):
         """
         Pop up the context menu on right click.
         """
-        self.menu = QtGui.QMenu()
+        self.menu = QtWidgets.QMenu()
         self.menu.setPalette(defaultOptions["palette"])
         self.menu.addAction("Delete", self.delete)
         self.menu.exec_(pos)
@@ -143,7 +143,7 @@ class Edge(QtGui.QGraphicsLineItem, Item):
         """
         graphical = "edge:(" + self.source.getName() + "," + self.dest.getName() + ")\n"
         logical = ""
-        for prop, value in self.properties.iteritems():
+        for prop, value in self.properties.items():
             logical += "\t" + prop + ":" + value + "\n"
 
         return graphical + logical

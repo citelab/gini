@@ -12,6 +12,7 @@
 #include "vpl.h"
 #include "device.h"
 #include "message.h"
+#include "simplequeue.h"
 #include <pthread.h>
 
 
@@ -82,7 +83,8 @@ device_t *findDeviceDriver(char *dev_type);
 interface_t *findInterface(int indx);
 void *delayedServerCall(void *arg);
 void *GNETHandler(void *outq);
-void GNETHalt(int gnethandler);
+void GNETInit(pthread_t *handler, char *config_dir, char *router_name, simplequeue_t *outputQ);
+void GNETHalt(pthread_t gnethandler);
 int destroyInterfaceByIndex(int indx);
 
 void GNETInsertInterface(interface_t *iface);

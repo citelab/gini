@@ -7,15 +7,17 @@
  * Licensed under the GPL.
  */
 
-#ifndef RAW_H
-#define	RAW_H
+#ifndef __RAW_H__
+#define __RAW_H__
 
 #include "vpl.h"
+#include "message.h"
 
-void* toRawDev(void *arg);
-void* fromRawDev(void *arg);
+// Function declarations
 vpl_data_t* raw_connect(unsigned char* mac_addr, char *bridge);
+void* fromRawDev(void *arg);
+void* toRawDev(void *arg);
 int create_raw_interface(unsigned char *nw_addr);
 
-#endif	/* RAW_H */
+#endif	/* __RAW_H__ */
 

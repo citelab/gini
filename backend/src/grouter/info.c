@@ -18,6 +18,11 @@
 #include <slack/err.h>
 #include <slack/fio.h>
 #include <sys/stat.h>
+#include "verbose.h"
+#include "message.h"
+#include "openflow_config.h"
+#include <pthread.h>
+#include <sys/types.h>
 
 /*
  * Some global variables!
@@ -33,23 +38,35 @@ void infoGetState()
 
 
 
-int write_to_fifo(int fid, char *buf, int len)
+int write_to_fifo(info_config_t *iconf, message_t *msg)
 {
-	int bytes;
+	int wsize;
 
-	if ((bytes = write(fid, buf, len)) == -1)
+	// write the header first
+	if ((wsize = write(iconf->sock, (void *)&(msg->header), sizeof(msg_header_t))) < 0)
 	{
 		error("[write_to_fifo]:: error writing the header ");
- 		return -1;
+		return EXIT_FAILURE;
 	}
-	return 0;
+
+	// write the payload next
+	if (msg->header.length > 0)
+	{
+		if ((wsize = write(iconf->sock, (void *)msg->data, msg->header.length)) < 0)
+		{
+			error("[write_to_fifo]:: error writing the payload ");
+			return EXIT_FAILURE;
+		}
+	}
+	return EXIT_SUCCESS;
 }
 
 
 
 
-void infoHandler()
+void *infoHandler(void *arg)
 {
+	info_config_t *iconf = (info_config_t *)arg;
 	queue_target_t *tptr;
 	simplequeue_t *qptr;
 	char linebuf[MAX_LINE_LEN], timestr[MAX_TMPBUF_LEN];
@@ -57,15 +74,14 @@ void infoHandler()
 	time_t tval;
 	Lister *lster;
 
-
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 	while(1)
 	{
-		sleep(iconf.updateinterval);
+		sleep(iconf->updateinterval);
 		pthread_testcancel();
 
 		tval = time(NULL);
-		if (iconf.rawtimemode)
+		if (iconf->rawtimemode)
 			sprintf(timestr, "%ld ", (long)tval);
 		else
 		{
@@ -73,18 +89,20 @@ void infoHandler()
 			timestr[strlen(timestr)-2] = 0;
 		}
 
-		for(lster = lister_create(iconf.qtargets); lister_has_next(lster) == 1; )
+		for(lster = lister_create(iconf->qtargets); lister_has_next(lster) == 1; )
 		{
 			tptr = (queue_target_t *)lister_next(lster);
 			qptr = tptr->queue;
-			sprintf(linebuf, "//Time stamp\t Queue name\t Queue size\t Queue rate\n");
-			len = strlen(linebuf);
-			sprintf(linebuf+len, "%s\t%s\t%d\t%f\n", timestr, qptr->name, qptr->cursize, getAvgByteRate(qptr));
-			write_to_fifo(iconf.id, linebuf, strlen(linebuf));
+			message_t msg;
+			msg.header.type = 1;  // Queue info type
+			msg.data = linebuf;
+			sprintf(linebuf, "%s\t%s\t%d\t%f\n", timestr, qptr->name, qptr->cursize, getAvgByteRate(qptr));
+			msg.header.length = strlen(linebuf);
+			write_to_fifo(iconf, &msg);
 		}
 		lister_release(lster);
 	}
-
+	return NULL;
 }
 
 
@@ -206,33 +224,44 @@ void infoList()
 /*
  * This function basically sets up the .port (for wireshark use)
  */
-void infoInit(char *rpath, char *rname)
+int infoInit(char *rpath, char *rname)
 {
-	int fd, status;
+	struct stat sbuf;
+	char tmpbuf[MAX_NAME_LEN];
+	pthread_t ptid;
 
-	sprintf(iconf.path, "%s/%s.%s", rpath, rname, "info");
-	iconf.updateinterval = 10;                    // set default update time to 10 sec
+	// construct the FIFO pathname
+	bzero(tmpbuf, MAX_NAME_LEN);
+	sprintf(tmpbuf, "%s/%s.fifo", rpath, rname);
+	strcpy(iconf.path, tmpbuf);
 
- 	if (fifo_exists(iconf.path, 1))
- 	{
- 		verbose(2, "[infoInit]:: WARNING! existing FIFO %s removed .. creating a new one ", iconf.path);
- 		remove(iconf.path);
-
-		if (iconf.threadid != 0)
+	// check whether the FIFO exists.. remove if it exists
+	if (stat(iconf.path, &sbuf) == 0)
+	{
+		verbose(2, "[infoInit]:: WARNING! existing FIFO %s removed .. creating a new one ", iconf.path);
+		// if the FIFO exists, delete it..
+		unlink(iconf.path);
+		// if there is a thread using it, cancel it
+		if (iconf.status == INFO_ACTIVE)
 			pthread_cancel(iconf.id);
- 	}
+	}
 
- 	if ((fd = fifo_open(iconf.path, S_IRUSR | S_IWUSR | S_IWGRP | S_IWOTH, 1, &(iconf.id))) == -1)
- 	{
- 		error("[infoInit]:: unable to create socket .. %s", iconf.path);
- 		return;
- 	}
+	// create the FIFO with read/write permissions for user
+	if (mkfifo(iconf.path, 0666) < 0)
+	{
+		error("[infoInit]:: unable to create socket .. %s", iconf.path);
+		return EXIT_FAILURE;
+	}
 
-	iconf.qtargets = list_create(NULL);
-
-	status = pthread_create(&(iconf.threadid), NULL, (void *)infoHandler, (void *)NULL);
-	if (status != 0)
+	// create the handler thread
+	if (pthread_create(&ptid, NULL, infoHandler, &iconf) != 0)
+	{
 		error("Unable to create the info handler thread... ");
-	return;
+		return EXIT_FAILURE;
+	}
+
+	iconf.id = ptid;
+	iconf.status = INFO_ACTIVE;
+	return EXIT_SUCCESS;
 }
 

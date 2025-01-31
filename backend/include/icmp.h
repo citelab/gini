@@ -5,8 +5,8 @@
  * VERSION: Beta
  */
 
-#ifndef __ICMP_H_
-#define __ICMP_H_
+#ifndef __ICMP_H__
+#define __ICMP_H__
 
 #include <sys/types.h>
 #include "grouter.h"
@@ -66,7 +66,7 @@ typedef struct _icmphdr_t
 		uint   gateway;        /* gateway address */
 		struct
 		{
-			ushort __unused;
+			ushort reserved;
 			ushort mtu;
 		} frag;                     /* path mtu discovery */
 	} un;
@@ -99,7 +99,14 @@ void ICMPProcessTTLExpired(gpacket_t *in_pkt);
 void ICMPProcessFragNeeded(gpacket_t *in_pkt, int interface_mtu);
 void ICMPProcessRedirect(gpacket_t *in_pkt, uchar *gw_addr);
 void ICMPDisplayPingStats();
-void dummyFunctionCopy();
+void dummyFunctionCopy(int sign);
 void ICMPPingTerminate();
+
+struct icmp_ra_addr
+{
+    uint32_t ira_addr;
+    uint32_t ira_preference;
+    ushort reserved;
+};
 
 #endif

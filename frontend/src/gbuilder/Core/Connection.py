@@ -1,15 +1,15 @@
 """The logical connection object that links two devices together"""
 
-from Devices.Bridge import *
-from Devices.Firewall import *
-from Devices.Hub import *
-from Devices.Router import *
-from Devices.Subnet import *
-from Devices.Switch import *
-from Devices.Mach import *
-from UI.Edge import *
-from Devices.OpenFlowController import *
-from Devices.OpenVirtualSwitch import *
+from Devices.Bridge import Bridge
+from Devices.Firewall import Firewall
+from Devices.Hub import Hub
+from Devices.Router import Router
+from Devices.Subnet import Subnet
+from Devices.Switch import Switch
+from Devices.Mach import Mach
+from UI.Edge import Edge
+from Devices.OpenFlowController import OpenFlowController
+from Devices.OpenVirtualSwitch import OpenVirtualSwitch
 from Devices.Cloud import Cloud
 
 # The connection rules for building topologies

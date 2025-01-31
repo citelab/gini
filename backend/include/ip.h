@@ -11,7 +11,11 @@
 #define __IP_H_
 
 #include <stdint.h>
+#ifdef __APPLE__
+#include <machine/endian.h>
+#else
 #include <endian.h>
+#endif
 #include "mtu.h"
 #include "routetable.h"
 #include "grouter.h"
@@ -84,13 +88,22 @@ struct ip_pcb {
  */
 typedef struct _ip_packet_t
 {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-	uint8_t ip_hdr_len:4;                   // header length 
-	uint8_t ip_version:4;                   // version 
-#endif
-#if __BYTE_ORDER == __BIG_ENDIAN
-	uint8_t ip_version:4;                   // version 
-	uint8_t ip_hdr_len:4;                   // header length 
+#if defined(__APPLE__)
+    #if __DARWIN_BYTE_ORDER == __DARWIN_LITTLE_ENDIAN
+        uint8_t ip_hdr_len:4;                   // header length 
+        uint8_t ip_version:4;                   // version 
+    #else
+        uint8_t ip_version:4;                   // version 
+        uint8_t ip_hdr_len:4;                   // header length 
+    #endif
+#else
+    #if __BYTE_ORDER == __LITTLE_ENDIAN
+        uint8_t ip_hdr_len:4;                   // header length 
+        uint8_t ip_version:4;                   // version 
+    #else
+        uint8_t ip_version:4;                   // version 
+        uint8_t ip_hdr_len:4;                   // header length 
+    #endif
 #endif
 	uint8_t ip_tos;                         // type of service 
 	uint16_t ip_pkt_len;                    // total length 

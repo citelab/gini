@@ -1,6 +1,6 @@
 from Core.Connection import *
 from Core.globals import environ, mainWidgets, GINI_ROOT, GINI_HOME, defaultOptions
-from PyQt4.QtCore import QPoint
+from PyQt5.QtCore import QPoint
 from Core.Attachable import *
 import os
 import re

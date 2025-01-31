@@ -1,4 +1,4 @@
-from Router import *
+from Devices.Router import Router
 
 """
 This class implements firewall device. Work is in progress

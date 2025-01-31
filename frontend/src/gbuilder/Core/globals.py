@@ -65,3 +65,21 @@ mainWidgets = {
 }
 
 defaultOptions = {"palette": None}
+
+# The list of device types and their current index numbers
+hostTypes = {"Mach": 0, "Cloud": 0}
+netTypes = {"Switch": 0, "Subnet": 0, "Router": 0, "OpenFlowController": 0, "OVSwitch": 0}
+customTypes = {"Custom": 0}
+nodeTypes = {
+    "Mach": hostTypes, 
+    "Switch": netTypes, 
+    "Subnet": netTypes,
+    "Router": netTypes, 
+    "OVSwitch": netTypes, 
+    "Custom": customTypes,
+    "OpenFlowController": netTypes, 
+    "Cloud": hostTypes
+}
+
+commonTypes = ["Mach", "Subnet", "Switch", "Router"]
+unimplementedTypes = ["Mach_FreeDOS", "Mach_Android", "Firewall"]

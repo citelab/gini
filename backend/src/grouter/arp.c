@@ -10,6 +10,9 @@
 #include <slack/std.h>
 #include <slack/err.h>
 #include <slack/prog.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <netinet/in.h>
 #include "protocols.h"
@@ -18,6 +21,7 @@
 #include "moduledefs.h"
 #include "grouter.h"
 #include "packetcore.h"
+#include "verbose.h"
 
 
 int tbl_replace_indx;            // overwrite this element if no free space in ARP table
@@ -117,7 +121,7 @@ void ARPProcess(gpacket_t *pkt)
   arp_packet_t *apkt = (arp_packet_t *) pkt->data.data;
 
   // check packet is ethernet and addresses of IP type.. otherwise throw away
-  if ((ntohs(apkt->hw_addr_type) != ETHERNET_PROTOCOL) || (ntohs(apkt->arp_prot) != IP_PROTOCOL))
+  if ((ntohs(apkt->hw_addr_type) != 0x0001) || (ntohs(apkt->arp_prot) != IP_PROTOCOL))
   {
     verbose(2, "[ARPProcess]:: unknown hwtype or protocol, dropping ARP packet");
     return;
@@ -125,7 +129,8 @@ void ARPProcess(gpacket_t *pkt)
 
 
   verbose(2, "[ARPProcess]:: adding sender of received packet to ARP table");
-  ARPAddEntry(gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), apkt->src_hw_addr);
+  ARPAddEntry((const char *)gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), 
+              (const char *)apkt->src_hw_addr);
 
   // Check it's actually destined to us,if not throw packet
   if (COMPARE_IP(apkt->dst_ip_addr, gHtonl((uchar *)tmpbuf, pkt->frame.src_ip_addr)) != 0)
@@ -168,7 +173,8 @@ void ARPProcess(gpacket_t *pkt)
   {
     // Flush buffer of any packets waiting for the incoming ARP..
     verbose(2, "[ARPProcess]:: packet was ARP REPLY... ");
-    ARPFlushBuffer(gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), apkt->src_hw_addr);
+    ARPFlushBuffer((const char *)gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), 
+                   (const char *)apkt->src_hw_addr);
     verbose(2, "[ARPProcess]:: flushed the ARP buffer ... ");
   }
   else
@@ -240,22 +246,25 @@ int ARPFindEntry(uchar *ip_addr, uchar *mac_addr)
  *            uchar *mac_addr - the MAC address (6 bytes)
  * RETURNS: Nothing
  */
-void ARPAddEntry(uchar *ip_addr, uchar *mac_addr)
+void ARPAddEntry(const char *ip_addr, const char *mac_addr)
 {
   int i;
   int empty_slot = MAX_ARP;
   char tmpbuf[MAX_TMPBUF_LEN];
+  uchar *uip = (uchar *)ip_addr;
+  uchar *umac = (uchar *)mac_addr;
+
   for (i = 0; i < MAX_ARP; i++)
   {
     if ((ARPtable[i].is_empty == FALSE) &&
-        (COMPARE_IP(ARPtable[i].ip_addr, ip_addr) == 0))
+        (COMPARE_IP(ARPtable[i].ip_addr, (const uchar *)ip_addr) == 0))
     {
       // update entry
-      COPY_IP(ARPtable[i].ip_addr, ip_addr);
-      COPY_MAC(ARPtable[i].mac_addr, mac_addr);
+      COPY_IP(ARPtable[i].ip_addr, (const uchar *)ip_addr);
+      COPY_MAC(ARPtable[i].mac_addr, (const uchar *)mac_addr);
 
       verbose(2, "[ARPAddEntry]:: updated ARP table entry #%d: IP %s = MAC %s", i,
-          IP2Dot(tmpbuf, ip_addr), MAC2Colon(tmpbuf+20, mac_addr));
+          IP2Dot(tmpbuf, uip), MAC2Colon(tmpbuf+20, umac));
       return;
     }
     if (ARPtable[i].is_empty == TRUE) {
@@ -274,11 +283,11 @@ void ARPAddEntry(uchar *ip_addr, uchar *mac_addr)
 
   // add new entry or overwrite the replaced entry
   ARPtable[empty_slot].is_empty = FALSE;
-  COPY_IP(ARPtable[empty_slot].ip_addr, ip_addr);
-  COPY_MAC(ARPtable[empty_slot].mac_addr, mac_addr);
+  COPY_IP(ARPtable[empty_slot].ip_addr, (const uchar *)ip_addr);
+  COPY_MAC(ARPtable[empty_slot].mac_addr, (const uchar *)mac_addr);
 
   verbose(2, "[ARPAddEntry]:: updated ARP table entry #%d: IP %s = MAC %s", empty_slot,
-      IP2Dot(tmpbuf, ip_addr), MAC2Colon(tmpbuf+20, mac_addr));
+      IP2Dot(tmpbuf, uip), MAC2Colon(tmpbuf+20, umac));
 
   return;
 }
@@ -307,14 +316,14 @@ void ARPPrintTable(void)
 /*
  * Delete ARP entry with the given IP address
  */
-void ARPDeleteEntry(char *ip_addr)
+void ARPDeleteEntry(const char *ip_addr)
 {
   int i;
 
   for (i = 0; i < MAX_ARP; i++)
   {
     if ( (ARPtable[i].is_empty == FALSE) &&
-        (COMPARE_IP(ARPtable[i].ip_addr, ip_addr)) == 0)
+        (COMPARE_IP(ARPtable[i].ip_addr, (const uchar *)ip_addr)) == 0)
     {
       ARPtable[i].is_empty = TRUE;
       verbose(2, "[ARPDeleteEntry]:: arp entry #%d deleted", i);
@@ -341,7 +350,7 @@ void ARPSendRequest(gpacket_t *pkt)
    * ether header will be set in GNET_ADAPTER
    * arp header
    */
-  apkt->hw_addr_type = htons(ETHERNET_PROTOCOL);      // set hw type
+  apkt->hw_addr_type = htons(0x0001);      // set hw type for Ethernet
   apkt->arp_prot = htons(IP_PROTOCOL);                // set prtotocol address format
 
   apkt->hw_addr_len = 6;                              // address length
@@ -461,13 +470,13 @@ int ARPGetBuffer(gpacket_t **out_pkt, uchar *nexthop)
  * flush all packets from buffer matching the nexthop
  * for which we now have an ARP entry
  */
-void ARPFlushBuffer(char *next_hop, char *mac_addr)
+void ARPFlushBuffer(const char *next_hop, const char *mac_addr)
 {
   gpacket_t *bfrd_msg;
   char tmpbuf[MAX_TMPBUF_LEN];
 
   verbose(2, "[ARPFlushBuffer]:: Entering the function.. ");
-  while (ARPGetBuffer(&bfrd_msg, next_hop) == EXIT_SUCCESS)
+  while (ARPGetBuffer(&bfrd_msg, (uchar *)next_hop) == EXIT_SUCCESS)
   {
     // a message is already buffered.. send it out..
     // TODO: include QoS routines.. for now they are removed!
@@ -475,8 +484,8 @@ void ARPFlushBuffer(char *next_hop, char *mac_addr)
     // send to gnetAdapter
     // no need to set dst_int_num -- why?
 
-    verbose(2, "[ARPFlushBuffer]:: flushing the entry with next_hop %s ", IP2Dot(tmpbuf, next_hop));
-    COPY_MAC(bfrd_msg->data.header.dst, mac_addr);
+    verbose(2, "[ARPFlushBuffer]:: flushing the entry with next_hop %s ", IP2Dot(tmpbuf, (uchar *)next_hop));
+    COPY_MAC(bfrd_msg->data.header.dst, (const uchar *)mac_addr);
     ARPSend2Output(bfrd_msg);
   }
 

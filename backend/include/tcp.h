@@ -33,7 +33,11 @@
 #define __LWIP_TCP_H__
 
 #include <stdint.h>
+#ifdef __APPLE__
+#include <machine/endian.h>
+#else
 #include <endian.h>
+#endif
 #include "opt.h"
 #include "pbuf.h"
 #include "ip.h"
@@ -51,17 +55,22 @@ typedef struct {
 	// Sequence number
 	uint16_t	seq_num;
 	uint16_t	ack_num;
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-	// Unused
-	uint8_t		reserved:4;
-	// Data offset
-	uint8_t		data_offset:4;
-#endif
-#if __BYTE_ORDER == __BIG_ENDIAN
-	// Data offset
-	uint8_t		data_offset:4;
-	// Unused
-	uint8_t		reserved:4;
+#if defined(__APPLE__)
+	#if __DARWIN_BYTE_ORDER == __DARWIN_LITTLE_ENDIAN
+		uint8_t         reserved:4;    // Unused
+		uint8_t         data_offset:4; // Data offset
+	#else
+		uint8_t         data_offset:4; // Data offset
+		uint8_t         reserved:4;    // Unused
+	#endif
+#else
+	#if __BYTE_ORDER == __LITTLE_ENDIAN
+		uint8_t         reserved:4;    // Unused
+		uint8_t         data_offset:4; // Data offset
+	#else
+		uint8_t         data_offset:4; // Data offset
+		uint8_t         reserved:4;    // Unused
+	#endif
 #endif
 	// Flags
 	uint8_t		flags;

@@ -6,6 +6,7 @@
  */
 
 #include <slack/err.h>
+#include "verbose.h"
 #include "tun.h"
 #include "packetcore.h"
 #include "classifier.h"
@@ -28,6 +29,10 @@ extern filtertab_t *filter;
 
 extern router_config rconfig;
 
+// Function declarations
+static int tun_sendto(vpl_data_t *vpl, void *buf, int len);
+static int tun_recvfrom(vpl_data_t *vpl, void *buf, int len);
+
 void *toTunDev(void *arg)
 {
 	gpacket_t *inpkt = (gpacket_t *)arg;
@@ -36,7 +41,7 @@ void *toTunDev(void *arg)
 	char tmpbuf[MAX_TMPBUF_LEN];
 	int pkt_size;
 
-	verbose(2, "[toTunDev]:: entering the function.. ");
+	verbose(1, "[toTunDev]:: entering the function.. ");
 	// find the outgoing interface and device...
 	if ((iface = findInterface(inpkt->frame.dst_interface)) != NULL)
 	{
@@ -45,7 +50,10 @@ void *toTunDev(void *arg)
 		{
 			apkt = (arp_packet_t *) inpkt->data.data;
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
-			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
+			{
+				uchar tmp[4];
+				COPY_IP(apkt->src_ip_addr, gHtonl(tmp, iface->ip_addr));
+			}
 		}
 		pkt_size = findPacketSize(&(inpkt->data));
 		verbose(2, "[toTunDev]:: tun_sendto called for interface %d.. ", iface->interface_id);
@@ -54,8 +62,7 @@ void *toTunDev(void *arg)
 	} else
 		error("[toTunDev]:: ERROR!! Could not find outgoing interface ...");
 
-	// this is just a dummy return -- return value not used.
-	return arg;
+	return NULL;                // nothing to return
 }
 
 
@@ -167,21 +174,22 @@ vpl_data_t *tun_connect(short int src_port, uchar* src_IP,
     return pri;
 }
 
-int tun_recvfrom(vpl_data_t *vpl, void *buf, int len)
+// Fix recvfrom socklen_t warning
+static int tun_recvfrom(vpl_data_t *vpl, void *buf, int len)
 {
-    int n, rcv_addr_len;
-    struct sockaddr_in* dstaddr = (struct sockaddr_in*)vpl->data_addr;
+    int n;
     struct sockaddr_in rcvaddr;
-    char tmpbuf[100];
+    char tmpbuf[MAX_TMPBUF_LEN];
+    socklen_t rcv_addr_len;
     
     rcv_addr_len = sizeof(rcvaddr);
-    n=recvfrom(vpl->data,buf,len,0,(struct sockaddr *)&rcvaddr,&rcv_addr_len);
+    n = recvfrom(vpl->data, buf, len, 0, (struct sockaddr *)&rcvaddr, &rcv_addr_len);
     if (n == -1) 
     {
         verbose(2, "[tun_recvfrom]:: unable to receive packet, error = %s", strerror(errno));		
         return EXIT_FAILURE;
-    } else if((rcvaddr.sin_addr.s_addr != dstaddr->sin_addr.s_addr) || 
-               rcvaddr.sin_port != dstaddr->sin_port)
+    } else if((rcvaddr.sin_addr.s_addr != ((struct sockaddr_in*)vpl->data_addr)->sin_addr.s_addr) || 
+               rcvaddr.sin_port != ((struct sockaddr_in*)vpl->data_addr)->sin_port)
     { 
         verbose(2, "[tun_recvfrom]:: source IP or port does not match interface router");
         return EXIT_FAILURE;

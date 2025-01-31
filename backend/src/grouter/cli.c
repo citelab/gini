@@ -42,6 +42,8 @@
 #include <limits.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include "verbose.h"
+#include "arp.h"
 
 
 Map *cli_map;
@@ -119,6 +121,7 @@ int CLIInit(router_config *rarg)
     pthread_join(rarg->clihandler, (void **)&jstat);
     verbose(2, "[cliHandler]:: Destroying the CLI datastructures ");
     CLIDestroy();
+    return EXIT_SUCCESS;
 }
 
 
@@ -135,6 +138,7 @@ void *CLIProcessCmdsInteractive(void *arg)
 
     CLIPrintHelpPreamble();
     CLIProcessCmds(fp, 1);
+    return NULL;
 }
 
 
@@ -439,7 +443,7 @@ void ifconfigCmd()
             if (!strcmp("-gateway", next_tok))
             {
                 next_tok = strtok(NULL, " \n");
-                Dot2IP(next_tok, gw_addr);
+                memcpy(gw_addr, next_tok, 4);
             } else if (!strcmp("-mtu", next_tok))
             {
                 next_tok = strtok(NULL, " \n");
@@ -500,7 +504,7 @@ void ifconfigCmd()
             if (!strcmp("-gateway", next_tok))
             {
                 next_tok = strtok(NULL, " \n");
-                strcpy(gw_addr, next_tok);
+                memcpy(gw_addr, next_tok, 4);
             } else if (!strcmp("-mtu", next_tok))
             {
                 next_tok = strtok(NULL, " \n");
@@ -849,7 +853,7 @@ void arpCmd()
             {
                 next_tok = strtok(NULL, " \n");
                 Dot2IP(next_tok, ip_addr);
-                ARPDeleteEntry(ip_addr);
+                ARPDeleteEntry((const char *)ip_addr);
             }
         } else
             ARPReInitTable();
@@ -864,7 +868,7 @@ void arpCmd()
             return;
         next_tok = strtok(NULL, " \n");
         Colon2MAC(next_tok, mac_addr);
-        ARPAddEntry(ip_addr, mac_addr);
+        ARPAddEntry((const char *)ip_addr, (const char *)mac_addr);
     }
 }
 
@@ -1156,7 +1160,8 @@ void setCmd()
                 rconfig.schedcycle = cyclelen;
             else
                 verbose(1, "ERROR!! schedule cycle length should be positive \n");
-        } else
+        }
+        else
             printf("\nSchedule cycle length: %d (microseconds) \n", rconfig.schedcycle);
     } else if (!strcmp(next_tok, "verbose"))
     {

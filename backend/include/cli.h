@@ -17,8 +17,14 @@
 #include <stdio.h>
 #include <slack/std.h>
 #include <slack/map.h>
+#include <slack/err.h>
 #include "message.h"
 #include "grouter.h"
+#include "routetable.h"  // For printRouteTable
+#include "console.h"     // For console functions
+#include "info.h"        // For time mode functions
+#include "openflow_config.h" // For OpenFlow config functions
+#include "openflow_ctrl_iface.h" // For OpenFlow control interface
 
 
 #define PROGRAM                       10
@@ -46,7 +52,7 @@ typedef struct _cli_entry_t
 
 
 // function prototypes...
-void dummyFunction();
+void dummyFunction(int sign);
 void parseACLICmd(char *str);
 void CLIProcessCmds(FILE *fp, int online);
 void CLIPrintHelpPreamble();
@@ -75,5 +81,20 @@ void filterCmd();
 void openflowCmd();
 void gncCmd();
 void gncTerminate();
+
+void printRouteTable(route_entry_t *route_tbl);
+void setTimeMode(int mode);
+int getTimeMode(void);
+void setUpdateInterval(int interval);
+int getUpdateInterval(void);
+void consoleGetState(void);
+void consoleRestart(char *config_dir, char *router_name);
+
+void openflow_config_print_desc_stats(void);
+void openflow_config_print_port_stats(void);
+void openflow_config_print_port_stat(uint32_t num);
+void openflow_config_print_ports(void);
+void openflow_config_print_port(uint32_t num);
+void openflow_ctrl_iface_reconnect(void);
 
 #endif

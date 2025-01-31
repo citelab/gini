@@ -24,6 +24,7 @@
 
 #include <slack/std.h>
 #include <slack/prog.h>
+#include "verbose.h"
 
 extern pktcore_t *pcore;
 
@@ -83,7 +84,10 @@ int IPCheckPacket4Me(gpacket_t *in_pkt)
 	uchar iface_ip[MAX_MTU][4];
 	uchar pkt_ip[4];
 
-	COPY_IP(pkt_ip, gNtohl(tmpbuf, ip_pkt->ip_dst));
+	{
+		uchar tmp[4];
+		COPY_IP(pkt_ip, gNtohl(tmp, ip_pkt->ip_dst));
+	}
 	verbose(2, "[IPCheckPacket4Me]:: looking for IP %s ", IP2Dot(tmpbuf, pkt_ip));
 	if ((count = findAllInterfaceIPs(MTU_tbl, iface_ip)) > 0)
 	{
@@ -141,10 +145,13 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 
 	// find the route... if it does not exist, should we send a
 	// ICMP network/host unreachable message -- CHECK??
-	if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst),
+	{
+		uchar tmp[4];
+		if (findRouteEntry(route_tbl, gNtohl(tmp, ip_pkt->ip_dst),
 			   in_pkt->frame.nxth_ip_addr,
 			   &(in_pkt->frame.dst_interface)) == EXIT_FAILURE)
-		return EXIT_FAILURE;
+			return EXIT_FAILURE;
+	}
 
 	// check for redirection?? -- the output interface is already found
 	// by the previous command.. if needed the following routine sends the
@@ -392,7 +399,10 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 	if (newflag == 0)
 	{
 		COPY_IP(ip_pkt->ip_dst, ip_pkt->ip_src); 		    // set dst to original src
-		COPY_IP(ip_pkt->ip_src, gHtonl(tmpbuf, pkt->frame.src_ip_addr));    // set src to me
+		{
+			uchar tmp[4];
+			COPY_IP(ip_pkt->ip_src, gHtonl(tmp, pkt->frame.src_ip_addr));
+		}
 
 		// find the nexthop and interface and fill them in the "meta" frame
 		// NOTE: the packet itself is not modified by this lookup!
@@ -411,7 +421,10 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 		RESET_MF_BITS(ip_pkt->ip_frag_off);
 		ip_pkt->ip_frag_off = 0;
 
-		COPY_IP(ip_pkt->ip_dst, gHtonl(tmpbuf, dst_ip));
+		{
+			uchar tmp[4];
+			COPY_IP(ip_pkt->ip_dst, gHtonl(tmp, dst_ip));
+		}
 		ip_pkt->ip_pkt_len = htons(size + ip_pkt->ip_hdr_len * 4);
 
 		verbose(2, "[IPOutgoingPacket]:: lookup next hop ");
@@ -427,7 +440,10 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 					      iface_ip_addr)) == EXIT_FAILURE)
 					      return EXIT_FAILURE;
 		// the outgoing packet should have the interface IP as source
-		COPY_IP(ip_pkt->ip_src, gHtonl(tmpbuf, iface_ip_addr));
+		{
+			uchar tmp[4];
+			COPY_IP(ip_pkt->ip_src, gHtonl(tmp, iface_ip_addr));
+		}
 		verbose(2, "[IPOutgoingPacket]:: almost one processing the IP header.");
 	} else
 	{

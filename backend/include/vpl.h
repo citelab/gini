@@ -16,7 +16,6 @@
 #ifndef __VPL_H__
 #define __VPL_H__
 
-
 #include <errno.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -25,21 +24,25 @@
 #include <sys/time.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
 
 #define SWITCH_VERSION           3
 #define CONSOLE_PACKET           269               // arbitary number .. least likely to clash!
 
+typedef size_t (*vpl_read_t)(void *arg, void *buf, size_t len);
+typedef size_t (*vpl_write_t)(void *arg, void *buf, size_t len);
+
 typedef struct _vpl_data_t {
 	char *sock_type;
-	char *ctl_sock;
-	void *ctl_addr;
-	void *data_addr;
-	void *local_addr;
+	struct sockaddr_un *ctl_sock;
+	struct sockaddr_un *ctl_addr;
+	struct sockaddr_un *data_addr;
+	struct sockaddr_un *local_addr;
 	int data;
 	int control;
+	vpl_read_t read;
+	vpl_write_t write;
 } vpl_data_t;
-
-
 
 enum request_type { REQ_NEW_CONTROL };
 
@@ -52,10 +55,8 @@ struct request_v3 {
 	struct sockaddr_un sock;
 };
 
-
 /* function prototypes for internal routines */
 int __vpl_sendto(int fd, void *buf, int len, void *to, int sock_len);
-
 
 /* function prototypes for external routines */
 struct sockaddr_un *new_addr(void *name, int len);

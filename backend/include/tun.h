@@ -6,17 +6,17 @@
  * Licensed under the GPL.
  */
 
-#ifndef TUN_H
-#define	TUN_H
+#ifndef __TUN_H__
+#define __TUN_H__
 
 #include "vpl.h"
-#include "grouter.h"
+#include "message.h"
 
+// Function declarations
 void *toTunDev(void *arg);
-void* fromTunDev(void *arg);
+void *fromTunDev(void *arg);
 vpl_data_t *tun_connect(short int src_port, uchar* src_IP,
-                        short int dst_port, uchar* dst_IP);
+                         short int dst_port, uchar* dst_IP);
 
-
-#endif	/* TUN_H */
+#endif	/* __TUN_H__ */
 

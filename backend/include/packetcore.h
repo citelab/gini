@@ -60,8 +60,8 @@ void modifyQueueDiscipline(pktcore_t *pcore, char *qname, char *qdisc);
 int delPktCoreQueue(pktcore_t *pcore, char *qname);
 
 pthread_t PktCoreSchedulerInit(pktcore_t *pcore);
-int PktCoreWorkerInit(pktcore_t *pcore);
-int PktCoreOpenflowWorkerInit(pktcore_t *pcore);
+int PktCoreWorkerInit(pktcore_t *pcore, pthread_t *thread);
+int PktCoreOpenflowWorkerInit(pktcore_t *pcore, pthread_t *thread);
 void *openflowPacketProcessor(void *pc);
 void *packetProcessor(void *pc);
 

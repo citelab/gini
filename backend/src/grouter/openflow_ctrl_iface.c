@@ -56,6 +56,7 @@
 #include "openflow_pkt_proc.h"
 #include "protocols.h"
 #include "tcp.h"
+#include "verbose.h"
 
 // Controller socket file descriptor
 static int32_t ofc_socket_fd;
@@ -738,7 +739,7 @@ static int32_t openflow_ctrl_iface_recv_flow_mod(ofp_flow_mod *msg)
 
 	uint16_t error_type;
 	uint16_t error_code;
-	ret = openflow_flowtable_modify(msg, &error_type, &error_type);
+	ret = openflow_flowtable_modify(msg, &error_type, &error_code);
 	if (ret < 0)
 	{
 		int32_t ret = openflow_ctrl_iface_send_error(error_type, error_code,
@@ -1430,7 +1431,7 @@ static void openflow_ctrl_iface(void *port)
 		struct sockaddr_in ofc_sock_addr;
 		ofc_sock_addr.sin_family = AF_INET;
 		ofc_sock_addr.sin_port = htons(*port_num);
-		inet_aton("127.0.0.1", &ofc_sock_addr.sin_addr);
+		inet_pton(AF_INET, "127.0.0.1", &ofc_sock_addr.sin_addr);
 
 		pthread_mutex_lock(&ofc_socket_mutex);
 		ofc_socket_fd = socket(AF_INET, SOCK_STREAM, 0);

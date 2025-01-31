@@ -119,8 +119,12 @@ unsigned char *gNtohl(uchar tval[], uchar val[]);
 ushort checksum(uchar *buf, int iwords);
 
 uint64_t __builtin_bswap64(uint64_t x);
+
+// Remove or guard these declarations since they're already defined on macOS
+#ifndef __APPLE__
 uint64_t ntohll(uint64_t arg);
 uint64_t htonll(uint64_t arg);
+#endif
 
 // function prototypes for code in router.c
 void redefineSignalHandler(int sigid, void (*my_func)());

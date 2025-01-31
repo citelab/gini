@@ -25,8 +25,18 @@
 #include <netinet/in.h>
 #include "routetable.h"
 #include "openflow_config.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "verbose.h"
+#include "mtu.h"
 
-#define MAX_MTU 1500
+// Forward declarations of static functions
+static int destroyInterface(interface_t *iface);
+static int upThisInterface(interface_t *iface);
+static int downThisInterface(interface_t *iface);
+static void deleteRouteEntryByInterface(route_entry_t route_tbl[], int interface_id);
+
 #define BASEPORTNUM 60000
 
 extern route_entry_t route_tbl[MAX_ROUTES];
@@ -268,14 +278,14 @@ void printInterfaces(int mode)
 					       ifptr->device_mtu);
 					break;
 				case VERBOSE_LISTING:
-					printf("%d\t%c%c\t\t%s\t%s\t%s\t%d\t%s\t%d\n", ifptr->interface_id,
+					printf("%d\t%c%c\t\t%s\t%s\t%s\t%d\t%s\t%lu\n", ifptr->interface_id,
 					       ifptr->state, ifptr->mode,
 					       ifptr->device_name,
 					       IP2Dot(tmpbuf, ifptr->ip_addr),
 					       MAC2Colon((tmpbuf+20), ifptr->mac_addr),
 					       ifptr->device_mtu,
 					       ifptr->sock_name,
-					       (int) ifptr->threadid);
+					       (unsigned long) ifptr->threadid);
 					break;
 			}
 		}
@@ -596,7 +606,10 @@ void *delayedServerCall(void *arg)
  */
 int destroyInterfaceByIndex(int indx)
 {
-	return destroyInterface(findInterface(indx));
+	interface_t *iface = findInterface(indx);
+	if (iface == NULL)
+		return EXIT_FAILURE;
+	return destroyInterface(iface);
 }
 
 
@@ -605,7 +618,7 @@ int destroyInterfaceByIndex(int indx)
  * The router should remove associated route table information, ARP entries,
  * and stop the threads (only fromXDevice thread).
  */
-int destroyInterface(interface_t *iface)
+static int destroyInterface(interface_t *iface)
 {
 
 	// nothing to do if iface is NULL
@@ -617,7 +630,7 @@ int destroyInterface(interface_t *iface)
 	deleteRouteEntryByInterface(route_tbl, iface->interface_id);
 
 	// remove the ARP table entries
-	ARPDeleteEntry(iface->ip_addr);
+	ARPDeleteEntry((char *)iface->ip_addr);
 
 	verbose(2, "[destroyInterface]:: cancelling the fromdev handler.. ");
 	if (iface->state == INTERFACE_UP)
@@ -663,7 +676,7 @@ int changeInterfaceMTU(int index, int new_mtu)
 /*
  * change the interface state to up -- of this interface
  */
-int upThisInterface(interface_t *iface)
+static int upThisInterface(interface_t *iface)
 {
 	int thread_stat;
 
@@ -681,7 +694,7 @@ int upThisInterface(interface_t *iface)
 /*
  * change the interface state to down -- of this interface
  */
-int downThisInterface(interface_t *iface)
+static int downThisInterface(interface_t *iface)
 {
 	int status;
 
@@ -711,7 +724,8 @@ int upInterface(int index)
 		return EXIT_FAILURE;
 	}
 
-	int status = upThisInterface(iface);
+	int status;
+	status = upThisInterface(iface);
 	if (rconfig.openflow)
 	{
 		openflow_config_update_phy_port(
@@ -735,7 +749,8 @@ int downInterface(int index)
 		return EXIT_FAILURE;
 	}
 
-	int status = downThisInterface(iface);
+	int status;
+	status = downThisInterface(iface);
 	if (rconfig.openflow)
 	{
 		openflow_config_update_phy_port(
@@ -833,11 +848,10 @@ void printARPCache(void)
  *---------------------------------------------------------------------------------*/
 
 
-void GNETHalt(int gnethandler)
+void GNETHalt(pthread_t gnethandler)
 {
-	verbose(2, "[gnetHalt]:: Shutting down GNET handler.. \n");
-	haltInterfaces();
 	pthread_cancel(gnethandler);
+	verbose(2, "[GNETHalt]:: Handler thread cancelled..");
 }
 
 
@@ -850,21 +864,23 @@ void GNETHalt(int gnethandler)
  * and injected back into the Output Queue once the ARP reply from a remote machine comes back.
  * This means a packet can go through the Output Queue two times.
  */
-int GNETInit(pthread_t *ghandler, char *config_dir, char *rname, simplequeue_t *sq)
+void GNETInit(pthread_t *handler, char *config_dir, char *router_name, simplequeue_t *outputQ)
 {
-	int thread_stat;
+	pthread_t threadid;
+	int *jstatus;
 
-	// do the initializations...
-	vpl_init(config_dir, rname);
-	GNETInitInterfaces();
- 	GNETInitARPCache();
+	// Initialize interface array
+	netarray.count = 0;
 
-	thread_stat = pthread_create((pthread_t *)ghandler, NULL, GNETHandler, (void *)sq);
-	if (thread_stat != 0)
-		return EXIT_FAILURE;
-	else
-		return EXIT_SUCCESS;
+	// Create handler thread
+	if (pthread_create(&threadid, NULL, GNETHandler, (void *)outputQ) != 0)
+	{
+		error("[GNETInit]:: Unable to create handler thread..");
+		return;
+	}
 
+	*handler = threadid;
+	return;
 }
 
 void *GNETHandler(void *outq)
@@ -918,4 +934,14 @@ void *GNETHandler(void *outq)
 		iface->devdriver->todev((void *)in_pkt);
 
 	}
+}
+
+static void deleteRouteEntryByInterface(route_entry_t route_tbl[], int interface_id)
+{
+    int i;
+    for (i = 0; i < MAX_ROUTES; i++)
+    {
+        if (route_tbl[i].interface == interface_id)
+            deleteRouteEntryByIndex(route_tbl, i);
+    }
 }

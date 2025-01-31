@@ -3,7 +3,7 @@
 from Core.Item import nodeTypes
 from Core.Device import Device
 from Core.globals import options, environ, mainWidgets
-from PyQt4 import QtCore
+from PyQt5 import QtCore
 from Core.utils import ip_utils
 import os
 import re
@@ -25,7 +25,7 @@ class Compiler:
         self.device_list = device_list
 
         self.base_network_generator = ip_utils.BaseGiniIPv4Network(
-            unicode(options["base_network"]),
+            str(options["base_network"]),
             check=True
         )
         self.filename = filename.replace(".gsav", ".xml")
@@ -250,7 +250,7 @@ class Compiler:
         if QtCore.QString("target") in interface:
             self.write_property("target", interface[QtCore.QString("target")].getName())
 
-        for prop, eq in mapping.iteritems():
+        for prop, eq in mapping.items():
             try:
                 value = interface[QtCore.QString(prop)]
             except:

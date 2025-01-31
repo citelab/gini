@@ -1,10 +1,10 @@
 """A window that can float or dock"""
 
-from PyQt4 import QtGui, QtCore
+from PyQt5 import QtGui, QtCore, QtWidgets
 
 
-class Dockable(QtGui.QDockWidget):
-    def __init__(self, title=QtCore.QString(), parent=None):
+class Dockable(QtWidgets.QDockWidget):
+    def __init__(self, title='', parent=None):
         """
         Create a dockable window.
         """
@@ -13,8 +13,9 @@ class Dockable(QtGui.QDockWidget):
         self.chosenSize = None
         self.timer = QtCore.QTimer()
 
-        self.connect(self, QtCore.SIGNAL("dockLocationChanged(Qt::DockWidgetArea)"), self.locationChanged)
-        self.connect(self.timer, QtCore.SIGNAL("timeout()"), self.resetMinsize)
+        # Update signal connections to new style
+        self.dockLocationChanged.connect(self.locationChanged)
+        self.timer.timeout.connect(self.resetMinsize)
 
     def resetMinsize(self):
         """
@@ -42,7 +43,7 @@ class Dockable(QtGui.QDockWidget):
         self.chosenSize = QtCore.QSize(rect.width(), rect.height())
         self.setMinimumSize(self.chosenSize)
         self.timer.start(1000)
-        QtGui.QDockWidget.setGeometry(self, rect)
+        QtWidgets.QDockWidget.setGeometry(self, rect)
 
     def sizeHint(self):
         """
@@ -51,4 +52,4 @@ class Dockable(QtGui.QDockWidget):
         if self.chosenSize:
             return self.chosenSize
         else:
-            return QtGui.QDockWidget.sizeHint(self)
+            return QtWidgets.QDockWidget.sizeHint(self)

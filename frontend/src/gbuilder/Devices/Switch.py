@@ -1,4 +1,5 @@
 from Core.Device import *
+from PyQt5.QtCore import QPoint
 
 
 class Switch(Device):
@@ -31,7 +32,7 @@ class Switch(Device):
             node.removeInterface(self)
 
     def getGateway(self):
-        return self.gateway[QtCore.QString("ipv4")]
+        return self.gateway["ipv4"]
 
     def getTarget(self, node):
         """

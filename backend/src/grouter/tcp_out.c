@@ -939,8 +939,11 @@ tcp_output_segment(struct tcp_seg *seg, struct tcp_pcb *pcb)
   char tmpbuf[MAX_TMPBUF_LEN];
   uchar any[4] = {0,0,0,0};
   int dst_interface = 0;
-  if (findRouteEntry(route_tbl, gNtohl(tmpbuf, pcb->remote_ip), any, &dst_interface) != EXIT_FAILURE) {
-    findInterfaceIP(MTU_tbl, dst_interface, pcb->local_ip);
+  {
+    uchar tmp[4];
+    if (findRouteEntry(route_tbl, gNtohl(tmp, pcb->remote_ip), any, &dst_interface) != EXIT_FAILURE) {
+      findInterfaceIP(MTU_tbl, dst_interface, pcb->local_ip);
+    }
   }
 
   if (pcb->rttest == 0) {

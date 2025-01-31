@@ -14,6 +14,14 @@
 #include <slack/err.h>
 #include <slack/fio.h>
 #include <sys/stat.h>
+#include "verbose.h"
+#include "message.h"
+#include "console.h"
+#include "protocols.h"
+
+// Forward declarations for static functions
+static void write_pcapheader(int fid);
+static int write_pcaprecord(int fid, void *buf, int len);
 
 /*
  * Some global variables!
@@ -53,21 +61,20 @@ void consoleGetState()
 /*
  * Write out the Gpcap header into the FIFO.
  */
-int write_pcapheader(int fid)
+static void write_pcapheader(int fid)
 {
 	pcap_hdr_t phdr = {0xa1b2c3d4, 2, 4, 0, 0, 65535, 1};
 	int bytes;
 
- 	if (bytes = write(fid, &phdr, sizeof(pcap_hdr_t)) == -1)
+ 	if ((bytes = write(fid, &phdr, sizeof(pcap_hdr_t))) == -1)
  	{
 		error("[write_pcapheader]:: error writing the pcap header ");
- 		return -1; 
+ 		return; 
  	} 
-	return 0;
 }
 
 
-int write_pcappacket(int fid, void *buf, int len)
+static int write_pcaprecord(int fid, void *buf, int len)
 {
 	pcaprec_hdr_t pchdr = {.ts_sec = 0, .ts_usec = 0};
 	int bytes;
@@ -78,7 +85,7 @@ int write_pcappacket(int fid, void *buf, int len)
 	bcopy(&pchdr, lbuf, sizeof(pcaprec_hdr_t));
 	bcopy(buf, (lbuf + sizeof(pcaprec_hdr_t)), len);
 
-	if (bytes = write(fid, lbuf, len + sizeof(pcaprec_hdr_t)) == -1)
+	if ((bytes = write(fid, lbuf, len + sizeof(pcaprec_hdr_t))) == -1)
 	{
 		error("[write_pcapheader]:: error writing the pcap header ");
  		return -1; 
@@ -104,7 +111,7 @@ void consoleHandler(void *ptr)
 		readQueue(consoleq, (void **)&data, &len);
 		pthread_testcancel();
 		// write the fifo, block if FIFO not read (i.e., full)
-		write_pcappacket(consoleid, data, len);
+		write_pcaprecord(consoleid, data, len);
 		free(data);
 	}
 }

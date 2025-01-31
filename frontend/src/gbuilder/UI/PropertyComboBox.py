@@ -1,7 +1,7 @@
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 
-class PropertyComboBox(QtGui.QComboBox):
+class PropertyComboBox(QtWidgets.QComboBox):
 
     def __init__(self, item, PropertiesWindow, prop, values, parent=None):
         super(PropertyComboBox, self).__init__(parent)
@@ -15,7 +15,7 @@ class PropertyComboBox(QtGui.QComboBox):
         if values:
             if hasattr(self.item, 'hostIndex'):
                 self.setCurrentIndex(self.item.hostIndex)
-                self.connect(self, QtCore.SIGNAL("currentIndexChanged(int)"), self.changeIndex)
+                self.currentIndexChanged.connect(self.changeIndex)
         self.currentIndexChanged.connect(self.comboBoxChanged)
 
         item.setProperty(prop, self.item.properties[prop])

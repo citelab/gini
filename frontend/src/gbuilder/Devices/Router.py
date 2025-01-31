@@ -1,10 +1,11 @@
-from Core.Interfaceable import *
-from Core.globals import environ
-from PyQt4.QtCore import QPoint
+from Core.Interfaceable import Interfaceable
+from Core.globals import environ, options, mainWidgets
+from PyQt5.QtCore import QPoint
 import Core.util
 import os
 import json
 from functools import partial
+import subprocess
 
 
 class Router(Interfaceable):
@@ -19,7 +20,7 @@ class Router(Interfaceable):
         self.wireshark_menu = self.menu.addMenu("Wireshark")
         self.wireshark_menu.aboutToShow.connect(self.load_wireshark_menu)
 
-        self.lightPoint = QPoint(-19, -6)
+        self.lightPoint = QPoint(-10, 2)
 
     def stop(self):
         """
@@ -31,8 +32,8 @@ class Router(Interfaceable):
                 self.router_stats_window.close()
             for session in self.wireshark_sessions:
                 session.terminate()
-        except:
-            print "Error occurred when stopping %s" % self.getName()
+        except Exception as e:
+            print(f"Error occurred when stopping {self.getName()}: {e}")
 
     def graph(self):
         """

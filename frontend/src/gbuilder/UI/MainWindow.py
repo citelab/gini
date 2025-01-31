@@ -1,27 +1,30 @@
 """The main window for gbuilder"""
 
 import os, time, math, subprocess, sys
-from PyQt4.QtCore import *
-from PyQt4.QtGui import *
-from DropBar import *
-from LogWindow import *
-from Canvas import *
-from Node import *
-from Edge import *
-from Configuration import *
-from Core.globals import *
-import socket
-import fcntl
-import struct
-from ExportWindow import *
-from SendDirectoryWindow import *
-from Properties import *
-from Systray import *
+from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtWidgets import QApplication
+from UI.DropBar import DropBar
+from UI.TabWidget import TabWidget
+from UI.LogWindow import LogWindow
+from UI.TaskManagerWindow import TaskManagerWindow
+from UI.Configuration import ConfigDialog
+from UI.Properties import PropertiesWindow
+from UI.Tutorial import Tutorial
+from UI.StatsWindow import StatsWindow
+from UI.Systray import Systray
+from Core.globals import options, environ, mainWidgets
+from Core.Item import nodeTypes
+from UI.ExportWindow import ExportWindow
+from Network.gclient import Client
+from Core.Compiler import *
+from .SendDirectoryWindow import *
+from .Properties import *
+from .Systray import *
 from Network.gclient import *
 from Core.Compiler import *
-from TabWidget import *
-from Tutorial import *
-from TaskManagerWindow import *
+from .TabWidget import *
+from .Tutorial import *
+from .TaskManagerWindow import *
 import Core.globals
 
 
@@ -96,9 +99,14 @@ class MainWindow(Systray):
         """
         Center the window.
         """
-        screen = QtGui.QDesktopWidget().screenGeometry()
+        screen = QtWidgets.QDesktopWidget().screenGeometry()
         rect = self.geometry()
-        self.move((screen.width()-rect.width())/2, (screen.height()-rect.height())/2)
+        
+        # Convert float division results to integers
+        x = int((screen.width() - rect.width()) / 2)
+        y = int((screen.height() - rect.height()) / 2)
+        
+        self.move(x, y)
         self.show()
 
     def getProject(self):
@@ -166,7 +174,7 @@ class MainWindow(Systray):
         os.chdir(old_dir)
 
         url = QtCore.QUrl("file://" + load_path + "/FAQ.html")
-        QtGui.QDesktopServices.openUrl(url)
+        QtCore.QDesktopServices.openUrl(url)
 
     def closeTopology(self):
         """
@@ -178,16 +186,16 @@ class MainWindow(Systray):
 
         scene = self.canvas.scene()
         if scene and scene.items():
-            reply = QtGui.QMessageBox.warning(
+            reply = QtWidgets.QMessageBox.warning(
                 self,
                 self.tr(Core.globals.PROG_NAME),
                 self.tr("Save before closing?"),
-                QtGui.QMessageBox.Yes | QtGui.QMessageBox.No | QtGui.QMessageBox.Cancel
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel
             )
-            if reply == QtGui.QMessageBox.Yes:
+            if reply == QtWidgets.QMessageBox.Yes:
                 if not self.saveTopology():
                     return False
-            elif reply == QtGui.QMessageBox.No:
+            elif reply == QtWidgets.QMessageBox.No:
                 pass
             else:
                 return False
@@ -202,7 +210,7 @@ class MainWindow(Systray):
 
         self.filename = ""
         scene = Scene(self.canvas)
-        scene.setItemIndexMethod(QtGui.QGraphicsScene.NoIndex)
+        scene.setItemIndexMethod(QtWidgets.QGraphicsScene.NoIndex)
         self.canvas.setScene(scene)
         self.expansions = 0
 
@@ -252,14 +260,19 @@ class MainWindow(Systray):
 
     def expandScene(self):
         """
-        Expand the scene based on number of expansions.
+        Expand the scene.
         """
-        x = 175 + self.expansions * 30
-        y = 160 + self.expansions * 20
         scene = self.canvas.scene()
-        item = QtGui.QGraphicsLineItem(-x, -y, x, y)
+        if not scene:
+            return
+            
+        x = scene.width()
+        y = scene.height()
+        
+        item = QtWidgets.QGraphicsLineItem(-x, -y, x, y)
         scene.addItem(item)
         scene.removeItem(item)
+        
         self.expansions += 1
 
     def newProject(self):
@@ -290,14 +303,14 @@ class MainWindow(Systray):
         self.project = str(filename)
         file = QtCore.QFile(filename)
         if not file.open(QtCore.QFile.WriteOnly | QtCore.QFile.Text):
-            QtGui.QMessageBox.warning(self, self.tr("Save Error"),
+            QtWidgets.QMessageBox.warning(self, self.tr("Save Error"),
                                       self.tr("Cannot write file %1:\n%2.")
                                       .arg(self.filename)
                                       .arg(file.errorString()))
             return
 
         out = QtCore.QTextStream(file)
-        QtGui.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         if options["username"]:
             out << "username=" + options["username"] + "\n"
@@ -311,7 +324,7 @@ class MainWindow(Systray):
         else:
             self.log.append("Warning, no server or session name is specified!")
 
-        QtGui.QApplication.restoreOverrideCursor()
+        QApplication.restoreOverrideCursor()
 
         self.tabWidget.addTab(self.canvas, project_name)
 
@@ -344,7 +357,7 @@ class MainWindow(Systray):
 
         file = QtCore.QFile(self.project)
         if not file.open(QtCore.QFile.ReadOnly | QtCore.QFile.Text):
-            QtGui.QMessageBox.warning(self, self.tr("Load Error"),
+            QtWidgets.QMessageBox.warning(self, self.tr("Load Error"),
                                       self.tr("Cannot read file %1:\n%2.")
                                       .arg(self.project)
                                       .arg(file.errorString()))
@@ -352,7 +365,7 @@ class MainWindow(Systray):
             return
 
         _in = QtCore.QTextStream(file)
-        QtGui.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         while not _in.atEnd():
             line = str(_in.readLine())
@@ -361,7 +374,7 @@ class MainWindow(Systray):
 
         self.configWindow.updateSettings()
 
-        QtGui.QApplication.restoreOverrideCursor()
+        QApplication.restoreOverrideCursor()
         project_name = self.project.split("/")[-1].strip(".gproj")
         self.tabWidget.addTab(self.canvas, project_name)
 
@@ -580,7 +593,7 @@ class MainWindow(Systray):
         load_path = os.getcwd()
         os.chdir(old_dir)
 
-        filename = QtGui.QFileDialog.getOpenFileName(
+        filename = QtWidgets.QFileDialog.getOpenFileName(
             self,
             self.tr("Choose a file name"), load_path,
             self.tr(filetype))
@@ -593,7 +606,7 @@ class MainWindow(Systray):
         """
         self.popup.setWindowTitle("Topology Names")
         self.popup.setText("You are about to select from the list:\n1.Ernet")
-        self.popup.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        self.popup.setStandardButtons(QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel)
         self.popup.show()
         retval = self.popup.exec_()
 
@@ -604,7 +617,7 @@ class MainWindow(Systray):
             load_path = os.getcwd()
             os.chdir(old_dir)
 
-            filename = QtGui.QFileDialog.getOpenFileName(
+            filename = QtWidgets.QFileDialog.getOpenFileName(
                 self,
                 self.tr("Choose a file name"), load_path,
                 self.tr(filetype))
@@ -673,7 +686,7 @@ class MainWindow(Systray):
 
         file = QtCore.QFile(filename)
         if not file.open(QtCore.QFile.ReadOnly | QtCore.QFile.Text):
-            QtGui.QMessageBox.warning(
+            QtWidgets.QMessageBox.warning(
                 self,
                 self.tr("Load Error"),
                 self.tr("Cannot read file %1:\n%2.")
@@ -686,7 +699,7 @@ class MainWindow(Systray):
 
         _in = QtCore.QTextStream(file)
 
-        QtGui.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         itemDict = {}
         _in.seek(0)
@@ -704,7 +717,7 @@ class MainWindow(Systray):
 
         loadProperties(itemDict)
 
-        QtGui.QApplication.restoreOverrideCursor()
+        QApplication.restoreOverrideCursor()
 
         self.statusBar().showMessage(self.tr("Loaded '%1'").arg(filename), 2000)
 
@@ -770,7 +783,7 @@ class MainWindow(Systray):
 
         file = QtCore.QFile(filename)
         if not file.open(QtCore.QFile.ReadOnly | QtCore.QFile.Text):
-            QtGui.QMessageBox.warning(
+            QtWidgets.QMessageBox.warning(
                 self,
                 self.tr("Load Error"),
                 self.tr("Cannot read file %1:\n%2.")
@@ -783,7 +796,7 @@ class MainWindow(Systray):
 
         _in = QtCore.QTextStream(file)
 
-        QtGui.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
         itemDict = {}
         _in.seek(0)
@@ -801,7 +814,7 @@ class MainWindow(Systray):
 
         loadProperties(itemDict)
 
-        QtGui.QApplication.restoreOverrideCursor()
+        QApplication.restoreOverrideCursor()
 
         self.statusBar().showMessage(self.tr("Loaded '%1'").arg(filename), 2000)
 
@@ -814,7 +827,7 @@ class MainWindow(Systray):
         save_path = os.getcwd()
         os.chdir(old_dir)
 
-        filename = QtGui.QFileDialog.getSaveFileName(
+        filename = QtWidgets.QFileDialog.getSaveFileName(
             self,
             self.tr("Choose a file name"), save_path,
             self.tr(filetype.upper() + " (*.%s)" % filetype))
@@ -829,19 +842,17 @@ class MainWindow(Systray):
 
     def saveTopologyAs(self):
         """
-        Save a topology under a given filename.
+        Save the topology under a new name.
         """
         if not self.canvas.scene().items():
-            self.log.append("There is nothing to save!")
-            return False
+            return
 
-        filename = self.saveFile("gsav")
-        if filename.isEmpty():
-            return False
-
-        self.filename = str(filename)
-
-        return self.saveTopology()
+        filename = self.saveFile("GINI Topology (*.gtop)")
+        if filename:
+            if not filename.endswith(".gtop"):
+                filename += ".gtop"
+            self.filename = filename
+            self.saveTopology()
 
     def saveTopology(self):
         """
@@ -859,7 +870,7 @@ class MainWindow(Systray):
 
         file = QtCore.QFile(self.filename)
         if not file.open(QtCore.QFile.WriteOnly | QtCore.QFile.Text):
-            QtGui.QMessageBox.warning(
+            QtWidgets.QMessageBox.warning(
                 self,
                 self.tr("Save Error"),
                 self.tr("Cannot write file %1:\n%2.")
@@ -868,7 +879,7 @@ class MainWindow(Systray):
             return False
 
         out = QtCore.QTextStream(file)
-        QtGui.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         outstring = ""
         for item in scene.items():
             if isinstance(item, Node):
@@ -879,7 +890,7 @@ class MainWindow(Systray):
                 outstring += item.toString()
 
         out << outstring
-        QtGui.QApplication.restoreOverrideCursor()
+        QApplication.restoreOverrideCursor()
 
         self.statusBar().showMessage(self.tr("Saved '%1'").arg(self.filename), 2000)
 
@@ -887,9 +898,15 @@ class MainWindow(Systray):
 
     def copy(self):
         """
-        Copy selected text from the log into the paste buffer.
+        Copy the selected items to the clipboard.
         """
-        self.log.copy()
+        scene = self.canvas.scene()
+        selectedItems = scene.selectedItems()
+        if not selectedItems:
+            return
+
+        # Implement copy functionality here
+        self.log.append("Copy functionality not implemented yet")
 
     def config(self):
         """
@@ -923,7 +940,7 @@ class MainWindow(Systray):
         """
         Show the about window.
         """
-        QtGui.QMessageBox.about(self,
+        QtWidgets.QMessageBox.about(self,
                                 self.tr("About %s %s"
                                         % (Core.globals.PROG_NAME,
                                             Core.globals.PROG_VERSION)),
@@ -933,120 +950,117 @@ class MainWindow(Systray):
 
     def createActions(self):
         """
-        Create the actions used in the menus and toolbars.
+        Create the actions for the menus and toolbars.
         """
-        self.newSceneAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "new.png"), self.tr("&New"), self)
+        self.newSceneAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "new.png"), self.tr("&New"), self)
         self.newSceneAct.setShortcut(self.tr("Ctrl+N"))
         self.newSceneAct.setStatusTip(self.tr("Create a new topology"))
-        self.connect(self.newSceneAct, QtCore.SIGNAL("triggered()"), self.newScene)
+        self.newSceneAct.triggered.connect(self.newScene)
 
-        self.closeAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "close.png"), self.tr("&Close"), self)
-        self.closeAct.setShortcut(self.tr("Ctrl+W"))
-        self.closeAct.setStatusTip(self.tr("Close the current topology"))
-        self.connect(self.closeAct, QtCore.SIGNAL("triggered()"), self.closeTopology)
-
-        self.loadAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "open.png"), self.tr("&Open..."), self)
+        self.loadAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "open.png"), self.tr("&Open..."), self)
         self.loadAct.setShortcut(self.tr("Ctrl+O"))
-        self.loadAct.setStatusTip(self.tr("Load a topology"))
-        self.connect(self.loadAct, QtCore.SIGNAL("triggered()"), self.loadTopology)
+        self.loadAct.setStatusTip(self.tr("Open an existing topology"))
+        self.loadAct.triggered.connect(self.loadTopology)
 
-        self.saveAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "save.png"), self.tr("&Save..."), self)
+        self.saveAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "save.png"), self.tr("&Save"), self)
         self.saveAct.setShortcut(self.tr("Ctrl+S"))
-        self.saveAct.setStatusTip(self.tr("Save the current topology"))
-        self.connect(self.saveAct, QtCore.SIGNAL("triggered()"), self.saveTopology)
+        self.saveAct.setStatusTip(self.tr("Save the topology"))
+        self.saveAct.triggered.connect(self.saveTopology)
 
-        self.saveAsAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "save.png"), self.tr("&Save As..."), self)
-        self.saveAsAct.setShortcut(self.tr("Ctrl+Shift+S"))
-        self.saveAsAct.setStatusTip(self.tr("Save the current topology under a given filename"))
-        self.connect(self.saveAsAct, QtCore.SIGNAL("triggered()"), self.saveTopologyAs)
+        self.saveAsAct = QtWidgets.QAction(self.tr("Save &As..."), self)
+        self.saveAsAct.setStatusTip(self.tr("Save the topology under a new name"))
+        self.saveAsAct.triggered.connect(self.saveTopologyAs)
 
-        self.sendFileAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "send.png"), self.tr("&Send File..."), self)
-        self.sendFileAct.setShortcut(self.tr("Ctrl+F"))
-        self.sendFileAct.setStatusTip(self.tr("Choose a file to send to the server"))
-        self.connect(self.sendFileAct, QtCore.SIGNAL("triggered()"), self.sendFile)
-
-        self.exportAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "export.png"), self.tr("&Export..."), self)
-        self.exportAct.setShortcut(self.tr("Ctrl+P"))
-        self.exportAct.setStatusTip(self.tr("Export the current topology as an image"))
-        self.connect(self.exportAct, QtCore.SIGNAL("triggered()"), self.export)
-
-        self.copyAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "copy.png"), self.tr("&Copy"), self)
+        self.copyAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "copy.png"), self.tr("&Copy"), self)
         self.copyAct.setShortcut(self.tr("Ctrl+C"))
-        self.copyAct.setStatusTip(self.tr("Copy the selected text"))
-        self.connect(self.copyAct, QtCore.SIGNAL("triggered()"), self.copy)
+        self.copyAct.setStatusTip(self.tr("Copy the selected items"))
+        self.copyAct.triggered.connect(self.copy)
 
-        self.compileAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "compile.png"), self.tr("&Compile"), self)
-        self.compileAct.setShortcut(self.tr("Ctrl+E"))
-        self.compileAct.setStatusTip(self.tr("Compile the current topology"))
-        self.connect(self.compileAct, QtCore.SIGNAL("triggered()"), self.compile)
+        self.exportAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "export.png"), self.tr("&Export"), self)
+        self.exportAct.setStatusTip(self.tr("Export topology to file"))
+        self.exportAct.triggered.connect(self.export)
 
-        self.runAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "run.png"), self.tr("&Run"), self)
-        self.runAct.setShortcut(self.tr("Ctrl+R"))
-        self.runAct.setStatusTip(self.tr("Run the current topology"))
-        self.connect(self.runAct, QtCore.SIGNAL("triggered()"), self.run)
+        self.closeAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "close.png"), self.tr("&Close"), self)
+        self.closeAct.setShortcut(self.tr("Ctrl+W"))
+        self.closeAct.setStatusTip(self.tr("Close the topology"))
+        self.closeAct.triggered.connect(self.closeTopology)
 
-        self.stopAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "stop.png"), self.tr("&Stop"), self)
-        self.stopAct.setShortcut(self.tr("Ctrl+D"))
-        self.stopAct.setStatusTip(self.tr("Stop the current topology"))
-        self.connect(self.stopAct, QtCore.SIGNAL("triggered()"), self.stop)
-
-        self.startServerAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "startServer.png"), self.tr("&Start Server"), self)
-        self.startServerAct.setShortcut(self.tr("Ctrl+T"))
-        self.startServerAct.setStatusTip(self.tr("Start the server"))
-        self.connect(self.startServerAct, QtCore.SIGNAL("triggered()"), self.startBackend)
-
-        self.optionsAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "options.png"), self.tr("&Options"), self)
-        self.optionsAct.setShortcut(self.tr("F2"))
-        self.optionsAct.setStatusTip(self.tr("Show the options window"))
-        self.connect(self.optionsAct, QtCore.SIGNAL("triggered()"), self.config)
-
-        self.arrangeAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "arrange.png"), self.tr("&Arrange"), self)
-        self.arrangeAct.setShortcut(self.tr("Ctrl+A"))
-        self.arrangeAct.setStatusTip(self.tr("Arranges the current topology"))
-        self.connect(self.arrangeAct, QtCore.SIGNAL("triggered()"), self.arrange)
-
-        self.resetLayoutAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "layout.png"), self.tr("Reset Layout"), self)
-        self.resetLayoutAct.setStatusTip(self.tr("Reset dock windows to the saved layout"))
-        self.connect(self.resetLayoutAct, QtCore.SIGNAL("triggered()"), self.resetLayout)
-
-        self.expandSceneAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "expand.png"), self.tr("Expand Scene"), self)
-        self.expandSceneAct.setStatusTip(self.tr("Expand the scene for more space"))
-        self.connect(self.expandSceneAct, QtCore.SIGNAL("triggered()"), self.expandScene)
-
-        self.quitAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "exit.png"), self.tr("&Quit"), self)
+        self.quitAct = QtWidgets.QAction(self.tr("&Quit"), self)
         self.quitAct.setShortcut(self.tr("Ctrl+Q"))
         self.quitAct.setStatusTip(self.tr("Quit the application"))
-        self.connect(self.quitAct, QtCore.SIGNAL("triggered()"), self.quit)
+        self.quitAct.triggered.connect(self.quit)
 
-        self.newProjectAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "new.png"), self.tr("&New"), self)
+        self.sendFileAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "send.png"), self.tr("&Send File..."), self)
+        self.sendFileAct.setShortcut(self.tr("Ctrl+F"))
+        self.sendFileAct.setStatusTip(self.tr("Choose a file to send to the server"))
+        self.sendFileAct.triggered.connect(self.sendFile)
+
+        self.compileAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "compile.png"), self.tr("&Compile"), self)
+        self.compileAct.setShortcut(self.tr("Ctrl+E"))
+        self.compileAct.setStatusTip(self.tr("Compile the current topology"))
+        self.compileAct.triggered.connect(self.compile)
+
+        self.runAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "run.png"), self.tr("&Run"), self)
+        self.runAct.setShortcut(self.tr("Ctrl+R"))
+        self.runAct.setStatusTip(self.tr("Run the current topology"))
+        self.runAct.triggered.connect(self.run)
+
+        self.stopAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "stop.png"), self.tr("&Stop"), self)
+        self.stopAct.setShortcut(self.tr("Ctrl+D"))
+        self.stopAct.setStatusTip(self.tr("Stop the current topology"))
+        self.stopAct.triggered.connect(self.stop)
+
+        self.startServerAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "startServer.png"), self.tr("&Start Server"), self)
+        self.startServerAct.setShortcut(self.tr("Ctrl+T"))
+        self.startServerAct.setStatusTip(self.tr("Start the server"))
+        self.startServerAct.triggered.connect(self.startBackend)
+
+        self.optionsAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "options.png"), self.tr("&Options"), self)
+        self.optionsAct.setShortcut(self.tr("F2"))
+        self.optionsAct.setStatusTip(self.tr("Show the options window"))
+        self.optionsAct.triggered.connect(self.config)
+
+        self.arrangeAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "arrange.png"), self.tr("&Arrange"), self)
+        self.arrangeAct.setShortcut(self.tr("Ctrl+A"))
+        self.arrangeAct.setStatusTip(self.tr("Arrange the items"))
+        self.arrangeAct.triggered.connect(self.arrange)
+
+        self.resetLayoutAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "layout.png"), self.tr("Reset Layout"), self)
+        self.resetLayoutAct.setStatusTip(self.tr("Reset dock windows to the saved layout"))
+        self.resetLayoutAct.triggered.connect(self.resetLayout)
+
+        self.expandSceneAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "expand.png"), self.tr("Expand Scene"), self)
+        self.expandSceneAct.setStatusTip(self.tr("Expand the scene for more space"))
+        self.expandSceneAct.triggered.connect(self.expandScene)
+
+        self.newProjectAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "new.png"), self.tr("&New"), self)
         self.newProjectAct.setShortcut(self.tr("Ctrl+Shift+N"))
         self.newProjectAct.setStatusTip(self.tr("Create a new project"))
-        self.connect(self.newProjectAct, QtCore.SIGNAL("triggered()"), self.newProject)
+        self.newProjectAct.triggered.connect(self.newProject)
 
-        self.openProjectAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "open.png"), self.tr("&Open"), self)
+        self.openProjectAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "open.png"), self.tr("&Open"), self)
         self.openProjectAct.setShortcut(self.tr("Ctrl+Shift+O"))
         self.openProjectAct.setStatusTip(self.tr("Open an existing project"))
-        self.connect(self.openProjectAct, QtCore.SIGNAL("triggered()"), self.openProject)
+        self.openProjectAct.triggered.connect(self.openProject)
 
-        self.closeProjectAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "close.png"), self.tr("&Close"), self)
+        self.closeProjectAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "close.png"), self.tr("&Close"), self)
         self.closeProjectAct.setShortcut(self.tr("Ctrl+Shift+W"))
         self.closeProjectAct.setStatusTip(self.tr("Close the current project"))
-        self.connect(self.closeProjectAct, QtCore.SIGNAL("triggered()"), self.closeProject)
+        self.closeProjectAct.triggered.connect(self.closeProject)
 
-        self.tutorialAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "tutorial.png"), self.tr("&Tutorial"), self)
-        self.connect(self.tutorialAct, QtCore.SIGNAL("triggered()"), self.startTutorial)
+        self.tutorialAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "tutorial.png"), self.tr("&Tutorial"), self)
+        self.tutorialAct.triggered.connect(self.startTutorial)
 
-        self.faqAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "help.png"), self.tr("&FAQ"), self)
-        self.connect(self.faqAct, QtCore.SIGNAL("triggered()"), self.faq)
+        self.faqAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "help.png"), self.tr("&FAQ"), self)
+        self.faqAct.triggered.connect(self.faq)
 
-        self.aboutAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "giniLogo.png"), self.tr("&About"), self)
+        self.aboutAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "giniLogo.png"), self.tr("&About"), self)
         self.aboutAct.setStatusTip(self.tr("Show the application's About box"))
-        self.connect(self.aboutAct, QtCore.SIGNAL("triggered()"), self.about)
+        self.aboutAct.triggered.connect(self.about)
 
-        self.aboutQtAct = QtGui.QAction(QtGui.QIcon(environ["images"] + "Qt-logo.png"), self.tr("About &Qt"), self)
+        self.aboutQtAct = QtWidgets.QAction(QtGui.QIcon(environ["images"] + "Qt-logo.png"), self.tr("About &Qt"), self)
         self.aboutQtAct.setStatusTip(self.tr("Show the Qt library's About box"))
-        self.connect(self.aboutQtAct, QtCore.SIGNAL("triggered()"),
-                     QtGui.qApp, QtCore.SLOT("aboutQt()"))
+        self.aboutQtAct.triggered.connect(QtWidgets.qApp.aboutQt)
 
     def createMenus(self):
         """
@@ -1101,7 +1115,7 @@ class MainWindow(Systray):
         """
         Customize the popup menu so that it is visible.
         """
-        popupMenu = QtGui.QMainWindow.createPopupMenu(self)
+        popupMenu = QtWidgets.QMainWindow.createPopupMenu(self)
         popupMenu.setPalette(defaultOptions["palette"])
         return popupMenu
 
@@ -1138,7 +1152,7 @@ class MainWindow(Systray):
         """
         Create the progress bar.
         """
-        self.progressBar = QtGui.QProgressBar()
+        self.progressBar = QtWidgets.QProgressBar()
         self.progressBar.setRange(0, 10000)
         self.progressBar.setValue(0)
 
@@ -1214,12 +1228,17 @@ class MainWindow(Systray):
         self.tm.setWindowTitle("Task Manager")
         mainWidgets["tm"] = self.tm
 
-        self.debugWindow = QtGui.QDockWidget(self.tr("Debug Window"))
+        self.debugWindow = QtWidgets.QDockWidget(self.tr("Debug Window"))
         self.debugWindow.setWidget(DebugWindow(self))
 
-        self.docks = {"Components": self.dropbar, "Log": self.log,
-                      "Properties": self.properties, "Interfaces": self.interfaces,
-                      "Routes": self.routes, "Task Manager": self.tm}
+        self.docks = {
+            "Components": self.dropbar,
+            "Log": self.log,
+            "Properties": self.properties,
+            "Interfaces": self.interfaces,
+            "Routes": self.routes,
+            "Task Manager": self.tm
+        }
 
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, self.dropbar)
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.log)
@@ -1238,12 +1257,12 @@ class MainWindow(Systray):
         """
         self.exportWindow = ExportWindow(self)
         self.sendWindow = SendDirectoryWindow(self)
-        self.popup = QtGui.QMessageBox(self)
-        self.popup.setIcon(QtGui.QMessageBox.Warning)
+        self.popup = QtWidgets.QMessageBox(self)
+        self.popup.setIcon(QtWidgets.QMessageBox.Warning)
         self.popup.setWindowIcon(QtGui.QIcon(environ["images"]+"giniLogo.png"))
         mainWidgets["popup"] = self.popup
         # specific dialog for client IP and port input
-        self.inputDialog = QtGui.QInputDialog(self)
+        self.inputDialog = QtWidgets.QInputDialog(self)
         self.inputDialog.setWindowIcon(QtGui.QIcon(environ["images"]+"giniLogo.png"))
         mainWidgets["dialog"] = self.inputDialog
 
@@ -1295,26 +1314,24 @@ class MainWindow(Systray):
             event.ignore()
 
 
-class DebugWindow(QtGui.QWidget):
+class DebugWindow(QtWidgets.QWidget):
     def __init__(self, parent):
         super(DebugWindow, self).__init__()
 
         self.parent = parent
-        self.layout = QtGui.QVBoxLayout()
-        # self.list = QtGui.QListWidget()
-        self.button = QtGui.QPushButton("Execute")
-        self.line_edit = QtGui.QLineEdit()
-        # self.layout.addWidget(self.list)
+        self.layout = QtWidgets.QVBoxLayout()
+        self.button = QtWidgets.QPushButton("Execute")
+        self.line_edit = QtWidgets.QLineEdit()
         self.layout.addWidget(self.line_edit)
         self.layout.addWidget(self.button)
         self.setLayout(self.layout)
 
         self.windows = {}
-        for key, val in mainWidgets.iteritems():
+        for key, val in mainWidgets.items():
             if key != "app" and key != "client" and val is not None:
                 self.windows[key] = val
 
-        self.connect(self.button, QtCore.SIGNAL("clicked()"), self.execute)
+        self.button.clicked.connect(self.execute)
 
     @staticmethod
     def fill(self):
@@ -1330,7 +1347,7 @@ class DebugWindow(QtGui.QWidget):
         if text:
             lines = text.split(";")
             for line in lines:
-                print eval(line)
+                print(eval(line))
 
         if isinstance(canvas, Tutorial):
             canvas.next()

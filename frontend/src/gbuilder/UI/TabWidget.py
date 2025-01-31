@@ -1,9 +1,9 @@
 """The project tab widget to hold the canvas"""
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 
-class TabWidget(QtGui.QTabWidget):
+class TabWidget(QtWidgets.QTabWidget):
     def __init__(self, parent=None):
         """
         Create a project tab widget.
@@ -13,7 +13,7 @@ class TabWidget(QtGui.QTabWidget):
         self.setMinimumSize(400, 300)
         self.timer = QtCore.QTimer()
 
-        self.connect(self.timer, QtCore.SIGNAL("timeout()"), self.resetMinsize)
+        self.timer.timeout.connect(self.resetMinsize)
 
     def resetMinsize(self):
         """
@@ -29,7 +29,7 @@ class TabWidget(QtGui.QTabWidget):
         self.chosenSize = QtCore.QSize(rect.width(), rect.height())
         self.setMinimumSize(self.chosenSize)
         self.timer.start(1000)
-        QtGui.QTabWidget.setGeometry(self, rect)
+        QtWidgets.QTabWidget.setGeometry(self, rect)
 
     def sizeHint(self):
         """
@@ -38,4 +38,4 @@ class TabWidget(QtGui.QTabWidget):
         if self.chosenSize:
             return self.chosenSize
         else:
-            return QtGui.QTabWidget.sizeHint(self)
+            return QtWidgets.QTabWidget.sizeHint(self)

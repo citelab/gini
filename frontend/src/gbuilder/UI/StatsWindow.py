@@ -1,8 +1,8 @@
 """The stats window to display wireless stats"""
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import mainWidgets
-from Dockable import *
+from .Dockable import *
 
 
 class StatsWindow(Dockable):
@@ -13,7 +13,7 @@ class StatsWindow(Dockable):
         super(StatsWindow, self).__init__(name + "stats", parent)
 
         self.name = name
-        self.statsText = QtGui.QTextEdit(self)
+        self.statsText = QtWidgets.QTextEdit(self)
         self.statsText.setReadOnly(True)
         self.setWidget(self.statsText)
 
@@ -21,7 +21,7 @@ class StatsWindow(Dockable):
         self.setFloating(True)
 
         self.timer = QtCore.QTimer()
-        self.connect(self.timer, QtCore.SIGNAL("timeout()"), self.requestStats)
+        self.timer.timeout.connect(self.requestStats)
 
     def requestStats(self):
         """

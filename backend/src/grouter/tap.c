@@ -6,7 +6,10 @@
  */
 
 #include <slack/err.h>
-
+#include <netinet/in.h>
+#include <stdlib.h>
+#include <strings.h>
+#include "verbose.h"
 #include "packetcore.h"
 #include "classifier.h"
 #include "filter.h"
@@ -17,8 +20,6 @@
 #include "ip.h"
 #include "ethernet.h"
 #include "tapio.h"
-#include <netinet/in.h>
-#include <stdlib.h>
 
 
 /*
@@ -44,7 +45,7 @@ void *toTapDev(void *arg)
 	char tmpbuf[MAX_TMPBUF_LEN];
 	int pkt_size;
 
-	verbose(2, "[toTapDev]:: entering the function.. ");
+	verbose(1, "[toTapDev]:: entering the function.. ");
 	// find the outgoing interface and device...
 	if ((iface = findInterface(inpkt->frame.dst_interface)) != NULL)
 	{
@@ -53,7 +54,10 @@ void *toTapDev(void *arg)
 		{
 			apkt = (arp_packet_t *) inpkt->data.data;
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
-			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
+			{
+				uchar tmp[4];
+				COPY_IP(apkt->src_ip_addr, gHtonl(tmp, iface->ip_addr));
+			}
 		}
 		pkt_size = findPacketSize(&(inpkt->data));
 
@@ -63,8 +67,7 @@ void *toTapDev(void *arg)
 	} else
 		error("[toTapDev]:: ERROR!! Could not find outgoing interface ...");
 
-	// this is just a dummy return -- return value not used.
-	return arg;
+	return NULL;                // nothing to return
 }
 
 

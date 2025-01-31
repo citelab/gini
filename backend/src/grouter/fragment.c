@@ -5,7 +5,7 @@
  * DATE:   Revised on July 15, 2005
  */
 
-
+#include "verbose.h"
 #include <math.h>
 #include "message.h"
 #include "grouter.h"
@@ -18,7 +18,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <slack/err.h>
+#ifdef __APPLE__
+#include "slack/err.h"
+#endif
 #include <netinet/in.h>
 
 extern mtu_entry_t MTU_tbl[MAX_MTU];	   

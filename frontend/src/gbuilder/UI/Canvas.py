@@ -1,18 +1,37 @@
 """The canvas to create topologies on"""
 
 from Core.globals import options, mainWidgets
-from Core.Connection import *
-from Core.Item import *
+from Core.Connection import Connection
+from Core.Item import Item
+from Devices.Bridge import Bridge
+from Devices.Firewall import Firewall
+from Devices.Hub import Hub
+from Devices.Router import Router
+from Devices.Subnet import Subnet
+from Devices.Switch import Switch
+from Devices.Mach import Mach
+from Devices.OpenFlowController import OpenFlowController
+from Devices.OpenVirtualSwitch import OpenVirtualSwitch
+from Devices.Cloud import Cloud
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 realMnumber = 3
-deviceTypes = {"Bridge": Bridge, "Firewall": Firewall, "Hub": Hub, "Router": Router,
-               "Subnet": Subnet, "Switch": Switch, "Mach": Mach,
-               "OpenFlowController": OpenFlowController, "OVSwitch": OpenVirtualSwitch,
-               "Cloud": Cloud}
+deviceTypes = {
+    "Bridge": Bridge, 
+    "Firewall": Firewall, 
+    "Hub": Hub, 
+    "Router": Router,
+    "Subnet": Subnet, 
+    "Switch": Switch, 
+    "Mach": Mach,
+    "OpenFlowController": OpenFlowController, 
+    "OVSwitch": OpenVirtualSwitch,
+    "Cloud": Cloud
+}
 
 
-class View(QtGui.QGraphicsView):
+class View(QtWidgets.QGraphicsView):
     def __init__(self, parent=None):
         """
         Create the view component of the canvas.
@@ -26,8 +45,8 @@ class View(QtGui.QGraphicsView):
         self.timerId = 0
 
         self.setRenderHint(QtGui.QPainter.Antialiasing)
-        self.setTransformationAnchor(QtGui.QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QtGui.QGraphicsView.AnchorViewCenter)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
         self.setViewportUpdateMode(self.FullViewportUpdate)
 
         self.setWindowTitle(self.tr("Canvas"))
@@ -72,7 +91,7 @@ class View(QtGui.QGraphicsView):
         if modifiers == QtCore.Qt.ControlModifier:
             self.scaleView(math.pow(2.0, event.delta() / 240.0))
         else:
-            QtGui.QGraphicsView.wheelEvent(self, event)
+            QtWidgets.QGraphicsView.wheelEvent(self, event)
 
     def drawBackground(self, painter, rect):
         """
@@ -147,7 +166,7 @@ class View(QtGui.QGraphicsView):
 
         self.scene()
         self.sourceNode = node
-        self.line = QtGui.QGraphicsLineItem(QtCore.QLineF(node.pos(), node.pos()))
+        self.line = QtWidgets.QGraphicsLineItem(QtCore.QLineF(node.pos(), node.pos()))
         self.scene().addItem(self.line)
 
     def createConnection(self, sourceNode, item):
@@ -163,7 +182,7 @@ class View(QtGui.QGraphicsView):
         Handle mouse movement for connection purposes.
         """
         if self.line is None:
-            QtGui.QGraphicsView.mouseMoveEvent(self, event)
+            QtWidgets.QGraphicsView.mouseMoveEvent(self, event)
             return
         # Draw Connection line and right click drag
         if event.buttons() == QtCore.Qt.RightButton:
@@ -246,7 +265,7 @@ class View(QtGui.QGraphicsView):
 
             self.disconnectNode()
 
-        QtGui.QGraphicsView.mouseReleaseEvent(self, event)
+        QtWidgets.QGraphicsView.mouseReleaseEvent(self, event)
 
 
 class Canvas(View):
@@ -282,19 +301,29 @@ class Canvas(View):
         pass
 
 
-class Scene(QtGui.QGraphicsScene):
-    def __init__(self, parent=None):
+class Scene(QtWidgets.QGraphicsScene):
+    def __init__(self, canvas):
         """
-        Create a scene for the view.
+        Create a scene for the canvas.
         """
-        QtGui.QGraphicsScene.__init__(self, parent)
-        self.target = None
-        self.connect(self, QtCore.SIGNAL("selectionChanged()"), self.select)
+        super(Scene, self).__init__()
+        
+        self.canvas = canvas
+        self.changed = False
+        self.moving = False
+        self.gridOn = False
+        
+        # New-style connection for selectionChanged
+        self.selectionChanged.connect(self.select)
 
         self.timer = QtCore.QTimer()
         self.refreshing = False
         self.paused = False
-        self.connect(self.timer, QtCore.SIGNAL("timeout()"), self.refresh)
+        
+        # Replace old-style connection:
+        # self.connect(self.timer, QtCore.SIGNAL("timeout()"), self.refresh)
+        # With new-style connection:
+        self.timer.timeout.connect(self.refresh)
 
     def getTimer(self):
         """
@@ -344,7 +373,7 @@ class Scene(QtGui.QGraphicsScene):
         """
         Find item by position.
         """
-        item = QtGui.QGraphicsScene.itemAt(self, pos)
+        item = QtWidgets.QGraphicsScene.itemAt(self, pos)
         if isinstance(item, Node) or isinstance(item, Connection):
             self.clearSelection()
             item.setSelected(True)

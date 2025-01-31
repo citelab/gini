@@ -1,20 +1,22 @@
 """A device that can have network interfaces"""
 
-from Device import *
-from Attachable import *
+from Core.Device import Device
+from Core.Attachable import Attachable
 
 
-class Interfaceable(Attachable):
+class Interfaceable(Device, Attachable):
     def __init__(self):
         """
-        Create a device that can have interfaces.
+        Initialize the interfaceable device.
         """
         super(Interfaceable, self).__init__()
+        self.interfaces = []
+        self.con_int = {}
+        self.num_interface = 0
+        self.next_interface_number = 0
 
         self.adjacentRouterList = []
         self.adjacentSubnetList = []
-
-        self.con_int = {} # the connection and interface pair
 
     def generateToolTip(self):
         """
@@ -22,8 +24,8 @@ class Interfaceable(Attachable):
         """
         tooltip = self.getName()
         for interface in self.getInterfaces():
-            tooltip += "\n\nTarget: " + interface[QtCore.QString("target")].getName() + "\n"
-            tooltip += "IP: " + interface[QtCore.QString("ipv4")]
+            tooltip += "\n\nTarget: " + interface["target"].getName() + "\n"
+            tooltip += "IP: " + interface["ipv4"]
         self.setToolTip(tooltip)
 
     def addInterface(self, node):
@@ -31,15 +33,15 @@ class Interfaceable(Attachable):
         Add an interface to the list of interfaces with node as target.
         """
         for interface in self.interfaces:
-            if interface[QtCore.QString("target")] == node:
+            if interface["target"] == node:
                 return
 
         self.interfaces.append(
             {
-                QtCore.QString("target"): node,
-                QtCore.QString("ipv4"): QtCore.QString(""),
-                QtCore.QString("mac"): QtCore.QString(""),
-                QtCore.QString("routing"): []
+                "target": node,
+                "ipv4": "",
+                "mac": "",
+                "routing": []
             }
         )
 
@@ -49,7 +51,7 @@ class Interfaceable(Attachable):
         """
         interface = None
         for interface in self.interfaces:
-            if interface[QtCore.QString("target")] == node:
+            if interface["target"] == node:
                 break
             interface = None
 
@@ -70,11 +72,11 @@ class Interfaceable(Attachable):
             return self.interfaces[0]
         elif subnet:
             for interface in self.interfaces:
-                if interface[QtCore.QString("subnet")] == subnet:
+                if interface["subnet"] == subnet:
                     return interface
         else:
             for interface in self.interfaces:
-                if interface[QtCore.QString("target")] == node:
+                if interface["target"] == node:
                     return interface
             return self.getInterface2(node)
 
@@ -83,7 +85,7 @@ class Interfaceable(Attachable):
         Helper for getInterface() to handle known edge cases
         """
         for interface in self.interfaces:
-            target = interface[QtCore.QString("target")]
+            target = interface["target"]
             if target.device_type in ["Switch", "OVSwitch"] and \
                     target.getTarget(node) == node:
                 return interface
@@ -95,22 +97,22 @@ class Interfaceable(Attachable):
         Return an interface property specified by node or subnet.
         """
         if not node and not subnet:
-            return self.interfaces[index][QtCore.QString(propName)]
+            return self.interfaces[index][propName]
         interface = self.getInterface(node, subnet)
         if interface:
-            return interface[QtCore.QString(propName)]
+            return interface[propName]
 
     def setInterfaceProperty(self, prop, value, node=None, subnet=None, index=0):
         """
         Set an interface property specified by node or subnet.
         """
         if not node and not subnet:
-            self.interfaces[index][QtCore.QString(prop)] = QtCore.QString(value)
+            self.interfaces[index][prop] = str(value)
         else:
             interface = self.getInterface(node, subnet)
             if not interface:
                 return
-            interface[QtCore.QString(prop)] = QtCore.QString(value)
+            interface[prop] = str(value)
 
         if prop == "ipv4":
             self.generateToolTip()
@@ -127,7 +129,7 @@ class Interfaceable(Attachable):
         """
         table = self.getInterfaceProperty("routing", target)
         for entry in table:
-            if entry[QtCore.QString("subnet")] == subnet:
+            if entry["subnet"] == subnet:
                 return entry
 
     def getEntryProperty(self, prop, subnet, target):
@@ -135,23 +137,23 @@ class Interfaceable(Attachable):
         Return a property from the entry specified by subnet and target.
         """
         entry = self.getEntry(subnet, target)
-        return entry[QtCore.QString(prop)]
+        return entry[prop]
 
     def setEntryProperty(self, prop, value, subnet, target):
         """
         Set a property from the entry specified by subnet and target.
         """
         entry = self.getEntry(subnet, target)
-        entry[QtCore.QString(prop)] = value
+        entry[prop] = value
 
     def addEntry(self, mask, gateway, subnet, target):
         """
         Add an entry to the table specified by subnet and target.
         """
         entry = {
-            QtCore.QString("netmask"): mask,
-            QtCore.QString("gw"): gateway,
-            QtCore.QString("subnet"): subnet
+            "netmask": mask,
+            "gw": gateway,
+            "subnet": subnet
         }
         table = self.getTable(target)
         table.append(entry)
@@ -199,7 +201,7 @@ class Interfaceable(Attachable):
         Clear the route table.
         """
         for interface in self.interfaces:
-            interface[QtCore.QString("routing")] = []
+            interface["routing"] = []
 
     def hasSubnet(self, subnet):
         """
@@ -212,7 +214,7 @@ class Interfaceable(Attachable):
 
     def findSwitchInterface(self, interfaces, switch):
         for i in interfaces:
-            if i[QtCore.QString("target")] == switch:
+            if i["target"] == switch:
                 return i
         return None
 
@@ -248,23 +250,23 @@ class Interfaceable(Attachable):
         if not self.hasSubnet(subnet):
             device, interface = self.searchSubnet(subnet)
             if interface:
-                target = interface[QtCore.QString("target")]
+                target = interface["target"]
                 if self.device_type != "Mach" and \
                         device.device_type == "Router" and \
                         target.device_type in ["Switch", "OVSwitch"]:
                     iface = device.getInterface(target)
                     if iface:
-                        gateway = iface[QtCore.QString("ipv4")]
+                        gateway = iface["ipv4"]
                         self.addEntry(
-                            interface[QtCore.QString("mask")],
+                            interface["mask"],
                             gateway,
                             subnet,
                             target
                         )
-                elif interface[QtCore.QString("subnet")] == subnet and \
+                elif interface["subnet"] == subnet and \
                         self.device_type in ["Mach", "Cloud"]:
                     self.addEntry(
-                        interface[QtCore.QString("mask")],
+                        interface["mask"],
                         "",
                         " ",
                         target
@@ -275,10 +277,10 @@ class Interfaceable(Attachable):
                         # gateway = interfaceable.getInterface(target)[QtCore.QString("ipv4")]
                         gateway = target.getGateway()
                     else:
-                        gateway = target.getInterface(self)[QtCore.QString("ipv4")]
+                        gateway = target.getInterface(self)["ipv4"]
 
                     self.addEntry(
-                        interface[QtCore.QString("mask")],
+                        interface["mask"],
                         gateway,
                         subnet,
                         target
@@ -286,10 +288,10 @@ class Interfaceable(Attachable):
         else:
             if self.device_type == "Router":
                 interface = self.getInterface(None, subnet)
-                self.addEntry(interface[QtCore.QString("mask")],
+                self.addEntry(interface["mask"],
                               "0.0.0.0",
                               subnet,
-                              interface[QtCore.QString("target")])
+                              interface["target"])
 
     def toString(self):
         """
@@ -298,14 +300,14 @@ class Interfaceable(Attachable):
         devInfo = Device.toString(self)
         interfaceInfo = ""
         for interface in self.interfaces:
-            interfaceInfo += "\t\tinterface:" + interface[QtCore.QString("target")].getName() + "\n"
-            for prop, value in interface.iteritems():
+            interfaceInfo += "\t\tinterface:" + interface["target"].getName() + "\n"
+            for prop, value in interface.items():
                 if prop == "target":
                     pass
                 elif prop == "routing":
                     for route in value:
-                        interfaceInfo += "\t\t\t\troute:" + route[QtCore.QString("subnet")] + "\n"
-                        for pr, val in route.iteritems():
+                        interfaceInfo += "\t\t\t\troute:" + route["subnet"] + "\n"
+                        for pr, val in route.items():
                             if pr != "subnet":
                                 interfaceInfo += "\t\t\t\t\t" + pr + ":" + val + "\n"
                 else:

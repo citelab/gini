@@ -24,6 +24,8 @@
 #include <math.h>
 #include <stdlib.h>
 #include <arpa/inet.h>
+#include <stdio.h>
+#include <string.h>
 #include "protocols.h"
 #include "packetcore.h"
 #include "message.h"
@@ -33,6 +35,7 @@
 #include "filter.h"
 #include "arp.h"
 #include "ip.h"
+#include "verbose.h"
 
 extern classlist_t *classifier;
 extern filtertab_t *filter;
@@ -57,7 +60,9 @@ pktcorecnamecache_t *createPktCoreCnameCache()
 
 void insertCnameCache(pktcorecnamecache_t *pcache, char *cname)
 {
-	pcache->cname[pcache->numofentries] = strdup(cname);
+	pcache->cname[pcache->numofentries] = malloc(strlen(cname) + 1);
+	if (pcache->cname[pcache->numofentries])
+		strcpy(pcache->cname[pcache->numofentries], cname);
 	pcache->numofentries++;
 }
 
@@ -180,7 +185,7 @@ void printAllQueues(pktcore_t *pcore)
 	keylst = map_keys(pcore->queues);
 	klster = lister_create(keylst);
 
-	while (nxtkey = ((char *)lister_next(klster)))
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		nextq = map_get(pcore->queues, nxtkey);
 		printSimpleQueue(nextq);
@@ -201,7 +206,7 @@ void printQueueStats(pktcore_t *pcore)
 	klster = lister_create(keylst);
 
 	printf("NOT YET IMPLEMENTED \n");
-	while (nxtkey = ((char *)lister_next(klster)))
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		nextq = map_get(pcore->queues, nxtkey);
 		printf("Stats for %s \n", nxtkey);
@@ -222,7 +227,7 @@ void printOneQueue(pktcore_t *pcore, char *qname)
 	keylst = map_keys(pcore->queues);
 	klster = lister_create(keylst);
 
-	while (nxtkey = ((char *)lister_next(klster)))
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		if (!strcmp(qname, nxtkey))
 		{
@@ -245,7 +250,7 @@ void modifyQueueWeight(pktcore_t *pcore, char *qname, double weight)
 	keylst = map_keys(pcore->queues);
 	klster = lister_create(keylst);
 
-	while (nxtkey = ((char *)lister_next(klster)))
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		if (!strcmp(qname, nxtkey))
 		{
@@ -268,7 +273,7 @@ void modifyQueueDiscipline(pktcore_t *pcore, char *qname, char *qdisc)
 	keylst = map_keys(pcore->queues);
 	klster = lister_create(keylst);
 
-	while (nxtkey = ((char *)lister_next(klster)))
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		if (!strcmp(qname, nxtkey))
 		{
@@ -292,7 +297,7 @@ int delPktCoreQueue(pktcore_t *pcore, char *qname)
 	klster = lister_create(keylst);
 	deleted = 0;
 
-	while (nxtkey = ((char *)lister_next(klster)))
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		if (!strcmp(qname, nxtkey))
 		{
@@ -325,26 +330,25 @@ pthread_t PktCoreSchedulerInit(pktcore_t *pcore)
 	if (threadstat != 0)
 	{
 		verbose(1, "[PKTCoreSchedulerInit]:: unable to create thread.. ");
-		return -1;
+		return (pthread_t)NULL;
 	}
 
 	return threadid;
 }
 
 
-int PktCoreWorkerInit(pktcore_t *pcore)
+int PktCoreWorkerInit(pktcore_t *pcore, pthread_t *thread)
 {
-	int threadstat, threadid;
+	pthread_t threadid;
+	int *jstatus;
 
-	threadstat = pthread_create((pthread_t *)&threadid, NULL, (void *)packetProcessor, (void *)pcore);
-
-	if (threadstat != 0)
+	if (pthread_create(&threadid, NULL, (void *)packetProcessor, (void *)pcore) != 0)
 	{
-		verbose(1, "[PKTCoreWorkerInit]:: unable to create thread.. ");
-		return -1;
+		error("[PktCoreWorkerInit]:: Unable to create packet processor thread.. ");
+		return EXIT_FAILURE;
 	}
-
-	return threadid;
+	*thread = threadid;
+	return EXIT_SUCCESS;
 }
 
 
@@ -383,20 +387,18 @@ void *packetProcessor(void *pc)
 	}
 }
 
-int PktCoreOpenflowWorkerInit(pktcore_t *pcore)
+int PktCoreOpenflowWorkerInit(pktcore_t *pcore, pthread_t *thread)
 {
-	int threadstat, threadid;
+	pthread_t threadid;
+	int *jstatus;
 
-	threadstat = pthread_create((pthread_t *)&threadid, NULL,
-	                            (void *)openflowPacketProcessor,
-								(void *)pcore);
-	if (threadstat != 0)
+	if (pthread_create(&threadid, NULL, (void *)openflowPacketProcessor, (void *)pcore) != 0)
 	{
-		verbose(1, "[PktCoreOpenflowWorkerInit]:: unable to create thread.. ");
-		return -1;
+		error("[PktCoreOpenflowWorkerInit]:: Unable to create OpenFlow packet processor thread.. ");
+		return EXIT_FAILURE;
 	}
-
-	return threadid;
+	*thread = threadid;
+	return EXIT_SUCCESS;
 }
 
 void *openflowPacketProcessor(void *pc) {

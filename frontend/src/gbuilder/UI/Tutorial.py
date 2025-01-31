@@ -1,14 +1,15 @@
 """The interactive tutorial for this program"""
 
-from PyQt4 import QtCore, QtGui
-from Canvas import *
-from Node import *
+from PyQt5 import QtCore, QtGui, QtWidgets
+from .Canvas import *
+from .Node import *
 from Core.Interfaceable import Interfaceable
 from Core.globals import mainWidgets
 import math
+from UI.Edge import Edge
 
 
-class Arrow(QtGui.QGraphicsItem):
+class Arrow(QtWidgets.QGraphicsItem):
     def __init__(self, angle):
         """
         Create an indicator arrow for the tutorial.
@@ -62,107 +63,85 @@ class Arrow(QtGui.QGraphicsItem):
         return QtCore.QRectF(rect.left() - rect.width()/2, rect.top() - rect.height()/2, rect.right(), rect.bottom())
 
 
-class TextItem(QtGui.QGraphicsTextItem):
-    def __init__(self, text):
+class TextItem(QtWidgets.QGraphicsTextItem):
+    def __init__(self, text, parent=None):
         """
         Create a fancy text item to display instructions on.
         """
-        super(TextItem, self).__init__(text)
+        super(TextItem, self).__init__(text, parent)
         self.shining = True
         self.offset = -50
-        self.gradientRect = QtCore.QRectF()
-        self.gradientBrush = QtGui.QBrush()
-        self.restartTimer = QtCore.QTimer()
+
+        self.gradientRect = QtCore.QRectF(0, 0, 50, 50)
+        self.gradientBrush = QtGui.QLinearGradient(0, 0, 50, 0)
+        self.gradientBrush.setSpread(QtGui.QGradient.RepeatSpread)
+        self.gradientBrush.setColorAt(0.0, QtGui.QColor(255, 255, 255, 0))
+        self.gradientBrush.setColorAt(0.5, QtGui.QColor(255, 255, 255, 255))
+        self.gradientBrush.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
+
         self.offsetTimer = QtCore.QTimer()
-        self.connect(self.restartTimer, QtCore.SIGNAL("timeout()"), self.restart)
-        self.connect(self.offsetTimer, QtCore.SIGNAL("timeout()"), self.changeOffset)
-        self.restartTimer.start(4000)
+        self.offsetTimer.timeout.connect(self.updateOffset)
         self.offsetTimer.start(40)
+
+        self.setDefaultTextColor(QtGui.QColor(QtCore.Qt.black))
+        self.setFont(QtGui.QFont("Helvetica", 14))
+        
+        # Create a semi-transparent white background
+        background = QtWidgets.QGraphicsRectItem(self.boundingRect(), self)
+        background.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 200)))
+        background.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        background.setZValue(-1)  # Put background behind text
 
     def restart(self):
         """
-        Move the gradient offset back into the initial position.
+        Restart the animation.
         """
-        self.offset = -50
         self.shining = True
+        self.offset = -50
+        self.offsetTimer.start(40)
 
-    def changeOffset(self):
+    def stop(self):
         """
-        Shift the gradient gradually.
+        Stop the animation.
+        """
+        self.shining = False
+        self.offsetTimer.stop()
+
+    def updateOffset(self):
+        """
+        Update the animation offset.
+        """
+        self.offset += 1
+        if self.offset > 0:
+            self.offset = -50
+        self.update()
+
+    def paint(self, painter, option, widget):
+        """
+        Paint the text item with a shining animation.
         """
         if self.shining:
-            adjusted = self.boundingRect().adjusted(-5, -5, 5, 5)
-            left = adjusted.left() + self.offset
-            width = 50
-            if left < -5:
-                left = -5
-            elif left + 50 > adjusted.right():
-                width = adjusted.right() - left
-            self.gradientRect = QtCore.QRectF(left, adjusted.top(), width, adjusted.height())
-
-            rightGradient = 50 + self.offset
-            if rightGradient > adjusted.right() + 50:
-                self.shining = False
-                return
-
-            gradient = QtGui.QLinearGradient(self.offset, 0, rightGradient, 0)
-            self.offset += 8
-
-            gradient.setColorAt(0, QtGui.QColor(160, 160, 160, 128))
-            gradient.setColorAt(0.5, QtGui.QColor(255, 255, 255, 128))
-            gradient.setColorAt(1, QtGui.QColor(160, 160, 160, 128))
-            self.gradientBrush = QtGui.QBrush(gradient)
-            self.update()
-
-    def center(self):
-        """
-        Center the text item.
-        """
-        cpos = QtCore.QPoint(mainWidgets["canvas"].geometry().center().x(), 5)
-        scpos = mainWidgets["canvas"].mapToScene(cpos)
-        tpos = scpos - QtCore.QPointF(self.boundingRect().width() / 2, 0)
-        self.setPos(tpos)
-
-    def paint(self, painter, option, widget=0):
-        """
-        Draw the text item.
-        """
-        self.center()
-        color = QtGui.QColor(128, 128, 128, 128)
-        adjusted = self.boundingRect().adjusted(-5, -5, 5, 5)
-        painter.fillRect(adjusted, color)
-        if self.shining:
+            self.gradientRect.setLeft(self.boundingRect().left() + self.offset)
+            self.gradientRect.setRight(self.boundingRect().left() + self.offset + 50)
+            self.gradientRect.setTop(self.boundingRect().top())
+            self.gradientRect.setBottom(self.boundingRect().bottom())
             painter.fillRect(self.gradientRect, self.gradientBrush)
         painter.fillRect(self.boundingRect(), QtGui.QColor(255, 255, 255, 192))
-        QtGui.QGraphicsTextItem.paint(self, painter, option, widget)
+        QtWidgets.QGraphicsTextItem.paint(self, painter, option, widget)
 
 
 class TutorialEdge(Edge):
-    def __init__(self, startItem, endItem):
+    def __init__(self, source, dest):
         """
-        Create an edge specific to this tutorial.
+        Create an edge for the tutorial.
         """
-        super(TutorialEdge, self).__init__(startItem, endItem)
-        self.setFlag(QtGui.QGraphicsItem.ItemIsSelectable, False)
-        self.p1 = startItem.pos()
-        self.p2 = endItem.pos()
+        super(TutorialEdge, self).__init__(source, dest)
 
-    def getEndpoints(self):
+    def adjust(self):
         """
-        Get the endpoints of this edge.
+        Adjust the edge's path.
         """
-        return self.p1, self.p2
-
-    def paint(self, painter, option, widget=None):
-        """
-        Draw the edge.
-        """
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, options["smoothing"])
-        painter.setPen(QtGui.QPen(QtCore.Qt.gray, 1))
-        painter.drawLine(self.line())
-
-    def contextMenu(self, pos):
-        pass
+        super(TutorialEdge, self).adjust()
 
 
 class TutorialNode(Node):
@@ -248,20 +227,20 @@ class Tutorial(View):
         self.index = -1
 
         scene = Scene(self)
-        scene.setItemIndexMethod(QtGui.QGraphicsScene.NoIndex)
+        scene.setItemIndexMethod(QtWidgets.QGraphicsScene.NoIndex)
         scene.setSceneRect(-175, -160, 350, 320)
         self.setScene(scene)
 
         self.timer = QtCore.QTimer()
 
-        self.connect(scene, QtCore.SIGNAL("selectionChanged()"), self.select)
-        self.connect(mainWidgets["properties"].model, QtCore.SIGNAL("dataChanged(QModelIndex,QModelIndex)"), self.propertiesChanged)
-        self.connect(mainWidgets["interfaces"].rightScroll, QtCore.SIGNAL("clicked()"), self.navigateInterfaces)
-        self.connect(mainWidgets["main"].compileAct, QtCore.SIGNAL("triggered()"), self.compile)
-        self.connect(self.timer, QtCore.SIGNAL("timeout()"), self.timerExpired)
-        self.connect(mainWidgets["main"].startServerAct, QtCore.SIGNAL("triggered()"), self.startServer)
-        self.connect(mainWidgets["main"].runAct, QtCore.SIGNAL("triggered()"), self.run)
-        self.connect(mainWidgets["main"].stopAct, QtCore.SIGNAL("triggered()"), self.stop)
+        scene.selectionChanged.connect(self.select)
+        mainWidgets["properties"].model.dataChanged.connect(self.propertiesChanged)
+        mainWidgets["interfaces"].rightScroll.clicked.connect(self.navigateInterfaces)
+        mainWidgets["main"].compileAct.triggered.connect(self.compile)
+        self.timer.timeout.connect(self.timerExpired)
+        mainWidgets["main"].startServerAct.triggered.connect(self.startServer)
+        mainWidgets["main"].runAct.triggered.connect(self.run)
+        mainWidgets["main"].stopAct.triggered.connect(self.stop)
 
     def addStep(self, message, angle, pos=QtCore.QPoint()):
         """

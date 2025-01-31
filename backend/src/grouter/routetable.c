@@ -4,12 +4,17 @@
  * DATE:   Revised on December 23, 2004
  */
 
+#include <slack/err.h>
+#include "verbose.h"
+#include "message.h"
+#include "grouter.h"
 #include "routetable.h"
+#include "protocols.h"
+#include "ip.h"
 #include "gnet.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <slack/err.h>
 
 
 

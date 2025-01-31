@@ -6,6 +6,10 @@
  */
 
 #include <slack/err.h>
+#include <netinet/in.h>
+#include <stdlib.h>
+#include <strings.h>
+#include "verbose.h"
 
 #include "packetcore.h"
 #include "classifier.h"
@@ -14,13 +18,9 @@
 #include "gnet.h"
 #include "arp.h"
 #include "ip.h"
-#include <netinet/in.h>
-#include <stdlib.h>
-
 
 extern pktcore_t *pcore;
 extern classlist_t *classifier;
-
 
 extern router_config rconfig;
 
@@ -40,7 +40,6 @@ int findPacketSize(pkt_data_t *pkt)
 		return sizeof(pkt_data_t);
 }
 
-
 void *toEthernetDev(void *arg)
 {
 	gpacket_t *inpkt = (gpacket_t *)arg;
@@ -58,7 +57,9 @@ void *toEthernetDev(void *arg)
 		{
 			apkt = (arp_packet_t *) inpkt->data.data;
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
-			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
+			uchar converted_buf[256];
+			memcpy(converted_buf, tmpbuf, sizeof(converted_buf));
+			COPY_IP(apkt->src_ip_addr, gHtonl(converted_buf, iface->ip_addr));
 		}
 		pkt_size = findPacketSize(&(inpkt->data));
 		verbose(2, "[toEthernetDev]:: vpl_sendto called for interface %d..%d bytes written ", iface->interface_id, pkt_size);
@@ -70,7 +71,6 @@ void *toEthernetDev(void *arg)
 	// this is just a dummy return -- return value not used.
 	return arg;
 }
-
 
 /*
  * TODO: Some form of conformance check so that only packets

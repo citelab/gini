@@ -15,6 +15,13 @@
 #include <time.h>
 #include <sys/time.h>
 #include "simplequeue.h"
+#include "verbose.h"
+#include "message.h"
+#include "grouter.h"
+#include <pthread.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 // For unbounded queues, set maxsize to 0.
 // For bounded queues, blockonwrite could be true or false. If true,

@@ -5,7 +5,7 @@ def is_valid_ip(address=None):
     """Check if a string makes up a valid IP address
     """
     try:
-        ipaddress.ip_address(unicode(address))
+        ipaddress.ip_address(str(address))
         return True
     except ValueError:
         return False
@@ -13,7 +13,7 @@ def is_valid_ip(address=None):
 
 def is_valid_network(network=None):
     try:
-        ipaddress.ip_network(unicode(network))
+        ipaddress.ip_network(str(network))
         return True
     except ValueError:
         return False
@@ -23,7 +23,7 @@ def is_valid_flsm(network=None):
     """Check if a network has a valid fixed length subnet mask
     """
     try:
-        network = ipaddress.ip_network(unicode(network))
+        network = ipaddress.ip_network(str(network))
         return network.prefixlen in [8, 16, 24]
     except ValueError:
         return False
@@ -36,7 +36,7 @@ def is_valid_base_network(network=None):
     - Length of the subnet mask cannot be greater than 16
     """
     try:
-        network = ipaddress.ip_network(unicode(network))
+        network = ipaddress.ip_network(str(network))
         return network.prefixlen in [8, 16]
     except ValueError:
         return False

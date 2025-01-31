@@ -1,11 +1,11 @@
 """The log window to display messages"""
 
-from PyQt4 import QtGui
-from Dockable import *
+from PyQt5 import QtWidgets
+from .Dockable import *
 from Core.globals import defaultOptions
 
 
-class TextEdit(QtGui.QTextEdit):
+class TextEdit(QtWidgets.QTextEdit):
     def __init__(self, parent=None):
         """
         Create a custom TextEdit so that the context menu is visible.

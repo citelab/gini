@@ -1,22 +1,18 @@
-"""A device that can be attached to"""
+"""A device that can be attached to a switch"""
 
-from Device import *
+from Core.Device import Device
 from Core.globals import options
 import subprocess
 import os
 import time
 
 
-class Attachable(Device):
+class Attachable:
     def __init__(self):
         """
-        Create a device that can be attached to.
+        Initialize the attachable device.
         """
-        super(Attachable, self).__init__()
-
-        self.menu.addAction("Restart", self.restart)
-        self.menu.addAction("Stop", self.terminate)
-        self.shell = None
+        pass
 
     def attach(self):
         """

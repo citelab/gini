@@ -4,13 +4,13 @@ import sys
 import time
 import os
 import subprocess
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import options, environ, mainWidgets, defaultOptions
-from Properties import *
+from .Properties import *
 from Core.Item import *
 
 
-class DropItem(QtGui.QGraphicsItem):
+class DropItem(QtWidgets.QGraphicsItem):
     def __init__(self, itemType=None):
         """
         Create a draggable item, which can be dropped into the canvas.
@@ -456,7 +456,7 @@ class Node(DropItem, Item):
         """
         graphical = self.getName() + ":(%f,%f)\n" % (self.pos().x(), self.pos().y())
         logical = ""
-        for prop, value in self.properties.iteritems():
+        for prop, value in self.properties.items():
             logical += "\t" + prop + ":" + str(value) + "\n"
 
         return str(graphical + logical)

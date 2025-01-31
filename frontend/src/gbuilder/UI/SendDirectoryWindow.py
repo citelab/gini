@@ -1,10 +1,10 @@
 """The window to specify which directory to send a file to"""
 
-from PyQt4 import QtCore, QtGui
+from PyQt5 import QtCore, QtGui, QtWidgets
 from Core.globals import options, mainWidgets
 
 
-class SendDirectoryWindow(QtGui.QDialog):
+class SendDirectoryWindow(QtWidgets.QDialog):
     def __init__(self, parent=None):
         """
         Create a send directory window to send a file to the server.
@@ -12,18 +12,18 @@ class SendDirectoryWindow(QtGui.QDialog):
         super(SendDirectoryWindow, self).__init__(parent)
 
         self.filename = ""
-        self.radio1 = QtGui.QRadioButton("bin")
-        self.radio2 = QtGui.QRadioButton("tmp")
-        self.radio3 = QtGui.QRadioButton("data")
-        self.filenameLabel = QtGui.QLabel("")
-        self.sendButton = QtGui.QPushButton("Send")
-        self.cancelButton = QtGui.QPushButton("Cancel")
+        self.radio1 = QtWidgets.QRadioButton("bin")
+        self.radio2 = QtWidgets.QRadioButton("tmp")
+        self.radio3 = QtWidgets.QRadioButton("data")
+        self.filenameLabel = QtWidgets.QLabel("")
+        self.sendButton = QtWidgets.QPushButton("Send")
+        self.cancelButton = QtWidgets.QPushButton("Cancel")
         self.choices = [self.radio1, self.radio2, self.radio3]
 
-        buttonLayout = QtGui.QHBoxLayout()
+        buttonLayout = QtWidgets.QHBoxLayout()
         buttonLayout.addWidget(self.sendButton)
 
-        layout = QtGui.QVBoxLayout()
+        layout = QtWidgets.QVBoxLayout()
         layout.addWidget(self.filenameLabel)
         layout.addWidget(self.radio1)
         layout.addWidget(self.radio2)
@@ -35,8 +35,8 @@ class SendDirectoryWindow(QtGui.QDialog):
         self.resize(250, 150)
         self.setWindowTitle("Destination Directory")
 
-        self.connect(self.sendButton, QtCore.SIGNAL("clicked()"), self.send)
-        self.connect(self.cancelButton, QtCore.SIGNAL("clicked()"), self.reject)
+        self.sendButton.clicked.connect(self.send)
+        self.cancelButton.clicked.connect(self.reject)
 
     def setFilename(self, filename):
         """

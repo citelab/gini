@@ -4,11 +4,14 @@
  * DATE:   Revised on December 23, 2004
  */
 
+#include <slack/err.h>
+#include "verbose.h"
+#include "message.h"
+#include "grouter.h"
 #include "mtu.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <slack/err.h>
 
 
 /*-------------------------------------------------------------------------

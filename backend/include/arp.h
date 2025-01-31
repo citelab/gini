@@ -75,15 +75,17 @@ void ARPInitTable();
 void ARPReInitTable();
 
 int ARPFindEntry(uchar *ip_addr, uchar *mac_addr);
-void ARPAddEntry(uchar *ip_addr, uchar *mac_addr);
+void ARPAddEntry(const char *ip_addr, const char *mac_addr);
 void ARPPrintTable(void);
-void ARPDeleteEntry(char *ip_addr);
+void ARPDeleteEntry(const char *ip_addr);
 void ARPSendRequest(gpacket_t *pkt);
 
 // ARP Buffer functions..
 void ARPInitBuffer();
 void ARPAddBuffer(gpacket_t *in_pkt);
 int ARPGetBuffer(gpacket_t **out_pkt, uchar *nexthop);
-void ARPFlushBuffer(char *next_hop, char *mac_addr);
+void ARPFlushBuffer(const char *next_hop, const char *mac_addr);
+
+void ARPInit(void);
 
 #endif

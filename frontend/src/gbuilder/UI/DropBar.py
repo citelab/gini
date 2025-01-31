@@ -1,64 +1,41 @@
 """The drag and drop toolbar"""
 
-from PyQt4 import QtCore, QtGui
-from Node import *
-from Core.globals import options
-from Dockable import *
+from PyQt5 import QtCore, QtGui, QtWidgets
+from .Node import *
+from Core.globals import (
+    options, nodeTypes, commonTypes, unimplementedTypes,
+    hostTypes, netTypes, customTypes
+)
+from .Dockable import *
 
 
-class DropArea(QtGui.QGraphicsView):
-    def __init__(self, itemTypes):
+class DropArea(QtWidgets.QListWidget):
+    def __init__(self, types):
         """
-        Create a page of dropable nodes.
+        Create a drop area for the specified types.
         """
         super(DropArea, self).__init__()
-        self.itemTypes = itemTypes
-        self.yRouterDrop = None
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragOnly)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
 
-        scene = QtGui.QGraphicsScene(self)
-        scene.setItemIndexMethod(QtGui.QGraphicsScene.NoIndex)
-        self.setScene(scene)
-        self.setRenderHint(QtGui.QPainter.Antialiasing)
-        self.setTransformationAnchor(QtGui.QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QtGui.QGraphicsView.AnchorViewCenter)
-        self.setViewportUpdateMode(self.FullViewportUpdate)
+        for t in types:
+            if t not in unimplementedTypes:
+                self.addItem(t)
 
     def refactorLocation(self, location):
         """
-        Resize and reposition nodes based on dock location.
+        Adjust the view based on dock location.
         """
-        scene = self.scene()
-        scene.clear()
-
-        # print location, QtCore.Qt.LeftDockWidgetArea, QtCore.Qt.RightDockWidgetArea
-        # TODO: Fix icon spacing here
-
-        if location == QtCore.Qt.LeftDockWidgetArea \
-                or location == QtCore.Qt.RightDockWidgetArea:
-            last_node = None
-            for i in range(len(self.itemTypes)):
-                node = DropItem(self.itemTypes[i])
-                if last_node:
-                    node.setPos(0, last_node.pos().y() + 75)
-                else:
-                    node.setPos(0, 0)
-                scene.addItem(node)
-                last_node = node
-
-            self.setSceneRect(-35, -35, 75, last_node.pos().y() + 100)
-
+        if location == QtCore.Qt.LeftDockWidgetArea or location == QtCore.Qt.RightDockWidgetArea:
+            self.setViewMode(QtWidgets.QListView.ListMode)
+            self.setFlow(QtWidgets.QListView.TopToBottom)
         else:
-            last_node = None
-            for i in range(len(self.itemTypes)):
-                node = DropItem(self.itemTypes[i])
-                if last_node:
-                    node.setPos(last_node.pos().x() + 75, 0)
-                else:
-                    node.setPos(0, 0)
-                scene.addItem(node)
-                last_node = node
-
-            self.setSceneRect(0, -35, 400, 75)
+            self.setViewMode(QtWidgets.QListView.IconMode)
+            self.setFlow(QtWidgets.QListView.LeftToRight)
+            self.setGridSize(QtCore.QSize(75, 75))
 
 
 class DropBar(Dockable):
@@ -69,22 +46,22 @@ class DropBar(Dockable):
         super(DropBar, self).__init__(title, parent)
         self.parent = parent
 
-        self.toolBox = QtGui.QToolBox()
+        self.toolBox = QtWidgets.QToolBox()
         self.setWidget(self.toolBox)
 
         self.commonDropArea = DropArea(commonTypes)
-        self.hostDropArea = DropArea(hostTypes.keys())
-        self.netDropArea = DropArea(netTypes.keys())
+        self.hostDropArea = DropArea(list(hostTypes.keys()))
+        self.netDropArea = DropArea(list(netTypes.keys()))
+        self.customDropArea = DropArea(list(customTypes.keys()))
 
         self.toolBox.addItem(self.commonDropArea, self.tr("&Common Elements"))
         self.toolBox.addItem(self.hostDropArea, self.tr("&Host Elements"))
         self.toolBox.addItem(self.netDropArea, self.tr("&Net Elements"))
+        self.toolBox.addItem(self.customDropArea, self.tr("&Custom Elements"))
 
-        self.connect(self.toolBox,
-                     QtCore.SIGNAL("currentChanged(int)"),
-                     self.toolChanged)
-
-        self.connect(self, QtCore.SIGNAL("dockLocationChanged(Qt::DockWidgetArea)"), self.locationChanged)
+        # Update signal connections to new style
+        self.toolBox.currentChanged.connect(self.toolChanged)
+        self.dockLocationChanged.connect(self.locationChanged)
 
         self.toolChanged(self.toolBox.currentIndex())
         self.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -101,6 +78,9 @@ class DropBar(Dockable):
         """
         Handle the dock location change.
         """
-        drop_area = self.widget().currentWidget()
-        drop_area.refactorLocation(location)
+        self.location = location
+        for i in range(self.toolBox.count()):
+            drop_area = self.toolBox.widget(i)
+            if drop_area:
+                drop_area.refactorLocation(location)
         Dockable.locationChanged(self, location)

@@ -21,6 +21,10 @@
 #include "classifier.h"
 #include "filter.h"
 #include "ip.h"
+#include "verbose.h"
+#include "message.h"
+#include "grouter.h"
+#include "protocols.h"
 
 
 filtertab_t *createFilter(classlist_t *cl, int state)

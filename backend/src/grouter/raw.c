@@ -8,6 +8,11 @@
  */
 
 #include <slack/err.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <net/if.h>  // For struct ifreq and IFNAMSIZ
 #include "raw.h"
 #include "packetcore.h"
 #include "classifier.h"
@@ -18,29 +23,32 @@
 #include "arp.h"
 #include "ip.h"
 #include "ethernet.h"
-#include "icmp.h"
+#include "verbose.h"
 
 #include <netinet/in.h>
-#include <errno.h>
 #include <netdb.h>
 #include <stdio.h> //For standard things
 #include <stdlib.h>    //malloc
 #include <string.h>    //strlen
-#include <netpacket/packet.h> 
+#ifdef __APPLE__
+#include <net/if_dl.h>
+#include <net/if.h>
+#include <net/ethernet.h>
+#include <net/bpf.h>
+#include <ifaddrs.h>
+#else
+#include <netpacket/packet.h>
+#endif
 #include <netinet/ip_icmp.h>   //Provides declarations for icmp header
 #include <netinet/udp.h>   //Provides declarations for udp header
 #include <netinet/tcp.h>   //Provides declarations for tcp header
 #include <netinet/ip.h>    //Provides declarations for ip header
 #include <netinet/if_ether.h>  //For ETH_P_ALL
 #include <net/ethernet.h>  //For ether_header
-#include <sys/socket.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
-#include <sys/types.h>
 #include <sys/ioctl.h>
-#include <net/if.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 
 extern pktcore_t *pcore;
@@ -49,6 +57,12 @@ extern filtertab_t *filter;
 
 
 extern router_config rconfig;
+
+// Function declarations
+static size_t rawRead(void *arg, void *buf, size_t len);
+static size_t rawWrite(void *arg, void *buf, size_t len);
+static int raw_recvfrom(vpl_data_t *vpl, void *buf, int len);
+static int raw_sendto(vpl_data_t *vpl, void *buf, int len);
 
 void *toRawDev(void *arg)
 {
@@ -88,7 +102,10 @@ void *toRawDev(void *arg)
 			printf("CONNORS DEBUG arp in toRawDev\n");
 			apkt = (arp_packet_t *) inpkt->data.data;
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
-			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
+			{
+				uchar tmp[4];
+				COPY_IP(apkt->src_ip_addr, gHtonl((uchar *)tmp, iface->ip_addr));
+			}
 		}
 		if(inpkt->data.header.prot == htons(ICMP_PROTOCOL)){
 			printf("\nICMP Request over raw\n");
@@ -171,78 +188,147 @@ void* fromRawDev(void *arg)
  * Connect to the raw interface.
  */
 
-vpl_data_t *raw_connect(uchar* mac_addr, char *bridge)
+vpl_data_t *raw_connect(unsigned char* mac_addr, char *bridge)
 {
-    struct sockaddr_ll sll;
-    struct ifreq* ifr;
-    int sock_raw;
-    char interface[32];
-    vpl_data_t *pri;
+    vpl_data_t *pri = (vpl_data_t *)malloc(sizeof(vpl_data_t));
+    int sock;
+
+#ifdef __APPLE__
+    // On macOS, we need to use Berkeley Packet Filter (BPF)
+    char bpf_dev[12];
+    int i;
     
-    verbose(2, "[raw_connect]:: starting connection.. ");
+    // Find an available BPF device
+    for (i = 0; i < 99; i++) {
+        snprintf(bpf_dev, sizeof(bpf_dev), "/dev/bpf%d", i);
+        sock = open(bpf_dev, O_RDWR);
+        if (sock != -1)
+            break;
+    }
     
-    sock_raw = socket( AF_PACKET , SOCK_RAW , htons(ETH_P_ALL)) ;	
-    if (sock_raw == -1) {
-        verbose(2, "[raw_connect]:: Creating raw socket failed, error = %s", strerror(errno));
-        free(ifr);
+    if (sock == -1) {
+        perror("Could not open BPF device");
+        free(pri);
+        return NULL;
+    }
+
+    // Set the interface
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strlcpy(ifr.ifr_name, bridge, IFNAMSIZ);
+
+    // Set up BPF device
+    if (ioctl(sock, BIOCSETIF, &ifr) < 0) {
+        perror("BIOCSETIF");
+        close(sock);
+        free(pri);
+        return NULL;
+    }
+
+    // Get interface flags
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+        perror("SIOCGIFFLAGS");
+        close(sock);
+        free(pri);
+        return NULL;
+    }
+
+    // Set interface in promiscuous mode
+    ifr.ifr_flags |= IFF_PROMISC;
+    if (ioctl(sock, SIOCSIFFLAGS, &ifr) < 0) {
+        perror("SIOCSIFFLAGS");
+        close(sock);
+        free(pri);
+        return NULL;
+    }
+
+    // Get MAC address using getifaddrs
+    struct ifaddrs *ifap, *ifaptr;
+    if (getifaddrs(&ifap) == 0) {
+        for (ifaptr = ifap; ifaptr != NULL; ifaptr = ifaptr->ifa_next) {
+            if (ifaptr->ifa_addr->sa_family == AF_LINK && 
+                strcmp(ifaptr->ifa_name, bridge) == 0) {
+                struct sockaddr_dl *sdl = (struct sockaddr_dl *)ifaptr->ifa_addr;
+                memcpy(mac_addr, LLADDR(sdl), 6);
+                break;
+            }
+        }
+        freeifaddrs(ifap);
+    } else {
+        perror("getifaddrs");
+        close(sock);
+        free(pri);
+        return NULL;
+    }
+
+    // Set immediate mode (don't buffer)
+    int immediate = 1;
+    if (ioctl(sock, BIOCIMMEDIATE, &immediate) < 0) {
+        perror("BIOCIMMEDIATE");
+        close(sock);
+        free(pri);
+        return NULL;
+    }
+#else
+    // Linux raw socket creation
+    sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (sock < 0) {
+        perror("socket");
+        free(pri);
+        return NULL;
+    }
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, bridge, IFNAMSIZ);
+    if (ioctl(sock, SIOCGIFINDEX, &ifr) < 0) {
+        perror("SIOCGIFINDEX");
+        close(sock);
+        free(pri);
         return NULL;
     }
     
-    //interface[0] = 't';
-    //sprintf(&interface[1], "%d", rconfig.top_num); 
-    //Above is from Ahmeds implementation
-    //For the cloud we want to use the eth0
-    //interface on the amazon machine for the raw socket
-    strcpy(interface, bridge);
-    verbose(1, "[raw_connect]:: Binding to interface %s strlen = %d", interface, strlen(interface));
-    ifr = calloc(1, sizeof(struct ifreq));
-    strcpy((char*)ifr->ifr_name, interface);
-            
-    if((ioctl(sock_raw, SIOCGIFINDEX, ifr)) == -1)
-    {
-    	verbose(2, "[raw_connect]:: Unable to find interface index, error = %s", strerror(errno));
-        free(ifr);
-    	return NULL;
-    }
-    
-    bzero(&sll, sizeof(sll));
-    sll.sll_family = AF_PACKET;
-    sll.sll_ifindex = ifr->ifr_ifindex;
-    sll.sll_protocol = htons(ETH_P_ALL);
-    
-    verbose(2, "[raw_connect]:: ifr_index = %d", ifr->ifr_ifindex);
-    if((bind(sock_raw, (struct sockaddr*) &sll, sizeof(sll))) == -1)
-    {
-        verbose(2, "[raw_connect]:: Binding raw Socket Failed, error = %s", strerror(errno));
-        free(ifr);
-        return NULL;
-    }
-    
-    if((ioctl(sock_raw, SIOCGIFHWADDR, ifr)) == -1)
-    {
-    	verbose(2, "[raw_connect]:: Unable to find interface mac address, error = %s", strerror(errno));	
-        free(ifr);
-    	return NULL;
-    }
-    COPY_MAC(mac_addr, ifr->ifr_hwaddr.sa_data);
-    
-    pri = (vpl_data_t *)malloc(sizeof(vpl_data_t));
-    bzero(pri, sizeof(sizeof(vpl_data_t))); 
-    
-    // initialize the vpl_data structure.. much of it is unused here.
-    // we are reusing vpl_data_t to minimize the changes for other code.
+    // Copy MAC address
+    memcpy(mac_addr, ifr.ifr_hwaddr.sa_data, 6);
+#endif
+
     pri->sock_type = "raw";
-    pri->ctl_sock = NULL;
-    pri->ctl_addr = NULL;
-    pri->data_addr = NULL;
-    pri->control = -1;
-    pri->data = sock_raw;
-    pri->local_addr = (void*)ifr;
+    pri->data = sock;
+    pri->read = rawRead;
+    pri->write = rawWrite;
 
     return pri;
 }
 
+size_t rawRead(void *arg, void *buf, size_t len)
+{
+    int sock = *((int *)arg);
+#ifdef __APPLE__
+    // For BPF, we need to handle the BPF header
+    struct bpf_hdr *bh;
+    char *pbuf = buf;
+    ssize_t n = read(sock, pbuf, len);
+    if (n <= 0)
+        return n;
+    
+    bh = (struct bpf_hdr *)pbuf;
+    memmove(buf, pbuf + bh->bh_hdrlen, bh->bh_caplen);
+    return bh->bh_caplen;
+#else
+    return read(sock, buf, len);
+#endif
+}
 
+size_t rawWrite(void *arg, void *buf, size_t len)
+{
+    int sock = *((int *)arg);
+#ifdef __APPLE__
+    // BPF write is straightforward
+    return write(sock, buf, len);
+#else
+    return write(sock, buf, len);
+#endif
+}
 
 /*
  * Receive a packet from the vpl. You can use this with a "select"
@@ -252,12 +338,13 @@ vpl_data_t *raw_connect(uchar* mac_addr, char *bridge)
  */
 int raw_recvfrom(vpl_data_t *vpl, void *buf, int len)
 {
-    int n, rcv_addr_len;
+    int n;
     struct sockaddr rcvaddr;
     char tmpbuf[100];
+    socklen_t rcv_addr_len;
     
     rcv_addr_len = sizeof(rcvaddr);
-    n=recvfrom(vpl->data, buf, len, 0, &rcvaddr, &rcv_addr_len);
+    n = recvfrom(vpl->data, buf, len, 0, &rcvaddr, &rcv_addr_len);
     if (n == -1) 
     {
         verbose(2, "[raw_recvfrom]:: unable to receive packet, error = %s", strerror(errno));		

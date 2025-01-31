@@ -1,6 +1,6 @@
 from Core.Attachable import *
-from .Switch import Switch
-from PyQt4.QtCore import QPoint
+from Devices.Switch import Switch
+from PyQt5.QtCore import QPoint
 
 
 class OpenVirtualSwitch(Switch, Attachable):

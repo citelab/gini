@@ -7,6 +7,10 @@
 #include "packetcore.h"
 #include "message.h"
 #include "grouter.h"
+#include "verbose.h"
+#include "simplequeue.h"
+#include "qdisc.h"
+#include "wfq.h"
 
 // WCWeightedFairScheduler: is one part of the W+FQ scheduler.
 // It picks the appropriate job from the system of queues.

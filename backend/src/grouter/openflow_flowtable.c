@@ -1,31 +1,32 @@
 /**
  * openflow_flowtable.c - OpenFlow flowtable
  */
-
-#include "openflow_flowtable.h"
+#include <slack/std.h>
+#include <slack/err.h>
 
 #include <inttypes.h>
 #include <string.h>
 #include <time.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 
-#include <slack/std.h>
-#include <slack/err.h>
+#include "openflow_flowtable.h"
+#include "openflow_ctrl_iface.h"
+#include "openflow_pkt_proc.h"
+#include "message.h"
+#include "protocols.h"
+#include "ip.h"
+#include "ethernet.h"
 
 #include "arp.h"
 #include "gnet.h"
 #include "grouter.h"
-#include "message.h"
 #include "icmp.h"
-#include "ip.h"
-#include "openflow.h"
 #include "openflow_config.h"
-#include "openflow_ctrl_iface.h"
-#include "openflow_pkt_proc.h"
-#include "protocols.h"
 #include "simplequeue.h"
 #include "tcp.h"
 #include "udp.h"
+#include "byteorder.h"
 
 // OpenFlow flowtable
 static openflow_flowtable_type *flowtable;
@@ -75,7 +76,7 @@ static void openflow_flowtable_set_defaults(void)
 
 	flow_mod->command = OFPFC_ADD;
 	flow_mod->match.wildcards = htonl(OFPFW_ALL);
-	flow_mod->priority = htonl(1);
+	flow_mod->priority = htons(1);  // Changed from htonl to htons since priority is uint16_t
 
 	flow_mod->actions[0].type = htons(OFPAT_OUTPUT);
 	flow_mod->actions[0].len = htons(sizeof(ofp_action_output));
@@ -2125,7 +2126,7 @@ static void openflow_flowtable_print_entry_no_lock(uint32_t index)
 		printf("Match:\n");
 		openflow_flowtable_print_match(&entry.match);
 
-		printf("Cookie: %" PRIu64 "\n", ntohll(entry.cookie));
+		printf("Cookie: %" PRIu64 "\n", (uint64_t)ntohll(entry.cookie));
 
 		char last_matched_str[100];
 		struct tm *last_matched = localtime(&entry.last_matched);
@@ -2235,10 +2236,9 @@ void openflow_flowtable_print_entry_stat(uint32_t index)
 		        ntohs(entry->stats.idle_timeout));
 		printf("Last modified timeout (seconds): %" PRIu16 "\n",
 		        ntohs(entry->stats.hard_timeout));
-		printf("Cookie: %" PRIu64 "\n", ntohll(entry->stats.cookie));
-		printf("Packet count: %" PRIu64 "\n",
-		        ntohll(entry->stats.packet_count));
-		printf("Byte count: %" PRIu64 "\n", ntohll(entry->stats.byte_count));
+		printf("Cookie: %" PRIu64 "\n", (uint64_t)ntohll(entry->stats.cookie));
+		printf("Packet count: %" PRIu64 "\n", (uint64_t)ntohll(entry->stats.packet_count));
+		printf("Byte count: %" PRIu64 "\n", (uint64_t)ntohll(entry->stats.byte_count));
 	}
 	else
 	{
@@ -2328,9 +2328,9 @@ void openflow_flowtable_print_table_stats()
 	printf("Number of active entries: %" PRIu32 "\n",
 	        ntohl(flowtable->stats.active_count));
 	printf("Number of packets looked up in tables: %" PRIu64 "\n",
-	        ntohll(flowtable->stats.lookup_count));
+	        (uint64_t)ntohll(flowtable->stats.lookup_count));
 	printf("Number of packets that hit table: %" PRIu64 "\n",
-	        ntohll(flowtable->stats.matched_count));
+	        (uint64_t)ntohll(flowtable->stats.matched_count));
 
 	pthread_mutex_unlock(&flowtable_mutex);
 }
@@ -2390,12 +2390,17 @@ static void openflow_flowtable_timeout()
 /**
  * Initializes the OpenFlow flowtable timeout thread.
  */
-pthread_t openflow_flowtable_timeout_init()
+int openflow_flowtable_timeout_init(pthread_t *thread)
 {
-	int32_t threadstat;
-	pthread_t threadid;
+    pthread_t threadid;
+    int *jstatus;
 
-	threadstat = pthread_create((pthread_t *) &threadid, NULL,
-	        (void *) openflow_flowtable_timeout, NULL);
-	return threadid;
+    if (pthread_create(&threadid, NULL, (void *)openflow_flowtable_timeout, NULL) != 0)
+    {
+        error("[openflow_flowtable_timeout_init]:: Unable to create timeout thread..");
+        return EXIT_FAILURE;
+    }
+
+    *thread = threadid;
+    return EXIT_SUCCESS;
 }

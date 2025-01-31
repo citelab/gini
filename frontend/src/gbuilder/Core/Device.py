@@ -1,15 +1,13 @@
-"""The logical object of a node"""
+"""The logical object of a node or edge within a topology"""
 
-from UI.Node import *
+from PyQt5 import QtCore
 
-
-class Device(Node):
+class Device:
     def __init__(self):
         """
-        Create a logical side to the node.
+        Initialize the device.
         """
-        super(Device, self).__init__()
-        self.connection = []
+        self.properties = {}
 
     def __str__(self):
         return self.getName()
