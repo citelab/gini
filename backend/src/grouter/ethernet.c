@@ -6,6 +6,7 @@
  */
 
 #include <slack/err.h>
+#include "sdn.h"        /* Z1: OpenFlow as ingress mode (seam) */
 
 #include "packetcore.h"
 #include "classifier.h"
@@ -101,7 +102,7 @@ void* fromEthernetDev(void *arg)
 		// check whether the incoming packet is a layer 2 broadcast or
 		// meant for this node... otherwise should be thrown..
 		// TODO: fix for promiscuous mode packet snooping.
-		if (!rconfig.openflow &&
+		if (!(sdn_mode() == SDN_MODE_OPENFLOW) &&
 			(COMPARE_MAC(in_pkt->data.header.dst, iface->mac_addr) != 0) &&
 			(COMPARE_MAC(in_pkt->data.header.dst, bcast_mac) != 0))
 		{
@@ -116,6 +117,6 @@ void* fromEthernetDev(void *arg)
 		COPY_IP(in_pkt->frame.src_ip_addr, iface->ip_addr);
 
 		verbose(2, "[fromEthernetDev]:: Packet is sent for enqueuing..");
-		enqueuePacket(pcore, in_pkt, sizeof(gpacket_t), rconfig.openflow);
+		enqueuePacket(pcore, in_pkt, sizeof(gpacket_t), (sdn_mode() == SDN_MODE_OPENFLOW));
 	}
 }

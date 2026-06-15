@@ -44,6 +44,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 #include "gnet.h"
 #include "grouter.h"
@@ -1417,20 +1419,71 @@ static void openflow_ctrl_iface(void *port)
 		exit(1);
 	}
 
-	verbose(2, "[openflow_ctrl_iface]:: Sleeping for 30 seconds to allow"
-			" controller to be configured before connecting.");
-	sleep(30);
+	// Where is the controller? Historically hardwired to 127.0.0.1 (POX ran in the
+	// same namespace). For containerized SDN the POX controller runs in its own
+	// container, so read GINI_OF_CONTROLLER ("host" or "host:port"); the host may be
+	// a Docker service name, hence DNS resolution below. Defaults preserve the old
+	// localhost behaviour. GINI_OF_CONNECT_DELAY overrides the pre-connect wait.
+	const char *ctrl_env = getenv("GINI_OF_CONTROLLER");
+	if (ctrl_env == NULL || ctrl_env[0] == '\0')
+	{
+		ctrl_env = "127.0.0.1";
+	}
+	char ctrl_host[256];
+	strncpy(ctrl_host, ctrl_env, sizeof(ctrl_host) - 1);
+	ctrl_host[sizeof(ctrl_host) - 1] = '\0';
+	int32_t ctrl_port = *port_num;
+	char *colon = strrchr(ctrl_host, ':');
+	if (colon != NULL)
+	{
+		*colon = '\0';
+		int32_t parsed = atoi(colon + 1);
+		if (parsed > 0 && parsed < 65536)
+		{
+			ctrl_port = parsed;
+		}
+	}
+
+	int32_t conn_delay = 30;
+	const char *delay_env = getenv("GINI_OF_CONNECT_DELAY");
+	if (delay_env != NULL && delay_env[0] != '\0')
+	{
+		int32_t v = atoi(delay_env);
+		if (v >= 0)
+		{
+			conn_delay = v;
+		}
+	}
+	verbose(2, "[openflow_ctrl_iface]:: Sleeping for %" PRId32 " seconds to allow"
+			" controller %s:%" PRId32 " to be configured before connecting.",
+			conn_delay, ctrl_host, ctrl_port);
+	sleep(conn_delay);
 
 	openflow_config_init_phy_ports();
 
 	while (1)
 	{
-		verbose(2, "[openflow_ctrl_iface]:: Connecting to controller.");
+		verbose(2, "[openflow_ctrl_iface]:: Connecting to controller %s:%"
+				PRId32 ".", ctrl_host, ctrl_port);
 
 		struct sockaddr_in ofc_sock_addr;
+		memset(&ofc_sock_addr, 0, sizeof(ofc_sock_addr));
 		ofc_sock_addr.sin_family = AF_INET;
-		ofc_sock_addr.sin_port = htons(*port_num);
-		inet_aton("127.0.0.1", &ofc_sock_addr.sin_addr);
+		ofc_sock_addr.sin_port = htons(ctrl_port);
+		if (inet_aton(ctrl_host, &ofc_sock_addr.sin_addr) == 0)
+		{
+			// not a dotted-quad: resolve as a hostname (e.g. a Docker service name)
+			struct hostent *he = gethostbyname(ctrl_host);
+			if (he == NULL || he->h_addr_list[0] == NULL)
+			{
+				verbose(2, "[openflow_ctrl_iface]:: Cannot resolve controller"
+						" host %s. Retrying...", ctrl_host);
+				sleep(1);
+				continue;
+			}
+			memcpy(&ofc_sock_addr.sin_addr, he->h_addr_list[0],
+			        sizeof(struct in_addr));
+		}
 
 		pthread_mutex_lock(&ofc_socket_mutex);
 		ofc_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1439,8 +1492,17 @@ static void openflow_ctrl_iface(void *port)
 		if (status != 0)
 		{
 			verbose(2, "[openflow_ctrl_iface]:: Failed to connect to"
-					" controller socket. Retrying...");
+					" controller %s:%" PRId32 ". Retrying...", ctrl_host, ctrl_port);
+			// MUST close the fd before retrying — otherwise each spin leaks a
+			// socket and we quickly exhaust the fd table, after which socket()
+			// returns -1 and we can NEVER connect (even once the controller is up).
+			if (ofc_socket_fd >= 0)
+			{
+				close(ofc_socket_fd);
+			}
+			ofc_socket_fd = -1;
 			pthread_mutex_unlock(&ofc_socket_mutex);
+			sleep(1);          // back off so we patiently wait for the controller
 			continue;
 		}
 		pthread_mutex_unlock(&ofc_socket_mutex);

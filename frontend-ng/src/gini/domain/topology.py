@@ -1,0 +1,157 @@
+"""In-memory topology model (pure Python, no Qt).
+
+This is the single source of truth for what's on the canvas. The UI renders it,
+the compiler/persistence layers read it, and the AI agent layer mutates it.
+"""
+from __future__ import annotations
+
+import itertools
+from dataclasses import dataclass, field, asdict
+
+from . import devices
+from .devices import DeviceType
+
+
+@dataclass
+class DeviceInstance:
+    id: str
+    type_key: str
+    name: str
+    x: float = 0.0
+    y: float = 0.0
+    parent_id: str | None = None
+    properties: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def type(self) -> DeviceType:
+        return devices.get(self.type_key)
+
+
+@dataclass
+class Link:
+    id: str
+    source_id: str
+    target_id: str
+    label: str = ""
+
+
+class Topology:
+    """A graph of device instances and the links between them."""
+
+    def __init__(self, name: str = "untitled") -> None:
+        self.name = name
+        self.devices: dict[str, DeviceInstance] = {}
+        self.links: dict[str, Link] = {}
+        self._ids = itertools.count(1)
+        self._name_counters: dict[str, int] = {}
+
+    # -- creation ----------------------------------------------------------- #
+    def _new_id(self, prefix: str) -> str:
+        return f"{prefix}{next(self._ids)}"
+
+    def _auto_name(self, dt: DeviceType) -> str:
+        # Short prefix from the label, e.g. Router -> R1, Switch -> S1, VPC -> VPC1
+        base = "".join(ch for ch in dt.label if ch.isupper()) or dt.label[:2].upper()
+        n = self._name_counters.get(base, 0) + 1
+        self._name_counters[base] = n
+        return f"{base}{n}"
+
+    def add_device(
+        self,
+        type_key: str,
+        name: str | None = None,
+        x: float = 0.0,
+        y: float = 0.0,
+        parent_id: str | None = None,
+        properties: dict[str, str] | None = None,
+    ) -> DeviceInstance:
+        dt = devices.get(type_key)
+        name = name or self._auto_name(dt)
+        props = dict(dt.default_properties)
+        if properties:
+            props.update(properties)
+        props["Name"] = name
+        inst = DeviceInstance(
+            id=self._new_id(dt.key + "-"),
+            type_key=type_key,
+            name=name,
+            x=x,
+            y=y,
+            parent_id=parent_id,
+            properties=props,
+        )
+        self.devices[inst.id] = inst
+        return inst
+
+    def add_link(self, source_id: str, target_id: str, label: str = "") -> Link:
+        if source_id not in self.devices or target_id not in self.devices:
+            raise KeyError("link endpoints must be existing devices")
+        link = Link(self._new_id("link-"), source_id, target_id, label)
+        self.links[link.id] = link
+        return link
+
+    # -- mutation ----------------------------------------------------------- #
+    def remove_device(self, device_id: str) -> None:
+        self.devices.pop(device_id, None)
+        for lid in [l.id for l in self.links.values()
+                    if l.source_id == device_id or l.target_id == device_id]:
+            self.links.pop(lid, None)
+
+    def rename(self, device_id: str, name: str) -> None:
+        d = self.devices[device_id]
+        d.name = name
+        d.properties["Name"] = name
+
+    # -- queries ------------------------------------------------------------ #
+    def find_by_name(self, name: str) -> DeviceInstance | None:
+        for d in self.devices.values():
+            if d.name == name:
+                return d
+        return None
+
+    def neighbors(self, device_id: str) -> list[DeviceInstance]:
+        out = []
+        for l in self.links.values():
+            if l.source_id == device_id:
+                out.append(self.devices[l.target_id])
+            elif l.target_id == device_id:
+                out.append(self.devices[l.source_id])
+        return out
+
+    def degree(self, device_id: str) -> int:
+        return sum(1 for l in self.links.values()
+                   if device_id in (l.source_id, l.target_id))
+
+    def counts_by_category(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for d in self.devices.values():
+            cat = d.type.category.value
+            out[cat] = out.get(cat, 0) + 1
+        return out
+
+    # -- serialization (used by persistence + agent layer) ------------------ #
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "devices": [asdict(d) for d in self.devices.values()],
+            "links": [asdict(l) for l in self.links.values()],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Topology":
+        t = cls(data.get("name", "untitled"))
+        max_n = 0
+        for d in data.get("devices", []):
+            inst = DeviceInstance(**d)
+            t.devices[inst.id] = inst
+            for token in inst.id.replace("-", " ").split():
+                if token.isdigit():
+                    max_n = max(max_n, int(token))
+        for l in data.get("links", []):
+            link = Link(**l)
+            t.links[link.id] = link
+        t._ids = itertools.count(max_n + 1)
+        return t
+
+    def __repr__(self) -> str:
+        return f"<Topology {self.name!r}: {len(self.devices)} devices, {len(self.links)} links>"

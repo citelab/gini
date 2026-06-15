@@ -8,6 +8,9 @@
 #include "message.h"
 #include "grouter.h"
 #include "routetable.h"
+#include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
+#include "host_stack.h" /* Z1: sealed, optional lwIP host stack */
+#include "gr_pipeline.h" /* Z2: inline module-graph runner */
 #include "mtu.h"
 #include "protocols.h"
 #include "ip.h"
@@ -139,9 +142,21 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 		return EXIT_FAILURE;
 
 
+	// Z2: run the inline module pipeline (ACL / NAT / QoS / Lua / native — the Router
+	// Lab "drops") after parse, before route lookup. Empty pipeline -> CONTINUE ->
+	// base forwarding unchanged. (Legacy / NORMAL path; OpenFlow mode is the ingress
+	// front door per sdn.h.)
+	{
+		gr_verdict_t _gv = gr_pipeline_run(gr_default_pipeline(), in_pkt);
+		if (_gv.action == GR_DROP)
+			return EXIT_FAILURE;
+		if (_gv.action != GR_CONTINUE)
+			return EXIT_SUCCESS;   /* a module took ownership of the packet */
+	}
+
 	// find the route... if it does not exist, should we send a
 	// ICMP network/host unreachable message -- CHECK??
-	if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst),
+	if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst),
 			   in_pkt->frame.nxth_ip_addr,
 			   &(in_pkt->frame.dst_interface)) == EXIT_FAILURE)
 		return EXIT_FAILURE;
@@ -317,55 +332,17 @@ int IPProcessMyPacket(gpacket_t *in_pkt)
 		  return EXIT_SUCCESS;
         }
 
-		// Is packet UDP/TCP
-		// May be we can deal with other connectionless protocols as well.
-		if (ip_pkt->ip_prot == UDP_PROTOCOL){
-			UDPProcess(in_pkt);
-		  return EXIT_SUCCESS;
-        }
-		if (ip_pkt->ip_prot == TCP_PROTOCOL){
-			TCPProcess(in_pkt);
-		  return EXIT_SUCCESS;
-        }
+		// UDP/TCP addressed to the router -> the (optional) host stack (lwIP),
+		// sealed behind host_stack_input(). Pure forwarder: -DGR_NO_HOST_STACK.
+		if (host_stack_input(in_pkt))
+			return EXIT_SUCCESS;
 
 	}
 	return EXIT_FAILURE;
 }
 
 
-/*
- * this function implements UDP processing with LWIP's UDP library
- */
-int UDPProcess(gpacket_t *in_pkt)
-{
-	verbose(2, "[UDPProcess]:: packet received for processing...");
-
-    struct pbuf *p = malloc(sizeof(struct pbuf)); // can also be done with pbuf_alloc()
-    p->payload = in_pkt->data.data;
-    p->len = ((ip_packet_t *)(in_pkt->data.data))->ip_hdr_len * 4 + UDP_HLEN;
-    p->tot_len = p->len;
-    p->type = PBUF_REF;
-
-    udp_input(p, in_pkt, route_tbl[in_pkt->frame.src_interface].netmask,route_tbl[in_pkt->frame.src_interface].network);
-	return EXIT_SUCCESS;
-}
-
-/*
- * this function implements TCP processing with LWIP's UDP library
- */
-int TCPProcess(gpacket_t *in_pkt)
-{
-	verbose(2, "[TCPProcess]:: packet received for processing...");
-
-    struct pbuf *p = malloc(sizeof(struct pbuf)); // can also be done with pbuf_alloc()
-    p->payload = in_pkt->data.data;
-    p->len = ntohs(((ip_packet_t *)(in_pkt->data.data))->ip_pkt_len);
-    p->tot_len = p->len;
-    p->type = PBUF_REF;
-
-    tcp_input(p, in_pkt);
-	return EXIT_SUCCESS;
-}
+/* UDPProcess/TCPProcess moved to host_stack.c (Z1: lwIP sealed + optional via -DGR_NO_HOST_STACK) */
 
 
 /*
@@ -396,7 +373,7 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 
 		// find the nexthop and interface and fill them in the "meta" frame
 		// NOTE: the packet itself is not modified by this lookup!
-		if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst),
+		if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst),
 				   pkt->frame.nxth_ip_addr, &(pkt->frame.dst_interface)) == EXIT_FAILURE)
 				   return EXIT_FAILURE;
 
@@ -417,7 +394,7 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 		verbose(2, "[IPOutgoingPacket]:: lookup next hop ");
 		// find the nexthop and interface and fill them in the "meta" frame
 		// NOTE: the packet itself is not modified by this lookup!
-		if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst), pkt->frame.nxth_ip_addr, &(pkt->frame.dst_interface)) == EXIT_FAILURE) {
+		if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst), pkt->frame.nxth_ip_addr, &(pkt->frame.dst_interface)) == EXIT_FAILURE) {
             return EXIT_FAILURE;
         }
 

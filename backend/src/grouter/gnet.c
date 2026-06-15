@@ -481,11 +481,12 @@ interface_t *GNETMakeTapInterface(char *device, uchar *mac_addr, uchar *nw_addr)
  * RETURNS: a pointer to the interface on success and NULL on failure
  */
 interface_t *GNETMakeTunInterface(char *device, uchar *mac_addr, uchar *nw_addr,
-                                  uchar* dst_ip, short int dst_port)
+                                  uchar* dst_ip, short int dst_port, int src_port)
 {
     vpl_data_t *vcon;
     interface_t *iface;
     int iface_id;
+    int local_port, peer_port;
     char tmpbuf[MAX_TMPBUF_LEN];
 
     verbose(2, "[GNETMakeTunInterface]:: making Interface for [%s] with MAC %s and IP %s",
@@ -505,7 +506,23 @@ interface_t *GNETMakeTunInterface(char *device, uchar *mac_addr, uchar *nw_addr,
 
     verbose(2, "[GNETMakeTunInterface]:: trying to connect to %s..", device);
 
-    vcon = tun_connect((short int)(BASEPORTNUM+iface_id+gAtoi(rconfig.router_name)*100), NULL, (short int)(BASEPORTNUM+dst_port+gAtoi(rconfig.router_name)*100), dst_ip);
+    if (src_port >= 0)
+    {
+        // literal-port mode (portable fabric): -srcport/-dstport are real UDP
+        // ports, so the fabric's shuttle (which uses literal ports) interoperates.
+        local_port = src_port;
+        peer_port  = dst_port;
+    }
+    else
+    {
+        // legacy UML-switch convention: ports are derived from BASEPORTNUM, the
+        // interface id, and the router name parsed as an integer (× 100).
+        local_port = (short int)(BASEPORTNUM + iface_id + gAtoi(rconfig.router_name) * 100);
+        peer_port  = (short int)(BASEPORTNUM + dst_port + gAtoi(rconfig.router_name) * 100);
+    }
+    verbose(2, "[GNETMakeTunInterface]:: tun %s bind :%d -> peer %s:%d",
+            device, local_port, IP2Dot(tmpbuf, dst_ip), peer_port);
+    vcon = tun_connect(local_port, NULL, peer_port, dst_ip);
 
     if(vcon == NULL)
     {

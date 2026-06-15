@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include "protocols.h"
 #include "arp.h"
+#include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
 #include "gnet.h"
 #include "moduledefs.h"
 #include "grouter.h"
@@ -82,7 +83,7 @@ int ARPResolve(gpacket_t *in_pkt)
 
   in_pkt->data.header.prot = htons(IP_PROTOCOL);
   // lookup the ARP table for the MAC for next hop
-  if (ARPFindEntry(in_pkt->frame.nxth_ip_addr, mac_addr) == EXIT_FAILURE)
+  if (gr_arp_find(in_pkt->frame.nxth_ip_addr, mac_addr) == EXIT_FAILURE)
   {
     // no ARP match, buffer and send ARP request for next
     verbose(2, "[ARPResolve]:: buffering packet, sending ARP request");
@@ -125,7 +126,7 @@ void ARPProcess(gpacket_t *pkt)
 
 
   verbose(2, "[ARPProcess]:: adding sender of received packet to ARP table");
-  ARPAddEntry(gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), apkt->src_hw_addr);
+  gr_arp_add(gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), apkt->src_hw_addr);
 
   // Check it's actually destined to us,if not throw packet
   if (COMPARE_IP(apkt->dst_ip_addr, gHtonl((uchar *)tmpbuf, pkt->frame.src_ip_addr)) != 0)

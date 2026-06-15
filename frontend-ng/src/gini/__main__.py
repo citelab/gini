@@ -1,0 +1,62 @@
+"""Launch gBuilder.
+
+    python -m gini                 # run the app
+    python -m gini --demo          # run with a sample hybrid topology
+    QT_QPA_PLATFORM=offscreen python -m gini --selftest   # headless smoke test
+"""
+from __future__ import annotations
+
+import sys
+
+
+def build_demo(api) -> None:
+    """A small hybrid networks + cloud topology for first-run / selftest."""
+    r1 = api.add_device("router", x=-260, y=-160)
+    s1 = api.add_device("switch", x=-260, y=-20)
+    h1 = api.add_device("host", x=-380, y=120)
+    api.add_device("host", x=-160, y=120)
+    api.connect(r1["name"], s1["name"])
+    api.connect(s1["name"], h1["name"])
+
+    vpc = api.add_device("vpc", x=160, y=-180)
+    lb = api.add_device("load_balancer", x=160, y=-40)
+    inst = api.add_device("instance", x=40, y=110)
+    api.add_device("instance", x=280, y=110)
+    db = api.add_device("database", x=160, y=240)
+    api.connect(vpc["name"], lb["name"])
+    api.connect(lb["name"], inst["name"])
+    api.connect(inst["name"], db["name"])
+    api.connect(r1["name"], vpc["name"], "hybrid uplink")
+
+
+def main() -> int:
+    args = set(sys.argv[1:])
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    from .ui import MainWindow
+
+    win = MainWindow(app)
+
+    if "--demo" in args or "--selftest" in args:
+        build_demo(win.api)
+
+    if "--selftest" in args:
+        s = win.api.summary()
+        assert s["devices"] >= 9, s
+        assert s["links"] >= 6, s
+        explanation = win.api.explain_topology()
+        assert "elements" in explanation
+        # exercise theme swap + node creation paths
+        win.theme.set_theme("Light")
+        win.theme.set_theme("GINI Brand")
+        print("SELFTEST OK:", s)
+        print("EXPLAIN:", explanation)
+        return 0
+
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -13,6 +13,8 @@
 #include <signal.h>
 #include <errno.h>
 #include <pthread.h>
+#include <execinfo.h>
+#include <stdio.h>
 
 #include "ip.h"
 #include "arp.h"
@@ -63,11 +65,29 @@ void shutdownRouter();
 int isPIDAlive(int pid);
 
 
+// On a fatal signal, dump a native backtrace straight to fd 2 (bypasses stdio
+// buffering, so it survives the crash and shows up in `docker logs`). Diagnostic aid
+// for the legacy datapath — build with -rdynamic for function names.
+static void gini_fatal_handler(int sig)
+{
+	void *frames[40];
+	int n = backtrace(frames, 40);
+	const char msg[] = "\n[gRouter] FATAL signal — backtrace:\n";
+	ssize_t _w = write(2, msg, sizeof(msg) - 1); (void)_w;
+	backtrace_symbols_fd(frames, n, 2);
+	signal(sig, SIG_DFL);
+	raise(sig);                 // re-raise so the exit code still reflects the signal
+}
+
 int main(int ac, char *av[])
 {
 	char rpath[MAX_NAME_LEN];
 	int status, *jstatus;
 	simplequeue_t *outputQ, *workQ, *openflowWorkQ, *qtoa;
+
+	signal(SIGSEGV, gini_fatal_handler);
+	signal(SIGABRT, gini_fatal_handler);
+	signal(SIGBUS, gini_fatal_handler);
 
 	// setup the program properties
 	setupProgram(ac, av);

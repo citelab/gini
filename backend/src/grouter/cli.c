@@ -18,7 +18,12 @@
 #include "memp.h"
 #include "helpdefs.h"
 #include "cli.h"
+#include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
+#include "gr_control.h" /* Z2: module-pipeline control surface */
+#include "gr_rctl.h"    /* remote control socket (interactive console) */
 #include "gnet.h"
+
+void gpipeCmd(void);    /* Z2: 'gpipe' command */
 #include "icmp.h"
 #include "grouter.h"
 #include <stdio.h>
@@ -102,6 +107,10 @@ int CLIInit(router_config *rarg)
     registerCLI("filter", filterCmd, SHELP_FILTER, USAGE_FILTER, LHELP_FILTER);
     registerCLI("openflow", openflowCmd, SHELP_OPENFLOW, USAGE_OPENFLOW, LHELP_OPENFLOW);
     registerCLI("gnc", gncCmd, SHELP_GNC, USAGE_GNC, LHELP_GNC);
+    registerCLI("gpipe", gpipeCmd,
+                "manage the inline module pipeline (Z2)",
+                "gpipe add acl <cidr> | add counter | list | clear | trace <a.b.c.d>",
+                "edit and inspect the gRouter's inline module pipeline");
 
     if (rarg->config_dir != NULL)
         chdir(rarg->config_dir);                  // change to the configuration directory
@@ -113,12 +122,27 @@ int CLIInit(router_config *rarg)
         rl_instream = stdin;
     }
 
-    if (rarg->cli_flag != 0)
-        stat = pthread_create((pthread_t *)(&(rarg->clihandler)), NULL, CLIProcessCmdsInteractive, (void *)stdin);
+    /* expose the CLI over a control socket so a console / the Router Lab can drive a
+     * running (daemon-mode) router. Path: <confdir>/<name>.ctl */
+    {
+        char ctlpath[MAX_NAME_LEN];
+        const char *dir = rarg->config_dir ? rarg->config_dir : ".";
+        snprintf(ctlpath, sizeof ctlpath, "%s/%s.ctl", dir, rarg->router_name);
+        if (gr_rctl_start(ctlpath) == 0)
+            verbose(1, "[CLIInit]:: control socket up at %s", ctlpath);
+    }
 
-    pthread_join(rarg->clihandler, (void **)&jstat);
-    verbose(2, "[cliHandler]:: Destroying the CLI datastructures ");
-    CLIDestroy();
+    if (rarg->cli_flag != 0)
+    {
+        // interactive mode: run the CLI on stdin, then tear down on exit.
+        stat = pthread_create((pthread_t *)(&(rarg->clihandler)), NULL, CLIProcessCmdsInteractive, (void *)stdin);
+        pthread_join(rarg->clihandler, (void **)&jstat);
+        verbose(2, "[cliHandler]:: Destroying the CLI datastructures ");
+        CLIDestroy();
+    }
+    // daemon mode: do NOT destroy cli_map — the control socket (gr_rctl) dispatches
+    // through it for the whole life of the router. CLIInit returns and main keeps the
+    // data-plane threads running.
 }
 
 
@@ -375,11 +399,16 @@ void ifconfigCmd()
     uchar mac_addr[6], ip_addr[4], gw_addr[4], dst_ip[4];
     int mtu, interface, mode;
     short int dst_port;
+    int src_port;           // int (not short): a literal port can exceed 32767,
+                            // which would wrap negative in a short and defeat the
+                            // >= 0 sentinel below.
 
     // set default values for optional parameters
     bzero(gw_addr, 4);
     mtu = DEFAULT_MTU;
     mode = NORMAL_LISTING;
+    src_port = -1;          // -1 => legacy BASEPORTNUM/name port formula;
+                            // >=0 => literal UDP port (portable fabric, -srcport)
 
     // we have already matched ifconfig... now parsing rest of the parameters.
     next_tok = strtok(NULL, " \n");
@@ -444,6 +473,12 @@ void ifconfigCmd()
             {
                 next_tok = strtok(NULL, " \n");
                 mtu = atoi(next_tok);
+            } else if (!strcmp("-srcport", next_tok))
+            {
+                // literal local UDP bind port (portable fabric); when given,
+                // -dstport is also taken literally (no BASEPORTNUM/name offset).
+                next_tok = strtok(NULL, " \n");
+                src_port = atoi(next_tok);
             }
 
         if (strcmp(dev_type, "eth") == 0)
@@ -451,7 +486,7 @@ void ifconfigCmd()
         else if (strcmp(dev_type, "tap") == 0)
             iface = GNETMakeTapInterface(dev_name, mac_addr, ip_addr);
         else if (strcmp(dev_type, "tun") == 0)
-            iface = GNETMakeTunInterface(dev_name, mac_addr, ip_addr, dst_ip, dst_port);
+            iface = GNETMakeTunInterface(dev_name, mac_addr, ip_addr, dst_ip, dst_port, src_port);
         else if (strcmp(dev_type, "raw") == 0) 
             iface = GNETMakeRawInterface(dev_name, ip_addr, raw_bridge);
         else {
@@ -532,6 +567,15 @@ void ifconfigCmd()
  * route add -dev eth0|tap0 -net nw_addr -netmask mask [-gw gw_addr]
  * route del route_number
  */
+/* Z2: edit/inspect the inline module pipeline; forwards to gr_control(). */
+void gpipeCmd(void)
+{
+    char out[1024];
+    char *rest = strtok(NULL, "\n");
+    gr_control(rest ? rest : "", out, sizeof(out));
+    printf("%s\n", out);
+}
+
 void routeCmd()
 {
     char *next_tok;
@@ -568,13 +612,13 @@ void routeCmd()
                 next_tok = strtok(NULL, " \n");
                 Dot2IP(next_tok, nxth_addr);
             }
-            addRouteEntry(route_tbl, net_addr, net_mask, nxth_addr, interface);
+            gr_route_add(net_addr, net_mask, nxth_addr, interface);
         }
         else if (!strcmp(next_tok, "del"))
         {
             next_tok = strtok(NULL, " \n");
             del_route = gAtoi(next_tok);
-            deleteRouteEntryByIndex(route_tbl, del_route);
+            gr_route_del(del_route);
         }
         else if (!strcmp(next_tok, "show"))
             printRouteTable(route_tbl);
@@ -864,7 +908,7 @@ void arpCmd()
             return;
         next_tok = strtok(NULL, " \n");
         Colon2MAC(next_tok, mac_addr);
-        ARPAddEntry(ip_addr, mac_addr);
+        gr_arp_add(ip_addr, mac_addr);
     }
 }
 

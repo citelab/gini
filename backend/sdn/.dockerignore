@@ -1,0 +1,5 @@
+pox/.git
+pox/tests
+**/__pycache__
+**/*.pyc
+README.md
