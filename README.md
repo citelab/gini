@@ -1,162 +1,212 @@
+# GINI — gBuilder 6.0
 
-# GINI Toolkit Version 5.0.0
+**A visual lab for computer networks *and* cloud computing — draw a system, press Run, and it comes to life as real containers you can inspect, drive, and observe.**
 
-The GINI Toolkit is free software. Please see the file COPYING for copyright information.
+GINI lets students and instructors build a topology on a canvas, then launches it as
+honest, running infrastructure on Docker: a real C router that actually forwards packets,
+a real OpenFlow controller programming a real switch, and real cloud services (databases,
+object stores, message queues, dashboards) discoverable by name. A built-in AI tutor —
+**GINI** — explains what's on the canvas, animates how packets flow, and can scaffold
+whole working systems from a one-line description.
 
+It's designed to anchor three courses:
 
-# Basic Installation - Ubuntu 18.04 LTS
+- **Computer Networks** — switches, routers, subnets, firewalls, and real OpenFlow SDN.
+- **Cloud Computing** — VPC-style networking, managed services, autoscaling, observability.
+- **Operating Systems** — containers as live namespaces/cgroups, plus a hackable ~20k-line
+  C network stack you can read and extend.
 
-GINI runs on Python2.7, so you may need to install if it does not come with your distribution. On Ubuntu 18.04, run the following command:
+> gBuilder 6.0 is the modern rewrite of the classic GINI Toolkit. The original
+> Python 2.7 / PyQt4 / SCons app lives under `legacy/` for reference.
 
-```bash
-sudo apt-get install python-minimal
-```
+---
 
-- [Cloning the repository](#cloning-the-repository)
-- [Installing dependencies](#installing-dependencies)
-- [Docker installation](#docker-installation)
-- [Setting up SSH](#setting-up-ssh)
-- [Plugins](#plugins)
-	- [Wireshark](#wireshark)
-	- [Open vSwitch](#open-vswitch)
-- [Building Gini components](#building-gini-components)
-- [Post-installation](#post-installation)
+## Highlights
 
-## Cloning the repository
+- **Visual builder** — a fast PySide6/Qt 6 canvas with a searchable palette of ~40
+  networking and cloud elements, theming, save/load, and an inspector.
+- **It actually runs** — Run compiles the canvas to a Docker Compose project and brings it
+  up. Machines, routers, switches, controllers, and cloud services all start as containers.
+- **The real C gRouter** — the genuine GINI router (built with `zig cc`), forwarding
+  packets over a portable user-space fabric. No kernel modules, no privileges.
+- **Real SDN** — drop an *OpenFlow Controller* + *OpenVSwitch*; GINI runs **POX** (Python 3)
+  programming the gRouter in OpenFlow-1.0 switch mode. Watch flows install on the first
+  packet, then forward at wire speed.
+- **Cloud services as containers** — MinIO, PostgreSQL, Redis, MongoDB, RabbitMQ, Kafka
+  (Redpanda), NATS, nginx, Traefik, Prometheus, Grafana, Jaeger, Fortio, and more — each a
+  real, off-the-shelf image reachable by service name.
+- **Live observability** — drop *Metrics* + *Dashboards* and GINI auto-wires
+  cAdvisor → Prometheus → Grafana with a prebuilt dashboard. Generate load and watch the
+  graphs move.
+- **GINI AI** — an in-app tutor with **Explain**, **Tutor**, and **Wizard** modes. Ask it
+  to explain a device, trace a path, or describe a system you want and it lays out a
+  working blueprint. Runs against a local LLM (Ollama) or fully offline.
 
-Run these commands to clone the repository and set up your environment variable to run Gini components:
+---
 
-```bash
-git clone --recursive https://github.com/citelab/gini5
+## Requirements
 
-# cd into directory where you cloned Gini
-# Add an environment variable called "GINI_HOME" which link to that directory
-# Append $GINI_HOME/bin to your PATH environment variable and apply the change
-cd gini5
-echo "export GINI_HOME=$PWD" >> ~/.bashrc
-echo 'export PATH=$PATH:$GINI_HOME/bin' >> ~/.bashrc
-source $HOME/.bashrc
-```
+- **macOS or Linux**
+- **Python 3.11+** (3.12 recommended) for the gBuilder app
+- **Docker** (Docker Desktop on macOS) — used to run topologies
+- *Optional:* a local **[Ollama](https://ollama.com)** model for richer GINI AI answers
 
-## Installing dependencies
+---
 
-To install GINI, you need the following libraries and applications:
+## Quick start
 
-```bash
-sudo apt-get install -y	libreadline-dev \
-			python-lxml \
-			python-qt4 \
-			scons \
-			screen \
-			g++ \
-			docker.io \
-			openssh-server \
-			build-essential \
-			xterm \
-			libcanberra-gtk-module \
-			libcanberra-gtk3-module \
-			iproute2 \
-			bridge-utils
-
-python -m pip install ipaddress
-
-# Run these commands to download and compile libslack from source
-wget http://libslack.org/download/libslack-0.6.tar.gz
-tar xzf libslack-0.6.tar.gz
-cd libslack-0.6
-make
-sudo make install
-
-# Allow non-root users to use `ip` and `brctl` commands:
-sudo chmod a+s /sbin/brctl
-sudo chmod a+s /sbin/ip
-```
-
-## Docker installation
-
-Consult the official Docker documentation on how to install Docker on your machine: https://docs.docker.com/install/
-
-Gini is running Docker containers under the hood with the assumption that your user account has enough permission to use Docker. After installing, run the command `docker run hello-world`, if there is an error message saying that you don't have permission to run Docker, please follow the instructions here: https://docs.docker.com/install/linux/linux-postinstall/, or run these two commands:
+### 1. Run the app
 
 ```bash
-sudo groupadd docker
-sudo usermod -aG docker $USER
+cd frontend-ng
+python -m pip install -e .
+python -m gini            # or: gbuilder
 ```
 
-The first command was creating a `docker` group assuming that it did not exist before. The second command was adding your account to the docker group. After running this command, you may need to log out of your account and log back in (or reboot).
+This opens gBuilder. You can build, save, and explore topologies right away — the AI tutor
+works offline, and "Run" needs Docker (next step).
 
-To pull the Docker images that Gini uses, run the script available under `scripts`:
+### 2. Build the two local images (once)
+
+Cloud-service images are pulled from Docker Hub automatically on first Run. The **router**
+and **SDN controller** images are built locally:
 
 ```bash
-./scripts/setup_docker.sh
+# the real C gRouter (used by Router and OpenVSwitch elements)
+cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
+
+# the POX OpenFlow controller (used by the OpenFlow Controller element)
+cd backend/sdn && docker build -t gini-pox .
 ```
 
-## Setting up SSH
+Prefer the app to build them for you? Run with `GINI_AUTOBUILD_GROUTER=1` and
+`GINI_AUTOBUILD_POX=1`.
 
-Change directory to `$HOME/.ssh` and run `ssh-keygen -t rsa` in that directory. When prompted, keep pressing ENTER to select the default options. Finally, run `cat id_rsa.pub >> authorized_keys`
+### 3. Draw, Run, explore
 
-## Plugins
+Drag elements from the palette, connect them, and press **Run**. Then:
 
-### Wireshark
+- **Double-click** a machine to open a shell; a service with a web UI (Grafana, MinIO …)
+  to open its dashboard; a router to open the **Router Lab**.
+- **Right-click** any node for **Open console**, **Log in**, **View logs**, or **Delete**.
+- The console log prints each running service's web URL.
 
-Please follow the instruction in https://www.wireshark.org/docs/wsug_html_chunked/ChapterBuildInstall.html. In the best case, you only need to run:
+---
+
+## GINI AI
+
+The right-hand **Ask GINI** panel is a teaching assistant that always sees the live canvas.
+Modes are toggle buttons; the toolbar shows the current **mode** and whether GINI is
+**thinking**.
+
+- **Explain** — click any device and GINI explains it on the canvas (spotlight, callouts,
+  animated packet flows). It also explains palette elements ("when do I use a switch vs a
+  hub?").
+- **Tutor** — overlays highlights and animations as it teaches.
+- **Wizard** — describe what you want ("something I can watch under load", "a web app with
+  a database") and GINI matches a curated, guaranteed-to-work **recipe** and lays it out
+  with one click. The model only *selects and explains*; the building is deterministic, so
+  even a small local model can't produce a broken topology.
+
+Connect a model by pointing GINI at Ollama:
 
 ```bash
-sudo add-apt-repository ppa:wireshark-dev/stable
-sudo apt-get update
-sudo apt-get install -y wireshark
+export GINI_LLM_URL=http://localhost:11434
+export GINI_LLM_MODEL=llama3.1        # or gemma, qwen, …
+python -m gini
 ```
 
-To use wireshark to capture packets as a normal user, you need to add yourself to `wireshark` group on your machine, similar to Docker. Run these commands:
+Without a model, GINI still builds, inspects, traces paths, and ranks recipes
+deterministically.
+
+---
+
+## Software-Defined Networking
+
+The SDN stack is the original GINI design, made real:
+
+- **OpenVSwitch** element → the gRouter launched in `--openflow` mode (a real OpenFlow 1.0
+  switch).
+- **OpenFlow Controller** element → a **POX** (`gar`, Python 3) container running an app
+  you choose from the inspector (`l2_learning`, `hub`, or the classic `of_tutorial`).
+
+Draw `Controller → OVS → hosts`, Run, and ping between hosts: the first packet misses the
+flow table → goes up to POX → a flow is installed → the rest forward in the datapath. You
+can watch flows appear with `openflow entry all` in the OVS console, and the controller's
+decisions in its logs.
+
+---
+
+## Cloud service catalog
+
+Each of these palette elements runs as a real container, reachable by name on the lab's
+network (cloud-style service discovery):
+
+| Element | Backed by | Console |
+|---|---|---|
+| Object Storage | MinIO | ✓ |
+| Managed Database | PostgreSQL | — |
+| NoSQL Database | MongoDB | — |
+| Cache | Redis | — |
+| Message Queue | RabbitMQ | ✓ |
+| Event Stream | Redpanda (Kafka API) | — |
+| Pub/Sub | NATS | ✓ |
+| Reverse Proxy | Traefik | ✓ |
+| Load Balancer | nginx | — |
+| Web App | nginxdemos/hello | ✓ |
+| Container Registry | registry:2 | — |
+| Metrics | Prometheus | ✓ |
+| Dashboards | Grafana | ✓ |
+| Tracing | Jaeger | ✓ |
+| Load Generator | Fortio | ✓ |
+
+Compute elements (**Instance**, **Container**) run as plain containers on the same network,
+so a program inside them reaches services by name (`psql -h database1`,
+`http://objectstore1:9000`).
+
+---
+
+## Repository layout
 
 ```
-sudo dpkg-reconfigure wireshark-common
-sudo usermod -a -G wireshark $USER
+frontend-ng/        gBuilder 6.0 — PySide6 app (domain · ui · agent · runtime · services)
+backend/
+  src/grouter/      the real C gRouter (~20k lines) incl. OpenFlow/SDN mode
+  grouter-zig/      zig-cc build + Dockerfile (gini-grouter) + e2e forwarding tests
+  sdn/              POX (gar) controller + Dockerfile (gini-pox)
+legacy/             the original Python 2.7 / PyQt4 GINI, kept for reference
+ARCHITECTURE.md     what's active vs legacy, and how it fits together
 ```
 
-then try to log out and re-login for the change to take effect.
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full map.
 
-You can refer to this page for more information: https://wiki.wireshark.org/CaptureSetup/CapturePrivileges
+---
 
-### Open vSwitch
-
-Reference : http://docs.openvswitch.org/en/latest/intro/install/
-
-If you want to try out Software Defined Networking (SDN) feature of Gini, first install two packages `openvswitch-switch` and `openvswitch-common`:
+## Testing
 
 ```bash
-sudo apt-get install -y openvswitch-switch \
-			openvswitch-common
-
-# And add setuid bit to the programs that Gini uses:
-sudo chmod a+s /usr/bin/ovs-vsctl
-sudo chmod a+s /usr/bin/ovs-ofctl
-sudo chmod a+s /usr/bin/ovs-docker
+cd frontend-ng
+pytest                                   # ~95 tests
+# headless / CI:
+QT_QPA_PLATFORM=offscreen pytest
 ```
 
-## Building Gini components
+The gRouter has end-to-end forwarding proofs under `backend/grouter-zig/tests/`
+(`forward_test.py`, `multihop_test.py`, …), runnable against a built `grouter` binary.
 
-In the Gini directory, run the following commands:
+---
 
-```bash
-scons
-scons install
-```
+## Status
 
-This should install GINI unless you get some errors in one or more of the above steps.
-Once installed, issue the `gbuilder` command to start the graphical interface.
+gBuilder 6.0 is under active development. Working today: the visual builder, real packet
+forwarding through the C gRouter (single- and multi-router), OpenFlow SDN (POX + gRouter),
+the cloud service catalog, observability auto-wiring, and the GINI AI tutor with Explain /
+Tutor / Wizard modes. On the roadmap: configuring services from the inspector, VPC-level
+isolation, a managed Kubernetes element, and more Wizard recipes.
 
-## Post-installation
+---
 
-- Check docker is properly installed by running `docker ps`. You will see a listing of docker containers that are running for that command. Because there are none running at this time, you will see an empty list with a header. 
-- Check the ssh passwordless login by running `ssh localhost`. You should be able to login without password with the proper key setup. If not, check the SSH key configuration.
-- Optionally, if you want to enable mouse scrollwheel when using the devices' terminal in GBuilder, add this line to `~/.screenrc`:
-```
-termcapinfo xterm* ti@:te@
-```
+## License & contact
 
-# Notes
-
-GINI should work on all Linux distributions with the required dependencies
-installed.  If you have any problems on any distribution and/or
-release, please e-mail maheswar@cs.mcgill.ca, or open an issue on this repository.
+GINI is free software — see `COPYING` for copyright information. Questions, bugs, or ideas:
+open an issue on this repository, or email `maheswar@cs.mcgill.ca`.
