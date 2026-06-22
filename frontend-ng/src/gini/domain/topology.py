@@ -24,6 +24,9 @@ class DeviceInstance:
     # manual addressing: link_id -> static IPv4 (bare dotted-quad). Only honored when
     # the topology is in manual_addressing mode; empty/missing entries auto-fill.
     static_ips: dict[str, str] = field(default_factory=dict)
+    # instance "size" tier (1=S … 4=XL) for resizable elements — bigger = more vCPU/mem
+    # and proportionally more GINI $/hr. See domain/pricing.py SIZE_TIERS.
+    size: int = 1
 
     @property
     def type(self) -> DeviceType:

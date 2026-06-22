@@ -22,7 +22,28 @@ LUA="${LUA:-1}"
 if [ "$LUA" = "1" ]; then
     SRCS=$(ls "$SRC"/*.c)
     LUA_FLAGS="-DGR_LUA"
-    LUA_LIBS="-llua5.4"
+    # locate lua.h + lib. Debian's liblua5.4-dev puts headers in /usr/include/lua5.4
+    # (NOT on the default include path), so we must add -I explicitly. Prefer
+    # pkg-config; fall back to common Debian/Homebrew locations.
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists lua5.4 2>/dev/null; then
+        LUA_FLAGS="$LUA_FLAGS $(pkg-config --cflags lua5.4)"
+        LUA_LIBS="$(pkg-config --libs lua5.4)"
+    else
+        LUA_INC=""
+        for d in /usr/include/lua5.4 /usr/local/include/lua5.4 \
+                 /opt/homebrew/include/lua5.4 /usr/local/include /usr/include; do
+            if [ -f "$d/lua.h" ]; then LUA_INC="-I$d"; break; fi
+        done
+        if [ -z "$LUA_INC" ]; then
+            echo "build.sh: lua.h not found — building WITHOUT the Lua module "
+            echo "          (install liblua5.4-dev, or run with LUA=0 to silence this)." >&2
+            SRCS=$(ls "$SRC"/*.c | grep -v '/gr_mod_lua\.c$')
+            LUA_FLAGS=""; LUA_LIBS=""
+        else
+            LUA_FLAGS="$LUA_FLAGS $LUA_INC"
+            LUA_LIBS="-llua5.4"
+        fi
+    fi
 else
     SRCS=$(ls "$SRC"/*.c | grep -v '/gr_mod_lua\.c$')
     LUA_FLAGS=""

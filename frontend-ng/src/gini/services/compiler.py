@@ -52,6 +52,12 @@ def _svc(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower()) or "node"
 
 
+def _cpus_for(device) -> float:
+    """CPU limit (vCPUs) for a device from its size tier — 0.5/1/2/4 for S/M/L/XL."""
+    from ..domain import pricing
+    return pricing.size_tier(pricing.size_level(getattr(device, "size", 1)))[1]
+
+
 def _norm_image(raw: str) -> str:
     """Turn a friendly image property into a real Docker tag.
     'ubuntu-22.04' -> 'ubuntu:22.04'; an explicit tag/registry is kept as-is."""
@@ -111,6 +117,7 @@ class MachineSpec:
     gateway: bool = False          # this node is the on-fabric NAT gateway to the world
     fabric_default: bool = False   # send 0.0.0.0/0 INTO the fabric (egress via the gateway)
     fabric_gw: str | None = None   # for the gateway: the local router IP for the return path
+    cpus: float = 0.0              # CPU limit from the size tier (0 = unset)
 
 
 @dataclass
@@ -183,6 +190,7 @@ class ServiceSpec:
     volumes: list[str] = field(default_factory=list)
     privileged: bool = False
     files: dict[str, str] = field(default_factory=dict)
+    cpus: float = 0.0              # CPU limit from the size tier (0 = unset)
 
 
 @dataclass
@@ -202,7 +210,7 @@ class RuntimeConfig:
             "machines": [
                 {"name": _svc(m.name), "gw": m.gw,
                  "gateway": m.gateway, "fabric_default": m.fabric_default,
-                 "fabric_gw": m.fabric_gw,
+                 "fabric_gw": m.fabric_gw, "cpus": m.cpus,
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "tap": f"gini{idx}",
                              "port": i.ep.wiring(docker)}
                             for idx, i in enumerate(m.ifaces)]}
@@ -245,7 +253,7 @@ class RuntimeConfig:
                 {"name": _svc(s.name), "type": s.type_key, "image": s.image,
                  "summary": s.summary, "command": s.command, "env": s.env,
                  "ports": s.ports, "volumes": s.volumes, "privileged": s.privileged,
-                 "files": s.files}
+                 "files": s.files, "cpus": s.cpus}
                 for s in self.services
             ],
         }
@@ -519,7 +527,8 @@ class RuntimeCompiler:
                 # drawn routers (traceroute then shows the real path).
                 cfg.machines.append(MachineSpec(
                     name=name[did], ifaces=m_ifaces[did], gw=m_gw.get(did),
-                    fabric_default=have_internet and bool(m_gw.get(did))))
+                    fabric_default=have_internet and bool(m_gw.get(did)),
+                    cpus=_cpus_for(topo.devices[did])))   # size tier -> CPU limit
 
         # switches
         for did, r in role.items():
@@ -576,7 +585,8 @@ class RuntimeCompiler:
             env = {k: v.replace("{svc}", sname) for k, v in svc.env.items()}
             cfg.services.append(ServiceSpec(
                 name=d.name, type_key=d.type_key, image=svc.image,
-                summary=svc.summary, command=command, env=env, ports=ports))
+                summary=svc.summary, command=command, env=env, ports=ports,
+                cpus=_cpus_for(d)))                   # size tier -> CPU limit
 
         # cloud compute (instance / container) — a plain bridge container the student can
         # log into and run an app on, reaching services by name. Image from the element's
@@ -596,7 +606,7 @@ class RuntimeCompiler:
             command = shlex.split(cmd) if cmd.strip() else ["tail", "-f", "/dev/null"]
             cfg.services.append(ServiceSpec(
                 name=d.name, type_key=d.type_key, image=image, summary=summary,
-                command=command, env={}, ports=[]))
+                command=command, env={}, ports=[], cpus=_cpus_for(d)))   # size -> CPU
 
         # auto-wire an observability stack so Prometheus/Grafana actually show data
         host_port = self._wire_observability(cfg, host_port)

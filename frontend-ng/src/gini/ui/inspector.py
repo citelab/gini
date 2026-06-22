@@ -157,6 +157,21 @@ class Inspector(QWidget):
         self.runs_lbl.setText(note)
         self.runs_lbl.setVisible(bool(note))
 
+        # size tier (resizable elements) — mirrors the on-node + / - stepper
+        from ..domain import pricing
+        if pricing.resizable(dt.key):
+            sizebox = QComboBox()
+            for lvl in range(pricing.SIZE_MIN, pricing.SIZE_MAX + 1):
+                lab, vcpu, _mem, mult = pricing.size_tier(lvl)
+                sizebox.addItem(f"{lab} · {vcpu:g} vCPU · ×{mult} cost", lvl)
+            sizebox.blockSignals(True)
+            sizebox.setCurrentIndex(pricing.size_level(getattr(d, "size", 1))
+                                    - pricing.SIZE_MIN)
+            sizebox.blockSignals(False)
+            sizebox.currentIndexChanged.connect(
+                lambda _i, sb=sizebox: self._commit_size(sb.currentData()))
+            self.props_form.addRow("Size", sizebox)
+
         choices = dt.property_choices
         for key, value in d.properties.items():
             if key in choices:                         # render a dropdown for enum props
@@ -314,3 +329,17 @@ class Inspector(QWidget):
     def _commit(self, key: str, value: str) -> None:
         if self._device_id:
             self.api.set_property(self._device_id, key, value)
+
+    def _commit_size(self, level) -> None:
+        from ..domain import pricing
+        if not self._device_id:
+            return
+        d = self.ctx.topology.devices.get(self._device_id)
+        if d is None:
+            return
+        new = pricing.size_level(level)
+        if new == getattr(d, "size", 1):            # no-op guard (breaks rebuild loop)
+            return
+        d.size = new
+        self.ctx.bus.device_changed.emit(self._device_id)   # resize the node + reroute edges
+        self.ctx.bus.topology_changed.emit()                # rebill the dashboard

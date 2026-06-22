@@ -261,6 +261,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
                 lines.append(f'      - "{p["host"]}:{p["container"]}"')
         if s.get("privileged"):
             lines.append("    privileged: true")
+        lines += _cpu_limit_lines(s.get("cpus"))
         if s.get("volumes"):
             lines.append("    volumes:")
             for v in s["volumes"]:
@@ -283,7 +284,20 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
         ]
+        lines += _cpu_limit_lines(m.get("cpus"))
     return "\n".join(lines) + "\n"
+
+
+def _cpu_limit_lines(cpus) -> list[str]:
+    """Compose lines for a per-container CPU cap from the element's size tier.
+    Uses `deploy.resources.limits.cpus`, which `docker compose up` (v2) enforces."""
+    try:
+        c = float(cpus or 0)
+    except (TypeError, ValueError):
+        c = 0.0
+    if c <= 0:
+        return []
+    return ["    deploy:", "      resources:", "        limits:", f'          cpus: "{c:g}"']
 
 
 class Orchestrator:

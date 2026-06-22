@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..app import AppContext
+from ..domain import pricing
 from ..domain.topology import DeviceInstance, Link
 from .theme import icons
 from .theme.tokens import Theme
@@ -27,6 +28,7 @@ from .theme.tokens import Theme
 MIME = "application/x-gini-device"
 GRID = 22
 NODE_W, NODE_H = 138, 84
+SIZE_STEP = 30         # px the node grows taller per size tier above S (vertical scaling)
 CORNER_R = 13          # rounded-corner radius for bent connectors
 
 
@@ -54,14 +56,15 @@ def _ortho_waypoints(a: "NodeItem", b: "NodeItem") -> list[QPointF]:
     """
     ax, ay = a.pos().x(), a.pos().y()
     bx, by = b.pos().x(), b.pos().y()
-    ca = QPointF(ax + NODE_W / 2, ay + NODE_H / 2)
-    cb = QPointF(bx + NODE_W / 2, by + NODE_H / 2)
+    ah, bh = a.node_h(), b.node_h()              # per-node heights (size tiers differ)
+    ca = QPointF(ax + NODE_W / 2, ay + ah / 2)
+    cb = QPointF(bx + NODE_W / 2, by + bh / 2)
     dx, dy = cb.x() - ca.x(), cb.y() - ca.y()
     if abs(dy) >= abs(dx):                       # stacked-ish -> exit top/bottom
         if dy >= 0:
-            ex, en = QPointF(ca.x(), ay + NODE_H), QPointF(cb.x(), by)
+            ex, en = QPointF(ca.x(), ay + ah), QPointF(cb.x(), by)
         else:
-            ex, en = QPointF(ca.x(), ay), QPointF(cb.x(), by + NODE_H)
+            ex, en = QPointF(ca.x(), ay), QPointF(cb.x(), by + bh)
         mid = (ex.y() + en.y()) / 2
         return [ex, QPointF(ex.x(), mid), QPointF(en.x(), mid), en]
     else:                                        # side-by-side -> exit left/right
@@ -131,8 +134,34 @@ class NodeItem(QGraphicsObject):
         self._shadow.setBlurRadius(t.elevation + 10 * self._hover)
         self._shadow.setOffset(0, 3 + 2 * self._hover)
 
+    # size tier (resizable elements grow taller; others stay at the base height) ----- #
+    def _resizable(self) -> bool:
+        return pricing.resizable(self.inst.type_key)
+
+    def _size(self) -> int:
+        return pricing.size_level(getattr(self.inst, "size", 1)) if self._resizable() else 1
+
+    def node_h(self) -> float:
+        return NODE_H + (self._size() - 1) * SIZE_STEP
+
+    def _stepper_rects(self) -> tuple[QRectF, QRectF]:
+        """(minus, plus) hit rectangles for the on-node size stepper, at bottom-right."""
+        y = self.node_h() - 25
+        return (QRectF(NODE_W - 46, y, 19, 19), QRectF(NODE_W - 24, y, 19, 19))
+
+    def _bump_size(self, delta: int) -> None:
+        new = pricing.size_level(self._size() + delta)
+        if new == self._size():
+            return
+        self.prepareGeometryChange()
+        self.inst.size = new
+        self.update()
+        self._scene.update_edges_for(self.inst.id)
+        # rebill the dashboard + mark the project dirty (size is persisted in .gini)
+        self._scene.ctx.bus.topology_changed.emit()
+
     def boundingRect(self) -> QRectF:
-        return QRectF(-3, -3, NODE_W + 6, NODE_H + 6)
+        return QRectF(-3, -3, NODE_W + 6, self.node_h() + 6)
 
     # hover lift -------------------------------------------------------------- #
     def hoverEnterEvent(self, e):
@@ -170,7 +199,8 @@ class NodeItem(QGraphicsObject):
         accent = _qcolor(t.accent_for(dt.accent.value))
         p.setRenderHint(QPainter.Antialiasing, True)
 
-        rect = QRectF(0.5, 0.5, NODE_W - 1, NODE_H - 1)
+        H = self.node_h()
+        rect = QRectF(0.5, 0.5, NODE_W - 1, H - 1)
         selected = self.isSelected()
         hover = self._hover
 
@@ -230,14 +260,18 @@ class NodeItem(QGraphicsObject):
             "error": (_qcolor(t.danger), "error"),
         }.get(self.status, (_qcolor(t.muted), "idle"))
         chip_bg = QColor(chip_col); chip_bg.setAlpha(38)
-        cr = QRectF(12, NODE_H - 24, 70, 16)
+        cr = QRectF(12, H - 24, 58, 16)
         p.setBrush(chip_bg); p.setPen(Qt.NoPen)
         p.drawRoundedRect(cr, 8, 8)
         p.setBrush(chip_col)
         p.drawEllipse(QRectF(cr.left() + 7, cr.center().y() - 3, 6, 6))
         p.setPen(chip_col)
         f3 = QFont(); f3.setPointSize(8); p.setFont(f3)
-        p.drawText(cr.adjusted(20, 0, -4, 0), Qt.AlignVCenter, label)
+        p.drawText(cr.adjusted(20, 0, -2, 0), Qt.AlignVCenter, label)
+
+        # size tier: capacity gauge + label in the grown body, and a + / - stepper
+        if self._resizable():
+            self._paint_size(p, t, accent, H)
 
         # advisory-lint warning badge (top-right) — clickable to ask GINI about it
         if self.inst.name in self._scene.ctx.warnings:
@@ -248,6 +282,36 @@ class NodeItem(QGraphicsObject):
             p.setPen(QColor("#1a1205"))
             fb = QFont(); fb.setPointSize(9); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by, 14, 14), Qt.AlignCenter, "!")
+
+    def _paint_size(self, p: QPainter, t, accent: QColor, H: float) -> None:
+        level = self._size()
+        label, vcpu, _mem, _mult = pricing.size_tier(level)
+
+        # + / - stepper (bottom-right) — dim the end-stops
+        minus, plus = self._stepper_rects()
+        for r, glyph, on in ((minus, "−", level > pricing.SIZE_MIN),
+                             (plus, "+", level < pricing.SIZE_MAX)):
+            bg = QColor(accent); bg.setAlpha(30 if on else 10)
+            p.setBrush(bg)
+            p.setPen(QPen(accent if on else _qcolor(t.line2), 1.2))
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 5, 5)
+            p.setPen(accent if on else _qcolor(t.faint))
+            fs = QFont(); fs.setPointSize(12); fs.setBold(True); p.setFont(fs)
+            p.drawText(r, Qt.AlignCenter, glyph)
+
+        # capacity caption + vertical gauge in the body the taller node opens up
+        body_top, body_bot = 58.0, H - 30
+        if body_bot - body_top >= 16:
+            p.setPen(_qcolor(t.muted))
+            fc = QFont(); fc.setPointSize(8); fc.setBold(True); p.setFont(fc)
+            p.drawText(QRectF(14, body_top, NODE_W - 30, 14),
+                       Qt.AlignVCenter | Qt.AlignLeft, f"{label} · {vcpu:g} vCPU")
+            gx, gw, gtop, gbot = NODE_W - 16.0, 6.0, body_top + 16, body_bot
+            p.setBrush(_qcolor(t.bg3)); p.setPen(QPen(_qcolor(t.line2), 1))
+            p.drawRoundedRect(QRectF(gx, gtop, gw, gbot - gtop), 3, 3)
+            fh = (gbot - gtop) * (level / pricing.SIZE_MAX)
+            p.setBrush(accent); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(QRectF(gx, gbot - fh, gw, fh), 3, 3)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -270,6 +334,13 @@ class NodeItem(QGraphicsObject):
             self._scene.ctx.bus.warning_explain_requested.emit(self.inst.id)
             e.accept()
             return
+        # on-node size stepper (+ / -) — resize without selecting/moving the node
+        if e.button() == Qt.LeftButton and self._resizable():
+            minus, plus = self._stepper_rects()
+            if minus.contains(e.pos()):
+                self._bump_size(-1); e.accept(); return
+            if plus.contains(e.pos()):
+                self._bump_size(+1); e.accept(); return
         super().mousePressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
@@ -357,8 +428,8 @@ class EdgeItem(QGraphicsObject):
         self.prepareGeometryChange()
         style = getattr(self._scene.ctx.settings, "connector_style", "orthogonal")
         if style == "straight":
-            ca = a.pos() + QPointF(NODE_W / 2, NODE_H / 2)
-            cb = b.pos() + QPointF(NODE_W / 2, NODE_H / 2)
+            ca = a.pos() + QPointF(NODE_W / 2, a.node_h() / 2)
+            cb = b.pos() + QPointF(NODE_W / 2, b.node_h() / 2)
             path = QPainterPath(ca)
             path.lineTo(cb)
             self._path = path
@@ -542,7 +613,9 @@ class CanvasScene(QGraphicsScene):
     def _on_device_changed(self, device_id: str) -> None:
         node = self.nodes.get(device_id)
         if node:
+            node.prepareGeometryChange()        # size tier may change the node height
             node.update()
+            self.update_edges_for(device_id)
 
     def _refresh_node_labels(self) -> None:
         for node in self.nodes.values():

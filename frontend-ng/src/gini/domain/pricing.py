@@ -45,6 +45,43 @@ DEFAULT_RATES: dict[str, float] = {
     "load_generator": 2.0,
 }
 
+# Instance "size" tiers (like cloud instance types). level -> (label, vCPUs, mem_MB,
+# cost_multiplier). Cost roughly doubles each step up, mirroring real cloud pricing.
+SIZE_TIERS: dict[int, tuple[str, float, int, int]] = {
+    1: ("S",  0.5,  256, 1),
+    2: ("M",  1.0,  512, 2),
+    3: ("L",  2.0, 1024, 4),
+    4: ("XL", 4.0, 2048, 8),
+}
+SIZE_MIN, SIZE_MAX = 1, 4
+
+
+def size_level(level) -> int:
+    try:
+        return max(SIZE_MIN, min(SIZE_MAX, int(level or 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def size_tier(level) -> tuple[str, float, int, int]:
+    return SIZE_TIERS[size_level(level)]
+
+
+def size_label(level) -> str:
+    return size_tier(level)[0]
+
+
+def size_cost_mult(level) -> int:
+    return size_tier(level)[3]
+
+
+def resizable(type_key: str) -> bool:
+    """Which elements expose a size knob — things that run a real workload container
+    and meaningfully have a capacity (compute + managed services). Not switches/hubs."""
+    from ..services.cloud_catalog import is_service   # lazy: keep domain below services
+    return is_service(type_key) or type_key in ("instance", "container", "host")
+
+
 # Dashboard breakdown groups. Order is the display order.
 CATEGORIES: dict[str, tuple[str, ...]] = {
     "Compute": ("instance", "container", "host", "function"),
@@ -94,7 +131,9 @@ def bill(topology, overrides: dict | None = None) -> dict:
         if tk not in BILLABLE:
             continue
         cat = _CAT_OF[tk]
-        r = rate_of(tk, overrides)
+        # bigger instance size = proportionally more GINI $/hr (x1/x2/x4/x8)
+        mult = size_cost_mult(getattr(d, "size", 1)) if resizable(tk) else 1
+        r = rate_of(tk, overrides) * mult
         by_cat[cat]["rate"] += r
         by_cat[cat]["count"] += 1
         total += r
