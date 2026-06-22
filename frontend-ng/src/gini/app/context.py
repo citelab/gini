@@ -33,6 +33,7 @@ class EventBus(QObject):
     runtime_status = Signal(object)   # {service: state} from the status poller
     addressing_changed = Signal()     # compiler-derived IP/MAC map refreshed
     warnings_changed = Signal()       # advisory topology-lint results refreshed
+    edges_restyled = Signal()         # connector style (bent/straight) changed -> reroute edges
     # --- AI tutor "present" channel (the stage the AI draws on) ---
     present_spotlight = Signal(object)    # list[device_id] to spotlight, or None to clear
     present_highlight = Signal(object)    # list[device_id] to ring, or None to clear
@@ -46,6 +47,7 @@ class EventBus(QObject):
 class Settings:
     theme: str = "dark"
     grid: bool = True
+    connector_style: str = "orthogonal"   # "orthogonal" (bent, rounded) | "straight"
     snap_to_grid: bool = True
     show_minimap: bool = True
     autosave: bool = False
@@ -62,6 +64,13 @@ class Settings:
     llm_url: str = "http://localhost:11434"
     llm_model: str = "llama3.1"
     llm_think: bool = False          # ask reasoning models (e.g. gemma4:e2b) to think
+    # auto-internet: every container gets a default eth to the internet (Docker NAT).
+    # Off = "faithful mode": no internet unless an Internet element is drawn + wired.
+    auto_internet: bool = False
+    # per-type auto-name prefix overrides, e.g. {"host": "Mach_"} -> Mach_1, Mach_2, …
+    name_prefixes: dict[str, str] = field(default_factory=dict)
+    # per-type GINI $/hr rental price overrides for the cost dashboard, e.g. {"database": 20}
+    prices: dict[str, float] = field(default_factory=dict)
     extra: dict[str, str] = field(default_factory=dict)
 
 

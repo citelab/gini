@@ -16,8 +16,18 @@ OUT="${OUT:-$HERE/grouter}"
 PREFIX="${PREFIX:-/usr/local}"
 
 # gr_mod_lua.c needs lua.h and is only built with -Dlua (zig build); exclude it
-# from the default glob so the plain build doesn't require liblua headers.
-SRCS=$(ls "$SRC"/*.c | grep -v '/gr_mod_lua\.c$')
+# from the default glob unless LUA=1 (the default here): the chapter-7 scripting tier needs
+# it, and the Docker image installs liblua5.4-dev. Set LUA=0 for a no-Lua build.
+LUA="${LUA:-1}"
+if [ "$LUA" = "1" ]; then
+    SRCS=$(ls "$SRC"/*.c)
+    LUA_FLAGS="-DGR_LUA"
+    LUA_LIBS="-llua5.4"
+else
+    SRCS=$(ls "$SRC"/*.c | grep -v '/gr_mod_lua\.c$')
+    LUA_FLAGS=""
+    LUA_LIBS=""
+fi
 
 # Z3: modules ported to the Zig language. Each <name>.zig is compiled to a relocatable
 # object (ReleaseSafe = memory-safe: bounds/overflow checks) and linked alongside the C.
@@ -50,9 +60,9 @@ echo "building gRouter with: $ZIG cc"
 $ZIG cc -o "$OUT" $SRCS $ZIG_OBJS \
     -I "$INC" -I "$PREFIX/include" -L "$PREFIX/lib" \
     -rdynamic \
-    -DHAVE_PTHREAD_RWLOCK=1 -DHAVE_GETOPT_LONG -DGR_LEGACY_MODULES -g -w \
+    -DHAVE_PTHREAD_RWLOCK=1 -DHAVE_GETOPT_LONG -DGR_LEGACY_MODULES $LUA_FLAGS -g -w \
     -fcommon -Wno-implicit-function-declaration -Wno-int-conversion \
     -fno-sanitize=undefined -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
-    -lreadline -ltermcap -lslack -lpthread -lutil -lm
+    -lreadline -ltermcap -lslack -lpthread -lutil -lm $LUA_LIBS
 
 echo "built: $OUT"

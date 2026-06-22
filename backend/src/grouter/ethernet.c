@@ -102,9 +102,12 @@ void* fromEthernetDev(void *arg)
 		// check whether the incoming packet is a layer 2 broadcast or
 		// meant for this node... otherwise should be thrown..
 		// TODO: fix for promiscuous mode packet snooping.
+		// B3: also accept group-addressed frames (the L2 multicast bit, dst[0] & 0x01) so the
+		// router can multicast-route them and snoop IGMP; broadcast already has that bit set.
 		if (!(sdn_mode() == SDN_MODE_OPENFLOW) &&
 			(COMPARE_MAC(in_pkt->data.header.dst, iface->mac_addr) != 0) &&
-			(COMPARE_MAC(in_pkt->data.header.dst, bcast_mac) != 0))
+			(COMPARE_MAC(in_pkt->data.header.dst, bcast_mac) != 0) &&
+			((in_pkt->data.header.dst[0] & 0x01) == 0))
 		{
 			verbose(1, "[fromEthernetDev]:: Packet dropped .. not for this router!? ");
 			free(in_pkt);

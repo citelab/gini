@@ -68,6 +68,75 @@ def test_container_uses_its_image_and_command():
     assert spec.command == ["nginx", "-g", "daemon off;"]
 
 
+def test_faithful_mode_cuts_host_default_route_not_the_network():
+    from gini.services.orchestrator import _compose
+    t = Topology("net")
+    h = t.add_device("host"); r = t.add_device("router")
+    t.add_link(h.id, r.id)                       # a host only becomes a machine once linked
+    cfg = RuntimeCompiler().compile(t)
+    # the network is NEVER `internal` — that would block host access to web consoles
+    on = _compose(cfg, auto_internet=True)
+    off = _compose(cfg, auto_internet=False)
+    assert "internal: true" not in on and "internal: true" not in off
+    # faithful mode cuts the host's default route instead (per-host, in the shuttle)
+    assert '"cut_default": true' in off
+    assert '"cut_default": true' not in on
+
+
+def test_published_ports_are_reachable_in_faithful_mode():
+    from gini.services.orchestrator import _compose
+    t = Topology("obs"); t.add_device("dashboard")     # Grafana publishes a web port
+    compose = _compose(RuntimeCompiler().compile(t), auto_internet=False)
+    assert "internal: true" not in compose             # host can reach localhost:<port>
+    assert ":3000" in compose                          # Grafana's published port survives
+
+
+def test_internet_element_is_a_nat_gateway_with_default_routes():
+    t = Topology("net")
+    m1 = t.add_device("host")
+    r1 = t.add_device("router")
+    net = t.add_device("cloud")              # the drawn Internet element
+    t.add_link(m1.id, r1.id)
+    t.add_link(r1.id, net.id)
+    cfg = RuntimeCompiler().compile(t)
+
+    # the Internet node compiles as a NAT-gateway machine (on the fabric), not a service
+    assert net.name not in {s.name for s in cfg.services}
+    gw = next(m for m in cfg.machines if m.name == net.name)
+    assert gw.gateway and gw.gw is None and gw.fabric_gw      # NAT + return path via router
+    # the ordinary host defaults INTO the fabric (egress via the drawn router)
+    host = next(m for m in cfg.machines if m.name == m1.name)
+    assert host.fabric_default and host.gw and not host.gateway
+    # R1 gets a default route (0.0.0.0/0) toward the Internet node's fabric IP
+    r = cfg.routers[0]
+    defr = next(rt for rt in r.routes if rt["net"] == "0.0.0.0" and rt["mask"] == "0.0.0.0")
+    assert defr["gw"] == gw.ifaces[0].ip.split("/")[0]
+
+
+def test_internet_gateway_emits_wan_network_and_dualhomes():
+    t = Topology("net")
+    m1 = t.add_device("host"); r1 = t.add_device("router"); net = t.add_device("cloud")
+    t.add_link(m1.id, r1.id); t.add_link(r1.id, net.id)
+    cfg = RuntimeCompiler().compile(t)
+    compose = _compose(cfg, auto_internet=False)
+    assert "wan:" in compose and "192.168.244.0/24" in compose
+    assert "networks: [gini, wan]" in compose     # the gateway is dual-homed
+    assert "networks: [gini]" in compose          # ordinary hosts stay on gini only
+    assert "internal: true" not in compose        # network is never isolated (consoles work)
+
+
+def test_no_wan_network_without_an_internet_element():
+    t = Topology("net"); t.add_device("host")
+    assert "wan:" not in _compose(RuntimeCompiler().compile(t))
+
+
+def test_machine_image_ships_the_gini_toolkit():
+    from gini.services.orchestrator import _DOCKERFILE_MACHINE
+    for tool in ("tcpdump", "tshark", "nmap", "traceroute", "iperf3", "hping3",
+                 "dnsutils", "net-tools", "iptables"):
+        assert tool in _DOCKERFILE_MACHINE, tool
+
+
 def test_expanded_catalog_has_breadth():
     from gini.services.cloud_catalog import CATALOG
     for key in ("proxy", "web_app", "stream", "messaging", "cache", "nosql",
@@ -113,6 +182,39 @@ def test_observability_autowires_cadvisor_prometheus_grafana():
     assert any("container.json" in v for v in graf.volumes)
     # datasource points at the actual Prometheus service name
     assert f"http://{_svc(m.name)}:9090" in graf.files["observability/grafana/ds.yml"]
+
+
+def test_dashboard_has_always_on_pipeline_panels():
+    # the board must never be blank: lead panels use Prometheus's own metrics, which
+    # always have data even when cAdvisor is sparse (Docker Desktop)
+    from gini.services.compiler import _grafana_dashboard_json
+    import json
+    dash = json.loads(_grafana_dashboard_json())
+    exprs = [t["expr"] for p in dash["panels"] for t in p["targets"]]
+    assert "up" in exprs                                 # scrape-target health (always data)
+    assert "scrape_samples_scraped" in exprs             # samples per target (always data)
+    # cAdvisor container panels still present (best-effort)
+    assert any("container_cpu_usage_seconds_total" in e for e in exprs)
+
+
+def test_lone_grafana_auto_adds_prometheus_and_home_dashboard():
+    # a Dashboards element by itself must still come up showing graphs
+    t = Topology("obs")
+    g = t.add_device("dashboard")
+    cfg = RuntimeCompiler().compile(t)
+    names = {s.name for s in cfg.services}
+    assert "Prometheus" in names and "cAdvisor" in names    # both auto-added
+    graf = next(s for s in cfg.services if s.name == g.name)
+    # home dashboard is set (so Grafana lands on it) AND its file is provisioned
+    assert graf.env.get("GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH")
+    assert "observability/grafana/container.json" in graf.files
+    assert f"http://{_svc('Prometheus')}:9090" in graf.files["observability/grafana/ds.yml"]
+
+
+def test_grafana_home_dashboard_only_set_when_provisioned():
+    # with NO observability elements, a plain Grafana-less topology sets no home path
+    from gini.services.cloud_catalog import CATALOG
+    assert "GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH" not in CATALOG["dashboard"].env
 
 
 def test_observability_compose_and_files_written(tmp_path):

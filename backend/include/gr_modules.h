@@ -8,6 +8,7 @@
 #ifndef __GR_MODULES_H__
 #define __GR_MODULES_H__
 
+#include <stdint.h>
 #include "gr_module.h"
 
 /* ACL / firewall: DROP packets whose dst IP matches deny_cidr (e.g. "10.0.3.0/24"). */
@@ -25,5 +26,22 @@ long         gr_mod_counter_value(gr_module_t *m);
 
 /* Lua scripting module (friendly tier) — only built with -Dlua=true (links liblua). */
 gr_module_t *gr_mod_lua(const char *script);
+
+/* ---- shared packet accessors (used by Lua scripts and native modules) ------ *
+ * A language-neutral view of the packet, so a module never re-derives byte offsets.
+ * Addresses are host-order IPv4; the IP datagram starts at pkt->data.data[0].     */
+uint32_t gr_pkt_ipsrc(gpacket_t *pkt);
+uint32_t gr_pkt_ipdst(gpacket_t *pkt);
+int      gr_pkt_proto(gpacket_t *pkt);
+int      gr_pkt_ttl(gpacket_t *pkt);
+int      gr_pkt_len(gpacket_t *pkt);
+int      gr_parse_ipv4(const char *s, uint32_t *out_hostorder);
+
+/* ---- native module registry ----------------------------------------------- *
+ * Build a registered module by name (`gpipe add <name> [arg]`). Returns NULL if the
+ * name is unknown. gr_module_names() lists the registered names for usage messages. */
+gr_module_t *gr_module_create(const char *name, const char *arg);
+const char  *gr_module_names(void);
+int          gr_module_needs_arg(const char *name);   /* 1 yes, 0 no, -1 unknown */
 
 #endif /* __GR_MODULES_H__ */

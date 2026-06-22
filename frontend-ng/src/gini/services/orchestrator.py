@@ -27,6 +27,13 @@ GROUTER_IMAGE = os.environ.get("GINI_GROUTER_IMAGE", "gini-grouter")
 # (built once: `cd backend/sdn && docker build -t gini-pox .`). Override with GINI_POX_IMAGE.
 POX_IMAGE = os.environ.get("GINI_POX_IMAGE", "gini-pox")
 
+# The external uplink network for the Internet element (NAT gateway). Fixed subnet so
+# the gateway container can deterministically find its WAN interface + default route.
+# Must match runtime/shuttle.py.
+WAN_NET = "wan"
+WAN_SUBNET = "192.168.244.0/24"
+WAN_GATEWAY = "192.168.244.1"
+
 
 class Sim:
     """A running in-process topology."""
@@ -74,9 +81,33 @@ def simulate(config: RuntimeConfig) -> Sim:
 # --------------------------------------------------------------------------- #
 # Docker project emission
 # --------------------------------------------------------------------------- #
-_DOCKERFILE_MACHINE = """FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-        iproute2 iputils-ping iperf3 tcpdump && rm -rf /var/lib/apt/lists/*
+# The Machine image ships "batteries included" — the common networking/diagnostic tools
+# the GINI book experiments use — so students rarely need to `apt install` anything.
+MACHINE_BASE = "Debian (python:3.12-slim)"
+_MACHINE_TOOLS = (
+    "iproute2 net-tools iputils-ping iputils-tracepath iputils-arping traceroute "
+    "mtr-tiny dnsutils netcat-openbsd socat curl wget nmap tcpdump tshark iperf3 "
+    "ethtool bridge-utils telnet telnetd hping3 iptables procps nano less ca-certificates "
+    # services + tools the GINI book experiments stand up, so a topology runs them offline
+    # (no in-container apt). DNS: bind9 (named). Mail: postfix + mailutils (the `mail` MUA).
+    # Load balancing: haproxy. Security: dsniff (arpspoof/dnsspoof), ettercap, lynx.
+    # DHCP: isc-dhcp-client (dhclient) to exercise the gRouter's control-plane DHCP server.
+    "bind9 postfix mailutils haproxy dsniff ettercap-text-only lynx isc-dhcp-client"
+)
+# human-readable list for the inspector / GINI (the commands students actually type)
+MACHINE_TOOLS_HUMAN = ("ip, ifconfig, ping, traceroute, mtr, tracepath, arping, "
+                       "dig/nslookup/host, tcpdump, tshark, nmap, nc, socat, curl, wget, "
+                       "iperf3, ethtool, brctl, telnet/telnetd, hping3, iptables; "
+                       "plus experiment servers: named (bind9), postfix+mail, haproxy, "
+                       "arpspoof/dnsspoof (dsniff), ettercap, lynx, dhclient (isc-dhcp-client)")
+
+_DOCKERFILE_MACHINE = f"""FROM python:3.12-slim
+ENV DEBIAN_FRONTEND=noninteractive
+RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
+        | debconf-set-selections \\
+ && apt-get update && apt-get install -y --no-install-recommends \\
+        {_MACHINE_TOOLS} \\
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
 CMD ["python", "-m", "dataplane.shuttle"]
@@ -116,7 +147,8 @@ while True:
 '''
 
 
-def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str | Path) -> Path:
+def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str | Path,
+                  auto_internet: bool = True) -> Path:
     """Write a self-contained Docker project that runs this topology."""
     work = Path(workdir)
     (work / "dataplane").mkdir(parents=True, exist_ok=True)
@@ -133,13 +165,27 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
             dst = work / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(content)
-    (work / "docker-compose.yml").write_text(_compose(config))
+    (work / "docker-compose.yml").write_text(_compose(config, auto_internet))
     return work
 
 
-def _compose(config: RuntimeConfig) -> str:
+def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
     rt = config.to_runtime(docker=True)
-    lines = ["name: gini-lab", "networks:", "  gini:", "    driver: bridge", "services:"]
+    # The `gini` bridge is a normal (non-internal) network so the HOST can reach
+    # published web consoles (Grafana/MinIO/…). "Faithful mode" (auto_internet off) does
+    # NOT isolate the network — that would also block published ports. Instead each host's
+    # shuttle drops its docker-eth0 default route (see `cut_default` below), so a Machine
+    # has no path to the internet unless one is routed through a drawn Internet element.
+    net = ["  gini:", "    driver: bridge"]
+    # if the canvas has an Internet element (a NAT gateway machine), add an external
+    # `wan` bridge with a fixed subnet. Only the gateway joins it; that container NATs
+    # the fabric out to the world. This is the lab's egress in faithful mode.
+    gw_machines = [m for m in rt["machines"] if m.get("gateway")]
+    if gw_machines:
+        net += [f"  {WAN_NET}:", "    driver: bridge",
+                "    ipam:", "      config:",
+                f"        - subnet: {WAN_SUBNET}", f"          gateway: {WAN_GATEWAY}"]
+    lines = ["name: gini-lab", "networks:", *net, "services:"]
 
     # fabric = the L2 switch substrate only (skip entirely if there are no switches)
     if rt["switches"]:
@@ -221,12 +267,19 @@ def _compose(config: RuntimeConfig) -> str:
                 lines.append(f'      - "{v}"')
 
     for m in rt["machines"]:
+        m = dict(m)
+        # faithful mode: a plain host with no internet path of its own drops its docker
+        # default route, so it genuinely can't reach the world (the management NIC isn't a
+        # back door). Hosts that route to a drawn Internet element keep/replace it instead.
+        m["cut_default"] = (not auto_internet
+                            and not m.get("fabric_default") and not m.get("gateway"))
+        nets = f"[gini, {WAN_NET}]" if m.get("gateway") else "[gini]"
         lines += [
             f"  {m['name']}:",
             "    build: { context: ., dockerfile: docker/Dockerfile.machine }",
             "    cap_add: [NET_ADMIN]",
             '    devices: ["/dev/net/tun:/dev/net/tun"]',
-            "    networks: [gini]",
+            f"    networks: {nets}",
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
         ]
@@ -240,7 +293,8 @@ class Orchestrator:
         self.runtime_dir = Path(runtime_dir)
         self.workdir: Path | None = None
 
-    def up(self, config: RuntimeConfig, workdir: str | Path) -> tuple[bool, str]:
+    def up(self, config: RuntimeConfig, workdir: str | Path,
+           auto_internet: bool = True) -> tuple[bool, str]:
         if config.routers or config.ovs_switches:   # routers & OVS use the gRouter image
             ok, msg = self._ensure_grouter_image()
             if not ok:
@@ -249,7 +303,7 @@ class Orchestrator:
             ok, msg = self._ensure_pox_image()
             if not ok:
                 return False, msg
-        self.workdir = write_project(config, workdir, self.runtime_dir)
+        self.workdir = write_project(config, workdir, self.runtime_dir, auto_internet)
         # --remove-orphans clears containers from a previous run that are no longer in
         # this compose, so stale services (e.g. an old web app) can't linger on the
         # network and shadow / break name resolution.

@@ -84,7 +84,13 @@ Prefer the app to build them for you? Run with `GINI_AUTOBUILD_GROUTER=1` and
 
 ### 3. Draw, Run, explore
 
-Drag elements from the palette, connect them, and press **Run**. Then:
+- **Place** a device by dragging it from the palette onto the canvas.
+- **Connect** two devices: click the **Connect** tool in the toolbar (the link icon), then
+  click the first device and then the second — a link appears. Click the tool again (or
+  press Esc) to leave Connect mode. You can also ask GINI: "connect R1 and S1".
+- **Run** the topology with the ▶ button.
+
+Once it's running:
 
 - **Double-click** a machine to open a shell; a service with a web UI (Grafana, MinIO …)
   to open its dashboard; a router to open the **Router Lab**.

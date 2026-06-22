@@ -7,7 +7,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget ca-certificates make gcc libc6-dev \
-        libreadline-dev libncurses-dev \
+        libreadline-dev libncurses-dev liblua5.4-dev \
         python3 python3-pip iproute2 \
     && rm -rf /var/lib/apt/lists/*
 

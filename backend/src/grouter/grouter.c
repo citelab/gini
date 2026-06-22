@@ -25,6 +25,7 @@
 #include "filter.h"
 #include "openflow_ctrl_iface.h"
 #include "openflow_pkt_proc.h"
+#include "gr_control_plane.h"   /* B2: control-plane module thread */
 
 router_config rconfig = {.router_name=NULL, .gini_home=NULL, .cli_flag=0, .config_file=NULL, .config_dir=NULL, .openflow=0, .ghandler=0, .clihandler= 0, .scheduler=0, .worker=0, .openflow_worker=0, .openflow_controller_iface=0, .openflow_flowtable_timeout=0, .schedcycle=0};
 pktcore_t *pcore;
@@ -140,6 +141,10 @@ int main(int ac, char *av[])
 		rconfig.openflow_flowtable_timeout = openflow_flowtable_timeout_init();
 	}
 
+	// B2: start the control-plane thread. It sits idle until a control module is
+	// loaded with `gpipe cp add <name>`; cheap to leave running otherwise.
+	rconfig.control_plane = gr_cp_thread_init();
+
 	// start the CLI..
 	CLIInit(&(rconfig));
 
@@ -151,6 +156,7 @@ int main(int ac, char *av[])
 		wait4thread(rconfig.openflow_controller_iface);
 		wait4thread(rconfig.openflow_worker);
 	}
+	wait4thread(rconfig.control_plane);
 	wait4thread(rconfig.ghandler);
 }
 
@@ -172,6 +178,10 @@ void shutdownRouter()
 	pthread_cancel(rconfig.worker);
 	if (rconfig.openflow) {
 		pthread_cancel(rconfig.openflow_worker);
+	}
+	if (rconfig.control_plane > 0) {
+		gr_cp_stop_all();
+		pthread_cancel(rconfig.control_plane);
 	}
 	verbose(1, "[main]:: shutting down the CLI handler.. ");
 	pthread_cancel(rconfig.clihandler);

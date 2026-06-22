@@ -21,6 +21,9 @@ class DeviceInstance:
     y: float = 0.0
     parent_id: str | None = None
     properties: dict[str, str] = field(default_factory=dict)
+    # manual addressing: link_id -> static IPv4 (bare dotted-quad). Only honored when
+    # the topology is in manual_addressing mode; empty/missing entries auto-fill.
+    static_ips: dict[str, str] = field(default_factory=dict)
 
     @property
     def type(self) -> DeviceType:
@@ -42,16 +45,22 @@ class Topology:
         self.name = name
         self.devices: dict[str, DeviceInstance] = {}
         self.links: dict[str, Link] = {}
+        # when True the compiler stops auto-assigning IPs and honors each device's
+        # static_ips, auto-filling any interface left blank.
+        self.manual_addressing: bool = False
         self._ids = itertools.count(1)
         self._name_counters: dict[str, int] = {}
+        # per-type auto-name prefix overrides (type_key -> prefix), set from Settings;
+        # empty means use the curated DEFAULT_PREFIXES (R1, S1, M1, …).
+        self.prefix_overrides: dict[str, str] = {}
 
     # -- creation ----------------------------------------------------------- #
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}{next(self._ids)}"
 
     def _auto_name(self, dt: DeviceType) -> str:
-        # Short prefix from the label, e.g. Router -> R1, Switch -> S1, VPC -> VPC1
-        base = "".join(ch for ch in dt.label if ch.isupper()) or dt.label[:2].upper()
+        # prefix: a user override (e.g. "Mach_"), else the curated default (M, R, S, …)
+        base = self.prefix_overrides.get(dt.key) or devices.default_prefix(dt.key)
         n = self._name_counters.get(base, 0) + 1
         self._name_counters[base] = n
         return f"{base}{n}"
@@ -133,6 +142,7 @@ class Topology:
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "manual_addressing": self.manual_addressing,
             "devices": [asdict(d) for d in self.devices.values()],
             "links": [asdict(l) for l in self.links.values()],
         }
@@ -140,6 +150,7 @@ class Topology:
     @classmethod
     def from_dict(cls, data: dict) -> "Topology":
         t = cls(data.get("name", "untitled"))
+        t.manual_addressing = bool(data.get("manual_addressing", False))
         max_n = 0
         for d in data.get("devices", []):
             inst = DeviceInstance(**d)

@@ -37,10 +37,6 @@ GUIDE: dict[str, str] = {
         "An Access Point bridges WIRELESS clients onto the wired LAN — it's essentially a "
         "switch with a radio. Use it when the topology needs Wi-Fi devices joining an "
         "existing wired network."),
-    "subnet": (
-        "A Subnet is an organizational marker for one IP network / broadcast domain. Use it "
-        "to label and group the hosts that share a 10.0.x.0/24 range; it documents structure "
-        "rather than forwarding traffic itself."),
     "cloud": (
         "The Internet element represents the outside world / upstream network. Connect it "
         "to a router or gateway to model traffic leaving your topology toward the public "
@@ -59,9 +55,12 @@ GUIDE: dict[str, str] = {
     # --- compute ---------------------------------------------------------- #
     "host": (
         "A Machine is an end host — a PC or server that runs programs and originates and "
-        "receives traffic (ping, iperf, etc.). It's the source and sink of every experiment. "
-        "Give it one link to a switch or router; for two networks at once, attach it to two "
-        "(it becomes multi-homed)."),
+        "receives traffic. It's the source and sink of every experiment. In gBuilder it "
+        "runs a Debian container with the GINI networking toolkit preinstalled — ping, "
+        "traceroute, mtr, tcpdump, tshark, nmap, nc, dig, iperf3, curl, hping3, iptables, "
+        "and more — so the book's experiments work out of the box (apt is there for "
+        "anything else). Give it one link to a switch or router; attach it to two for two "
+        "networks at once (multi-homed)."),
     "instance": (
         "A cloud Instance is a virtual machine in a cloud provider. Use it as a host inside "
         "cloud scenarios (VPCs, security groups) rather than a plain LAN."),

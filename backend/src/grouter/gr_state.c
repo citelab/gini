@@ -4,7 +4,9 @@
  */
 #include "gr_state.h"
 #include "arp.h"       /* ARPFindEntry, ARPAddEntry */
+#include "routetable.h" /* route_entry_t, MAX_ROUTES */
 #include <pthread.h>
+#include <string.h>
 
 extern route_entry_t route_tbl[];   /* defined in routetable.c */
 
@@ -36,6 +38,23 @@ void gr_route_del(int index)
 {
     pthread_rwlock_wrlock(&route_lock);
     deleteRouteEntryByIndex(route_tbl, index);
+    pthread_rwlock_unlock(&route_lock);
+}
+
+/* Delete the route whose (network, netmask) match exactly. Control protocols think in
+ * (net, mask), not table indices; this finds the slot under the write lock and removes it. */
+void gr_route_del_match(uchar *net, uchar *mask)
+{
+    int i;
+    pthread_rwlock_wrlock(&route_lock);
+    for (i = 0; i < MAX_ROUTES; i++)
+        if (!route_tbl[i].is_empty &&
+            memcmp(route_tbl[i].network, net, 4) == 0 &&
+            memcmp(route_tbl[i].netmask, mask, 4) == 0)
+        {
+            deleteRouteEntryByIndex(route_tbl, i);
+            break;
+        }
     pthread_rwlock_unlock(&route_lock);
 }
 

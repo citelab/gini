@@ -5,8 +5,31 @@
 #include "gr_control.h"
 #include "gr_pipeline.h"
 #include "gr_modules.h"
+#include "gr_control_plane.h"   /* B2: control-plane modules (cp add/list/stop) */
+#include "gr_mcast.h"           /* B3: multicast membership (mcast join/leave/show) */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+
+#ifdef GR_LUA
+/* slurp a whole file into a malloc'd, NUL-terminated buffer (caller frees). */
+static char *read_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    long n;
+    char *buf;
+    size_t rd;
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n < 0) { fclose(f); return 0; }
+    buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return 0; }
+    rd = fread(buf, 1, (size_t)n, f);
+    buf[rd] = '\0';
+    fclose(f);
+    return buf;
+}
+#endif
 
 static const char *verdict_name(gr_action_t a)
 {
@@ -31,44 +54,57 @@ int gr_control(const char *line, char *out, size_t outlen)
     char *tok = strtok(buf, " \t\n");
     if (!tok)
     {
-        snprintf(out, outlen, "usage: add acl <cidr> | add counter | list | clear | trace <a.b.c.d>");
+        snprintf(out, outlen, "usage: add acl <cidr> | add counter | list | clear | trace <a.b.c.d>"
+                 " | cp add <name> [args] | cp list | cp stop"
+                 " | mcast join|leave <group> <iface> | mcast show");
         return 0;
     }
 
     if (strcmp(tok, "add") == 0)
     {
         char *what = strtok(NULL, " \t\n");
-        if (what && strcmp(what, "acl") == 0)
+        char *arg  = strtok(NULL, " \t\n");
+        gr_module_t *m;
+        int need;
+
+        if (!what)
         {
-            char *cidr = strtok(NULL, " \t\n");
-            if (!cidr) { snprintf(out, outlen, "usage: add acl <cidr>"); return -1; }
-            gr_pipeline_add(pl, gr_mod_acl(cidr));
-            snprintf(out, outlen, "added acl %s  (pipeline: %d modules)", cidr, pl->count);
-        }
-        else if (what && strcmp(what, "counter") == 0)
-        {
-            gr_pipeline_add(pl, gr_mod_counter());
-            snprintf(out, outlen, "added counter  (pipeline: %d modules)", pl->count);
-        }
-        else if (what && strcmp(what, "nat") == 0)
-        {
-            char *ip = strtok(NULL, " \t\n");
-            if (!ip) { snprintf(out, outlen, "usage: add nat <snat-ip>"); return -1; }
-            gr_pipeline_add(pl, gr_mod_nat(ip));
-            snprintf(out, outlen, "added nat (snat %s)  (pipeline: %d modules)", ip, pl->count);
-        }
-#ifdef GR_LEGACY_MODULES
-        else if (what && strcmp(what, "filter") == 0)
-        {
-            gr_pipeline_add(pl, gr_mod_filter());
-            snprintf(out, outlen, "added filter (firewall)  (pipeline: %d modules)", pl->count);
-        }
-#endif
-        else
-        {
-            snprintf(out, outlen, "unknown module: %s", what ? what : "(none)");
+            snprintf(out, outlen, "usage: add <module> [arg]   (modules: %s | lua <path>)",
+                     gr_module_names());
             return -1;
         }
+#ifdef GR_LUA
+        if (strcmp(what, "lua") == 0)                 /* the scripting tier: load a script */
+        {
+            char *script;
+            if (!arg) { snprintf(out, outlen, "usage: add lua <script-path>"); return -1; }
+            script = read_file(arg);
+            if (!script) { snprintf(out, outlen, "add lua: cannot read '%s'", arg); return -1; }
+            m = gr_mod_lua(script);
+            free(script);
+            if (!m) { snprintf(out, outlen, "add lua: failed to load '%s'", arg); return -1; }
+            gr_pipeline_add(pl, m);
+            snprintf(out, outlen, "added lua %s  (pipeline: %d modules)", arg, pl->count);
+            return 0;
+        }
+#endif
+        need = gr_module_needs_arg(what);             /* built-in or native, via the registry */
+        if (need < 0)
+        {
+            snprintf(out, outlen, "unknown module: %s   (have: %s | lua <path>)",
+                     what, gr_module_names());
+            return -1;
+        }
+        if (need && !arg)
+        {
+            snprintf(out, outlen, "usage: add %s <arg>", what);
+            return -1;
+        }
+        m = gr_module_create(what, arg);
+        if (!m) { snprintf(out, outlen, "add %s: failed", what); return -1; }
+        gr_pipeline_add(pl, m);
+        snprintf(out, outlen, "added %s%s%s  (pipeline: %d modules)",
+                 what, arg ? " " : "", arg ? arg : "", pl->count);
     }
     else if (strcmp(tok, "list") == 0)
     {
@@ -81,6 +117,56 @@ int gr_control(const char *line, char *out, size_t outlen)
     {
         gr_pipeline_clear(pl);
         snprintf(out, outlen, "pipeline cleared (base only)");
+    }
+    else if (strcmp(tok, "cp") == 0)        /* B2: control-plane modules */
+    {
+        char *sub = strtok(NULL, " \t\n");
+        if (sub && strcmp(sub, "add") == 0)
+        {
+            char *name = strtok(NULL, " \t\n");
+            char *args = strtok(NULL, "\n");          /* rest of line = module args */
+            if (!name)
+            {
+                snprintf(out, outlen, "usage: cp add <name> [args]   (modules: %s)",
+                         gr_cp_names());
+                return -1;
+            }
+            return gr_cp_add(name, args, out, outlen);
+        }
+        else if (sub && strcmp(sub, "list") == 0)
+            return gr_cp_list(out, outlen);
+        else if (sub && strcmp(sub, "stop") == 0)
+        {
+            gr_cp_stop_all();
+            snprintf(out, outlen, "control plane stopped (all modules removed)");
+        }
+        else
+            snprintf(out, outlen, "usage: cp add <name> [args] | cp list | cp stop"
+                     "   (modules: %s)", gr_cp_names());
+    }
+    else if (strcmp(tok, "mcast") == 0)     /* B3: multicast membership */
+    {
+        char *sub = strtok(NULL, " \t\n");
+        if (sub && (strcmp(sub, "join") == 0 || strcmp(sub, "leave") == 0))
+        {
+            char *grp = strtok(NULL, " \t\n");
+            char *ifs = strtok(NULL, " \t\n");
+            uchar g[4]; uint32_t hg;
+            int a = 0, b = 0, c = 0, d = 0, iface;
+            if (!grp || !ifs)
+            { snprintf(out, outlen, "usage: mcast %s <group> <iface>", sub); return -1; }
+            sscanf(grp, "%d.%d.%d.%d", &a, &b, &c, &d);
+            g[0]=(uchar)a; g[1]=(uchar)b; g[2]=(uchar)c; g[3]=(uchar)d;
+            (void)hg;
+            iface = atoi(ifs);
+            if (strcmp(sub, "join") == 0) gr_mcast_join(g, iface);
+            else gr_mcast_leave(g, iface);
+            snprintf(out, outlen, "mcast %s %d.%d.%d.%d if%d", sub, a, b, c, d, iface);
+        }
+        else if (sub && strcmp(sub, "show") == 0)
+            gr_mcast_show(out, (int)outlen);
+        else
+            snprintf(out, outlen, "usage: mcast join <group> <iface> | leave <group> <iface> | show");
     }
     else if (strcmp(tok, "trace") == 0)
     {

@@ -41,6 +41,8 @@ class Router:
         self.pending: dict[str, list[tuple[Iface, bytes]]] = {}
         self.log = cfg.get("log", False)
         self.pipeline: list[tuple[str, str]] = []     # Z2: inline modules (type, param)
+        self.cp_modules: list[tuple[str, str]] = []   # B2: control-plane modules (name, args)
+        self.mgroups: list[tuple[str, str]] = []      # B3: multicast memberships (group, iface)
         self._ctrl = maybe_start(self.name, self._control, f"router {self.name}")
 
     def _control(self, cmd: str) -> str:
@@ -64,11 +66,13 @@ class Router:
         """Z2 inline module pipeline — same vocabulary as the C gRouter's gr_control."""
         parts = args.split()
         if not parts or parts[0] in ("help", ""):
-            return "gpipe: add acl <cidr> | add nat <ip> | add counter | list | clear | trace <ip>"
+            return ("gpipe: add acl <cidr>|nat <ip>|counter|block <ip>|lua <path> | "
+                    "list | clear | trace <ip> | cp add <name> [args]|cp list|cp stop")
         op = parts[0]
         if op == "add" and len(parts) >= 2:
             kind = parts[1]
-            if kind in ("acl", "nat") and len(parts) >= 3:
+            # block (native/Zig) and lua (scripting) mirror the real gRouter's gr_control.
+            if kind in ("acl", "nat", "block", "lua") and len(parts) >= 3:
                 self.pipeline.append((kind, parts[2]))
                 return f"added {kind} {parts[2]}  (pipeline: {len(self.pipeline)})"
             if kind == "counter":
@@ -81,6 +85,36 @@ class Router:
         if op == "clear":
             self.pipeline.clear()
             return "pipeline cleared (base only)"
+        if op == "cp":                                 # B2: control-plane modules
+            sub = parts[1] if len(parts) >= 2 else ""
+            if sub == "add" and len(parts) >= 3:
+                name, cargs = parts[2], " ".join(parts[3:])
+                self.cp_modules.append((name, cargs))
+                return f"control module '{name}' started"
+            if sub == "list":
+                if not self.cp_modules:
+                    return "no control modules loaded"
+                return "control modules (%d): %s" % (
+                    len(self.cp_modules), " ".join(n for n, _ in self.cp_modules))
+            if sub == "stop":
+                self.cp_modules.clear()
+                return "control plane stopped (all modules removed)"
+            return "usage: cp add <name> [args] | cp list | cp stop  (modules: hello dhcp rip igmp)"
+        if op == "mcast":                              # B3: multicast membership
+            sub = parts[1] if len(parts) >= 2 else ""
+            if sub in ("join", "leave") and len(parts) >= 4:
+                grp, iface = parts[2], parts[3]
+                key = (grp, iface)
+                if sub == "join" and key not in self.mgroups:
+                    self.mgroups.append(key)
+                elif sub == "leave" and key in self.mgroups:
+                    self.mgroups.remove(key)
+                return f"mcast {sub} {grp} if{iface}"
+            if sub == "show":
+                if not self.mgroups:
+                    return "multicast groups: (none)"
+                return "multicast groups: " + ", ".join(f"{g}->if{i}" for g, i in self.mgroups)
+            return "usage: mcast join <group> <iface> | leave <group> <iface> | show"
         if op == "trace" and len(parts) >= 2:
             dst = parts[1]
             out = [f"trace dst {dst}:"]
@@ -93,6 +127,8 @@ class Router:
                             verdict, dropped = "DROP", True
                     except ValueError:
                         pass
+                elif t == "block" and dst == p:        # native module: exact-dst drop
+                    verdict, dropped = "DROP", True
                 out.append(f"  {i}. {t:<8} -> {verdict}")
                 if dropped:
                     break

@@ -19,6 +19,7 @@ void gr_state_init(void);
 int  gr_route_lookup(uchar *ip_addr, uchar *nexthop, int *out_iface);   /* read  */
 void gr_route_add(uchar *net, uchar *mask, uchar *nhop, int iface);     /* write */
 void gr_route_del(int index);                                          /* write */
+void gr_route_del_match(uchar *net, uchar *mask);                       /* write (by net/mask) */
 
 /* ARP cache (rwlock-protected) */
 int  gr_arp_find(uchar *ip_addr, uchar *mac_out);                       /* read  */

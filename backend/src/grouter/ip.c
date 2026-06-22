@@ -11,6 +11,8 @@
 #include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
 #include "host_stack.h" /* Z1: sealed, optional lwIP host stack */
 #include "gr_pipeline.h" /* Z2: inline module-graph runner */
+#include "gr_control_plane.h" /* B2: control-plane module receive hook */
+#include "gr_mcast.h"         /* B3: multicast membership table */
 #include "mtu.h"
 #include "protocols.h"
 #include "ip.h"
@@ -30,10 +32,14 @@
 
 extern pktcore_t *pcore;
 
+void IPProcessMulticast(gpacket_t *in_pkt);                 /* B3 */
+static int ip_directed_bcast_iface(uchar *dst, int *iface); /* B3 */
+
 void IPInit()
 {
 	RouteTableInit(route_tbl);
 	MTUTableInit(MTU_tbl);
+	gr_mcast_init();                                       /* B3: multicast membership */
 }
 
 
@@ -57,6 +63,11 @@ void IPIncomingPacket(gpacket_t *in_pkt)
 	{
 		verbose(2, "[IPIncomingPacket]:: got IP packet destined to this router");
 		IPProcessMyPacket(in_pkt);
+	} else if ((gNtohl(tmpbuf, ip_pkt->ip_dst)[0] & 0xf0) == 0xe0)
+	{
+		// B3: class-D destination (224.0.0.0/4) -> multicast handling
+		verbose(2, "[IPIncomingPacket]:: got a multicast packet");
+		IPProcessMulticast(in_pkt);
 	} else if (COMPARE_IP(gNtohl(tmpbuf, ip_pkt->ip_dst), bcast_ip) == 0)
 	{
 		// TODO: rudimentary 'broadcast IP address' check
@@ -111,9 +122,82 @@ int IPCheckPacket4Me(gpacket_t *in_pkt)
  */
 int IPProcessBcastPacket(gpacket_t *in_pkt)
 {
+	/* B2: broadcast/link-local-multicast control traffic (DHCP DISCOVER to
+	 * 255.255.255.255, routing-protocol hellos to 224.0.0.x) is offered to the
+	 * control plane here. gr_cp_deliver copies on a filter match; it does not take
+	 * ownership, so the existing (no-op) memory behaviour is unchanged. */
+	gr_cp_deliver(in_pkt);
 	return EXIT_SUCCESS;
 }
 
+
+/*
+ * B3: forward a multicast (class-D) datagram. Link-local control groups (224.0.0.x, e.g.
+ * IGMP membership reports) are offered to the control plane so the IGMP-snoop module can
+ * learn memberships; routable groups are replicated to every interface that has a member,
+ * except the one the packet arrived on. With no members, the packet is dropped.
+ */
+void IPProcessMulticast(gpacket_t *in_pkt)
+{
+	char tmpbuf[MAX_TMPBUF_LEN];
+	ip_packet_t *ip_pkt = (ip_packet_t *)&in_pkt->data.data;
+	uchar grp[4];
+	uint32_t mask;
+	int i;
+
+	COPY_IP(grp, gNtohl(tmpbuf, ip_pkt->ip_dst));   /* group address (host order) */
+
+	gr_cp_deliver(in_pkt);                           /* let IGMP snoop / control see it */
+
+	mask = gr_mcast_lookup(grp);
+	if (mask == 0)                                   /* no members anywhere */
+	{
+		free(in_pkt);
+		return;
+	}
+
+	for (i = 0; i < 32; i++)
+	{
+		gpacket_t *cp;
+		ip_packet_t *cip;
+		if (!(mask & (1u << i))) continue;
+		if (i == in_pkt->frame.src_interface) continue;   /* don't echo to the source LAN */
+		if ((cp = duplicatePacket(in_pkt)) == NULL) continue;
+		cip = (ip_packet_t *)&cp->data.data;
+		cip->ip_ttl -= 1;                            /* this is a hop */
+		cip->ip_cksum = 0;
+		cip->ip_cksum = htons(checksum((uchar *)cip, cip->ip_hdr_len * 2));
+		cp->frame.dst_interface = i;
+		cp->frame.arp_bcast = TRUE;                  /* MAC set below; GNET sends as-is */
+		/* IPv4 multicast MAC: 01:00:5e + low 23 bits of the group */
+		cp->data.header.dst[0] = 0x01; cp->data.header.dst[1] = 0x00; cp->data.header.dst[2] = 0x5e;
+		cp->data.header.dst[3] = grp[1] & 0x7f;
+		cp->data.header.dst[4] = grp[2];
+		cp->data.header.dst[5] = grp[3];
+		cp->data.header.prot = htons(IP_PROTOCOL);
+		IPSend2Output(cp);
+	}
+	free(in_pkt);
+}
+
+
+/* B3: if dst is the all-ones host address of one of our connected /24s, return 1 and the
+ * interface index; used to forward a directed broadcast onto that subnet. */
+static int ip_directed_bcast_iface(uchar *dst, int *iface)
+{
+	int i;
+	uchar ip[4];
+	for (i = 0; i < MAX_MTU; i++)
+	{
+		if (findInterfaceIP(MTU_tbl, i, ip) != EXIT_SUCCESS) continue;
+		if (ip[0] == dst[0] && ip[1] == dst[1] && ip[2] == dst[2] && dst[3] == 255)
+		{
+			*iface = i;
+			return 1;
+		}
+	}
+	return 0;
+}
 
 
 /*
@@ -152,6 +236,25 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 			return EXIT_FAILURE;
 		if (_gv.action != GR_CONTINUE)
 			return EXIT_SUCCESS;   /* a module took ownership of the packet */
+	}
+
+	// B3: directed broadcast — dst is the all-ones host address of a connected /24. Forward
+	// it onto that subnet as a link-layer broadcast (unless it arrived from there). This is
+	// what makes the cross-subnet smurf experiment work; real edge routers disable it.
+	{
+		int dbif;
+		if (ip_directed_bcast_iface(gNtohl(tmpbuf, ip_pkt->ip_dst), &dbif) &&
+		    dbif != in_pkt->frame.src_interface)
+		{
+			ip_pkt->ip_cksum = 0;
+			ip_pkt->ip_cksum = htons(checksum((uchar *)ip_pkt, ip_pkt->ip_hdr_len * 2));
+			in_pkt->frame.dst_interface = dbif;
+			in_pkt->frame.arp_bcast = TRUE;
+			memset(in_pkt->data.header.dst, 0xff, 6);   /* L2 broadcast */
+			in_pkt->data.header.prot = htons(IP_PROTOCOL);
+			IPSend2Output(in_pkt);
+			return EXIT_SUCCESS;
+		}
 	}
 
 	// find the route... if it does not exist, should we send a
@@ -324,6 +427,11 @@ int IPProcessMyPacket(gpacket_t *in_pkt)
 
 	if (IPVerifyPacket(ip_pkt) == EXIT_SUCCESS)
 	{
+		// B2: offer router-bound packets to the control plane (a routing protocol's
+		// packets, DHCP unicast renewals). gr_cp_deliver copies on a filter match and
+		// does not consume, so the existing ICMP/host-stack handling below is unchanged.
+		gr_cp_deliver(in_pkt);
+
 		// Is packet ICMP? send it to the ICMP module
 		// further processing with appropriate type code
 
@@ -492,7 +600,11 @@ int isInSameNetwork(uchar *ip_addr1, uchar *ip_addr2)
 	for (i = 0; i < MAX_ROUTES; i++)
 	{
 		if (route_tbl[i].is_empty == TRUE) continue;
-		// TODO: Could there be a bug here? What about default routes with 0.0.0.0??
+		// Skip the default route (netmask 0.0.0.0): it masks every address to 0.0.0.0,
+		// which would make ANY two IPs look "on the same network" and trigger spurious
+		// ICMP redirects on every forwarded packet. Only real subnets count here.
+		if ((route_tbl[i].netmask[0] | route_tbl[i].netmask[1] |
+		     route_tbl[i].netmask[2] | route_tbl[i].netmask[3]) == 0) continue;
 		for (j = 0; j < 4; j++)
 		{
 			net1[j] = ip_addr1[j] & route_tbl[i].netmask[j];

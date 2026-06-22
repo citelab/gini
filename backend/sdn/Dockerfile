@@ -9,7 +9,7 @@ RUN chmod +x /usr/local/bin/run-pox.sh
 
 # Which controller app to run, and the OpenFlow port to listen on. Overridden per
 # container by the orchestrator (POX_APP / POX_PORT from the compiled topology).
-ENV POX_APP=forwarding.l2_learning \
+ENV POX_APP=gini.samples.switch \
     POX_PORT=6633
 
 EXPOSE 6633

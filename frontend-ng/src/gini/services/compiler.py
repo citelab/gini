@@ -6,9 +6,10 @@ Generalizes the hand-written R0 wiring to any topology:
   * assign IPs, gateways, MACs, and per-endpoint UDP ports,
   * emit machine/switch/router specs that gini.runtime can run (in-process or Docker).
 
-Cloud "grouping" devices (VPC, subnet, region, cluster, pod, instance-group) are
+Cloud "grouping" devices (VPC, cloud-subnet, region, cluster, pod, instance-group) are
 organizational in R0 and are skipped as runtime nodes (links touching them are
 dropped, with a note). Cloud endpoints (instances, containers, LBs, …) run as machines.
+(Plain IP subnets are NOT a device: each L2 broadcast domain is auto-assigned a /24.)
 """
 from __future__ import annotations
 
@@ -20,13 +21,13 @@ from .cloud_catalog import is_service, service_for
 
 ROUTERS = {"router", "firewall"}
 SWITCHES = {"switch", "hub"}        # plain L2 — live in the shared `fabric` container
-GROUPS = {"vpc", "subnet", "cloud_subnet", "region", "k8s_cluster", "instance_group", "pod"}
+GROUPS = {"vpc", "cloud_subnet", "region", "k8s_cluster", "instance_group", "pod"}
 
 # SDN: an OVS is an OpenFlow switch that runs as its OWN container (the gRouter in
 # --openflow mode), programmed by a controller over a management channel. A controller
 # is the control plane — it is NOT a data host and gets no data-plane IP/gateway.
 DEFAULT_OF_PORT = 6633
-DEFAULT_OF_APP = "forwarding.l2_learning"
+DEFAULT_OF_APP = "gini.samples.switch"
 
 
 def _role(type_key: str) -> str:
@@ -106,6 +107,10 @@ class MachineSpec:
     name: str
     ifaces: list["IfaceSpec"]      # one per segment the machine is on (multi-homing)
     gw: str | None                 # default gateway (first segment that has a router)
+    # --- internet / NAT gateway (the drawn "Internet" element) --------------- #
+    gateway: bool = False          # this node is the on-fabric NAT gateway to the world
+    fabric_default: bool = False   # send 0.0.0.0/0 INTO the fabric (egress via the gateway)
+    fabric_gw: str | None = None   # for the gateway: the local router IP for the return path
 
 
 @dataclass
@@ -113,6 +118,17 @@ class IfaceSpec:
     ip: str
     mac: str
     ep: Endpoint
+    link_id: str = ""          # the topology link this interface sits on
+
+
+def _is_ipv4(s: str) -> bool:
+    parts = (s or "").strip().split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        return all(0 <= int(p) <= 255 for p in parts)
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -185,6 +201,8 @@ class RuntimeConfig:
         return {
             "machines": [
                 {"name": _svc(m.name), "gw": m.gw,
+                 "gateway": m.gateway, "fabric_default": m.fabric_default,
+                 "fabric_gw": m.fabric_gw,
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "tap": f"gini{idx}",
                              "port": i.ep.wiring(docker)}
                             for idx, i in enumerate(m.ifaces)]}
@@ -266,30 +284,54 @@ _GRAFANA_PROVIDER = (
 
 
 def _grafana_dashboard_json() -> str:
-    """A starter Grafana dashboard over cAdvisor metrics — CPU, memory, network per
-    container. Built via json.dumps so the PromQL (with quotes) is always valid JSON."""
+    """A starter Grafana dashboard. It leads with Prometheus *pipeline-health* panels
+    (targets up, samples scraped) that ALWAYS have data — so the board is never blank and
+    doubles as a built-in diagnostic — then shows cAdvisor per-container CPU/mem/network
+    (best-effort; cAdvisor can be sparse on Docker Desktop). Built via json.dumps so the
+    PromQL (with quotes) is always valid JSON."""
     import json
 
     ds = {"type": "prometheus", "uid": "prometheus"}      # bind panels to the datasource
 
-    def panel(pid, title, expr, x, y, w=12, h=9):
+    def ts(pid, title, expr, legend, x, y, w=12, h=8):
         return {"id": pid, "type": "timeseries", "title": title, "datasource": ds,
                 "gridPos": {"h": h, "w": w, "x": x, "y": y},
                 "fieldConfig": {"defaults": {}, "overrides": []},
-                "targets": [{"expr": expr, "legendFormat": "{{name}}", "refId": "A",
+                "targets": [{"expr": expr, "legendFormat": legend, "refId": "A",
+                             "datasource": ds}]}
+
+    def stat(pid, title, expr, legend, x, y, w=12, h=6):
+        return {"id": pid, "type": "stat", "title": title, "datasource": ds,
+                "gridPos": {"h": h, "w": w, "x": x, "y": y},
+                "options": {"colorMode": "background", "graphMode": "none",
+                            "textMode": "value_and_name", "reduceOptions":
+                            {"calcs": ["lastNotNull"]}},
+                "fieldConfig": {"defaults": {"mappings": [
+                    {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"},
+                                                  "1": {"text": "UP", "color": "green"}}}],
+                    "thresholds": {"steps": [{"color": "red", "value": None},
+                                             {"color": "green", "value": 1}]}},
+                    "overrides": []},
+                "targets": [{"expr": expr, "legendFormat": legend, "refId": "A",
                              "datasource": ds}]}
 
     return json.dumps({
-        "title": "Container resources", "uid": "gini-containers",
+        "title": "GINI lab overview", "uid": "gini-containers",
         "schemaVersion": 39, "version": 1, "refresh": "5s",
         "time": {"from": "now-15m", "to": "now"},
         "panels": [
-            panel(1, "CPU (cores) by container",
-                  'rate(container_cpu_usage_seconds_total{name!=""}[1m])', 0, 0),
-            panel(2, "Memory (bytes) by container",
-                  'container_memory_usage_bytes{name!=""}', 12, 0),
-            panel(3, "Network RX (bytes/s) by container",
-                  'rate(container_network_receive_bytes_total{name!=""}[1m])', 0, 9, w=24),
+            # --- pipeline health: always populated (Prometheus knows its own targets) ---
+            stat(10, "Scrape targets up", "up", "{{job}}", 0, 0, w=8, h=6),
+            ts(11, "Samples scraped / target", "scrape_samples_scraped", "{{job}}",
+               8, 0, w=16, h=6),
+            # --- per-container resources (cAdvisor; best-effort on Docker Desktop) ---
+            ts(1, "CPU (cores) by container",
+               'rate(container_cpu_usage_seconds_total{name!=""}[1m])', "{{name}}", 0, 6),
+            ts(2, "Memory (bytes) by container",
+               'container_memory_usage_bytes{name!=""}', "{{name}}", 12, 6),
+            ts(3, "Network RX (bytes/s) by container",
+               'rate(container_network_receive_bytes_total{name!=""}[1m])',
+               "{{name}}", 0, 14, w=24),
         ],
     }, indent=2)
 
@@ -299,6 +341,9 @@ class RuntimeCompiler:
         cfg = RuntimeConfig()
         role = {d.id: _role(d.type_key) for d in topo.devices.values()}
         name = {d.id: d.name for d in topo.devices.values()}
+        # the drawn "Internet" element (type_key "cloud") is the on-fabric NAT gateway:
+        # it sits on the fabric like a host but also has an external uplink + does NAT.
+        gw_dids = {d.id for d in topo.devices.values() if d.type_key == "cloud"}
 
         # 1. keep links not touching grouping devices; pull out SDN control links
         #    (controller↔OVS) — they are a management association, not a data segment.
@@ -402,6 +447,36 @@ class RuntimeCompiler:
                         ip = base + str(n)            # .10, .11 ...
                     iface_ip[key] = ip
 
+        # 5b. manual addressing: honor each device's typed static IPs, auto-fill the
+        #     rest. MACs stay auto. Default gateways then follow the (possibly
+        #     overridden) router address on each segment.
+        if getattr(topo, "manual_addressing", False):
+            for d in topo.devices.values():
+                for lid, sip in (getattr(d, "static_ips", None) or {}).items():
+                    key = (lid, d.id)
+                    bare = (sip or "").strip().split("/")[0]
+                    if key in iface_ip and _is_ipv4(bare):
+                        iface_ip[key] = bare
+            seg_gateway = {}
+            for l in kept:
+                seg = seg_ids[seg_of_link[l.id]]
+                for end in (l.source_id, l.target_id):
+                    if role[end] == "router" and (l.id, end) in iface_ip:
+                        seg_gateway.setdefault(seg, iface_ip[(l.id, end)])
+
+        # the Internet node's IP on each segment it touches; if a segment has an
+        # Internet node but no router, hosts there default straight to the Internet node.
+        seg_internet_ip: dict[int, str] = {}
+        for l in kept:
+            seg = seg_ids[seg_of_link[l.id]]
+            for end in (l.source_id, l.target_id):
+                if end in gw_dids and (l.id, end) in iface_ip:
+                    seg_internet_ip.setdefault(seg, iface_ip[(l.id, end)])
+        for seg, ip in seg_internet_ip.items():
+            seg_gateway.setdefault(seg, ip)
+        # the segment + IP that everything default-routes toward (first Internet node)
+        gw_seg, gw_ip = next(iter(seg_internet_ip.items()), (None, None))
+
         def mac(seg: int, kind: int, idx: int) -> str:
             return f"02:00:00:{seg + 1:02x}:{kind:02x}:{idx:02x}"
 
@@ -424,13 +499,27 @@ class RuntimeCompiler:
                     m_ifaces[end] = []
                     m_order.append(end)
                 m_ifaces[end].append(IfaceSpec(ip=iface_ip[key] + "/24",
-                                               mac=mac(seg, 2, midx), ep=eps[key]))
+                                               mac=mac(seg, 2, midx), ep=eps[key],
+                                               link_id=l.id))
                 gw = seg_gateway.get(seg)        # default route via the first router seen
                 if gw and end not in m_gw:
                     m_gw[end] = gw
+        have_internet = bool(gw_dids)
         for did in m_order:
-            cfg.machines.append(MachineSpec(name=name[did], ifaces=m_ifaces[did],
-                                            gw=m_gw.get(did)))
+            if did in gw_dids:
+                # the Internet element: NAT gateway. It defaults OUT its uplink (set up
+                # at runtime), and routes the experiment supernet back via its local
+                # router so replies reach the hosts behind it.
+                cfg.machines.append(MachineSpec(
+                    name=name[did], ifaces=m_ifaces[did], gw=None,
+                    gateway=True, fabric_gw=m_gw.get(did)))
+            else:
+                # an ordinary host: when an Internet element is on the canvas, its
+                # default route goes INTO the fabric so internet egresses through the
+                # drawn routers (traceroute then shows the real path).
+                cfg.machines.append(MachineSpec(
+                    name=name[did], ifaces=m_ifaces[did], gw=m_gw.get(did),
+                    fabric_default=have_internet and bool(m_gw.get(did))))
 
         # switches
         for did, r in role.items():
@@ -531,7 +620,8 @@ class RuntimeCompiler:
                 ridx += 1
                 pos += 1
                 ifaces.append(IfaceSpec(ip=iface_ip[key] + "/24",
-                                        mac=mac(seg, 1, ridx), ep=eps[key]))
+                                        mac=mac(seg, 1, ridx), ep=eps[key],
+                                        link_id=l.id))
                 rtr_seg_ip[(did, seg)] = iface_ip[key]
                 rtr_seg_dev[(did, seg)] = pos          # matches run_grouter's tun{pos}
                 seg_routers.setdefault(seg, []).append(did)
@@ -543,12 +633,14 @@ class RuntimeCompiler:
         # static inter-router routes: each router needs a route to every subnet it is
         # NOT directly on, via the neighbouring router on the shortest path. (There is no
         # routing protocol between the C routers, so we compute the static routes here.)
-        self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers)
+        self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
+                                gw_seg, gw_ip)
 
         return cfg
 
     @staticmethod
-    def _add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers) -> None:
+    def _add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
+                           gw_seg=None, gw_ip=None) -> None:
         import ipaddress
         from collections import deque
 
@@ -592,6 +684,24 @@ class RuntimeCompiler:
                                "mask": str(net.netmask),
                                "gw": rtr_seg_ip[(nh, shared)],
                                "dev": rtr_seg_dev[(did, shared)]})
+
+            # default route (0.0.0.0/0) toward the Internet/NAT gateway, so internet-
+            # bound traffic leaves the lab through the drawn Internet element.
+            if gw_seg is not None and gw_ip:
+                if gw_seg in my_segs:                          # gateway is on my segment
+                    routes.append({"net": "0.0.0.0", "mask": "0.0.0.0", "gw": gw_ip,
+                                   "dev": rtr_seg_dev[(did, gw_seg)]})
+                else:                                          # hop toward its router
+                    cand = [c for c in seg_routers.get(gw_seg, [])
+                            if c in dist and c != did]
+                    if cand:
+                        best = min(cand, key=lambda c: dist[c])
+                        nh = firsthop[best]
+                        if nh is not None:
+                            shared = adj[did][nh]
+                            routes.append({"net": "0.0.0.0", "mask": "0.0.0.0",
+                                           "gw": rtr_seg_ip[(nh, shared)],
+                                           "dev": rtr_seg_dev[(did, shared)]})
             spec_of[did].routes = routes
 
     @staticmethod
@@ -604,6 +714,21 @@ class RuntimeCompiler:
         dashboards = [s for s in cfg.services if s.type_key == "dashboard"]
         if not metrics and not dashboards:
             return host_port
+
+        # A Dashboards (Grafana) element with no Prometheus on the canvas: auto-add a
+        # hidden Prometheus so Grafana always has a datasource + data to show (mirrors the
+        # cAdvisor sidecar). Without this, Grafana loads but has nothing to graph.
+        if dashboards and not metrics:
+            from .cloud_catalog import service_for
+            auto = ServiceSpec(
+                name="Prometheus", type_key="metrics", image=service_for("metrics").image,
+                summary="Auto-added Prometheus backing the dashboard (scrapes cAdvisor).",
+                ports=[{"container": 9090, "host": host_port,
+                        "label": "console", "web": True}])
+            host_port += 1
+            cfg.services.append(auto)
+            metrics = [auto]
+            cfg.notes.append("auto-added Prometheus + cAdvisor behind Grafana")
 
         # cAdvisor — exposes CPU/mem/net for EVERY container, so any topology is
         # observable without the apps exporting anything. It's infra (not a canvas node).
@@ -637,6 +762,10 @@ class RuntimeCompiler:
                     "./observability/grafana/container.json:"
                     "/var/lib/grafana/dashboards/container.json:ro",
                 ]
+                # land students on the provisioned dashboard — set ONLY now that the file
+                # exists (else Grafana errors "Failed to load home dashboard").
+                graf.env["GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH"] = \
+                    "/var/lib/grafana/dashboards/container.json"
         return host_port
 
 
@@ -665,7 +794,7 @@ def validate(topo: Topology) -> list[dict]:
     cfg = RuntimeCompiler().compile(topo)
     id_of = {n: i for i, n in name.items()}
     for m in cfg.machines:
-        if m.gw:
+        if m.gw or getattr(m, "gateway", False):    # gateway egresses via its own uplink
             continue
         did = id_of.get(m.name)
         on_lan = did is not None and any(
@@ -725,12 +854,13 @@ def address_map(topo: Topology) -> dict[str, dict]:
     for m in cfg.machines:
         out[m.name] = {"role": "machine", "interfaces": [
             {"name": f"eth{i}", "ip": itf.ip, "mac": itf.mac, "subnet": subnet(itf.ip),
-             "gateway": m.gw if i == 0 else None, "peer": itf.ep.peer.device}
+             "gateway": m.gw if i == 0 else None, "peer": itf.ep.peer.device,
+             "link_id": itf.link_id}
             for i, itf in enumerate(m.ifaces)]}
     for r in cfg.routers:
         out[r.name] = {"role": "router", "interfaces": [
             {"name": f"eth{i}", "ip": itf.ip, "mac": itf.mac, "subnet": subnet(itf.ip),
-             "gateway": None, "peer": itf.ep.peer.device}
+             "gateway": None, "peer": itf.ep.peer.device, "link_id": itf.link_id}
             for i, itf in enumerate(r.ifaces)]}
     for s in cfg.switches:
         out[s.name] = {"role": "switch", "ports": len(s.eps), "interfaces": [],

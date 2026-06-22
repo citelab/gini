@@ -28,6 +28,12 @@ TUNSETIFF = 0x400454CA
 IFF_TAP = 0x0002
 IFF_NO_PI = 0x1000
 
+# External uplink for the Internet element (NAT gateway). Must match the `wan` network
+# in services/orchestrator.py so the gateway can find its WAN interface + default route.
+WAN_SUBNET_PREFIX = "192.168.244."
+WAN_GATEWAY = "192.168.244.1"
+EXP_SUPERNET = "10.0.0.0/8"
+
 
 def open_tap(name: str) -> int:
     fd = os.open("/dev/net/tun", os.O_RDWR)
@@ -43,11 +49,60 @@ def configure_iface(name: str, mac: str, cidr: str) -> None:
     subprocess.run(["ip", "link", "set", name, "mtu", "1400"], check=True)   # absorb UDP encap
 
 
-def add_default_route(gw: str, exp_net: str = "10.0.0.0/8") -> None:
+def add_default_route(gw: str, exp_net: str = EXP_SUPERNET) -> None:
     # Route the experiment supernet via the gateway. Connected /24s (from `ip addr
     # add`) are more specific and win for on-link subnets; this catches everything
     # else. The container's default route stays on docker eth0 for the UDP transport.
     subprocess.run(["ip", "route", "replace", exp_net, "via", gw], check=False)
+
+
+def set_fabric_default(gw: str) -> None:
+    """Send the *real* default route (0.0.0.0/0) into the fabric via `gw`, so internet-
+    bound traffic egresses through the drawn routers + Internet element (not docker eth0).
+    Used on ordinary hosts when an Internet element is present on the canvas."""
+    subprocess.run(["ip", "route", "replace", "default", "via", gw], check=False)
+
+
+def cut_default_route() -> None:
+    """Faithful mode with no Internet element: remove the docker-eth0 default route so this
+    host has NO path to the internet (the management NIC isn't a back door). Inter-container
+    traffic and the simulated fabric still work — those use connected/`10.0.0.0/8` routes."""
+    subprocess.run(["ip", "route", "del", "default"], check=False)
+    print("[gini] faithful mode: default route removed (no internet on this host)",
+          file=sys.stderr)
+
+
+def _wan_iface() -> str | None:
+    """The interface attached to the external `wan` bridge (its IP is in WAN_SUBNET)."""
+    out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()              # "<idx>: <ifname>    inet <ip>/<pfx> ..."
+        if len(parts) >= 4 and parts[1] != "lo" and parts[3].startswith(WAN_SUBNET_PREFIX):
+            return parts[1]
+    return None
+
+
+def setup_nat_gateway(cfg: dict) -> None:
+    """Turn this container into the lab's NAT gateway (the drawn Internet element):
+    enable IP forwarding, pin the default route out the external uplink, MASQUERADE the
+    fabric out to the world, and route the experiment supernet back via the local router
+    so replies reach the hosts behind us."""
+    try:
+        with open("/proc/sys/net/ipv4/ip_forward", "w") as f:    # namespaced; NET_ADMIN ok
+            f.write("1")
+    except OSError:
+        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
+    subprocess.run(["ip", "route", "replace", "default", "via", WAN_GATEWAY], check=False)
+    wan = _wan_iface()
+    if wan:
+        subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING",
+                        "-o", wan, "-j", "MASQUERADE"], check=False)
+    fgw = cfg.get("fabric_gw")
+    if fgw:                              # return path: GINI subnets reachable via the router
+        subprocess.run(["ip", "route", "replace", EXP_SUPERNET, "via", fgw], check=False)
+    print(f"[{cfg.get('name')}] NAT gateway: {EXP_SUPERNET} via {fgw} "
+          f"<-> internet via {wan}", file=sys.stderr)
 
 
 def main() -> None:
@@ -72,8 +127,15 @@ def main() -> None:
         print(f"[{cfg['name']}] {tap} {itf['ip']} <-> UDP "
               f"{port.peer_host}:{port.peer_port}", file=sys.stderr)
 
-    if cfg.get("gw"):
-        add_default_route(cfg["gw"])
+    if cfg.get("gateway"):                       # the drawn Internet element = NAT gateway
+        setup_nat_gateway(cfg)
+    elif cfg.get("fabric_default") and cfg.get("gw"):
+        set_fabric_default(cfg["gw"])            # internet egresses through the fabric
+    else:
+        if cfg.get("gw"):
+            add_default_route(cfg["gw"])         # experiment supernet via the router
+        if cfg.get("cut_default"):               # faithful mode: no internet on this host
+            cut_default_route()
 
     while True:
         for key, _ in sel.select():

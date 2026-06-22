@@ -58,6 +58,18 @@ def test_suggest_recipes_matches_intent():
     assert "load_test" in ids2
 
 
+def test_inspector_shows_what_each_element_runs():
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(app)
+    h = w.api.add_device("host")["id"]
+    w.ctx.select(h)
+    note = w.inspector.runs_lbl.text()
+    assert "tshark" in note and "Debian" in note          # batteries-included machine
+    s3 = w.api.add_device("object_store")["id"]
+    w.ctx.select(s3)
+    assert "minio" in w.inspector.runs_lbl.text().lower()  # services show their image
+
+
 def test_unknown_recipe_raises():
     api = _api()
     try:

@@ -102,14 +102,13 @@ CATALOG: dict[str, CloudService] = {
     "dashboard": CloudService(
         image="grafana/grafana:latest",
         summary="Grafana dashboards — opens straight to a live view (no login in the lab).",
-        # No-login teaching setup: anonymous Admin + skip the login form, and make the
-        # provisioned container dashboard the home page so students land on graphs.
+        # No-login teaching setup: anonymous Admin + skip the login form. The home-dashboard
+        # path is set by the compiler's observability auto-wiring ONLY once the dashboard is
+        # actually provisioned (otherwise Grafana errors on a missing home dashboard).
         # admin/admin still works if you want to edit/save.
         env={"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD": "admin",
              "GF_AUTH_ANONYMOUS_ENABLED": "true", "GF_AUTH_ANONYMOUS_ORG_ROLE": "Admin",
-             "GF_AUTH_DISABLE_LOGIN_FORM": "true",
-             "GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH":
-                 "/var/lib/grafana/dashboards/container.json"},
+             "GF_AUTH_DISABLE_LOGIN_FORM": "true"},
         ports=(Port(3000, "console", web=True),)),
     "tracing": CloudService(
         image="jaegertracing/all-in-one:latest",

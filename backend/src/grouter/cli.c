@@ -108,9 +108,10 @@ int CLIInit(router_config *rarg)
     registerCLI("openflow", openflowCmd, SHELP_OPENFLOW, USAGE_OPENFLOW, LHELP_OPENFLOW);
     registerCLI("gnc", gncCmd, SHELP_GNC, USAGE_GNC, LHELP_GNC);
     registerCLI("gpipe", gpipeCmd,
-                "manage the inline module pipeline (Z2)",
-                "gpipe add acl <cidr> | add counter | list | clear | trace <a.b.c.d>",
-                "edit and inspect the gRouter's inline module pipeline");
+                "manage the inline module pipeline (Z2) + control-plane modules (B2)",
+                "gpipe add acl <cidr>|nat <ip>|counter|block <ip>|lua <path> | list | clear | trace <a.b.c.d>"
+                " | cp add <name> [args] | cp list | cp stop",
+                "edit and inspect the gRouter's inline (data-plane) pipeline and control-plane modules");
 
     if (rarg->config_dir != NULL)
         chdir(rarg->config_dir);                  // change to the configuration directory

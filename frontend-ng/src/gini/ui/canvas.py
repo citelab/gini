@@ -6,8 +6,10 @@ model stays the single source of truth; the scene is a view of it.
 """
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import (
-    QEasingCurve, QLineF, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation,
+    QEasingCurve, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF,
@@ -25,6 +27,7 @@ from .theme.tokens import Theme
 MIME = "application/x-gini-device"
 GRID = 22
 NODE_W, NODE_H = 138, 84
+CORNER_R = 13          # rounded-corner radius for bent connectors
 
 
 def _qcolor(spec: str) -> QColor:
@@ -41,6 +44,61 @@ def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
         int(c1.green() + (c2.green() - c1.green()) * t),
         int(c1.blue() + (c2.blue() - c1.blue()) * t),
     )
+
+
+def _ortho_waypoints(a: "NodeItem", b: "NodeItem") -> list[QPointF]:
+    """Manhattan (horizontal/vertical) waypoints from A's border to B's border.
+
+    Exits perpendicular to the nearer face and turns at the midline, giving a tidy
+    two-bend 'Z' that the rounded-path builder softens into smooth elbows.
+    """
+    ax, ay = a.pos().x(), a.pos().y()
+    bx, by = b.pos().x(), b.pos().y()
+    ca = QPointF(ax + NODE_W / 2, ay + NODE_H / 2)
+    cb = QPointF(bx + NODE_W / 2, by + NODE_H / 2)
+    dx, dy = cb.x() - ca.x(), cb.y() - ca.y()
+    if abs(dy) >= abs(dx):                       # stacked-ish -> exit top/bottom
+        if dy >= 0:
+            ex, en = QPointF(ca.x(), ay + NODE_H), QPointF(cb.x(), by)
+        else:
+            ex, en = QPointF(ca.x(), ay), QPointF(cb.x(), by + NODE_H)
+        mid = (ex.y() + en.y()) / 2
+        return [ex, QPointF(ex.x(), mid), QPointF(en.x(), mid), en]
+    else:                                        # side-by-side -> exit left/right
+        if dx >= 0:
+            ex, en = QPointF(ax + NODE_W, ca.y()), QPointF(bx, cb.y())
+        else:
+            ex, en = QPointF(ax, ca.y()), QPointF(bx + NODE_W, cb.y())
+        mid = (ex.x() + en.x()) / 2
+        return [ex, QPointF(mid, ex.y()), QPointF(mid, en.y()), en]
+
+
+def _rounded_path(pts: list[QPointF], r: float) -> QPainterPath:
+    """A polyline through `pts` with each interior corner rounded by radius `r`."""
+    path = QPainterPath()
+    # drop near-duplicate / collinear-collapsed points so corners are well defined
+    clean: list[QPointF] = []
+    for p in pts:
+        if not clean or (p - clean[-1]).manhattanLength() > 0.5:
+            clean.append(p)
+    if not clean:
+        return path
+    path.moveTo(clean[0])
+    if len(clean) == 2:
+        path.lineTo(clean[1])
+        return path
+    for i in range(1, len(clean) - 1):
+        prev, cur, nxt = clean[i - 1], clean[i], clean[i + 1]
+        vin, vout = cur - prev, nxt - cur
+        lin = math.hypot(vin.x(), vin.y())
+        lout = math.hypot(vout.x(), vout.y())
+        if lin < 1e-6 or lout < 1e-6:
+            continue
+        ri = min(r, lin / 2, lout / 2)
+        path.lineTo(cur - vin * (ri / lin))      # straight up to the corner
+        path.quadTo(cur, cur + vout * (ri / lout))  # round through it
+    path.lineTo(clean[-1])
+    return path
 
 
 class NodeItem(QGraphicsObject):
@@ -220,6 +278,12 @@ class NodeItem(QGraphicsObject):
         super().mouseDoubleClickEvent(e)
 
     def contextMenuEvent(self, e):
+        self.popup_menu(e.screenPos())
+        e.accept()
+
+    def popup_menu(self, screen_pos) -> None:
+        """Build + show this node's action menu. Reused by the view's right-click handler
+        (a plain right-click shows this; a right-drag connects instead)."""
         from PySide6.QtWidgets import QMenu
         self.setSelected(True)
         menu = QMenu()
@@ -228,16 +292,16 @@ class NodeItem(QGraphicsObject):
         a_logs = menu.addAction("View logs")
         menu.addSeparator()
         a_del = menu.addAction("Delete")
-        chosen = menu.exec(e.screenPos())
+        chosen = menu.exec(screen_pos)
+        bus = self._scene.ctx.bus
         if chosen == a_console:
-            self._scene.ctx.bus.device_console_requested.emit(self.inst.id)
+            bus.device_console_requested.emit(self.inst.id)
         elif chosen == a_login:
-            self._scene.ctx.bus.device_activated.emit(self.inst.id)
+            bus.device_activated.emit(self.inst.id)
         elif chosen == a_logs:
-            self._scene.ctx.bus.device_logs_requested.emit(self.inst.id)
+            bus.device_logs_requested.emit(self.inst.id)
         elif chosen == a_del:
-            self._scene.ctx.bus.device_delete_requested.emit(self.inst.id)
-        e.accept()
+            bus.device_delete_requested.emit(self.inst.id)
 
     def set_status(self, status: str) -> None:
         self.status = status
@@ -258,7 +322,7 @@ class EdgeItem(QGraphicsObject):
         self._scene = scene
         self.link = link
         self.setZValue(1)
-        self._line = QLineF()
+        self._path = QPainterPath()
         self._packet_t: float | None = None
         self._packet_color: QColor | None = None
         self._flow_anim: QVariantAnimation | None = None
@@ -290,22 +354,33 @@ class EdgeItem(QGraphicsObject):
         b = nodes.get(self.link.target_id)
         if not a or not b:
             return
-        ca = a.pos() + QPointF(NODE_W / 2, NODE_H / 2)
-        cb = b.pos() + QPointF(NODE_W / 2, NODE_H / 2)
         self.prepareGeometryChange()
-        self._line = QLineF(ca, cb)
+        style = getattr(self._scene.ctx.settings, "connector_style", "orthogonal")
+        if style == "straight":
+            ca = a.pos() + QPointF(NODE_W / 2, NODE_H / 2)
+            cb = b.pos() + QPointF(NODE_W / 2, NODE_H / 2)
+            path = QPainterPath(ca)
+            path.lineTo(cb)
+            self._path = path
+        else:
+            self._path = _rounded_path(_ortho_waypoints(a, b), CORNER_R)
         self.update()
 
     def boundingRect(self) -> QRectF:
-        return QRectF(self._line.p1(), self._line.p2()).normalized().adjusted(-4, -4, 4, 4)
+        if self._path.isEmpty():
+            return QRectF()
+        return self._path.boundingRect().adjusted(-4, -4, 4, 4)
 
     def paint(self, p: QPainter, opt, widget=None) -> None:
+        if self._path.isEmpty():
+            return
         t = self._scene.theme
         p.setRenderHint(QPainter.Antialiasing, True)
+        p.setBrush(Qt.NoBrush)                    # open path: stroke only, never fill
         p.setPen(QPen(_qcolor(t.line2), 2))
-        p.drawLine(self._line)
+        p.drawPath(self._path)
         if self._packet_t is not None:
-            pt = self._line.pointAt(self._packet_t)
+            pt = self._path.pointAtPercent(self._packet_t)
             col = self._packet_color or _qcolor(t.accent)
             p.setBrush(col)
             p.setPen(Qt.NoPen)
@@ -399,6 +474,12 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.present_packet.connect(self._on_packet)
         ctx.bus.present_clear.connect(self._on_clear_stage)
         ctx.bus.addressing_changed.connect(self._on_addressing)
+        ctx.bus.edges_restyled.connect(self._on_restyle)
+
+    def _on_restyle(self) -> None:
+        """Re-route every edge after the connector style (bent/straight) changes."""
+        for edge in self.edges.values():
+            edge.refresh()
 
     def _on_addressing(self) -> None:
         for n in self.nodes.values():
@@ -556,6 +637,13 @@ class CanvasView(QGraphicsView):
         self._connect_mode = False
         self._connect_first: str | None = None
         self._zoom = 1.0
+        # right-drag-to-connect (the book's gesture): we drive right-click ourselves so a
+        # plain right-click shows the node menu and a right-DRAG creates a link.
+        self.setContextMenuPolicy(Qt.PreventContextMenu)
+        self._rc_from: NodeItem | None = None
+        self._rc_moved = False
+        self._rc_start = None
+        self._rc_line = None
 
         # tutor narration banner (overlaid on the viewport)
         self._narration = QLabel(self)
@@ -622,19 +710,88 @@ class CanvasView(QGraphicsView):
         self.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
         self.setDragMode(QGraphicsView.NoDrag if on else QGraphicsView.RubberBandDrag)
 
+    def _node_at(self, view_pos) -> "NodeItem | None":
+        item = self.itemAt(view_pos)
+        while item is not None and not isinstance(item, NodeItem):
+            item = item.parentItem()
+        return item if isinstance(item, NodeItem) else None
+
     def mousePressEvent(self, e) -> None:
         if self._connect_mode and e.button() == Qt.LeftButton:
-            item = self.itemAt(e.pos())
-            while item is not None and not isinstance(item, NodeItem):
-                item = item.parentItem()
-            if isinstance(item, NodeItem):
+            node = self._node_at(e.pos())
+            if node is not None:
+                devices = self.ctx.topology.devices
+                # drop a stale first endpoint (its device was deleted, or the project was
+                # reloaded between clicks) so we never link to a gone device
+                if self._connect_first is not None and self._connect_first not in devices:
+                    self._connect_first = None
                 if self._connect_first is None:
-                    self._connect_first = item.inst.id
-                elif self._connect_first != item.inst.id:
-                    self.ctx.add_link(self._connect_first, item.inst.id)
+                    self._connect_first = node.inst.id
+                elif self._connect_first != node.inst.id:
+                    try:
+                        self.ctx.add_link(self._connect_first, node.inst.id)
+                    except Exception as ex:          # noqa: BLE001
+                        self.ctx.log(f"Couldn't connect: {ex}", "info")
                     self._connect_first = None
                 return
+        # right-button on a node: maybe a connect-drag, maybe the context menu (decided
+        # on release by whether the mouse moved)
+        if e.button() == Qt.RightButton:
+            node = self._node_at(e.pos())
+            if node is not None:
+                self._rc_from = node
+                self._rc_start = e.pos()
+                self._rc_moved = False
+                e.accept()
+                return
         super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:
+        if self._rc_from is not None:
+            if not self._rc_moved and (e.pos() - self._rc_start).manhattanLength() > 6:
+                self._rc_moved = True
+            if self._rc_moved:
+                self._draw_rc_line(e.pos())
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        if self._rc_from is not None and e.button() == Qt.RightButton:
+            self._clear_rc_line()
+            src = self._rc_from
+            self._rc_from = None
+            if self._rc_moved:                       # right-DRAG -> connect to the target
+                target = self._node_at(e.pos())
+                if target is not None and target.inst.id != src.inst.id:
+                    try:
+                        self.ctx.add_link(src.inst.id, target.inst.id)
+                    except Exception as ex:          # noqa: BLE001
+                        self.ctx.log(f"Couldn't connect: {ex}", "info")
+            else:                                    # plain right-click -> context menu
+                src.popup_menu(e.globalPosition().toPoint())
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def _draw_rc_line(self, view_pos) -> None:
+        from PySide6.QtCore import QLineF
+        from PySide6.QtGui import QColor, QPen
+        from PySide6.QtWidgets import QGraphicsLineItem
+        p1 = self._rc_from.sceneBoundingRect().center()
+        p2 = self.mapToScene(view_pos)
+        if self._rc_line is None:
+            self._rc_line = QGraphicsLineItem()
+            pen = QPen(QColor(self.scene_.theme.accent), 2.0, Qt.DashLine)
+            self._rc_line.setPen(pen)
+            self._rc_line.setZValue(5)
+            self.scene_.addItem(self._rc_line)
+        self._rc_line.setLine(QLineF(p1, p2))
+
+    def _clear_rc_line(self) -> None:
+        if self._rc_line is not None:
+            self.scene_.removeItem(self._rc_line)
+            self._rc_line = None
 
     # drag & drop from palette --------------------------------------------- #
     def dragEnterEvent(self, e) -> None:

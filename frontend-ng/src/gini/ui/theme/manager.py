@@ -15,6 +15,31 @@ def _qc(spec: str) -> QColor:
     return QColor(spec)
 
 
+_FONT_STACK: str | None = None
+
+
+def _ui_font_stack() -> str:
+    """A font-family list whose FIRST entry is actually installed on this machine.
+
+    Leading with a present family avoids Qt's slow missing-family alias lookup (the
+    'Populating font family aliases … Replace uses of missing font family "Inter"'
+    warning + delay seen on macOS, which lacks Inter). Inter is still used when present.
+    """
+    global _FONT_STACK
+    if _FONT_STACK is not None:
+        return _FONT_STACK
+    prefs = ["Inter", "SF Pro Text", "Helvetica Neue", "Segoe UI", "Roboto", "Arial"]
+    try:
+        from PySide6.QtGui import QFontDatabase
+        avail = set(QFontDatabase.families())
+        present = [f for f in prefs if f in avail]
+    except Exception:
+        present = []
+    present = present[:4] or ["Helvetica Neue"]
+    _FONT_STACK = ", ".join(f'"{f}"' for f in present) + ", sans-serif"
+    return _FONT_STACK
+
+
 def build_palette(t: Theme) -> QPalette:
     """A full palette so even unstyled surfaces (scroll viewports, tab panes,
     plain QWidgets) follow the theme instead of falling back to system light."""
@@ -42,7 +67,7 @@ def build_palette(t: Theme) -> QPalette:
 def build_qss(t: Theme) -> str:
     return f"""
 * {{
-    font-family: "Inter", "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    font-family: {_ui_font_stack()};
     font-size: 13px;
     color: {t.text};
     outline: none;
@@ -51,17 +76,30 @@ QMainWindow, QDialog {{ background: {t.bg}; }}
 QWidget#Sidebar, QWidget#Inspector, QWidget#Console {{ background: {t.panel}; }}
 QFrame#Card {{ background: {t.panel2}; border: 1px solid {t.line}; border-radius: 10px; }}
 
-QToolBar {{ background: {t.panel2}; border: none; border-bottom: 1px solid {t.line};
-            spacing: 6px; padding: 6px 10px; }}
-QToolBar::separator {{ background: {t.line}; width: 1px; margin: 4px 6px; }}
+QToolBar {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {t.panel}, stop:1 {t.panel2});
+    border: none; border-bottom: 1px solid {t.line2};
+    spacing: 4px; padding: 7px 12px;
+}}
+QToolBar::separator {{ background: {t.line}; width: 1px; margin: 6px 8px; border-radius: 1px; }}
 
 QToolButton, QPushButton {{
     background: transparent; color: {t.muted};
-    border: 1px solid transparent; border-radius: 7px; padding: 6px 10px;
+    border: 1px solid transparent; border-radius: 8px; padding: 7px 10px;
 }}
-QToolButton:hover, QPushButton:hover {{ background: {t.bg3}; color: {t.text}; border-color: {t.line}; }}
+QToolButton:hover, QPushButton:hover {{ background: {t.bg3}; color: {t.text}; border-color: {t.line2}; }}
 QToolButton:pressed, QPushButton:pressed {{ background: {t.bg2}; }}
 QToolButton:checked {{ background: {t.accent_soft}; color: {t.accent}; border-color: {t.accent}; }}
+
+/* Run = filled green primary, Stop = danger red — the toolbar's two key actions */
+QToolButton#RunBtn {{
+    background: {t.success}; border: 1px solid {t.success}; border-radius: 8px;
+    margin: 0 1px; padding: 7px 13px;
+}}
+QToolButton#RunBtn:hover {{ background: {t.success}; border-color: {t.text}; }}
+QToolButton#RunBtn:pressed {{ background: {t.success}; }}
+QToolButton#StopBtn {{ color: {t.danger}; border: 1px solid transparent; }}
+QToolButton#StopBtn:hover {{ background: {t.danger_soft}; border-color: {t.danger}; color: {t.danger}; }}
 
 QPushButton#Primary {{ background: {t.success}; color: #ffffff; border: none; font-weight: 500; }}
 QPushButton#Primary:hover {{ background: {t.success}; }}

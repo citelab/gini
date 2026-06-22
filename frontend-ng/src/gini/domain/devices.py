@@ -96,12 +96,6 @@ _DEVICES: list[DeviceType] = [
         default_properties={"Name": "", "OS": "linux", "Interfaces": "1"},
     ),
     DeviceType(
-        "subnet", "Subnet", Category.NETWORKING, "subnet", Accent.BLUE,
-        "An addressed broadcast domain that interfaces attach to.",
-        is_container=True,
-        default_properties={"Name": "", "Network": "172.31.0.0/16"},
-    ),
-    DeviceType(
         "firewall", "Firewall", Category.NETWORKING, "firewall", Accent.BLUE,
         "Packet-filtering firewall node.",
         backend_kind="vr",
@@ -129,10 +123,15 @@ _DEVICES: list[DeviceType] = [
         "controller", "OpenFlow Controller", Category.SDN, "controller", Accent.TEAL,
         "SDN controller managing OpenFlow switches.",
         default_properties={"Name": "", "Port": "6633",
-                            "App": "forwarding.l2_learning"},
-        # the POX app that gives the switch its personality (learning switch / hub /
-        # the classic of_tutorial lab). Runs in the controller container.
-        property_choices={"App": ("forwarding.l2_learning", "forwarding.hub",
+                            "App": "gini.samples.switch"},
+        # the POX app that gives the switch its personality. The gini.samples.*
+        # apps are GINI's own (they clear the Flow Switch's match-all -> NORMAL
+        # default first, so the controller actually sees packet-ins); the
+        # forwarding.* / misc.* apps are stock POX. Runs in the controller container.
+        property_choices={"App": ("gini.samples.switch", "gini.samples.packet_loss",
+                                  "gini.samples.port_knock", "gini.samples.l4_lb",
+                                  "gini.samples.ids", "gini.samples.redirect",
+                                  "forwarding.l2_learning", "forwarding.hub",
                                   "misc.of_tutorial")},
     ),
 
@@ -312,6 +311,42 @@ _DEVICES: list[DeviceType] = [
 
 # Lookup table
 REGISTRY: dict[str, DeviceType] = {d.key: d for d in _DEVICES}
+
+# Auto-name prefixes per element type (R1, S1, M1, …). Curated to be short and
+# collision-free (e.g. Metrics is PROM, not M, so it never clashes with Machine).
+# Users can override the popular ones in Settings → Naming.
+DEFAULT_PREFIXES: dict[str, str] = {
+    # networking
+    "router": "R", "switch": "S", "hub": "H", "host": "M", "firewall": "FW",
+    "wap": "AP", "cloud": "NET",
+    # sdn
+    "ovs": "OVS", "controller": "OFC",
+    # compute / containers
+    "instance": "I", "container": "CT", "web_app": "WA", "pod": "POD",
+    "k8s_node": "KN", "k8s_cluster": "K8S", "registry": "REG",
+    "instance_group": "ASG", "region": "RGN",
+    # cloud networking
+    "vpc": "VPC", "cloud_subnet": "CSUB", "security_group": "SG",
+    "gateway": "GW", "load_balancer": "LB", "proxy": "PXY",
+    # storage & data
+    "object_store": "OBJ", "block_volume": "VOL", "database": "DB",
+    "cache": "CA", "nosql": "NDB",
+    # streaming & messaging
+    "stream": "STR", "messaging": "MSG", "queue": "Q",
+    # observability
+    "metrics": "PROM", "dashboard": "GRAF", "tracing": "JGR",
+    # workload / serverless
+    "load_generator": "LG", "function": "FN", "api_gateway": "AGW",
+}
+
+
+def default_prefix(type_key: str) -> str:
+    dt = REGISTRY.get(type_key)
+    if type_key in DEFAULT_PREFIXES:
+        return DEFAULT_PREFIXES[type_key]
+    if dt is not None:                       # fallback: capitals of the label, e.g. VPC
+        return "".join(c for c in dt.label if c.isupper()) or dt.label[:2].upper()
+    return "N"
 
 
 def all_devices() -> list[DeviceType]:

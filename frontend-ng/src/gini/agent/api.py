@@ -61,6 +61,27 @@ class GiniAPI:
         self.ctx.bus.device_changed.emit(d.id)
         return self._device_dict(d)
 
+    # -- manual addressing -------------------------------------------------- #
+    def set_manual_addressing(self, on: bool) -> None:
+        """Toggle manual addressing: stop auto-assigning IPs and honor static_ips
+        (auto-filling any interface left blank)."""
+        self.ctx.topology.manual_addressing = bool(on)
+        self.ctx.bus.topology_changed.emit()
+
+    def set_interface_ip(self, ref: str, link_id: str, ip: str) -> dict:
+        """Set (or clear, with an empty string) a device's static IP on one interface
+        (identified by the link it sits on). Honored only in manual addressing mode."""
+        d = self._resolve(ref)
+        bare = (ip or "").strip().split("/")[0]
+        si = dict(getattr(d, "static_ips", None) or {})
+        if bare:
+            si[link_id] = bare
+        else:
+            si.pop(link_id, None)
+        d.static_ips = si
+        self.ctx.bus.topology_changed.emit()
+        return self._device_dict(d)
+
     # -- recipes (Wizard blueprints) ---------------------------------------- #
     def list_recipes(self) -> list[dict]:
         from ..domain.recipes import RECIPES

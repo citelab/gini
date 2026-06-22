@@ -39,7 +39,7 @@ def test_controller_spec_programs_the_ovs():
     cfg = RuntimeCompiler().compile(t)
     assert len(cfg.controllers) == 1
     c = cfg.controllers[0]
-    assert c.port == 6633 and "l2_learning" in c.app
+    assert c.port == 6633 and "gini.samples.switch" in c.app
     from gini.services.compiler import _svc
     assert _svc(ovs.name) in c.switches            # it programs the OVS
 
@@ -90,4 +90,4 @@ def test_to_runtime_emits_ovs_and_controller_for_docker():
     assert len(rt["ovs"]) == 1 and len(rt["controllers"]) == 1
     assert rt["ovs"][0]["controller"] == rt["controllers"][0]["name"]   # wired together
     assert rt["ovs"][0]["controller_port"] == 6633
-    assert "l2_learning" in rt["controllers"][0]["app"]
+    assert "gini.samples.switch" in rt["controllers"][0]["app"]

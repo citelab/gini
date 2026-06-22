@@ -24,6 +24,10 @@ const CORE_SRCS = [_][]const u8{
     "gr_pipeline.c", "gr_modules.c", "gr_control.c", "gr_mod_legacy.c",
     // remote control socket (interactive console + Router Lab live binding)
     "gr_rctl.c",
+    // B2 control-plane module runtime + the demo/protocol modules
+    "gr_control_plane.c", "gr_cp_hello.c", "gr_cp_dhcp.c", "gr_cp_rip.c",
+    // B3 multicast membership table + IGMP snooping
+    "gr_mcast.c", "gr_cp_igmp.c",
 };
 
 // lwIP host stack — only when host_stack is on (Z1: sealed behind host_stack.c).
@@ -32,10 +36,12 @@ const LWIP_SRCS = [_][]const u8{
 };
 
 // Z3: gRouter modules ported from C to the Zig language (built as objects, C ABI).
+// gr_mod_block.zig is a native pipeline MODULE written in Zig (the Chapter 7 example).
 const ZIG_SRCS = [_][]const u8{
     "src/grouter/routetable.zig",
     "src/grouter/mtu.zig",
     "src/grouter/utils.zig",
+    "src/grouter/gr_mod_block.zig",
 };
 
 const SYS_LIBS = [_][]const u8{ "readline", "termcap", "slack", "pthread", "util", "m" };
@@ -62,6 +68,9 @@ const FLAGS_BASE = [_][]const u8{
     "-g", "-w",
 };
 const FLAGS_NO_HS = FLAGS_BASE ++ [_][]const u8{"-DGR_NO_HOST_STACK"};
+// -DGR_LUA enables the `gpipe add lua <path>` control verb (gr_control.c).
+const FLAGS_LUA = FLAGS_BASE ++ [_][]const u8{"-DGR_LUA"};
+const FLAGS_NO_HS_LUA = FLAGS_NO_HS ++ [_][]const u8{"-DGR_LUA"};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -69,9 +78,12 @@ pub fn build(b: *std.Build) void {
     const host_stack = b.option(bool, "host_stack",
         "build the lwIP host stack (UDP/TCP to the router)") orelse true;
     const lua = b.option(bool, "lua",
-        "build the Lua script module (links liblua5.4)") orelse false;
+        "build the Lua script module (links liblua5.4)") orelse true;
 
-    const flags: []const []const u8 = if (host_stack) &FLAGS_BASE else &FLAGS_NO_HS;
+    const flags: []const []const u8 = if (host_stack)
+        (if (lua) &FLAGS_LUA else &FLAGS_BASE)
+    else
+        (if (lua) &FLAGS_NO_HS_LUA else &FLAGS_NO_HS);
 
     const mod = b.createModule(.{
         .target = target,

@@ -25,3 +25,11 @@ backend/src/pox/ext/gini/samples/*.xml
 *.deb
 .idea/
 .venv/
+
+# build caches / generated
+backend/.zig-cache/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+# sandbox/editor scratch
+.__unlink_test

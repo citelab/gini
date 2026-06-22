@@ -28,15 +28,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ctx = AppContext()
         self.api = GiniAPI(self.ctx)
-        self._apply_env_settings()
+        self._load_config()          # ~/.gini/config.json defaults
+        self.ctx.topology.prefix_overrides = dict(self.ctx.settings.name_prefixes)
+        self._apply_env_settings()   # env vars override saved config
         from ..agent.tools import build_registry
         self.registry = build_registry(self.api)   # shared: in-app loop + present tools
-        # runtime: compile the canvas and launch it via Docker
+        # gLoader: compiles the drawn topology into a runtime plan and launches it
         from pathlib import Path
         from .. import runtime as _rt
-        from ..services import Orchestrator, RuntimeCompiler
-        self._compiler = RuntimeCompiler()
-        self._orch = Orchestrator(Path(_rt.__file__).parent)
+        from ..services import GLoader
+        self._gloader = GLoader(Path(_rt.__file__).parent)
         self._running = False
         self._stopping = False
         self._workdir: str | None = None
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         self.ctx.bus.topology_changed.connect(self._update_status)
         self.ctx.bus.topology_changed.connect(self._recompute_addressing)
         self.ctx.bus.topology_changed.connect(self._revalidate)
+        self.ctx.bus.topology_changed.connect(self._rebill)
         self.ctx.bus.log.connect(self._on_log)
         self.ctx.bus.device_delete_requested.connect(self._delete_device)
         self.ctx.bus.warning_explain_requested.connect(self._on_warning_explain)
@@ -79,10 +81,40 @@ class MainWindow(QMainWindow):
         self.palette.element_selected.connect(self._on_palette_explain)
         self.assistant.status_changed.connect(self.mode_indicator.set_status)
         self.mode_indicator.set_status("Q&A mode", False)   # initial
-        self.ctx.bus.assistant_message.connect(
-            lambda role, text: self._on_log("chat", f"{role}: {text}")
-        )
+        # Ask GINI messages live in the right-hand pane only; the Console is for
+        # build/run logs, so we deliberately do NOT mirror chat into it.
         self._update_status()
+
+    def _load_config(self) -> None:
+        """Load persisted defaults from ~/.gini/config.json into Settings (applied as the
+        ThemeManager and LLM read Settings during construction)."""
+        from ..app.paths import PERSISTED_KEYS, load_config
+        cfg = load_config()
+        s = self.ctx.settings
+        for k in PERSISTED_KEYS:
+            if k in cfg:
+                setattr(s, k, cfg[k])
+
+    def _open_settings(self) -> None:
+        from ..app.paths import PERSISTED_KEYS, save_config
+        from .settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self, self.ctx.settings)
+        if not dlg.exec():
+            return
+        v = dlg.values()
+        s = self.ctx.settings
+        for k in ("reduced_motion", "auto_internet",
+                  "llm_enabled", "llm_url", "llm_model", "llm_think"):
+            setattr(s, k, v[k])
+        s.theme = v["theme"]
+        s.name_prefixes = v["name_prefixes"]
+        s.prices = v["prices"]
+        self.ctx.topology.prefix_overrides = dict(s.name_prefixes)   # apply to current topo
+        self.theme.set_theme(v["theme"])               # live theme switch
+        self._wire_llm()                               # re-create / clear the LLM loop
+        self._rebill()                                 # prices may have changed
+        save_config({k: getattr(s, k) for k in PERSISTED_KEYS})
+        self.ctx.log("Settings saved to ~/.gini/config.json.", "ok")
 
     def _apply_env_settings(self) -> None:
         import os
@@ -106,8 +138,9 @@ class MainWindow(QMainWindow):
     def _wire_llm(self) -> None:
         s = self.ctx.settings
         if not s.llm_enabled:
-            self.ctx.log("GINI AI: offline mode (deterministic). "
-                         "Set GINI_LLM_URL to connect a local Ollama model.", "info")
+            self.assistant.set_loop(None)              # clear any existing loop
+            self.ctx.log("GINI AI: offline mode (deterministic). Enable a local LLM in "
+                         "Settings (or set GINI_LLM_URL).", "info")
             return
         try:
             from ..agent.llm import OllamaBackend
@@ -115,7 +148,13 @@ class MainWindow(QMainWindow):
             backend = OllamaBackend(s.llm_url, s.llm_model, think=s.llm_think)
             self.assistant.set_loop(AgentLoop(backend, self.registry,
                                               context_provider=self._ai_context))
-            self.ctx.log(f"GINI AI: using {s.llm_model} at {s.llm_url}.", "ok")
+            # actually check the server is reachable so the user gets real feedback
+            if backend.available():
+                self.ctx.log(f"GINI AI: connected to {s.llm_model} at {s.llm_url}.", "ok")
+            else:
+                self.ctx.log(f"GINI AI: set to {s.llm_model} at {s.llm_url}, but the server "
+                             f"isn't responding. Is Ollama running? (run: ollama serve)",
+                             "error")
         except Exception as e:  # never let LLM wiring break startup
             self.ctx.log(f"GINI AI: LLM unavailable ({e}); offline mode.", "info")
 
@@ -142,14 +181,30 @@ class MainWindow(QMainWindow):
         act("compile", "compile", "Compile", self._compile)
         act("layout", "layout", "Arrange", self._auto_layout)
         self._connect_act = act("connect", "link", "Connect", self._toggle_connect, checkable=True)
+        self._edges_act = act("edges", "elbow",
+                              "Connector style: bent ↔ straight",
+                              self._toggle_edge_style, checkable=True)
+        self._edges_act.setChecked(self.ctx.settings.connector_style == "orthogonal")
+        self._manual_addr_act = act("manualaddr", "pencil",
+                                    "Manual addressing — assign IP addresses by hand",
+                                    self._toggle_manual_addr, checkable=True)
+        self._manual_addr_act.setChecked(self.ctx.topology.manual_addressing)
         self._delete_act = act("delete", "trash", "Delete selected device", self._delete_selected)
         self._delete_act.setEnabled(False)
         tb.addSeparator()
         self._run_act = act("run", "play", "Run", self._run)
-        act("stop", "stop", "Stop", self._stop)
+        self._stop_act = act("stop", "stop", "Stop", self._stop)
         tb.addSeparator()
         act("zoom_in", "plus", "Zoom in", lambda: self.canvas.zoom_by(1.15))
         act("zoom_out", "minus", "Zoom out", lambda: self.canvas.zoom_by(1 / 1.15))
+
+        # give Run/Stop their own object names so the stylesheet can make them the
+        # toolbar's primary (green) + danger (red) actions — clear visual hierarchy
+        for a_obj, oname in ((self._run_act, "RunBtn"), (self._stop_act, "StopBtn")):
+            w = tb.widgetForAction(a_obj)
+            if w is not None:
+                w.setObjectName(oname)
+                w.style().unpolish(w); w.style().polish(w)
 
         spacer = QWidget(); spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding, spacer.sizePolicy().verticalPolicy().Preferred)
         tb.addWidget(spacer)
@@ -178,13 +233,16 @@ class MainWindow(QMainWindow):
         self._refresh_icons()
 
     def _refresh_icons(self) -> None:
-        col = self.theme.theme.muted
+        t = self.theme.theme
+        col = t.muted
         for a, icon_name in self._actions.values():
-            a.setIcon(icons.icon(icon_name, col, 18))
-        self._theme_act.setIcon(icons.icon("palette", col, 18))
-        # primary-style run icon in accent/success
+            a.setIcon(icons.icon(icon_name, col, 19))
+        self._theme_act.setIcon(icons.icon("palette", col, 19))
+        # Run is a filled green primary button (white glyph); Stop reads in danger red
         run_a, _ = self._actions["run"]
-        run_a.setIcon(icons.icon("play", self.theme.theme.success, 18))
+        run_a.setIcon(icons.icon("play", "#ffffff", 19))
+        stop_a, _ = self._actions["stop"]
+        stop_a.setIcon(icons.icon("stop", t.danger, 19))
 
     # -- docks -------------------------------------------------------------- #
     def _make_docks(self) -> None:
@@ -218,7 +276,19 @@ class MainWindow(QMainWindow):
         cons.setObjectName("dock_console")
         cons.setWidget(self.console)
         self.addDockWidget(Qt.BottomDockWidgetArea, cons)
+
+        # analytics strip — a short "cloud bill" dashboard stacked under the Console
+        from .dashboard import Dashboard
+        self.dashboard = Dashboard(self.theme)
+        self.dashboard.open_grafana_requested.connect(self._open_grafana)
+        dash = QDockWidget("Dashboard", self)
+        dash.setObjectName("dock_dashboard")
+        dash.setWidget(self.dashboard)
+        self.addDockWidget(Qt.BottomDockWidgetArea, dash)
+        self.splitDockWidget(cons, dash, Qt.Vertical)   # dashboard below the console
         self.resizeDocks([left], [240], Qt.Horizontal)
+        self.resizeDocks([cons, dash], [180, 96], Qt.Vertical)
+        self._rebill()
 
     def _make_statusbar(self) -> None:
         self.status_conn = QLabel()
@@ -251,7 +321,13 @@ class MainWindow(QMainWindow):
         filem.addSeparator()
         add(filem, "&Export PNG…", self._export_png)
         filem.addSeparator()
-        add(filem, "&Quit", self.close, "Ctrl+Q")
+        # NoRole keeps these in the File menu on macOS (Qt otherwise hoists "Settings"
+        # and "Quit" into the application menu, where the book's readers don't expect them)
+        settings_act = add(filem, "&Settings…", self._open_settings, "Ctrl+,")
+        settings_act.setMenuRole(QAction.MenuRole.NoRole)
+        filem.addSeparator()
+        quit_act = add(filem, "&Quit", self.close, "Ctrl+Q")
+        quit_act.setMenuRole(QAction.MenuRole.NoRole)
 
     def _new(self) -> None:
         from ..domain import Topology
@@ -262,10 +338,12 @@ class MainWindow(QMainWindow):
         self.ctx.log("New topology.", "info")
 
     def _open(self) -> None:
+        from ..app.paths import projects_dir
         from ..services import PROJECT_EXT
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open project", "", f"GINI project (*{PROJECT_EXT});;All files (*)")
+            self, "Open project", str(projects_dir()),
+            f"GINI project (*{PROJECT_EXT});;All files (*)")
         if path:
             self._load_from_path(path)
 
@@ -276,10 +354,13 @@ class MainWindow(QMainWindow):
             self._save_as()
 
     def _save_as(self) -> None:
+        from ..app.paths import ensure_dirs, projects_dir
         from ..services import PROJECT_EXT
         from PySide6.QtWidgets import QFileDialog
+        ensure_dirs()
+        default = str(projects_dir() / f"untitled{PROJECT_EXT}")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save project", f"untitled{PROJECT_EXT}", f"GINI project (*{PROJECT_EXT})")
+            self, "Save project", default, f"GINI project (*{PROJECT_EXT})")
         if path:
             if not path.endswith(PROJECT_EXT):
                 path += PROJECT_EXT
@@ -317,7 +398,10 @@ class MainWindow(QMainWindow):
         scene._spotlit = []
         scene._highlit = []
         self.ctx.topology = topo
+        topo.prefix_overrides = dict(self.ctx.settings.name_prefixes)   # apply naming prefs
         self.ctx.selected_id = None
+        if hasattr(self, "_manual_addr_act"):
+            self._manual_addr_act.setChecked(topo.manual_addressing)
         for d in topo.devices.values():
             self.ctx.bus.device_added.emit(d.id)
         for link in topo.links.values():
@@ -345,7 +429,7 @@ class MainWindow(QMainWindow):
         self.ctx.log(f"Exported {path}", "ok")
 
     def _compile(self):
-        cfg = self._compiler.compile(self.ctx.topology)
+        cfg = self._gloader.compile(self.ctx.topology)
         self.ctx.log(
             f"Compiled “{self.ctx.topology.name}” → {len(cfg.machines)} machines, "
             f"{len(cfg.switches)} switches, {len(cfg.routers)} routers, "
@@ -374,6 +458,19 @@ class MainWindow(QMainWindow):
         self.ctx.log("Connect mode: click two devices to link them." if on
                      else "Connect mode off.", "info")
 
+    def _toggle_edge_style(self, bent: bool) -> None:
+        self.ctx.settings.connector_style = "orthogonal" if bent else "straight"
+        self.ctx.bus.edges_restyled.emit()
+        self.ctx.log(f"Connectors: {'bent (rounded)' if bent else 'straight'}.", "info")
+
+    def _toggle_manual_addr(self, on: bool) -> None:
+        self.ctx.topology.manual_addressing = on
+        self._recompute_addressing()      # re-derive with/without the manual overrides
+        self._revalidate()
+        self.ctx.log(
+            "Manual addressing: on — set IPs in Inspector › Interfaces; blanks auto-fill."
+            if on else "Manual addressing: off — IPs are auto-assigned.", "info")
+
     def _run(self) -> None:
         import tempfile
         import threading
@@ -392,8 +489,14 @@ class MainWindow(QMainWindow):
                      f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
         self.ctx.log(f"Project: {self._workdir}  (double-click a device to log in)", "info")
 
-        def worker(workdir=self._workdir):
-            ok, msg = self._orch.up(cfg, workdir)
+        auto_internet = self.ctx.settings.auto_internet
+        if not auto_internet:
+            self.ctx.log("Faithful mode: hosts have NO default route to the internet. "
+                         "Draw + wire an Internet element for egress. (Web consoles "
+                         "still open — only outbound internet is cut.)", "info")
+
+        def worker(workdir=self._workdir, ai=auto_internet):
+            ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai)
             self.ctx.bus.run_state.emit(ok, msg)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -404,11 +507,19 @@ class MainWindow(QMainWindow):
             self._set_runtime_status("running")
             self._poll.start()                  # reconcile with real container state
             self.ctx.log("Topology running on Docker.", "ok")
+            grafana = None
             for s in getattr(self, "_last_services", []):   # surface web consoles
                 for p in s.ports:
                     if p.get("web"):
-                        self.ctx.log(f"{s.name} ({p['label']}): "
-                                     f"http://localhost:{p['host']}{p.get('path', '')}", "ok")
+                        url = f"http://localhost:{p['host']}{p.get('path', '')}"
+                        self.ctx.log(f"{s.name} ({p['label']}): {url}", "ok")
+                        if getattr(s, "type_key", None) == "dashboard":
+                            grafana = url
+            # start the GINI $ meter billing the launched topology
+            from ..domain.pricing import bill
+            rate = bill(self.ctx.topology, self.ctx.settings.prices)["rate_per_hr"]
+            self.dashboard.set_grafana_url(grafana)
+            self.dashboard.start(rate)
         else:
             self.ctx.log(f"Run failed: {msg}", "error")
         self._update_status()
@@ -424,7 +535,7 @@ class MainWindow(QMainWindow):
         self._update_status()
 
         def worker():
-            ok, msg = self._orch.down()
+            ok, msg = self._gloader.down()
             if not ok:
                 self.ctx.log(f"Stop issue: {msg}", "error")
             self.ctx.bus.runtime_status.emit({})   # force a final reconcile -> idle
@@ -438,7 +549,7 @@ class MainWindow(QMainWindow):
         wd = self._workdir
 
         def worker():
-            self.ctx.bus.runtime_status.emit(self._orch.status(wd))
+            self.ctx.bus.runtime_status.emit(self._gloader.status(wd))
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_runtime_status(self, states) -> None:
@@ -452,6 +563,8 @@ class MainWindow(QMainWindow):
                 self._stopping = False
                 self._poll.stop()
                 self._set_runtime_status("idle")
+                self.dashboard.stop()           # freeze the session's GINI $ bill
+                self.dashboard.set_grafana_url(None)
                 self.ctx.log("All containers stopped.", "info")
                 self._update_status()
             return
@@ -487,6 +600,24 @@ class MainWindow(QMainWindow):
         except Exception:
             self.ctx.addressing = {}
         self.ctx.bus.addressing_changed.emit()
+
+    def _rebill(self) -> None:
+        """Refresh the dashboard's projected GINI $/hr from the current canvas. While a
+        lab runs the meter holds the launched rate, so we only re-estimate when idle."""
+        if not hasattr(self, "dashboard") or self._running:
+            return
+        from ..domain.pricing import bill
+        self.dashboard.set_estimate(bill(self.ctx.topology, self.ctx.settings.prices))
+
+    def _open_grafana(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        url = self.dashboard.grafana_url()
+        if not url:
+            self.ctx.log("No Grafana running — add a Dashboards element and Run.", "info")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self.ctx.log(f"Opening Grafana: {url}", "ok")
 
     def _on_palette_explain(self, type_key: str) -> None:
         """In explain mode, clicking a palette element explains that element TYPE."""
