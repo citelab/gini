@@ -91,15 +91,33 @@ QToolButton:hover, QPushButton:hover {{ background: {t.bg3}; color: {t.text}; bo
 QToolButton:pressed, QPushButton:pressed {{ background: {t.bg2}; }}
 QToolButton:checked {{ background: {t.accent_soft}; color: {t.accent}; border-color: {t.accent}; }}
 
-/* Run = filled green primary, Stop = danger red — the toolbar's two key actions */
-QToolButton#RunBtn {{
-    background: {t.success}; border: 1px solid {t.success}; border-radius: 8px;
-    margin: 0 1px; padding: 7px 13px;
+/* segmented toolbar clusters — File / Tools / Zoom sit in rounded inset trays */
+QFrame#TbGroup {{ background: {t.bg2}; border: 1px solid {t.line}; border-radius: 10px; }}
+QFrame#TbGroup QToolButton {{
+    background: transparent; color: {t.muted};
+    border: 1px solid transparent; border-radius: 7px; padding: 6px 8px;
 }}
-QToolButton#RunBtn:hover {{ background: {t.success}; border-color: {t.text}; }}
-QToolButton#RunBtn:pressed {{ background: {t.success}; }}
-QToolButton#StopBtn {{ color: {t.danger}; border: 1px solid transparent; }}
-QToolButton#StopBtn:hover {{ background: {t.danger_soft}; border-color: {t.danger}; color: {t.danger}; }}
+QFrame#TbGroup QToolButton:hover {{ background: {t.panel}; color: {t.text}; border-color: {t.line2}; }}
+QFrame#TbGroup QToolButton:pressed {{ background: {t.bg3}; }}
+QFrame#TbGroup QToolButton:checked {{
+    background: {t.accent_soft}; color: {t.accent}; border-color: {t.accent}; }}
+
+/* Run = green primary pill, Stop = red-tinted pill — the toolbar's two key actions.
+   Labelled (icon + text) so they read as buttons, not saturated icon squares. */
+QToolButton#RunBtn {{
+    background: {t.success}; color: #ffffff; font-weight: 600;
+    border: 1px solid {t.success}; border-radius: 8px;
+    margin: 0 2px; padding: 6px 16px 6px 12px;
+}}
+QToolButton#RunBtn:hover {{ background: {t.success}; color: #ffffff;
+                            border-color: {t.text}; }}
+QToolButton#RunBtn:pressed {{ background: {t.success}; color: #ffffff; }}
+QToolButton#StopBtn {{
+    background: {t.danger_soft}; color: {t.danger}; font-weight: 600;
+    border: 1px solid {t.danger_soft}; border-radius: 8px;
+    margin: 0 2px; padding: 6px 16px 6px 12px;
+}}
+QToolButton#StopBtn:hover {{ border-color: {t.danger}; }}
 
 QPushButton#Primary {{ background: {t.success}; color: #ffffff; border: none; font-weight: 500; }}
 QPushButton#Primary:hover {{ background: {t.success}; }}

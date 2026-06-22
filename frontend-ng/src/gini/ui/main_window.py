@@ -11,7 +11,8 @@ import math
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
-    QDockWidget, QLabel, QMainWindow, QPlainTextEdit, QToolBar, QWidget,
+    QDockWidget, QFrame, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QToolBar,
+    QToolButton, QWidget,
 )
 
 from ..agent.api import GiniAPI
@@ -162,22 +163,23 @@ class MainWindow(QMainWindow):
     def _make_toolbar(self) -> None:
         tb = QToolBar("Main")
         tb.setMovable(False)
+        tb.setFloatable(False)
         self.addToolBar(tb)
         self._tb = tb
         self._actions: dict[str, QAction] = {}
+        self._tb_buttons: dict[str, QToolButton] = {}
 
         def act(key: str, icon: str, text: str, slot, checkable=False) -> QAction:
             a = QAction(text, self)
             a.setCheckable(checkable)
             a.triggered.connect(slot)
-            tb.addAction(a)
             self._actions[key] = (a, icon)
             return a
 
+        # build the actions (same wiring as before — checkable, enable/disable, slots)
         act("new", "new", "New", self._new)
         act("open", "open", "Open", self._open)
         act("save", "save", "Save", self._save)
-        tb.addSeparator()
         act("compile", "compile", "Compile", self._compile)
         act("layout", "layout", "Arrange", self._auto_layout)
         self._connect_act = act("connect", "link", "Connect", self._toggle_connect, checkable=True)
@@ -191,33 +193,61 @@ class MainWindow(QMainWindow):
         self._manual_addr_act.setChecked(self.ctx.topology.manual_addressing)
         self._delete_act = act("delete", "trash", "Delete selected device", self._delete_selected)
         self._delete_act.setEnabled(False)
-        tb.addSeparator()
         self._run_act = act("run", "play", "Run", self._run)
         self._stop_act = act("stop", "stop", "Stop", self._stop)
-        tb.addSeparator()
         act("zoom_in", "plus", "Zoom in", lambda: self.canvas.zoom_by(1.15))
         act("zoom_out", "minus", "Zoom out", lambda: self.canvas.zoom_by(1 / 1.15))
 
-        # give Run/Stop their own object names so the stylesheet can make them the
-        # toolbar's primary (green) + danger (red) actions — clear visual hierarchy
-        for a_obj, oname in ((self._run_act, "RunBtn"), (self._stop_act, "StopBtn")):
-            w = tb.widgetForAction(a_obj)
-            if w is not None:
-                w.setObjectName(oname)
-                w.style().unpolish(w); w.style().polish(w)
+        def button(key: str, *, labelled=False, oname="") -> QToolButton:
+            a, _ = self._actions[key]
+            b = QToolButton(tb)
+            b.setDefaultAction(a)                # mirrors icon/checkable/enabled/triggered
+            b.setAutoRaise(True)
+            if labelled:
+                b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            if oname:
+                b.setObjectName(oname)
+            self._tb_buttons[key] = b
+            return b
 
-        spacer = QWidget(); spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding, spacer.sizePolicy().verticalPolicy().Preferred)
+        def tray(keys, *, name="TbGroup") -> QWidget:
+            """A rounded segmented cluster of icon buttons."""
+            f = QFrame(tb); f.setObjectName(name)
+            lay = QHBoxLayout(f); lay.setContentsMargins(3, 3, 3, 3); lay.setSpacing(1)
+            for k in keys:
+                lay.addWidget(button(k))
+            return f
+
+        # grouped trays: File · Tools · (Run/Stop, free-standing pills) · Zoom
+        tb.addWidget(tray(("new", "open", "save")))
+        tb.addWidget(self._tb_spacer(6))
+        tb.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete")))
+        tb.addWidget(self._tb_spacer(8))
+        run_grp = QWidget(tb); rg = QHBoxLayout(run_grp)
+        rg.setContentsMargins(0, 0, 0, 0); rg.setSpacing(6)
+        rg.addWidget(button("run", labelled=True, oname="RunBtn"))
+        rg.addWidget(button("stop", labelled=True, oname="StopBtn"))
+        tb.addWidget(run_grp)
+        tb.addWidget(self._tb_spacer(8))
+        tb.addWidget(tray(("zoom_in", "zoom_out")))
+
+        spacer = QWidget()
+        spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding,
+                             spacer.sizePolicy().verticalPolicy().Preferred)
         tb.addWidget(spacer)
 
         # prominent mode / activity indicator (Explain · Q&A · Thinking spinner)
         from .mode_indicator import ModeIndicator
         self.mode_indicator = ModeIndicator(self.theme)
         tb.addWidget(self.mode_indicator)
-        tb.addSeparator()
+        tb.addWidget(self._tb_spacer(8))
 
         # theme menu
         self._theme_act = QAction("Theme", self)
-        tb.addAction(self._theme_act)
+        self._theme_btn = QToolButton(tb)
+        self._theme_btn.setDefaultAction(self._theme_act)
+        self._theme_btn.setAutoRaise(True)
+        self._theme_btn.setPopupMode(QToolButton.InstantPopup)
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
         grp = QActionGroup(self)
@@ -227,10 +257,14 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _=False, n=name: self.theme.set_theme(n))
             grp.addAction(a); menu.addAction(a)
         self._theme_act.setMenu(menu)
-        # make the toolbar button show its menu on click
-        for w in tb.findChildren(QWidget):
-            pass
+        self._theme_btn.setMenu(menu)
+        tb.addWidget(self._theme_btn)
         self._refresh_icons()
+
+    @staticmethod
+    def _tb_spacer(width: int) -> QWidget:
+        w = QWidget(); w.setFixedWidth(width)
+        return w
 
     def _refresh_icons(self) -> None:
         t = self.theme.theme
