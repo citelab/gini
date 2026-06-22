@@ -70,6 +70,49 @@ def test_size_persists_round_trip():
     assert Topology.from_dict(raw).devices[d.id].size == 1
 
 
+def test_update_cpus_safe_when_not_running():
+    from gini.services.orchestrator import Orchestrator
+    import gini.runtime as rt
+    o = Orchestrator(rt.__path__[0])           # no workdir yet (nothing launched)
+    ok, msg = o.update_cpus("wa1", 2.0)
+    assert ok is False and "not running" in msg
+
+
+def test_update_cpus_builds_docker_update_command(monkeypatch):
+    # verify the live path resolves the container id then calls `docker update --cpus`
+    from gini.services.orchestrator import Orchestrator
+    import gini.runtime as rt
+    import subprocess as sp
+    calls = []
+
+    class R:
+        def __init__(self, out="", rc=0): self.stdout, self.returncode, self.stderr = out, rc, ""
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "ps"]:
+            return R(out="container123\n")
+        return R(out="ok")
+    monkeypatch.setattr(sp, "run", fake_run)
+    o = Orchestrator(rt.__path__[0]); o.workdir = "/tmp/x"
+    ok, _ = o.update_cpus("wa1", 2.0)
+    assert ok is True
+    assert ["docker", "update", "--cpus", "2", "container123"] in calls
+
+
+def test_resize_emits_device_resized_signal():
+    from PySide6.QtWidgets import QApplication
+    from gini.ui.main_window import MainWindow
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(app)
+    seen = []
+    w.ctx.bus.device_resized.connect(lambda did: seen.append(did))
+    wa = w.api.add_device("web_app", x=80, y=80)["id"]
+    app.processEvents()
+    w.canvas.scene_.nodes[wa]._bump_size(+1)
+    assert seen == [wa]
+
+
 def test_node_height_grows_only_for_resizable():
     from PySide6.QtWidgets import QApplication
     from gini.ui.main_window import MainWindow

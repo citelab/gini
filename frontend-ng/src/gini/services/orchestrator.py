@@ -412,6 +412,27 @@ class Orchestrator:
                 states[svc] = "running" if "running" in raw or "up" in raw else raw
         return states
 
+    def update_cpus(self, service: str, cpus: float,
+                    workdir: str | Path | None = None) -> tuple[bool, str]:
+        """Live-change a running container's CPU cap (vertical scaling), no restart, via
+        `docker update --cpus`. Resolves the container id through `docker compose ps`."""
+        wd = workdir or self.workdir
+        if not wd:
+            return False, "not running"
+        try:
+            r = subprocess.run(["docker", "compose", "ps", "-q", service],
+                               cwd=str(wd), capture_output=True, text=True, timeout=20)
+            ids = (r.stdout or "").strip().splitlines()
+            if not ids or not ids[0]:
+                return False, f"{service}: no running container"
+            u = subprocess.run(["docker", "update", "--cpus", f"{cpus:g}", ids[0]],
+                               capture_output=True, text=True, timeout=20)
+            return u.returncode == 0, (u.stderr or u.stdout).strip()
+        except FileNotFoundError:
+            return False, "docker not found — is Docker installed and running?"
+        except subprocess.TimeoutExpired:
+            return False, "docker update timed out"
+
     def _compose(self, *args: str) -> tuple[bool, str]:
         try:
             r = subprocess.run(["docker", "compose", *args], cwd=str(self.workdir),

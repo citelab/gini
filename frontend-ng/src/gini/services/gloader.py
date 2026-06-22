@@ -78,6 +78,10 @@ class GLoader:
         """Compile and run the topology in-process (no Docker)."""
         return simulate(self._as_config(spec))
 
+    def update_cpus(self, service: str, cpus: float) -> tuple[bool, str]:
+        """Live-change a running container's CPU cap (vertical scaling), no restart."""
+        return self._orch.update_cpus(service, cpus)
+
     def down(self) -> tuple[bool, str]:
         """Tear the running network down."""
         return self._orch.down()

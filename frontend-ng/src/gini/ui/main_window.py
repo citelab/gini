@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self.ctx.bus.topology_changed.connect(self._recompute_addressing)
         self.ctx.bus.topology_changed.connect(self._revalidate)
         self.ctx.bus.topology_changed.connect(self._rebill)
+        self.ctx.bus.device_resized.connect(self._on_device_resized)
         self.ctx.bus.log.connect(self._on_log)
         self.ctx.bus.device_delete_requested.connect(self._delete_device)
         self.ctx.bus.warning_explain_requested.connect(self._on_warning_explain)
@@ -642,6 +643,31 @@ class MainWindow(QMainWindow):
             return
         from ..domain.pricing import bill
         self.dashboard.set_estimate(bill(self.ctx.topology, self.ctx.settings.prices))
+
+    def _on_device_resized(self, device_id: str) -> None:
+        """An element's size tier changed. If the lab is running, apply the new CPU cap
+        to its container live (vertical scaling) via `docker update` — no restart."""
+        if not self._running:
+            return
+        import threading
+        from ..domain import pricing
+        from ..services.compiler import _svc
+        d = self.ctx.topology.devices.get(device_id)
+        if d is None or not pricing.resizable(d.type_key):
+            return
+        lvl = pricing.size_level(getattr(d, "size", 1))
+        lab, cpus, _mem, _mult = pricing.size_tier(lvl)
+        svc, dname = _svc(d.name), d.name
+
+        def worker():
+            ok, msg = self._gloader.update_cpus(svc, cpus)
+            if ok:
+                self.ctx.log(f"Scaled {dname} to {lab} ({cpus:g} vCPU) live — no restart.",
+                             "ok")
+            else:
+                self.ctx.log(f"{dname}: couldn't apply size live ({msg}). "
+                             f"It takes effect on the next Run.", "info")
+        threading.Thread(target=worker, daemon=True).start()
 
     def _open_grafana(self) -> None:
         from PySide6.QtCore import QUrl

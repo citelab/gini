@@ -19,6 +19,7 @@ class EventBus(QObject):
     device_added = Signal(str)        # device id
     device_removed = Signal(str)      # device id
     device_changed = Signal(str)      # device id (properties/position)
+    device_resized = Signal(str)      # device id (size tier changed -> maybe live CPU update)
     link_added = Signal(str)          # link id
     selection_changed = Signal(object)  # device id or None
     theme_changed = Signal(str)       # theme name

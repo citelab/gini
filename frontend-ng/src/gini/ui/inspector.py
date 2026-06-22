@@ -342,4 +342,5 @@ class Inspector(QWidget):
             return
         d.size = new
         self.ctx.bus.device_changed.emit(self._device_id)   # resize the node + reroute edges
+        self.ctx.bus.device_resized.emit(self._device_id)   # live CPU update if running
         self.ctx.bus.topology_changed.emit()                # rebill the dashboard

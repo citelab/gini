@@ -157,7 +157,8 @@ class NodeItem(QGraphicsObject):
         self.inst.size = new
         self.update()
         self._scene.update_edges_for(self.inst.id)
-        # rebill the dashboard + mark the project dirty (size is persisted in .gini)
+        # resized -> live CPU update if running; rebill the dashboard; persist in .gini
+        self._scene.ctx.bus.device_resized.emit(self.inst.id)
         self._scene.ctx.bus.topology_changed.emit()
 
     def boundingRect(self) -> QRectF:
