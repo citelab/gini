@@ -1,0 +1,36 @@
+.TH "gnc" 1 "15 August 2019" GINI "gRouter Commands"
+
+
+.SH NAME
+
+gnc \- gRouter's nc (netcat) to create TCP and UDP connections and listens
+
+
+.SH SYNOPSIS
+
+.B gnc [-u] <destination> <port>
+
+.B gnc [-u] -l <port>
+
+
+.SH DESCRIPTION
+Create a TCP or UDP connection with a remote host. After the connection is established it will behave like a two-way chat, similar to the real nc command.
+
+Use the
+.B -u
+switch to use UDP instead of the default option of TCP.
+
+Use the 
+.B -l
+switch to specify that gnc should listen for an incoming connection rather than initiate a connection to a remote host.
+
+Use the 
+.B <destination> 
+and 
+.B <port>
+arguments to create a connection with a remote host.
+
+.SH AUTHORS
+
+Written by Archit Agnihotri. Send comments and feedback at archit.agnihotri@mail.mcgill.ca.
+

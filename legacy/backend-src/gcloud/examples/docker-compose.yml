@@ -1,0 +1,84 @@
+version: "3"
+
+services:
+    consul:
+        container_name: consul
+        image: citelab/consul-server:latest
+        command: -bootstrap
+        restart: always
+        networks:
+            my_net:
+                ipv4_address: 192.168.10.2
+
+    registrator:
+        container_name: registrator
+        image: citelab/registrator:latest
+        command: -internal -retry-attempts 10 -retry-interval 100 consul://consul:8500
+        volumes:
+            - /var/run/docker.sock:/tmp/docker.sock
+        networks:
+            my_net:
+                ipv4_address: 192.168.10.3
+        depends_on:
+            - consul
+
+    proxy:
+        container_name: consul-template-haproxy
+        image: citelab/haproxy:latest
+        command: consul-template -config=/tmp/haproxy.conf -consul=consul:8500 -log-level=debug
+        #volumes:
+        #     - ${PWD}/tmp/consul-template:/tmp/
+        #     - ${PWD}/tmp/haproxy:/etc/haproxy/
+        privileged: true
+        restart: on-failure
+        networks:
+            my_net:
+                ipv4_address: 192.168.10.128
+        depends_on:
+            - consul
+            - registrator
+
+    flask-app-01:
+        container_name: flask_01
+        image: citelab/flask-server:latest
+        environment:
+            - SERVICE_NAME=flask
+            - SERVICE_ID=flask01
+        expose:
+            - "80"
+        networks:
+            my_net:
+                ipv4_address: 192.168.10.4
+
+    flask-app-02:
+        container_name: flask_02
+        image: citelab/flask-server:latest
+        environment:
+            - SERVICE_NAME=flask
+            - SERVICE_ID=flask02
+        expose:
+            - "80"
+        networks:
+            my_net:
+                ipv4_address: 192.168.10.5
+
+    another-flask-app:
+        container_name: flask_03
+        image: citelab/flask-server:latest
+        command: "8080"
+        environment:
+            - SERVICE_NAME=another_flask_app
+            - SERVICE_ID=aflask01
+        expose:
+            - "8080"
+        networks:
+            my_net:
+                ipv4_address: 192.168.10.10
+
+networks:
+    my_net:
+        driver: bridge
+        ipam:
+            driver: default
+            config:
+                - subnet: 192.168.10.0/24

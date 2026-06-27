@@ -1,7 +1,0 @@
-Package: gini
-Version: 2.1
-Section: devel
-Maintainer: Benoit Hiller <benoit.hiller@mail.mcgill.ca>
-Architecture: i386
-Depends: python, python-lxml, screen, ssh, libreadline5, uml-utilities, python-qt4
-Description: a toolkit for creating virtual micro Internets for teaching and learning computer networks. It provides an easy to use graphical user interface (GUI) called gBuilder for creating network instances. 

@@ -19,9 +19,15 @@
 #include <string.h>
 
 #include <unistd.h>
+#include <math.h>
+#include <signal.h>
 
 // state information on outstanding ping..
 pingstat_t pstat;
+
+// state information specifying number of "echo request" packets to be attempted by the ping
+// this is set to 0 if ^C is received (to kill the ping)
+static int curr_retries = 0;
 
 /*
  * *** TODO: *** complete this function by implemeting the missing handlers
@@ -70,10 +76,16 @@ void ICMPProcessPacket(gpacket_t *in_pkt)
 void ICMPDoPing(uchar *ipaddr, int pkt_size, int retries)
 {
 	static int ping_active = 0;
+
+	// temporarily set SIGINT handler to ICMPPingTerminate
+	redefineSignalHandler(SIGINT, ICMPPingTerminate);
+	curr_retries = retries;
+
 	int i;
 	char tmpbuf[64];
 
 	// initialize the ping statistics structure
+	pstat.dst_ip = ipaddr;
 	pstat.tmin = LARGE_REAL_NUMBER;
 	pstat.tmax = SMALL_REAL_NUMBER;
 	pstat.tsum = 0;
@@ -85,12 +97,16 @@ void ICMPDoPing(uchar *ipaddr, int pkt_size, int retries)
 		printf("Pinging IP Address [%s]\n", IP2Dot(tmpbuf, ipaddr));
 		ping_active = 1;
 		
-		for(i=0; i < retries; i++)
+		for(i=0; i < curr_retries; i++) {
 			ICMPSendPingPacket(ipaddr, pkt_size, i);
-
+			sleep(1);
+		}
+		ICMPDisplayPingStats();
 		ping_active = 0;
 	}
 
+	// reset SIGINT handler to ignore the signal
+	redefineSignalHandler(SIGINT, dummyFunctionCopy);
 }
 
 
@@ -228,14 +244,20 @@ void ICMPProcessEchoReply(gpacket_t *in_pkt)
 
 	if (icmphdr->type == ICMP_ECHO_REPLY)
 	{
-		pstat.nreceived++;
 
 		gettimeofday(&tv, &tz);
 		elapsed_time = subTimeVal(&tv, (struct timeval *)(icmppkt_b + 8));
+
+		// update ping statistics structure
+		pstat.nreceived++;
+		pstat.tmin = fmin(pstat.tmin, elapsed_time);
+		pstat.tmax = fmax(pstat.tmax, elapsed_time);
+		pstat.tsum += elapsed_time;
+
 		printf("%d bytes from %s: icmp_seq=%d ttl=%d time=%6.3f ms\n", 
 		       (ntohs(ipkt->ip_pkt_len) - iphdrlen - 8),
 		       IP2Dot(tmpbuf, gNtohl((tmpbuf+20), ipkt->ip_src)), 
-		       ntohs(icmphdr->un.echo.sequence), ipkt->ip_ttl, elapsed_time);
+		       icmphdr->un.echo.sequence, ipkt->ip_ttl, elapsed_time);
 	}
 }
 
@@ -302,4 +324,30 @@ void ICMPProcessFragNeeded(gpacket_t *in_pkt, int interface_mtu)
 	// send the message back to the IP module for further processing ..
 	// set the messsage as REPLY_PACKET
 	IPOutgoingPacket(in_pkt, gNtohl(tmpbuf, ipkt->ip_src), (8 + iprevlen), 0, ICMP_PROTOCOL);
+}
+
+/*
+ * display ping statistics after ping command is terminated
+ */
+void ICMPDisplayPingStats() {
+	char tmpbuf[64];
+	printf("\n");
+	printf("--- %s ping statistics ---\n", IP2Dot(tmpbuf, pstat.dst_ip));
+	printf("%d packets transmitted, %d packets received, %.1f%% packet loss\n", pstat.ntransmitted, pstat.nreceived, 1.0 - pstat.ntransmitted/(double)pstat.nreceived);
+	printf("round-trip min/avg/max = %.3f/%.3f/%.3f ms\n", pstat.tmin, pstat.tsum/pstat.nreceived, pstat.tmax);
+}
+
+/*
+ * set current retries to 0, so if ^C was received then ping will terminate
+ */
+void ICMPPingTerminate() {
+	curr_retries = 0;
+}
+
+/*
+ * copy of the dummy function
+ */
+void dummyFunctionCopy(int sign)
+{
+	printf("Signal [%d] is ignored \n", sign);
 }

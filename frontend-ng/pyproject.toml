@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gini-gbuilder"
+version = "6.0.0a1"
+description = "GINI gBuilder — next-generation topology builder for computer networks and cloud computing experimentation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "GINI Toolkit" }]
+dependencies = [
+    "PySide6-Essentials>=6.6",
+]
+
+[project.optional-dependencies]
+agent = [
+    "mcp>=1.0",          # Model Context Protocol server (in-app + external agents)
+]
+graph = [
+    "matplotlib>=3.7",   # router / instance statistics graphing
+    "numpy>=1.24",
+]
+dev = [
+    "pytest>=7",
+    "pytest-qt>=4",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[project.scripts]
+gbuilder = "gini.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

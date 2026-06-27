@@ -1,0 +1,2 @@
+[console_scripts]
+gbuilder = gini.__main__:main

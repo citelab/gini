@@ -1,6 +1,6 @@
 /*
  * This example code shows how you can connect to a port of the
- * uml_virtual_switch when it is running in HUB mode. To put the
+ * mach_virtual_switch when it is running in HUB mode. To put the
  * virtual switch in hub mode just include the word "hub" in the
  * config file for the switch in a line by itself. 
 

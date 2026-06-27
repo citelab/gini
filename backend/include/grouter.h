@@ -97,11 +97,13 @@ typedef struct _router_config
 	pthread_t openflow_worker;
 	pthread_t openflow_controller_iface;
 	pthread_t openflow_flowtable_timeout;
+	pthread_t control_plane;            /* B2: control-plane module thread */
 	int schedcycle;
 } router_config;
 
 
 // function prototypes for code in utils.c..
+int netMaskLen(uchar nmask[]);
 int compareIPUsingMask(uchar *ip_addr, uchar *network, uchar *netmask);
 char *IP2Dot(char *buf, uchar ip_addr[]);
 char *ID2ModuleName(char *buf, int modid);

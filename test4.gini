@@ -1,0 +1,99 @@
+{
+  "format": "gini-project",
+  "version": 1,
+  "topology": {
+    "name": "test4",
+    "devices": [
+      {
+        "id": "ovs-1",
+        "type_key": "ovs",
+        "name": "OVS1",
+        "x": -42.0,
+        "y": -23.0,
+        "parent_id": null,
+        "properties": {
+          "Name": "OVS1",
+          "Datapath": "",
+          "Protocol": "OpenFlow13"
+        }
+      },
+      {
+        "id": "host-2",
+        "type_key": "host",
+        "name": "M1",
+        "x": -166.0,
+        "y": 101.0,
+        "parent_id": null,
+        "properties": {
+          "Name": "M1",
+          "OS": "linux",
+          "Interfaces": "1"
+        }
+      },
+      {
+        "id": "host-3",
+        "type_key": "host",
+        "name": "M2",
+        "x": 41.0,
+        "y": 118.0,
+        "parent_id": null,
+        "properties": {
+          "Name": "M2",
+          "OS": "linux",
+          "Interfaces": "1"
+        }
+      },
+      {
+        "id": "controller-4",
+        "type_key": "controller",
+        "name": "OFC1",
+        "x": -44.0,
+        "y": -221.0,
+        "parent_id": null,
+        "properties": {
+          "Name": "OFC1",
+          "Port": "6633"
+        }
+      },
+      {
+        "id": "host-8",
+        "type_key": "host",
+        "name": "M3",
+        "x": 232.0,
+        "y": 99.0,
+        "parent_id": null,
+        "properties": {
+          "Name": "M3",
+          "OS": "linux",
+          "Interfaces": "1"
+        }
+      }
+    ],
+    "links": [
+      {
+        "id": "link-5",
+        "source_id": "controller-4",
+        "target_id": "ovs-1",
+        "label": ""
+      },
+      {
+        "id": "link-6",
+        "source_id": "ovs-1",
+        "target_id": "host-2",
+        "label": ""
+      },
+      {
+        "id": "link-7",
+        "source_id": "ovs-1",
+        "target_id": "host-3",
+        "label": ""
+      },
+      {
+        "id": "link-9",
+        "source_id": "host-8",
+        "target_id": "ovs-1",
+        "label": ""
+      }
+    ]
+  }
+}

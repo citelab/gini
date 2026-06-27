@@ -1,6 +1,6 @@
 //=======================================================
 //       File Name :  gwcenter
-//======================================================= 
+//=======================================================
  #ifndef __GWCENTER_H_
  #define __GWCENTER_H_
 
@@ -27,9 +27,9 @@
 #define  MAC_802_11_RTS_FRAME_HEADER_LENGHT  16
 #define  MAC_802_11_CTS_FRAME_HEADER_LENGHT  10
 #define  MAC_802_11_ACK_FRAME_HEADER_LENGHT  10
-#define  MAC_802_11_FRAME_TAILER_LENGHT   4                
+#define  MAC_802_11_FRAME_TAILER_LENGHT   4
 
-#define MAC_PROTOCOL_VERSION 0x00    
+#define MAC_PROTOCOL_VERSION 0x00
 
 #define MAC_TYPE_MANAGEMENT 0x00
 #define MAC_TYPE_CONTROL 0x01
@@ -41,24 +41,24 @@
 #define MAC_SUBTYPE_RTS 0x0B
 #define MAC_SUBTYPE_CTS 0x0C
 #define MAC_SUBTYPE_ACK 0x0D
-#define MAC_SUBTYPE_DATA 0x00	
+#define MAC_SUBTYPE_DATA 0x00
 
 //logical link control layer parameters
 #define LLC_TO_MAC_BUF_SIZE  500
-#define LLC_TO_UML_BUF_SIZE  500
+#define LLC_TO_MACH_BUF_SIZE  500
 #define RCVBUFSIZE 2000
 
 // mac layer parameters
 #define RETX_MAX_NUM 11
 #define TIMEOUT_TIME 0.15
 #define MAC_DUP_CHK_BUF_SIZE 1
-#define MAC_ADDR_LEN 6 
+#define MAC_ADDR_LEN 6
 
 //physical layer parameters
  #define DSSS_CWMin 31
  #define DSSS_CWMax 1023
  #define DSSS_SlotTime 0.000020
- #define DSSS_CCATime 0.000015	
+ #define DSSS_CCATime 0.000015
  #define DSSS_RxTxTurnaroundTime 0.000005
  #define DSSS_SIFSTime	0.000010
  #define DSSS_PreambleLength 144	     //bits	 NOT	 byte
@@ -71,12 +71,12 @@
 
 //=======================================================
 //       General stuff
-//======================================================= 
+//=======================================================
   typedef enum {
     FALSE,
     TRUE
   } WGNflag;
-  
+
   typedef enum {
     ON,
     OFF
@@ -84,7 +84,7 @@
 
 //=======================================================
 //       Time stuff
-//======================================================= 
+//=======================================================
   typedef struct {
      unsigned int tv_sec;
 	 unsigned int tv_nsec;
@@ -105,13 +105,13 @@ typedef struct {
     WGNTime timeout_time;                                   //the time timeout happens
 	WGNTime start_time;
 	unsigned int remain_time;                                          //nanoseconds
-	unsigned int wait_time;                                              //nanoseconds         // the waiting time before the backoff process 
+	unsigned int wait_time;                                              //nanoseconds         // the waiting time before the backoff process
 }   BackoffTimer;
 
 typedef struct {
 	Switch switcher;
 	WGNTime start_time;
-	WGNTime end_time;                                      
+	WGNTime end_time;
 }   NormalTimer;
 
 typedef struct {
@@ -132,7 +132,7 @@ WGNTime SYSTEM_TIME;
 
 //=======================================================
 //       Map stuff
-//======================================================= 
+//=======================================================
   typedef struct {
     double x_width;
 	double y_width;
@@ -141,10 +141,10 @@ WGNTime SYSTEM_TIME;
 
 //=======================================================
 //        Event stuff
-//======================================================= 
+//=======================================================
   typedef enum {
     // mac layer
-	BFTimeOut,      
+	BFTimeOut,
 	DFTimeOut,
 	NAVTimeOut,
 	IFTimeOut,
@@ -152,25 +152,25 @@ WGNTime SYSTEM_TIME;
     RXTimeOut,
 	// phy layer
 	INTTimeOut,
-	// channel       
-	START_RX       
+	// channel
+	START_RX
   } Event_type;
- 
+
   typedef struct WGNEvent {
 	 int id;
 	 Event_type eveType;
-	 WGNTime eveTime;    
-	 void* eveObject; 	
+	 WGNTime eveTime;
+	 void* eveObject;
 	 struct WGNEvent* nextEventPtr;
   }  WGNEvent;
- 
+
   WGNEvent* WGNEveQPtr;
   WGNTime timeOutTime;        //the execution time of the earliest timeout event
   pthread_mutex_t event_queue_mutex;			/* for several nodes write the event queue at the same time*/
 
 //=======================================================
 //       Statistical stuff
-//======================================================= 
+//=======================================================
   WGNflag ThroutputComSign;
   WGNflag PrintChFadSign;
   WGNflag PrintEventSign;
@@ -188,7 +188,7 @@ WGNTime SYSTEM_TIME;
 	unsigned long int AckTxed;
 	unsigned long int TotPktTxed;
 	//retransmission stuff
-	unsigned long int ReTxPktNum;	   
+	unsigned long int ReTxPktNum;
 	unsigned long int ReTxRtsNum;
 	unsigned long int ReTxNum;
 	//recording error stuff
@@ -201,16 +201,16 @@ WGNTime SYSTEM_TIME;
     unsigned long int CtsDropForCollision;
 	unsigned long int AckDropForCollision;
     unsigned long int DataDropForCollision;
-	unsigned long int DropForCollision;		  
+	unsigned long int DropForCollision;
 	unsigned long int DropForLowRxPwr;
 	unsigned long int DropForNoiseErr;
 	unsigned long int TotPktErrorDrop;
   	unsigned long int AptCaptureNo;                         //accept for the capture
 	//recording the pkt accepted correctly
-	unsigned long int TotPktRxed;		                              //including the correct ones and not             
+	unsigned long int TotPktRxed;		                              //including the correct ones and not
 	unsigned long int PktSucRxed;							   //the packets received correctly
 	unsigned long int NotForMeRxed;
-	unsigned long int RtsRxed; 
+	unsigned long int RtsRxed;
 	unsigned long int CtsRxed;
 	unsigned long int DataRxed;
 	unsigned long int AckRxed;
@@ -236,41 +236,41 @@ WGNTime SYSTEM_TIME;
 
 //=======================================================
 //             Frame stuff
-//======================================================= 
+//=======================================================
 typedef struct {
-   unsigned char dst[6];		
-   unsigned char src[6];		
-   unsigned char prot[2];	
+   unsigned char dst[6];
+   unsigned char src[6];
+   unsigned char prot[2];
 }  WGN_802_3_Mac_Hdr;
 
 typedef struct {
   int payload_len;                   //header+data
   WGN_802_3_Mac_Hdr header;
-  unsigned char *data;				
+  unsigned char *data;
 } WGN_802_3_Mac_Frame;
 
 typedef struct {
-	int     fc_protocol_version;      
-	int     fc_type;                  
-	int     fc_subtype;                
-	int     fc_to_ds;  
-	int     fc_from_ds;	
-	int     fc_more_frag; 	 
-	int     fc_retry; 	 
-	int     fc_pwr_mgt;		
-	int     fc_more_data;  
-	int     fc_wep;  
-	int     fc_order;                  	                         	               
+	int     fc_protocol_version;
+	int     fc_type;
+	int     fc_subtype;
+	int     fc_to_ds;
+	int     fc_from_ds;
+	int     fc_more_frag;
+	int     fc_retry;
+	int     fc_pwr_mgt;
+	int     fc_more_data;
+	int     fc_wep;
+	int     fc_order;
 }	WGN_802_11_Mac_Pseudo_Frame_Control;
 
 typedef struct {
-	unsigned int     sc_fragment_number;     
-	unsigned int     sc_sequence;                    
+	unsigned int     sc_fragment_number;
+	unsigned int     sc_sequence;
 }	WGN_802_11_Mac_Pseudo_Sequence_Control;
 
-typedef enum {                                         
+typedef enum {
     BIT,
-    BYTE                                                                                                                 
+    BYTE
 }   Pkt_Unit;
 
 typedef struct {
@@ -280,7 +280,7 @@ typedef struct {
 	unsigned int duration;
 	unsigned char SA[6];
 	unsigned char DA[6];
-	unsigned char TA[6];	
+	unsigned char TA[6];
 	unsigned char RA[6];
 	unsigned char BSSID[6];
 	unsigned int fcs;
@@ -304,14 +304,14 @@ typedef struct {
 
 typedef struct {
   WGN_802_11_Mac_Pseudo_Header *pseudo_header;		           //just for computation in WGN
-  WGN_802_3_Mac_Frame *frame_body;			 		                      //the packet uml wants
+  WGN_802_3_Mac_Frame *frame_body;			 		                      //the packet mach wants
 } WGN_802_11_Mac_Frame;
 
 typedef enum {
-    MAC_DATA_FRAME,                                      
-    MAC_RTS_FRAME,                                          
+    MAC_DATA_FRAME,
+    MAC_RTS_FRAME,
     MAC_CTS_FRAME,
-    MAC_ACK_FRAME                                                                                                                       
+    MAC_ACK_FRAME
 }   WGN_802_11_Mac_Frame_Type;
 
 //=======================================================
@@ -319,20 +319,20 @@ typedef enum {
 //=======================================================
   typedef struct {
     pthread_t buf_thread_id;
-	struct interface *inf;                //interface to the UML
-    WGN_802_3_Mac_Frame* LToMArray[LLC_TO_MAC_BUF_SIZE];	
-	WGN_802_11_Mac_Frame* LToUArray[LLC_TO_UML_BUF_SIZE];
+	struct interface *inf;                //interface to the Mach
+    WGN_802_3_Mac_Frame* LToMArray[LLC_TO_MAC_BUF_SIZE];
+	WGN_802_11_Mac_Frame* LToUArray[LLC_TO_MACH_BUF_SIZE];
 	//logic link layer to mac layer
 	int ltom_buf_Wcount;
 	int ltom_buf_Rcount;
-	pthread_mutex_t ltom_array_mutex;			/* LLToUMLBuf array buffer mutex*/
+	pthread_mutex_t ltom_array_mutex;			/* LLToMachBuf array buffer mutex*/
     pthread_cond_t ltom_nonempty;				/* array non empty condition */
     pthread_cond_t ltom_nonfull;					/* array non full condition */
 	WGNflag ltombufempty;
-	//logic link layer to uml
+	//logic link layer to mach
     int ltou_buf_Wcount;
 	int ltou_buf_Rcount;
-	pthread_mutex_t ltou_array_mutex;			/* LLToUMLBuf array buffer mutex*/
+	pthread_mutex_t ltou_array_mutex;			/* LLToMachBuf array buffer mutex*/
     pthread_cond_t ltou_nonempty;				/* array non empty condition */
     pthread_cond_t ltou_nonfull;					/* array non full condition */
 }   NodeLlc;
@@ -348,7 +348,7 @@ char *pchSocket[MaxNodeNo];
 
 //=======================================================
 //             MAC layer stuff
-//======================================================= 
+//=======================================================
 	int MAC_DATA_HDR_LEN;
 	int MAC_RTS_LEN;
 	int MAC_CTS_LEN;
@@ -363,7 +363,7 @@ char *pchSocket[MaxNodeNo];
 	   unsigned int id;
 	   unsigned char mac_addr[MAC_ADDR_LEN];
 	}  AddrToIDEntry;
-    
+
 	typedef enum {
 	   NONE,
        CSMA,
@@ -389,16 +389,16 @@ char *pchSocket[MaxNodeNo];
    typedef enum {
       MAC_IDLE,
 	  MAC_COLL,
-      MAC_RECV,                                          
-      MAC_SEND,                                         
-      MAC_RTS,                                          
+      MAC_RECV,
+      MAC_SEND,
+      MAC_RTS,
       MAC_CTS,
-      MAC_ACK                                                                                                                       
+      MAC_ACK
   }   MacStatus;
 
   typedef struct {
 	//shared part
-	char BSSID[MAC_ADDR_LEN];                            
+	char BSSID[MAC_ADDR_LEN];
 	int seq_no;
 	int frag_no;                       //not used now
 	unsigned char mac_addr[MAC_ADDR_LEN];
@@ -410,8 +410,8 @@ char *pchSocket[MaxNodeNo];
 	WGN_802_11_Mac_Frame *pktTx;
 	WGN_802_11_Mac_Frame *pktRsp;
 	WGN_802_11_Mac_Frame *pktRx;
-	int *mac_buffer;		                              	//used in duplication checking purpose               
-	int *mac_buf_index;		
+	int *mac_buffer;		                              	//used in duplication checking purpose
+	int *mac_buf_index;
 	WGNflag HasPkt;
 
 	//none & csma
@@ -423,7 +423,7 @@ char *pchSocket[MaxNodeNo];
 	//dcf_802_11 part
 	int cw;
 	int short_retry_counter;
-	int long_retry_counter;	
+	int long_retry_counter;
 	WGN_802_11_Mac_Frame *pktRts;
 
   } NodeMac;
@@ -434,7 +434,7 @@ char *pchSocket[MaxNodeNo];
 
 //=======================================================
 //         Antenna stuff
-//======================================================= 
+//=======================================================
   typedef enum {
     OmniDirectionalAnt,
     SwitchedBeamAnt,
@@ -446,7 +446,7 @@ char *pchSocket[MaxNodeNo];
 	Antenna_type AntType;
     double Height;
     double Gain_dBi;
-    double SysLoss; 
+    double SysLoss;
 	//handle the interference added on the antenna.
 	double intPwr;                    //(W)
 	double jamInt;                    //(W)
@@ -454,19 +454,19 @@ char *pchSocket[MaxNodeNo];
 
 //=======================================================
 //       Energy stuff
-//======================================================= 
+//=======================================================
 typedef enum {
        IDLE,
        TX,
 	   RX,
 	   SLEEP
     }  EnergyUpdate_type;
-	
+
 	typedef struct {
 		Switch PowSwitch;
 		Switch PSM;
 		double TotalEnergy ;
-		double Pt;    
+		double Pt;
 		double Pt_consume;
 		double Pr_consume;
 		double P_idle;
@@ -476,15 +476,15 @@ typedef enum {
 
 //=======================================================
 //       Mobility stuff
-//======================================================= 
-  unsigned int Mob_update_remain;                      //nanosecond 
+//=======================================================
+  unsigned int Mob_update_remain;                      //nanosecond
 
   typedef enum {
     RandomWayPoint,
     TrajectoryBased,
 	Manual
   } Mobility_type;
-  
+
   typedef struct {
     double x;
     double y;
@@ -502,27 +502,27 @@ typedef enum {
   typedef struct {
     WGNflag MovChSign;      // the sign to show if it is the time to change the movement
     WGNflag EndSign;           // the sign to show whether to end the RWP moving mode
-	double UpdateTimeUnit;  // the time interval that update parameters related to the node's movement 
+	double UpdateTimeUnit;  // the time interval that update parameters related to the node's movement
   } RWP_StrPtr;
 
   /*TrajectoryBased structure pointer, one kind of movStrPtr*/
   typedef struct {
     WGNflag EndSign;            // the sign to show whether to end the TB moving mode
-    double UpdateTimeUnit;  // the time interval that update parameters related to the node's movement 
+    double UpdateTimeUnit;  // the time interval that update parameters related to the node's movement
   } TB_StrPtr;
 
   /*Manual structure pointer, one kind of movStrPtr*/
   typedef struct {
     WGNflag EndSign;           // the sign to show whether to end the MAN moving mode
-	double UpdateTimeUnit;  // the time interval that update parameters related to the node's movement 
-  } MAN_StrPtr; 
+	double UpdateTimeUnit;  // the time interval that update parameters related to the node's movement
+  } MAN_StrPtr;
 
   typedef struct {
 	Mobility_type mobilityType;
-	void * movStrPtr;                            // the pointer point to the structure corresponding to the specific movement mode 
-	NodePosition *srcPosition;            // the starting location for each piece of movement 
-	NodePosition *dstPosition;            // the destination location for each piece of movement 
-    NodePosition *curPosition;            // the current location for each piece of movement 
+	void * movStrPtr;                            // the pointer point to the structure corresponding to the specific movement mode
+	NodePosition *srcPosition;            // the starting location for each piece of movement
+	NodePosition *dstPosition;            // the destination location for each piece of movement
+    NodePosition *curPosition;            // the current location for each piece of movement
 	double MaxSpd;                              // the max speed of the node
 	double MinSpd;                               // the min speed of the node
 	NodeSpd * nodeSpd;                      // the real speed of the node
@@ -531,7 +531,7 @@ typedef enum {
 
 //=======================================================
 //       Wireless card stuff
-//======================================================= 
+//=======================================================
     typedef enum {
        DSSS,
        FHSS
@@ -548,7 +548,7 @@ typedef enum {
     typedef struct {
 	   double freq;
        double bandwidth;
-       double Pt;    
+       double Pt;
        double Pt_consume;
        double Pr_consume;
        double P_idle;
@@ -563,7 +563,7 @@ typedef enum {
 
 //=======================================================
 //       Physical layer stuff
-//======================================================= 
+//=======================================================
     int PHY_DATA_HDR_LEN;
     int PHY_RTS_LEN;
     int PHY_CTS_LEN;
@@ -579,8 +579,8 @@ typedef enum {
 		double PIFSTime;                                    //seconds
 		double DIFSTime;                                    //seconds
 		double EIFSTime;                                    //seconds
-		int    PreambleLength;	  
-		int    PLCPHeaderLength;	
+		int    PreambleLength;
+		int    PLCPHeaderLength;
 	}  PhyMib;
 
 	typedef struct {
@@ -616,7 +616,7 @@ typedef enum {
   } ShadDev_type;
 
   typedef struct {
-     Prop_type prop_type;        
+     Prop_type prop_type;
 	 double pathlossexp;
      double dev_db;
      double dist0;
@@ -625,7 +625,7 @@ typedef enum {
 
 //=======================================================
 //        Awgn stuff
-//======================================================= 
+//=======================================================
    typedef enum {
     PWR,
 	SNR
@@ -635,17 +635,17 @@ typedef enum {
 	  Switch switcher;
 	  double noise;     //noise variance
       double snr;        //db
-      Awgn_Mode mode;       // mode 1: set SNR directly    mode 2: add noise  
+      Awgn_Mode mode;       // mode 1: set SNR directly    mode 2: add noise
   }  ChannelAwgn;
 
 
 //=======================================================
 //        Fading stuff
-//======================================================= 
+//=======================================================
   typedef struct {
 	 Switch switcher;
 	 int N0;     //the total number of oscillators in the Jakes model
-	 int N;       //the total number of the simulated multiple paths 
+	 int N;       //the total number of the simulated multiple paths
      double **coef;
 	 double ***incr;
 	 double ***pha;
@@ -655,7 +655,7 @@ typedef enum {
 
 //=======================================================
 //        Channel stuff
-//======================================================= 
+//=======================================================
    unsigned int Ch_update_remain;               //nanosecond
 
    typedef struct {
@@ -694,8 +694,8 @@ typedef enum {
 }   Sys_Info;
 
 typedef struct {
-    NodeId Id; 
-	NodeType nodeType;       
+    NodeId Id;
+	NodeType nodeType;
 	NodeLlc *nodeLlc;
 	NodeMac *nodeMac;
 	NodePhy *nodePhy;
@@ -709,7 +709,7 @@ int TotNodeNo;
 
 //=======================================================
 //       Temperary variables (for initialization purpose)
-//======================================================= 
+//=======================================================
 int X_Width;
 int Y_Width;
 int Z_Width;
@@ -726,7 +726,7 @@ Switch AwgnSign;
 double dist0;
 double noise;     //noise variance
 double snr_Eb_N0;        //db
-Awgn_Mode awgn_mode;                            // mode 1: set SNR directly    mode 2: add noise  
+Awgn_Mode awgn_mode;                            // mode 1: set SNR directly    mode 2: add noise
 double MaxSpdArray[MaxNodeNo];
 double MinSpdArray[MaxNodeNo];
 Mobility_type MobilityTypeArray[MaxNodeNo];              // store the mobility type for nodes
@@ -737,26 +737,25 @@ Switch EnPowSwitchArray[MaxNodeNo];                       //  store the power sw
 Switch EnPSMArray[MaxNodeNo];                                          //  store the PSM status for the node
 double TotalEnergyArray[MaxNodeNo];                         //  store the source power preservation for the node
 WCard_type WCardTypeArray[MaxNodeNo];               // store the wireless card type
-Switch CapSignArray[MaxNodeNo]; 
+Switch CapSignArray[MaxNodeNo];
 double TxProbArray[MaxNodeNo];
 
 
 //=======================================================
 //                                                   Functions
-//======================================================= 
-    void IniInput(); 
-    void IniNetworkNode(); 
-	void FinalizeNetworkNode();	
+//=======================================================
+    void IniInput();
+    void IniNetworkNode();
+	void FinalizeNetworkNode();
 	void IniMobNode();
 	void FinalizeMobNode();
-    void IniNodeID(NodeType type); 
+    void IniNodeID(NodeType type);
     void IniNodeType(NodeType type);
     void IniAddrToIDMap();
 	void FinalizeAddrToIDMap();
     void IniSystem(int argc, char *argv[]);
 	void FinalizeSystem();
 	void IniProgram(int ac, char *av[]);
-    void ReloadWGN(); 
-  
+    void ReloadWGN();
+
   #endif
-  

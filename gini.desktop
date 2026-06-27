@@ -1,8 +1,0 @@
-
-[Desktop Entry]
-Version=2.1.0
-Name=GINI
-Comment=Your wish is its command
-Exec=gbuilder
-Icon=giniLogo.png
-Type=Application

@@ -6,6 +6,7 @@
  */
 
 #include <slack/err.h>
+#include "sdn.h"        /* Z1: OpenFlow as ingress mode (seam) */
 #include "tun.h"
 #include "packetcore.h"
 #include "classifier.h"
@@ -40,8 +41,13 @@ void *toTunDev(void *arg)
 	// find the outgoing interface and device...
 	if ((iface = findInterface(inpkt->frame.dst_interface)) != NULL)
 	{
-		/* send IP packet or ARP reply */
-		if (inpkt->data.header.prot == htons(ARP_PROTOCOL))
+		/* send IP packet or ARP reply. As a router we rewrite the ARP sender to our
+		 * own egress MAC/IP (proxy-ARP-ish); but as an OpenFlow SWITCH we must NOT touch
+		 * the frame — rewriting would launder the host MACs and break L2 learning. So
+		 * only rewrite when NOT acting as an OpenFlow switch. (toEthernetDev does the
+		 * same via !frame.openflow.) */
+		if (!(sdn_mode() == SDN_MODE_OPENFLOW) &&
+				inpkt->data.header.prot == htons(ARP_PROTOCOL))
 		{
 			apkt = (arp_packet_t *) inpkt->data.data;
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
@@ -84,12 +90,31 @@ void* fromTunDev(void *arg)
         
         verbose(2, "[fromTunDev]:: Destination MAC is %s ", MAC2Colon(tmpbuf, in_pkt->data.header.dst));
       
-        if ((COMPARE_MAC(in_pkt->data.header.dst, iface->mac_addr) != 0) &&
+        // In OpenFlow mode the gRouter is an L2 SWITCH, so it must accept frames whose
+        // destination MAC is some other host (that's the whole point of switching). Only
+        // apply the "is it for me?" router filter when NOT acting as an OpenFlow switch.
+        // (fromEthernetDev has the identical guard; the tun path needs it too.)
+        if (!(sdn_mode() == SDN_MODE_OPENFLOW) &&
+                (COMPARE_MAC(in_pkt->data.header.dst, iface->mac_addr) != 0) &&
                 (COMPARE_MAC(in_pkt->data.header.dst, bcast_mac) != 0))
         {
             verbose(1, "[fromTunDev]:: Packet[%d] dropped .. not for this router!? ", pktsize);
             free(in_pkt);
             continue;
+        }
+
+        // OpenFlow-switch safety: the legacy OpenFlow 1.0 flow-matcher only parses IPv4
+        // and ARP. Other ethertypes (IPv6 ND multicast 33:33:*, STP, LLDP, …) make it
+        // read past the header and SIGSEGV. A teaching L2/SDN lab only needs IPv4+ARP,
+        // so silently drop anything else before it reaches the flow table.
+        if (sdn_mode() == SDN_MODE_OPENFLOW)
+        {
+            uint16_t ethertype = in_pkt->data.header.prot;
+            if (ethertype != htons(IP_PROTOCOL) && ethertype != htons(ARP_PROTOCOL))
+            {
+                free(in_pkt);
+                continue;
+            }
         }
 
         // copy fields into the message from the packet..
@@ -106,7 +131,7 @@ void* fromTunDev(void *arg)
         }
 
         verbose(2, "[fromTunDev]:: Packet is sent for enqueuing..");
-        enqueuePacket(pcore, in_pkt, sizeof(gpacket_t), rconfig.openflow);
+        enqueuePacket(pcore, in_pkt, sizeof(gpacket_t), (sdn_mode() == SDN_MODE_OPENFLOW));
     }
 }
 
@@ -176,17 +201,22 @@ int tun_recvfrom(vpl_data_t *vpl, void *buf, int len)
     
     rcv_addr_len = sizeof(rcvaddr);
     n=recvfrom(vpl->data,buf,len,0,(struct sockaddr *)&rcvaddr,&rcv_addr_len);
-    if (n == -1) 
+    if (n == -1)
     {
-        verbose(2, "[tun_recvfrom]:: unable to receive packet, error = %s", strerror(errno));		
-        return EXIT_FAILURE;
-    } else if((rcvaddr.sin_addr.s_addr != dstaddr->sin_addr.s_addr) || 
-               rcvaddr.sin_port != dstaddr->sin_port)
-    { 
-        verbose(2, "[tun_recvfrom]:: source IP or port does not match interface router");
+        verbose(2, "[tun_recvfrom]:: unable to receive packet, error = %s", strerror(errno));
         return EXIT_FAILURE;
     }
-    
+    /*
+     * Each tun interface is a dedicated point-to-point UDP link, so only the peer
+     * sends here. We deliberately do NOT reject on a sender-address mismatch: in a
+     * dynamic fabric (Docker) the peer's address is resolved at startup and may differ
+     * slightly from the datagram's observed source (DNS timing, NAT). Dropping on a
+     * mismatch silently breaks the whole link. Note a mismatch at high verbosity only.
+     */
+    if ((rcvaddr.sin_addr.s_addr != dstaddr->sin_addr.s_addr) ||
+        rcvaddr.sin_port != dstaddr->sin_port)
+        verbose(3, "[tun_recvfrom]:: sender differs from configured peer (accepting anyway)");
+
     verbose(2, "[tun_recvfrom]:: Destination MAC is %s ", MAC2Colon(tmpbuf, buf));
     return EXIT_SUCCESS;
         

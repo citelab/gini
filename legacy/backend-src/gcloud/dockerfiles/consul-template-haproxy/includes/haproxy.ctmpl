@@ -1,0 +1,34 @@
+global
+    log localhost local0
+    log localhost local1 notice
+    maxconn {{ key_or_default "service/haproxy/maxconn" "2000" }}
+    daemon
+
+defaults
+    log global
+    mode http
+    option httplog
+    option dontlognull
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms{{ range $key:=services }}{{ if not (contains "consul" $key.Name) }}
+
+frontend gini_frontend_{{ $key.Name }}
+    mode {{ key_or_default (printf "service/%s/mode" $key.Name) "tcp" }}
+    bind *:{{ if service $key.Name }}{{ with index (service $key.Name) 0 }} {{- .Port }} {{ end }} {{ end }}
+    default_backend gini_backend_{{ $key.Name }}
+{{- end }}{{ end }}{{ range $key:=services }}{{ if not (contains "consul" $key.Name) }}
+
+backend gini_backend_{{ $key.Name }}
+    mode {{ key_or_default (printf "service/%s/mode" $key.Name) "tcp" }}
+    balance {{ key_or_default (printf "service/%s/balance" $key.Name) "roundrobin" }}
+    option http-server-close{{ range $idx,$sv:=(service $key.Name) }}
+    server {{ $key.Name }}_{{ add $idx 1 }} {{ $sv.Address }}:{{ $sv.Port }} weight {{ key_or_default (printf "service/%s/%s/weight" $key.Name $sv.ID) "1" }} check{{ end }}
+{{- end }}{{ end }}
+
+# only enable stats on http mode
+listen stats
+    bind *:10000
+    stats enable
+    stats uri /stats
+    stats hide-version

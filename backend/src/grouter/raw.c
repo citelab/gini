@@ -8,6 +8,7 @@
  */
 
 #include <slack/err.h>
+#include "sdn.h"        /* Z1: OpenFlow as ingress mode (seam) */
 #include "raw.h"
 #include "packetcore.h"
 #include "classifier.h"
@@ -162,7 +163,7 @@ void* fromRawDev(void *arg)
         }
 
         verbose(2, "[fromRawDev]:: Packet is sent for enqueuing..");
-        enqueuePacket(pcore, in_pkt, sizeof(gpacket_t), rconfig.openflow);
+        enqueuePacket(pcore, in_pkt, sizeof(gpacket_t), (sdn_mode() == SDN_MODE_OPENFLOW));
     }
 }
 

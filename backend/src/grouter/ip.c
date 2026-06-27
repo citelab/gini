@@ -8,9 +8,17 @@
 #include "message.h"
 #include "grouter.h"
 #include "routetable.h"
+#include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
+#include "host_stack.h" /* Z1: sealed, optional lwIP host stack */
+#include "gr_pipeline.h" /* Z2: inline module-graph runner */
+#include "gr_control_plane.h" /* B2: control-plane module receive hook */
+#include "gr_mcast.h"         /* B3: multicast membership table */
 #include "mtu.h"
 #include "protocols.h"
 #include "ip.h"
+#include "tcp.h"
+#include "tcp_impl.h"
+#include "udp.h"
 #include "icmp.h"
 #include "fragment.h"
 #include "packetcore.h"
@@ -22,15 +30,16 @@
 #include <slack/std.h>
 #include <slack/prog.h>
 
-route_entry_t route_tbl[MAX_ROUTES];       	// routing table
-mtu_entry_t MTU_tbl[MAX_MTU];		        // MTU table
-
 extern pktcore_t *pcore;
+
+void IPProcessMulticast(gpacket_t *in_pkt);                 /* B3 */
+static int ip_directed_bcast_iface(uchar *dst, int *iface); /* B3 */
 
 void IPInit()
 {
 	RouteTableInit(route_tbl);
 	MTUTableInit(MTU_tbl);
+	gr_mcast_init();                                       /* B3: multicast membership */
 }
 
 
@@ -44,8 +53,9 @@ void IPInit()
 void IPIncomingPacket(gpacket_t *in_pkt)
 {
 	char tmpbuf[MAX_TMPBUF_LEN];
+
 	// get a pointer to the IP packet
-        ip_packet_t *ip_pkt = (ip_packet_t *)&in_pkt->data.data;
+    ip_packet_t *ip_pkt = (ip_packet_t *)&in_pkt->data.data;
 	uchar bcast_ip[] = IP_BCAST_ADDR;
 
 	// Is this IP packet for me??
@@ -53,6 +63,11 @@ void IPIncomingPacket(gpacket_t *in_pkt)
 	{
 		verbose(2, "[IPIncomingPacket]:: got IP packet destined to this router");
 		IPProcessMyPacket(in_pkt);
+	} else if ((gNtohl(tmpbuf, ip_pkt->ip_dst)[0] & 0xf0) == 0xe0)
+	{
+		// B3: class-D destination (224.0.0.0/4) -> multicast handling
+		verbose(2, "[IPIncomingPacket]:: got a multicast packet");
+		IPProcessMulticast(in_pkt);
 	} else if (COMPARE_IP(gNtohl(tmpbuf, ip_pkt->ip_dst), bcast_ip) == 0)
 	{
 		// TODO: rudimentary 'broadcast IP address' check
@@ -107,9 +122,82 @@ int IPCheckPacket4Me(gpacket_t *in_pkt)
  */
 int IPProcessBcastPacket(gpacket_t *in_pkt)
 {
+	/* B2: broadcast/link-local-multicast control traffic (DHCP DISCOVER to
+	 * 255.255.255.255, routing-protocol hellos to 224.0.0.x) is offered to the
+	 * control plane here. gr_cp_deliver copies on a filter match; it does not take
+	 * ownership, so the existing (no-op) memory behaviour is unchanged. */
+	gr_cp_deliver(in_pkt);
 	return EXIT_SUCCESS;
 }
 
+
+/*
+ * B3: forward a multicast (class-D) datagram. Link-local control groups (224.0.0.x, e.g.
+ * IGMP membership reports) are offered to the control plane so the IGMP-snoop module can
+ * learn memberships; routable groups are replicated to every interface that has a member,
+ * except the one the packet arrived on. With no members, the packet is dropped.
+ */
+void IPProcessMulticast(gpacket_t *in_pkt)
+{
+	char tmpbuf[MAX_TMPBUF_LEN];
+	ip_packet_t *ip_pkt = (ip_packet_t *)&in_pkt->data.data;
+	uchar grp[4];
+	uint32_t mask;
+	int i;
+
+	COPY_IP(grp, gNtohl(tmpbuf, ip_pkt->ip_dst));   /* group address (host order) */
+
+	gr_cp_deliver(in_pkt);                           /* let IGMP snoop / control see it */
+
+	mask = gr_mcast_lookup(grp);
+	if (mask == 0)                                   /* no members anywhere */
+	{
+		free(in_pkt);
+		return;
+	}
+
+	for (i = 0; i < 32; i++)
+	{
+		gpacket_t *cp;
+		ip_packet_t *cip;
+		if (!(mask & (1u << i))) continue;
+		if (i == in_pkt->frame.src_interface) continue;   /* don't echo to the source LAN */
+		if ((cp = duplicatePacket(in_pkt)) == NULL) continue;
+		cip = (ip_packet_t *)&cp->data.data;
+		cip->ip_ttl -= 1;                            /* this is a hop */
+		cip->ip_cksum = 0;
+		cip->ip_cksum = htons(checksum((uchar *)cip, cip->ip_hdr_len * 2));
+		cp->frame.dst_interface = i;
+		cp->frame.arp_bcast = TRUE;                  /* MAC set below; GNET sends as-is */
+		/* IPv4 multicast MAC: 01:00:5e + low 23 bits of the group */
+		cp->data.header.dst[0] = 0x01; cp->data.header.dst[1] = 0x00; cp->data.header.dst[2] = 0x5e;
+		cp->data.header.dst[3] = grp[1] & 0x7f;
+		cp->data.header.dst[4] = grp[2];
+		cp->data.header.dst[5] = grp[3];
+		cp->data.header.prot = htons(IP_PROTOCOL);
+		IPSend2Output(cp);
+	}
+	free(in_pkt);
+}
+
+
+/* B3: if dst is the all-ones host address of one of our connected /24s, return 1 and the
+ * interface index; used to forward a directed broadcast onto that subnet. */
+static int ip_directed_bcast_iface(uchar *dst, int *iface)
+{
+	int i;
+	uchar ip[4];
+	for (i = 0; i < MAX_MTU; i++)
+	{
+		if (findInterfaceIP(MTU_tbl, i, ip) != EXIT_SUCCESS) continue;
+		if (ip[0] == dst[0] && ip[1] == dst[1] && ip[2] == dst[2] && dst[3] == 255)
+		{
+			*iface = i;
+			return 1;
+		}
+	}
+	return 0;
+}
 
 
 /*
@@ -137,9 +225,41 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 	if (IPCheck4Errors(in_pkt) == EXIT_FAILURE)
 		return EXIT_FAILURE;
 
+
+	// Z2: run the inline module pipeline (ACL / NAT / QoS / Lua / native — the Router
+	// Lab "drops") after parse, before route lookup. Empty pipeline -> CONTINUE ->
+	// base forwarding unchanged. (Legacy / NORMAL path; OpenFlow mode is the ingress
+	// front door per sdn.h.)
+	{
+		gr_verdict_t _gv = gr_pipeline_run(gr_default_pipeline(), in_pkt);
+		if (_gv.action == GR_DROP)
+			return EXIT_FAILURE;
+		if (_gv.action != GR_CONTINUE)
+			return EXIT_SUCCESS;   /* a module took ownership of the packet */
+	}
+
+	// B3: directed broadcast — dst is the all-ones host address of a connected /24. Forward
+	// it onto that subnet as a link-layer broadcast (unless it arrived from there). This is
+	// what makes the cross-subnet smurf experiment work; real edge routers disable it.
+	{
+		int dbif;
+		if (ip_directed_bcast_iface(gNtohl(tmpbuf, ip_pkt->ip_dst), &dbif) &&
+		    dbif != in_pkt->frame.src_interface)
+		{
+			ip_pkt->ip_cksum = 0;
+			ip_pkt->ip_cksum = htons(checksum((uchar *)ip_pkt, ip_pkt->ip_hdr_len * 2));
+			in_pkt->frame.dst_interface = dbif;
+			in_pkt->frame.arp_bcast = TRUE;
+			memset(in_pkt->data.header.dst, 0xff, 6);   /* L2 broadcast */
+			in_pkt->data.header.prot = htons(IP_PROTOCOL);
+			IPSend2Output(in_pkt);
+			return EXIT_SUCCESS;
+		}
+	}
+
 	// find the route... if it does not exist, should we send a
 	// ICMP network/host unreachable message -- CHECK??
-	if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst),
+	if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst),
 			   in_pkt->frame.nxth_ip_addr,
 			   &(in_pkt->frame.dst_interface)) == EXIT_FAILURE)
 		return EXIT_FAILURE;
@@ -307,35 +427,30 @@ int IPProcessMyPacket(gpacket_t *in_pkt)
 
 	if (IPVerifyPacket(ip_pkt) == EXIT_SUCCESS)
 	{
+		// B2: offer router-bound packets to the control plane (a routing protocol's
+		// packets, DHCP unicast renewals). gr_cp_deliver copies on a filter match and
+		// does not consume, so the existing ICMP/host-stack handling below is unchanged.
+		gr_cp_deliver(in_pkt);
+
 		// Is packet ICMP? send it to the ICMP module
 		// further processing with appropriate type code
 
 		if (ip_pkt->ip_prot == ICMP_PROTOCOL) {
 			ICMPProcessPacket(in_pkt);
 		  return EXIT_SUCCESS;
-    }
+        }
 
-		// Is packet UDP/TCP (only UDP implemented now)
-		// May be we can deal with other connectionless protocols as well.
-		if (ip_pkt->ip_prot == UDP_PROTOCOL){
-			UDPProcess(in_pkt);
-		  return EXIT_SUCCESS;
-    }
+		// UDP/TCP addressed to the router -> the (optional) host stack (lwIP),
+		// sealed behind host_stack_input(). Pure forwarder: -DGR_NO_HOST_STACK.
+		if (host_stack_input(in_pkt))
+			return EXIT_SUCCESS;
 
 	}
 	return EXIT_FAILURE;
 }
 
 
-/*
- * TODO: implement UDP processing routines..
- * this is necessary for implementing some routing protocols.
- */
-int UDPProcess(gpacket_t *in_pkt)
-{
-	verbose(2, "[UDPProcess]:: packet received for processing.. NOT YET IMPLEMENTED!! ");
-	return EXIT_SUCCESS;
-}
+/* UDPProcess/TCPProcess moved to host_stack.c (Z1: lwIP sealed + optional via -DGR_NO_HOST_STACK) */
 
 
 /*
@@ -348,7 +463,7 @@ int UDPProcess(gpacket_t *in_pkt)
  */
 int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int src_prot)
 {
-        ip_packet_t *ip_pkt = (ip_packet_t *)pkt->data.data;
+    ip_packet_t *ip_pkt = (ip_packet_t *)pkt->data.data;
 	ushort cksum;
 	char tmpbuf[MAX_TMPBUF_LEN];
 	uchar iface_ip_addr[4];
@@ -359,7 +474,6 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 	ip_pkt->ip_cksum = 0;                       // reset the checksum field
 	ip_pkt->ip_prot = src_prot;  // set the protocol field
 
-
 	if (newflag == 0)
 	{
 		COPY_IP(ip_pkt->ip_dst, ip_pkt->ip_src); 		    // set dst to original src
@@ -367,7 +481,7 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 
 		// find the nexthop and interface and fill them in the "meta" frame
 		// NOTE: the packet itself is not modified by this lookup!
-		if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst),
+		if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst),
 				   pkt->frame.nxth_ip_addr, &(pkt->frame.dst_interface)) == EXIT_FAILURE)
 				   return EXIT_FAILURE;
 
@@ -388,9 +502,9 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 		verbose(2, "[IPOutgoingPacket]:: lookup next hop ");
 		// find the nexthop and interface and fill them in the "meta" frame
 		// NOTE: the packet itself is not modified by this lookup!
-		if (findRouteEntry(route_tbl, gNtohl(tmpbuf, ip_pkt->ip_dst),
-				   pkt->frame.nxth_ip_addr, &(pkt->frame.dst_interface)) == EXIT_FAILURE)
-				   return EXIT_FAILURE;
+		if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst), pkt->frame.nxth_ip_addr, &(pkt->frame.dst_interface)) == EXIT_FAILURE) {
+            return EXIT_FAILURE;
+        }
 
 		verbose(2, "[IPOutgoingPacket]:: lookup MTU of nexthop");
 		// lookup the IP address of the destination interface..
@@ -486,7 +600,11 @@ int isInSameNetwork(uchar *ip_addr1, uchar *ip_addr2)
 	for (i = 0; i < MAX_ROUTES; i++)
 	{
 		if (route_tbl[i].is_empty == TRUE) continue;
-		// TODO: Could there be a bug here? What about default routes with 0.0.0.0??
+		// Skip the default route (netmask 0.0.0.0): it masks every address to 0.0.0.0,
+		// which would make ANY two IPs look "on the same network" and trigger spurious
+		// ICMP redirects on every forwarded packet. Only real subnets count here.
+		if ((route_tbl[i].netmask[0] | route_tbl[i].netmask[1] |
+		     route_tbl[i].netmask[2] | route_tbl[i].netmask[3]) == 0) continue;
 		for (j = 0; j < 4; j++)
 		{
 			net1[j] = ip_addr1[j] & route_tbl[i].netmask[j];
@@ -507,3 +625,65 @@ int isInSameNetwork(uchar *ip_addr1, uchar *ip_addr2)
 	return EXIT_FAILURE;
 }
 
+uchar ip_addr_isany(uchar *addr)
+{
+  if (addr == NULL) return 1;
+  return((addr[0] | addr[1] | addr[2] | addr[3]) == 0);
+}
+
+uchar ip_addr_cmp(uchar *addr1, uchar *addr2)
+{
+  return(addr1[0] == addr2[0] &&
+         addr1[1] == addr2[1] &&
+         addr1[2] == addr2[2] &&
+         addr1[3] == addr2[3]);
+}
+
+uchar ip_addr_netcmp(uchar *addr1, uchar *addr2, uchar *mask)
+{
+  return((addr1[0] & mask[0]) == (addr2[0] & mask[0]) &&
+         (addr1[1] & mask[1]) == (addr2[1] & mask[1]) &&
+         (addr1[2] & mask[2]) == (addr2[2] & mask[2]) &&
+         (addr1[3] & mask[3]) == (addr2[3] & mask[3]));
+}
+
+void print_ip4(uchar *addr) {
+    unsigned char bytes[4];
+    bytes[0] = addr[0] & 0xFF;
+    bytes[1] = addr[1] & 0xFF;
+    bytes[2] = addr[2] & 0xFF;
+    bytes[3] = addr[3] & 0xFF;
+    printf("%d.%d.%d.%d\n", bytes[3], bytes[2], bytes[1], bytes[0]);
+}
+
+void ip_addr_set(uchar *dest, uchar *src) {
+    memcpy(dest, src, 4 * sizeof(unsigned short));
+}
+
+/*
+ * convert uchar[4] to int
+ */
+u32_t ip4_addr_get_u32(uchar *src) {
+    return (src[0] << 24) | (src[1] << 16) | (src[2] << 8) | src[3];
+}
+
+/*
+ * converts LWIP's ip_output() function to GINI's IPOutgoingPacket()
+ */
+err_t
+ip_output(struct pbuf *p, uchar *src_ip, uchar *dst_ip, u8_t ttl, u8_t tos, int src_prot) {
+    // create GINI's gpacket_t
+	gpacket_t *out_pkt = (gpacket_t *) malloc(sizeof(gpacket_t));
+    if (out_pkt == NULL) {
+        printf("could not allocate gpacket_t\n");
+        return ERR_MEM;
+    }
+
+    // write pbuf's payload to GINI's gpacket_t, at the correct offset
+    int offset = sizeof(ip_packet_t);
+    memcpy((void*)((uchar*)out_pkt->data.data + offset), p->payload, p->len);
+
+    // call IP function
+    int res = IPOutgoingPacket(out_pkt, dst_ip, p->len, 1, src_prot);
+    return res;
+}

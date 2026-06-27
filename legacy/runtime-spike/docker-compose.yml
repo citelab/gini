@@ -1,0 +1,46 @@
+name: gini-r0
+
+# R0 portable data-plane spike.
+#
+#   10.0.1.0/24:  m1(.10)  m2(.11)  ── s1 (learning switch) ── r1.eth0(.1)
+#   10.0.2.0/24:  m3(.10)  ── r1.eth1(.1)
+#
+# Machines are containers with a TAP (gini0) bridged to the fabric over Ethernet-in-UDP.
+# The fabric container runs the switch and the gRouter as separate processes.
+# The host (macOS/Linux/Windows) only runs Docker — no host kernel networking is touched.
+
+networks:
+  gini:
+    driver: bridge
+
+services:
+  fabric:
+    build: { context: ., dockerfile: docker/Dockerfile.fabric }
+    networks: [gini]
+    environment:
+      SWITCH_CONFIG: '{"name":"s1","log":false,"ports":[{"bind_port":5000,"peer_host":"m1","peer_port":5000},{"bind_port":5001,"peer_host":"m2","peer_port":5001},{"bind_port":5002,"peer_host":"127.0.0.1","peer_port":5012}]}'
+      ROUTER_CONFIG: '{"name":"r1","log":true,"ifaces":[{"ip":"10.0.1.1/24","mac":"02:00:00:00:01:01","port":{"bind_port":5012,"peer_host":"127.0.0.1","peer_port":5002}},{"ip":"10.0.2.1/24","mac":"02:00:00:00:02:01","port":{"bind_port":5003,"peer_host":"m3","peer_port":5003}}]}'
+
+  m1:
+    build: { context: ., dockerfile: docker/Dockerfile.machine }
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    networks: [gini]
+    environment:
+      NODE_CONFIG: '{"name":"m1","tap":"gini0","ip":"10.0.1.10/24","gw":"10.0.1.1","mac":"02:00:00:00:01:10","port":{"bind_port":5000,"peer_host":"fabric","peer_port":5000}}'
+
+  m2:
+    build: { context: ., dockerfile: docker/Dockerfile.machine }
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    networks: [gini]
+    environment:
+      NODE_CONFIG: '{"name":"m2","tap":"gini0","ip":"10.0.1.11/24","gw":"10.0.1.1","mac":"02:00:00:00:01:11","port":{"bind_port":5001,"peer_host":"fabric","peer_port":5001}}'
+
+  m3:
+    build: { context: ., dockerfile: docker/Dockerfile.machine }
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    networks: [gini]
+    environment:
+      NODE_CONFIG: '{"name":"m3","tap":"gini0","ip":"10.0.2.10/24","gw":"10.0.2.1","mac":"02:00:00:00:02:10","port":{"bind_port":5003,"peer_host":"fabric","peer_port":5003}}'

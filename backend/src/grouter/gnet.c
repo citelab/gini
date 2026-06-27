@@ -360,7 +360,7 @@ interface_t *GNETMakeEthInterface(char *vsock_name, char *device,
 		device, MAC2Colon(tmpbuf, mac_addr), IP2Dot((tmpbuf+20), nw_addr));
 
 	iface_id = gAtoi(device);
-	
+
 	if (findInterface(iface_id) != NULL)
 	{
 		verbose(1, "[GNETMakeEthInterface]:: device %s already defined.. ", device);
@@ -481,32 +481,49 @@ interface_t *GNETMakeTapInterface(char *device, uchar *mac_addr, uchar *nw_addr)
  * RETURNS: a pointer to the interface on success and NULL on failure
  */
 interface_t *GNETMakeTunInterface(char *device, uchar *mac_addr, uchar *nw_addr,
-                                  uchar* dst_ip, short int dst_port)
+                                  uchar* dst_ip, short int dst_port, int src_port)
 {
     vpl_data_t *vcon;
     interface_t *iface;
     int iface_id;
+    int local_port, peer_port;
     char tmpbuf[MAX_TMPBUF_LEN];
 
     verbose(2, "[GNETMakeTunInterface]:: making Interface for [%s] with MAC %s and IP %s",
 	device, MAC2Colon(tmpbuf, mac_addr), IP2Dot((tmpbuf+20), nw_addr));
 
     iface_id = gAtoi(device);
-        
+
     if (findInterface(iface_id) != NULL)
     {
 	verbose(1, "[GNETMakeTunInterface]:: device %s already defined.. ", device);
 	return NULL;
     }
-    
+
     // setup the interface..
     iface = newInterfaceStructure(device, device,
                                   mac_addr, nw_addr, MAX_MTU);
-    
+
     verbose(2, "[GNETMakeTunInterface]:: trying to connect to %s..", device);
-    
-    vcon = tun_connect((short int)(BASEPORTNUM+iface_id+gAtoi(rconfig.router_name)*100), NULL, (short int)(BASEPORTNUM+dst_port+gAtoi(rconfig.router_name)*100), dst_ip); 
-    
+
+    if (src_port >= 0)
+    {
+        // literal-port mode (portable fabric): -srcport/-dstport are real UDP
+        // ports, so the fabric's shuttle (which uses literal ports) interoperates.
+        local_port = src_port;
+        peer_port  = dst_port;
+    }
+    else
+    {
+        // legacy UML-switch convention: ports are derived from BASEPORTNUM, the
+        // interface id, and the router name parsed as an integer (× 100).
+        local_port = (short int)(BASEPORTNUM + iface_id + gAtoi(rconfig.router_name) * 100);
+        peer_port  = (short int)(BASEPORTNUM + dst_port + gAtoi(rconfig.router_name) * 100);
+    }
+    verbose(2, "[GNETMakeTunInterface]:: tun %s bind :%d -> peer %s:%d",
+            device, local_port, IP2Dot(tmpbuf, dst_ip), peer_port);
+    vcon = tun_connect(local_port, NULL, peer_port, dst_ip);
+
     if(vcon == NULL)
     {
         verbose(1, "[GNETMakeTunInterface]:: unable to connect to %s", device);
@@ -515,20 +532,20 @@ interface_t *GNETMakeTunInterface(char *device, uchar *mac_addr, uchar *nw_addr,
 
     iface->iface_fd = vcon->data;
     iface->vpl_data = vcon;
-    
+
     upThisInterface(iface);
     return iface;
 }
 
 
-interface_t *GNETMakeRawInterface(char *device, uchar *nw_addr, char *bridge)                
+interface_t *GNETMakeRawInterface(char *device, uchar *nw_addr, char *bridge)
 {
     vpl_data_t *vcon;
     interface_t *iface;
     int iface_id;
     char tmpbuf[MAX_TMPBUF_LEN];
     uchar mac_addr[6];
-    
+
     verbose(2, "[GNETMakeRawInterface]:: making Interface for [%s] with IP %s",
 	device, IP2Dot((tmpbuf+20), nw_addr));
 
@@ -538,30 +555,30 @@ interface_t *GNETMakeRawInterface(char *device, uchar *nw_addr, char *bridge)
 	verbose(1, "[GNETMakeRawInterface]:: device %s already defined.. ", device);
 	return NULL;
     }
-    
+
     if(create_raw_interface(nw_addr) == -1) {
         verbose(1, "[GNETMakeRawInterface]:: Failed to create raw interface.. ");
 	return NULL;
-    } 
-    
+    }
+
     verbose(2, "[GNETMakeRawInterface]:: trying to connect to %s..", device);
 
-    vcon = raw_connect(mac_addr, bridge); 
-    
+    vcon = raw_connect(mac_addr, bridge);
+
     if(vcon == NULL)
     {
         verbose(1, "[GNETMakeRawInterface]:: unable to connect to %s", device);
         return NULL;
     }
-    
+
     verbose(2, "[GNETMakeRawInterface]:: Interface MAC %s", MAC2Colon(tmpbuf, mac_addr));
-    
+
     iface = newInterfaceStructure(device, device,
                                   mac_addr, nw_addr, MAX_MTU);
-        
+
     iface->iface_fd = vcon->data;
     iface->vpl_data = vcon;
-    
+
     upThisInterface(iface);
 
     return iface;
@@ -919,4 +936,3 @@ void *GNETHandler(void *outq)
 
 	}
 }
-

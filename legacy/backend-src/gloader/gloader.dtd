@@ -1,0 +1,60 @@
+<!-- GLOADERT DTD -->
+<!ELEMENT gloader (vs*, vr*, vwr*, vm*, vmb*, vrm*, vofc*)>
+
+
+<!-- wired router definition -->
+<!ELEMENT vr (netif*, cli?, controller?)>
+<!ATTLIST vr name CDATA #REQUIRED>
+<!ELEMENT netif (target, network, nic, ip, rtentry*, mtu?)>
+<!ELEMENT network (#PCDATA)>
+<!ELEMENT target (#PCDATA)>
+<!ELEMENT nic (#PCDATA)>
+<!ELEMENT ip (#PCDATA)>
+<!ELEMENT rtentry (#PCDATA)>
+<!ATTLIST rtentry netmask CDATA #REQUIRED
+                nexthop CDATA #REQUIRED>
+<!ELEMENT mtu (#PCDATA)>
+<!ELEMENT cli EMPTY>
+<!ELEMENT controller (#PCDATA)>
+
+
+<!-- virtual switch definition -->
+<!ELEMENT vs (priority, mac, target*, port?, remote?, hub?, ovs?)>
+<!ATTLIST vs name CDATA #REQUIRED>
+<!ELEMENT priority (#PCDATA)>
+<!ELEMENT port (#PCDATA)>
+<!ELEMENT remote (#PCDATA)>
+<!ELEMENT hub EMPTY>
+<!ELEMENT ovs EMPTY>
+
+
+<!-- virtual wired machine definition -->
+<!ELEMENT vm (filesystem, mem?, kernel?, boot?, if*)>
+<!ATTLIST vm name CDATA #REQUIRED>
+<!ELEMENT filesystem (#PCDATA)>
+<!ATTLIST filesystem type (direct|cow) #REQUIRED>
+<!ELEMENT mem (#PCDATA)>
+<!ELEMENT kernel (#PCDATA)>
+<!ELEMENT boot (con0?)>
+<!ELEMENT con0 (#PCDATA)>
+<!ELEMENT if (target, network, mac, ip?, route*)>
+<!ELEMENT mac (#PCDATA)>
+<!ELEMENT route (#PCDATA)>
+<!ATTLIST route type (net|host) #REQUIRED
+		netmask CDATA #REQUIRED
+                gw  CDATA #REQUIRED>
+
+
+<!--Cloud definition -->
+<!ELEMENT cloud (if*)>
+<!ELEMENT if (target, network, route*)>
+<!ELEMENT route (#PCDATA)>
+<!ATTLIST route type (net|host) #REQUIRED
+		netmask CDATA #REQUIRED
+			gw CDATA #REQUIRED>
+
+
+<!-- OpenFlow controller definition -->
+<!ELEMENT vofc (ovs*)>
+<!ATTLIST vofc name CDATA #REQUIRED>
+<!ELEMENT ovs (#PCDATA)>

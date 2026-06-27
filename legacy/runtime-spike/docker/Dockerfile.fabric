@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends tcpdump \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY dataplane/ /app/dataplane/
+COPY docker/run_fabric.py /app/run_fabric.py
+# fabric entrypoint: launch the switch and each gRouter as separate processes
+CMD ["python", "/app/run_fabric.py"]

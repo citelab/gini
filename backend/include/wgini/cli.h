@@ -117,7 +117,7 @@ be accessed from this shell. \n"
            \n\
 \t\tThe above command is used to This above command is used to start or terminate the syste-\n\
 \t\t-m throughput calculation process. Currently the system time used by the wireless GINI\n\
-\t\tcenter is different from the UMLs. Therefore, the transmission rate calculated by the U-\n\
+\t\tcenter is different from the Machs. Therefore, the transmission rate calculated by the U-\n\
 \t\t-ML is totally based on a different reference point. The command provide the capacity to\n\
 \t\tcompute the throughput based on the local time managed by the wireless GINI center its-\n\
 \t\t-elf.\n\
@@ -231,7 +231,7 @@ be accessed from this shell. \n"
            \n\
 \t\tThis command is used to set the mac address for a specified one-interface virtual devi-\n\
 \t\tce. The <mac-address> should follow the format of @:@:@:@:@:@ (e.g.FE:FD:00:00:00:01). \n\
-\t\tIt should matche the one that is set in the corresponding UML machine.\n\
+\t\tIt should matche the one that is set in the corresponding Mach machine.\n\
            \n\
 \tmac show node <id> info\n\
            \n\

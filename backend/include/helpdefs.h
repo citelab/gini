@@ -21,6 +21,7 @@
 #define USAGE_CLASS		    "class cname [-src ip_spec [<min_port--max_port>]] [-dst ip_spec [<min_port--max_port>]] [-prot num] [-tos tos_spec]"
 #define USAGE_FILTER     	"filter action [action specific options]"
 #define USAGE_OPENFLOW      "openflow action [action specific options]"
+#define USAGE_GNC           "gnc [-u] [-l <port>] <destination> <port>"
 
 
 #define SHELP_HELP          "display help information on given command"
@@ -41,6 +42,7 @@
 #define SHELP_CLASS		    "create add, del, and view classifier information"
 #define SHELP_FILTER		"create add, del, and view filtering rules; this uses class rules to group packets"
 #define SHELP_OPENFLOW      "view OpenFlow switch information or force the OpenFlow switch to reconnect to the controller"
+#define SHELP_GNC           "use gRouter netcat (gnc) to create udp and tcp connections"
 
 
 /*
@@ -79,5 +81,6 @@ absolute path (e.g., /sbin/ifconfig). \n"
 #define LHELP_CLASS			"class.hlp"
 #define LHELP_FILTER		"filter.hlp"
 #define LHELP_OPENFLOW      "openflow.hlp"
+#define LHELP_GNC           "gnc.hlp"
 
 #endif

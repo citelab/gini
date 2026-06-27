@@ -76,9 +76,10 @@ typedef struct _icmphdr_t
 // structure used to collect ping statistics
 typedef struct _pingstat_t
 {
-	int tmin;
-	int tmax;
-	int tsum;
+	uchar* dst_ip;
+	float tmin;
+	float tmax;
+	float tsum;
 	int ntransmitted;
 	int nreceived;
 } pingstat_t;
@@ -97,5 +98,8 @@ void ICMPDoPing(uchar *ipaddr, int pkt_size, int retries);
 void ICMPProcessTTLExpired(gpacket_t *in_pkt);
 void ICMPProcessFragNeeded(gpacket_t *in_pkt, int interface_mtu);
 void ICMPProcessRedirect(gpacket_t *in_pkt, uchar *gw_addr);
+void ICMPDisplayPingStats();
+void dummyFunctionCopy();
+void ICMPPingTerminate();
 
 #endif
