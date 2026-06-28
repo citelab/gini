@@ -51,4 +51,5 @@ PERSISTED_KEYS = (
     "theme", "reduced_motion",
     "llm_enabled", "llm_url", "llm_model", "llm_think",
     "auto_internet", "name_prefixes", "prices",
+    "backend", "gini_server_host", "gini_server_port", "gini_server_user",
 )

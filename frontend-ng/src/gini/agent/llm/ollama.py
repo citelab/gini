@@ -50,10 +50,15 @@ def _to_ollama_message(m: Message) -> dict:
 class OllamaBackend:
     def __init__(self, url: str = "http://localhost:11434", model: str = "llama3.1",
                  timeout: float = 120.0, think: bool = False, stream: bool = True,
+                 num_ctx: int = 8192,
                  transport: Callable[[str, dict], dict] | None = None) -> None:
         self.url = url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        # Ollama's DEFAULT context window is only 2048 tokens — far smaller than the model's
+        # real window — and it SILENTLY TRUNCATES the prompt when exceeded. Set it explicitly
+        # so the catalog/canvas/question always fit. (Ollama clamps to the model's real max.)
+        self.num_ctx = num_ctx
         self.think = think          # ask reasoning models to think (Ollama `think` flag)
         self.stream = stream        # stream tokens for a live "typing" feel
         self._injected = transport is not None   # tests inject a transport (non-streaming)
@@ -85,6 +90,7 @@ class OllamaBackend:
             "model": self.model,
             "messages": [_to_ollama_message(m) for m in messages],
             "stream": False,            # tool turns are most reliable non-streamed
+            "options": {"num_ctx": self.num_ctx},   # don't let Ollama truncate to 2048
         }
         # Try the richest request first, then degrade: a small model may not support
         # tools and/or thinking, and Ollama errors rather than ignoring them. Dropping

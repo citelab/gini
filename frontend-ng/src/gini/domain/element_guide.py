@@ -64,10 +64,21 @@ GUIDE: dict[str, str] = {
     "instance": (
         "A cloud Instance is a virtual machine in a cloud provider. Use it as a host inside "
         "cloud scenarios (VPCs, security groups) rather than a plain LAN."),
+    "kinstance": (
+        "A Kata Instance runs your workload inside a lightweight microVM with its OWN guest "
+        "kernel (Kata Containers), instead of sharing the host kernel like a normal container. "
+        "Use it to compare VM-vs-container trade-offs: stronger isolation, but slower boot and "
+        "more memory/IO overhead. It needs a Kata-enabled Linux backend and is kept to flat "
+        "experiment topologies (no VPCs, no Kubernetes)."),
     "instance_group": (
-        "An Autoscaling Group is a managed set of identical instances that grows or shrinks "
-        "with load, usually behind a load balancer. Use it to model elastic, horizontally "
-        "scaled compute."),
+        "A Pod Autoscaler is a Kubernetes Horizontal Pod Autoscaler (HPA): it watches one "
+        "Deployment's CPU and adds or removes pod replicas between Min and Max to hold a "
+        "target CPU%. Connect it to a Pod — the HPA scales that one workload, not the whole "
+        "cluster, because each workload scales on its own policy. Note the contrast with two "
+        "other K8s autoscalers: the Cluster Autoscaler adds/removes Nodes (machines) when "
+        "pods don't fit, and the Vertical Pod Autoscaler (VPA) resizes each pod's CPU/memory. "
+        "The HPA is also the container-world cousin of a cloud Auto Scaling Group, which "
+        "instead scales VM instances behind a load balancer."),
     "region": (
         "A Region / Zone groups cloud resources by physical location. Use it to discuss "
         "latency, availability zones, and multi-region designs."),

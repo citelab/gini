@@ -54,6 +54,7 @@ class DeviceType:
     # properties that should render as a dropdown in the inspector: name -> choices
     property_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
     max_links: int | None = None             # None = unlimited
+    hidden: bool = False                     # kept in the registry but off the palette
 
     @property
     def cloud(self) -> bool:
@@ -144,20 +145,29 @@ _DEVICES: list[DeviceType] = [
     ),
     DeviceType(
         "pod", "Pod", Category.CONTAINERS, "pod", Accent.CYAN,
-        "Kubernetes pod (one or more co-located containers).",
+        "A Kubernetes workload — a Deployment of an image, run as N pod replicas. "
+        "Connect it to a K8s Cluster to deploy it there.",
         is_container=True,
-        default_properties={"Name": "", "Replicas": "1"},
+        default_properties={"Name": "", "Image": "nginxdemos/hello:latest",
+                            "Replicas": "2", "Port": "80"},
     ),
     DeviceType(
         "k8s_node", "K8s Node", Category.CONTAINERS, "k8s_node", Accent.CYAN,
-        "Kubernetes worker node that schedules pods.",
+        "A Kubernetes worker node (a k3s agent). v1 clusters are single-node; nodes are "
+        "shown for the model — multi-node scheduling is a follow-on.",
         default_properties={"Name": "", "Role": "worker"},
+        # hidden from the palette for v1: a single-node cluster makes a separate Node
+        # element confusing next to 'K8s Cluster'. The type is retained so older saved
+        # projects still load and the compiler role keeps working. Re-expose with
+        # multi-node scheduling.
+        hidden=True,
     ),
     DeviceType(
         "k8s_cluster", "K8s Cluster", Category.CONTAINERS, "k8s_cluster", Accent.CYAN,
-        "Kubernetes control plane + node group.",
+        "A real Kubernetes cluster (k3s in a container). Connect Pods to deploy them; add "
+        "a Pod Autoscaler (HPA) on a Pod to scale its replicas.",
         is_container=True,
-        default_properties={"Name": "", "Version": "1.30", "Nodes": "3"},
+        default_properties={"Name": "", "Version": "1.30"},
     ),
     DeviceType(
         "registry", "Container Registry", Category.CONTAINERS, "registry", Accent.CYAN,
@@ -192,6 +202,7 @@ _DEVICES: list[DeviceType] = [
         "load_balancer", "Load Balancer", Category.CLOUD_NETWORK, "load_balancer", Accent.INDIGO,
         "Distributes traffic across backend targets.",
         default_properties={"Name": "", "Scheme": "round-robin", "Listener": "80"},
+        property_choices={"Scheme": ("round-robin", "least_conn", "ip_hash")},
     ),
 
     # ---- Compute & autoscaling ----------------------------------------------
@@ -202,10 +213,21 @@ _DEVICES: list[DeviceType] = [
         default_properties={"Name": "", "Type": "t3.micro", "Image": "ubuntu-22.04"},
     ),
     DeviceType(
-        "instance_group", "Autoscaling Group", Category.COMPUTE, "instance_group", Accent.PURPLE,
-        "Managed group of instances with autoscaling policies.",
+        "kinstance", "Kata Instance (VM)", Category.COMPUTE, "instance", Accent.PURPLE,
+        "A VM-isolated workload (Kata Containers): your container runs inside a lightweight "
+        "microVM with its own guest kernel — stronger isolation than a normal container, at "
+        "the cost of boot time, memory and I/O overhead. Use it to compare VM-vs-container "
+        "trade-offs. Needs a Kata-enabled GINI server backend (Settings - Backend).",
+        backend_kind="vm",
+        default_properties={"Name": "", "Image": "ubuntu:22.04", "Command": ""},
+    ),
+    DeviceType(
+        "instance_group", "Pod Autoscaler (HPA)", Category.CONTAINERS, "instance_group", Accent.CYAN,
+        "A Kubernetes Horizontal Pod Autoscaler. Connect it to a Pod to scale that "
+        "Deployment's replicas between Min and Max to hold a target CPU%. (This is the "
+        "HPA — different from the Cluster Autoscaler, which adds Nodes.)",
         is_container=True,
-        default_properties={"Name": "", "Min": "1", "Max": "5", "Metric": "cpu>70%"},
+        default_properties={"Name": "", "Min": "1", "Max": "5", "TargetCPU": "60"},
     ),
     DeviceType(
         "region", "Region / Zone", Category.COMPUTE, "region", Accent.PURPLE,
@@ -234,12 +256,19 @@ _DEVICES: list[DeviceType] = [
     # ---- Serverless ----------------------------------------------------------
     DeviceType(
         "function", "Function", Category.SERVERLESS, "function", Accent.PINK,
-        "Serverless function (FaaS), event-driven.",
-        default_properties={"Name": "", "Runtime": "python3.12", "Trigger": "http"},
+        "A serverless function (FaaS). Runs your handler on demand in a shared runtime — "
+        "no server to manage, scales per request, billed per invocation. Reachable over "
+        "HTTP at /<name>; front it with an API Gateway and drive it with a Load Generator.",
+        default_properties={"Name": "", "Runtime": "python3.12", "Handler": "echo",
+                            "Code": ""},
+        property_choices={"Handler": ("echo", "transform", "slow", "fail", "counter",
+                                      "custom")},
     ),
     DeviceType(
         "api_gateway", "API Gateway", Category.SERVERLESS, "api_gateway", Accent.PINK,
-        "Managed API gateway fronting functions/services.",
+        "The front door for your functions — a real Traefik edge router that maps a URL "
+        "path to each connected Function (/<name>). Connect it to Functions and it routes "
+        "automatically; open its dashboard to watch requests.",
         default_properties={"Name": "", "Stage": "prod"},
     ),
     DeviceType(
@@ -324,7 +353,7 @@ DEFAULT_PREFIXES: dict[str, str] = {
     # compute / containers
     "instance": "I", "container": "CT", "web_app": "WA", "pod": "POD",
     "k8s_node": "KN", "k8s_cluster": "K8S", "registry": "REG",
-    "instance_group": "ASG", "region": "RGN",
+    "instance_group": "HPA", "region": "RGN",
     # cloud networking
     "vpc": "VPC", "cloud_subnet": "CSUB", "security_group": "SG",
     "gateway": "GW", "load_balancer": "LB", "proxy": "PXY",
@@ -360,5 +389,7 @@ def get(key: str) -> DeviceType:
 def by_category() -> dict[Category, list[DeviceType]]:
     out: dict[Category, list[DeviceType]] = {c: [] for c in Category}
     for d in _DEVICES:
+        if d.hidden:                         # retained in REGISTRY but kept off the palette
+            continue
         out[d.category].append(d)
     return {c: items for c, items in out.items() if items}

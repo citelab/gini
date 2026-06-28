@@ -57,11 +57,21 @@ CATALOG: dict[str, CloudService] = {
         summary="Docker/OCI image registry serving container images on port 5000.",
         ports=(Port(5000, "registry"),)),
 
+    # --- serverless front door ---
+    "api_gateway": CloudService(
+        image="traefik:v3.1",
+        summary="API Gateway (Traefik) — maps a URL path to each connected serverless "
+                "Function. Open the dashboard to watch routing live.",
+        command=("--api.insecure=true", "--entrypoints.web.address=:80",
+                 "--metrics.prometheus=true"),
+        ports=(Port(8080, "dashboard", web=True, path="/dashboard/"), Port(80, "http"))),
+
     # --- edge & traffic ---
     "proxy": CloudService(
         image="traefik:v3.1",
         summary="Traefik reverse proxy / edge router. Dashboard shows routing live.",
-        command=("--api.insecure=true", "--entrypoints.web.address=:80"),
+        command=("--api.insecure=true", "--entrypoints.web.address=:80",
+                 "--metrics.prometheus=true"),   # exposes /metrics for the cloud fabric
         ports=(Port(8080, "dashboard", web=True, path="/dashboard/"), Port(80, "http"))),
     "web_app": CloudService(
         image="nginxdemos/hello:latest",

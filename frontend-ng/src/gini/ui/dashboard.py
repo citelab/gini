@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
 from ..domain.pricing import CATEGORY_ORDER
 
 # category -> theme accent-token key (for the little coloured cost chips)
-_CAT_ACCENT = {"Compute": "purple", "Networking": "blue",
-               "Services": "teal", "Observability": "amber"}
+_CAT_ACCENT = {"Compute": "purple", "Serverless": "pink", "Kubernetes": "cyan",
+               "Networking": "blue", "Services": "teal", "Observability": "amber"}
 
 
 class Dashboard(QWidget):
@@ -53,6 +53,8 @@ class Dashboard(QWidget):
         root.addLayout(self._metric(self.elapsed_lbl, "elapsed"))
         self.count_lbl = self._value("0")
         root.addLayout(self._metric(self.count_lbl, "resources"))
+        self.rps_lbl = self._value("—")
+        root.addLayout(self._metric(self.rps_lbl, "req/s · lab"))
 
         sep = QFrame(); sep.setFrameShape(QFrame.VLine); sep.setObjectName("DashSep")
         root.addWidget(sep)
@@ -135,6 +137,16 @@ class Dashboard(QWidget):
     def set_grafana_url(self, url: str | None) -> None:
         self._grafana_url = url
         self.grafana_btn.setEnabled(bool(url))
+
+    def set_fabric(self, totals: dict) -> None:
+        """Lab-wide app metrics from the cloud fabric (request rate, services up)."""
+        if totals and totals.get("services_total"):
+            rps = totals.get("rps", 0.0)
+            up, tot = totals.get("services_up", 0), totals.get("services_total", 0)
+            self.rps_lbl.setText(f"{rps:,.0f}")
+            self.rps_lbl.setToolTip(f"{up}/{tot} services up")
+        else:
+            self.rps_lbl.setText("—")
 
     def grafana_url(self) -> str | None:
         return self._grafana_url

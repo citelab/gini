@@ -23,6 +23,30 @@ from .inspector import Inspector
 from .palette import Palette
 from .theme import ThemeManager, icons
 
+# Runs INSIDE the faas container (python -c). Reads GINI_FN/METHOD/BODY from the env,
+# checks whether this is the function's first call (cold), invokes it on localhost:8000,
+# and prints one JSON line {code, ms, cold, body} for the inspector to display.
+_FAAS_INVOKE = (
+    "import os,time,json,urllib.request,urllib.error\n"
+    "fn=os.environ['GINI_FN'];method=os.environ.get('GINI_METHOD','GET')\n"
+    "body=os.environ.get('GINI_BODY','');base='http://localhost:8000'\n"
+    "try:\n"
+    "    m=json.load(urllib.request.urlopen(base+'/_gini/metrics',timeout=5))\n"
+    "    prev=m.get('functions',{}).get(fn,{}).get('invocations',0)\n"
+    "except Exception:\n"
+    "    prev=0\n"
+    "data=body.encode() if body else None\n"   # send the body whenever one is typed
+    "req=urllib.request.Request(base+'/'+fn,data=data,method=method)\n"
+    "t=time.time()\n"
+    "try:\n"
+    "    r=urllib.request.urlopen(req,timeout=15);code=r.getcode();out=r.read().decode('utf-8','replace')\n"
+    "except urllib.error.HTTPError as e:\n"
+    "    code=e.code;out=e.read().decode('utf-8','replace')\n"
+    "except Exception as e:\n"
+    "    code=0;out=str(e)\n"
+    "print(json.dumps({'code':code,'ms':round((time.time()-t)*1000),'cold':prev==0,'body':out}))\n"
+)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, app) -> None:
@@ -39,6 +63,7 @@ class MainWindow(QMainWindow):
         from .. import runtime as _rt
         from ..services import GLoader
         self._gloader = GLoader(Path(_rt.__file__).parent)
+        self._remote = None              # RemoteClient when connected to a GINI server, else None
         self._running = False
         self._stopping = False
         self._workdir: str | None = None
@@ -51,10 +76,20 @@ class MainWindow(QMainWindow):
         self._poll = QTimer(self)
         self._poll.setInterval(3000)
         self._poll.timeout.connect(self._poll_status)
+        self._fabric_poll = QTimer(self)        # cloud-fabric app metrics
+        self._fabric_poll.setInterval(2000)
+        self._fabric_poll.timeout.connect(self._poll_fabric)
+        self.ctx.bus.fabric_metrics.connect(self._on_fabric_metrics)
+        self._k8s_poll = QTimer(self)           # kubernetes metrics (kubectl)
+        self._k8s_poll.setInterval(3000)
+        self._k8s_poll.timeout.connect(self._poll_k8s)
+        self.ctx.bus.k8s_metrics.connect(self._on_k8s_metrics)
         self.theme = ThemeManager(app, self.ctx.settings.theme)
         self.theme.apply()
 
         self.setWindowTitle("gBuilder 6.0 — networks + cloud")
+        from .branding import app_icon
+        self.setWindowIcon(app_icon())              # window + taskbar/dock icon (the GINI mascot)
         self.resize(1280, 820)
 
         self.canvas = CanvasView(self.ctx, self.theme.theme)
@@ -74,11 +109,14 @@ class MainWindow(QMainWindow):
         self.ctx.bus.topology_changed.connect(self._revalidate)
         self.ctx.bus.topology_changed.connect(self._rebill)
         self.ctx.bus.device_resized.connect(self._on_device_resized)
+        self.ctx.bus.device_changed.connect(self._on_device_changed_live)
         self.ctx.bus.log.connect(self._on_log)
         self.ctx.bus.device_delete_requested.connect(self._delete_device)
         self.ctx.bus.warning_explain_requested.connect(self._on_warning_explain)
         self.ctx.bus.device_logs_requested.connect(self._open_logs)
         self.ctx.bus.device_console_requested.connect(self._open_console)
+        self.ctx.bus.function_invoke_requested.connect(self._on_function_invoke)
+        self.ctx.bus.function_deploy_requested.connect(self._on_function_deploy)
         self.ctx.bus.selection_changed.connect(self._on_selection_explain)
         self.palette.element_selected.connect(self._on_palette_explain)
         self.assistant.status_changed.connect(self.mode_indicator.set_status)
@@ -135,7 +173,11 @@ class MainWindow(QMainWindow):
         """Live canvas snapshot fed to the assistant each turn (topology + run-state)."""
         digest = self.api.context_digest()
         state = "running on Docker" if self._running else "not running (idle, editable)"
-        return f"{digest}\nRuntime: the topology is {state}."
+        ctx = f"{digest}\nRuntime: the topology is {state}."
+        m = getattr(self.ctx, "mission", None)            # Wizard: keep follow-ups goal-aware
+        if m is not None:
+            ctx += f"\nThe student's current build objective is: \"{m.goal}\"."
+        return ctx
 
     def _wire_llm(self) -> None:
         s = self.ctx.settings
@@ -147,7 +189,8 @@ class MainWindow(QMainWindow):
         try:
             from ..agent.llm import OllamaBackend
             from ..agent.loop import AgentLoop
-            backend = OllamaBackend(s.llm_url, s.llm_model, think=s.llm_think)
+            backend = OllamaBackend(s.llm_url, s.llm_model, think=s.llm_think,
+                                    num_ctx=getattr(s, "llm_num_ctx", 8192))
             self.assistant.set_loop(AgentLoop(backend, self.registry,
                                               context_provider=self._ai_context))
             # actually check the server is reachable so the user gets real feedback
@@ -196,6 +239,9 @@ class MainWindow(QMainWindow):
         self._delete_act.setEnabled(False)
         self._run_act = act("run", "play", "Run", self._run)
         self._stop_act = act("stop", "stop", "Stop", self._stop)
+        self._server_act = act("server", "cloud",
+                               "Backend: run on a remote Kata GINI server (or go local)",
+                               self._toggle_backend, checkable=True)
         act("zoom_in", "plus", "Zoom in", lambda: self.canvas.zoom_by(1.15))
         act("zoom_out", "minus", "Zoom out", lambda: self.canvas.zoom_by(1 / 1.15))
 
@@ -290,6 +336,8 @@ class MainWindow(QMainWindow):
 
         self.inspector = Inspector(self.ctx, self.api, self.theme)
         self.inspector.query_fn = self.element_query
+        self.inspector.stats_fn = self._element_stats
+        self.inspector.stats_all_fn = self._element_stats_all
         insp = QDockWidget("Inspector", self)
         insp.setObjectName("dock_inspector")
         insp.setWidget(self.inspector)
@@ -429,6 +477,7 @@ class MainWindow(QMainWindow):
         scene.clear()
         scene.nodes.clear()
         scene.edges.clear()
+        scene.groups.clear()
         scene._callouts = []
         scene._spotlit = []
         scene._highlit = []
@@ -506,19 +555,115 @@ class MainWindow(QMainWindow):
             "Manual addressing: on — set IPs in Inspector › Interfaces; blanks auto-fill."
             if on else "Manual addressing: off — IPs are auto-assigned.", "info")
 
+    # -- remote (GINI server) backend -------------------------------------- #
+    def _toggle_backend(self) -> None:
+        """Toolbar toggle: connect to a remote Kata GINI server, or drop back to local."""
+        if self._remote is not None:
+            self._remote = None
+            self.ctx.settings.backend = "local"
+            self.ctx.log("Backend: local Docker.", "info")
+            self._server_act.setChecked(False)
+            return
+        if self._running:
+            self.ctx.log("Stop the running lab before switching backend.", "info")
+            self._server_act.setChecked(False)
+            return
+        self._connect_server()
+        self._server_act.setChecked(self._remote is not None)
+
+    def _connect_server(self, client=None) -> bool:
+        """Log in to the configured GINI server (host/port/user from Settings; password is
+        prompted, never stored). `client` is injectable for tests."""
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+        s = self.ctx.settings
+        if client is None and not s.gini_server_host:
+            self.ctx.log("Set the GINI server host in Settings → Backend first.", "info")
+            return False
+        if client is None:
+            pw, ok = QInputDialog.getText(self, "Connect to GINI server",
+                                          f"Password for {s.gini_server_user}@{s.gini_server_host}:",
+                                          QLineEdit.Password)
+            if not ok:
+                return False
+            from ..services.remote import RemoteClient
+            client = RemoteClient(f"http://{s.gini_server_host}:{s.gini_server_port}")
+            good, err = client.login(s.gini_server_user, pw)
+            if not good:
+                self.ctx.log(f"Server login failed: {err}", "error")
+                return False
+        self._remote = client
+        s.backend = "gini-server"
+        kata = client.kata_available()
+        self.ctx.log(f"Connected to GINI server{' (Kata available)' if kata else ''}. "
+                     "Build a topology and Run — it executes on the server.", "ok")
+        return True
+
+    def _run_remote(self) -> None:
+        if self._running:
+            self.ctx.log("Already running — stop first.", "info")
+            return
+        import threading
+        topo = self.ctx.topology
+        self.ctx.log("Sending topology to the GINI server…", "info")
+
+        def worker():
+            ok, msg = self._remote.run(topo)
+            self.ctx.bus.run_state.emit(ok, msg)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_remote_run_state(self, ok: bool, msg: str) -> None:
+        if ok:
+            self._running = True
+            self._stopping = False
+            self._set_runtime_status("running")
+            self.canvas.scene_.running = True
+            self.inspector.set_live_running(True)
+            self.ctx.log("Topology running on the GINI server.", "ok")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2500, self._poll_remote_metrics)
+        else:
+            self._running = False
+            self.ctx.log(f"Server run failed: {msg}", "error")
+            self._set_runtime_status("idle")
+
+    def _poll_remote_metrics(self) -> None:
+        if not self._running or self._remote is None:
+            return
+        import threading
+
+        def work():
+            m = self._remote.metrics() or {}
+            startup = m.get("startup") or {}
+            if startup:
+                line = ", ".join(f"{s} {ms:.0f} ms" for s, ms in sorted(startup.items()))
+                self.ctx.log("Startup times — " + line, "info")
+        threading.Thread(target=work, daemon=True).start()
+
     def _run(self) -> None:
         import tempfile
         import threading
+        if self._remote is not None:           # remote backend: the server runs it
+            self._run_remote()
+            return
         if self._running:
             self.ctx.log("Already running — stop first.", "info")
             return
         cfg = self._compile()
         runnable = (cfg.machines or cfg.routers or cfg.ovs_switches
-                    or cfg.controllers or cfg.services)
+                    or cfg.controllers or cfg.services or cfg.k8s or cfg.faas)
         if not runnable:
             self.ctx.log("Nothing runnable on the canvas yet (add devices + links).", "info")
             return
+        # Kata Instances need a 'kata' OCI runtime on the backend — fail with a clear
+        # message instead of a raw Docker error if it's not there (e.g. on a Mac).
+        if any(getattr(s, "runtime", "") == "kata" for s in cfg.services) \
+                and not self._gloader.runtime_available("kata"):
+            self.ctx.log("This topology has Kata Instance(s), but the current backend has no "
+                         "'kata' runtime. Point GINI at a Kata-enabled Linux backend "
+                         "(Settings → Backend) to run VM-isolated workloads.", "info")
+            return
         self._last_services = list(cfg.services)
+        self._last_k8s = list(cfg.k8s)
         self._workdir = tempfile.mkdtemp(prefix="gini-lab-")
         self.ctx.log(f"Launching {len(cfg.machines)} machines + {len(cfg.routers)} "
                      f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
@@ -536,6 +681,9 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_run_state(self, ok: bool, msg: str) -> None:
+        if self._remote is not None:           # remote backend has its own (lighter) handling
+            self._on_remote_run_state(ok, msg)
+            return
         if ok:
             self._running = True
             self._stopping = False
@@ -555,6 +703,15 @@ class MainWindow(QMainWindow):
             rate = bill(self.ctx.topology, self.ctx.settings.prices)["rate_per_hr"]
             self.dashboard.set_grafana_url(grafana)
             self.dashboard.start(rate)
+            self.inspector.set_live_running(True)       # enable the Live metrics plots
+            self.canvas.scene_.running = True           # enable console/logs/login actions
+            self._fabric_poll.start()                   # poll cloud-fabric app metrics
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(6000, self._drive_loadgens)   # let Fortio boot, then load
+            QTimer.singleShot(2000, self._log_startup_times)  # VM-vs-container startup signal
+            if getattr(self, "_last_k8s", None):
+                self._apply_k8s()                           # wait for k3s, kubectl apply
+                self._k8s_poll.start()                      # poll deployment metrics
         else:
             self.ctx.log(f"Run failed: {msg}", "error")
         self._update_status()
@@ -570,7 +727,7 @@ class MainWindow(QMainWindow):
         self._update_status()
 
         def worker():
-            ok, msg = self._gloader.down()
+            ok, msg = self._remote.stop() if self._remote is not None else self._gloader.down()
             if not ok:
                 self.ctx.log(f"Stop issue: {msg}", "error")
             self.ctx.bus.runtime_status.emit({})   # force a final reconcile -> idle
@@ -600,6 +757,13 @@ class MainWindow(QMainWindow):
                 self._set_runtime_status("idle")
                 self.dashboard.stop()           # freeze the session's GINI $ bill
                 self.dashboard.set_grafana_url(None)
+                self._fabric_poll.stop()
+                self._k8s_poll.stop()
+                self.dashboard.set_fabric({})
+                self.inspector.set_live_running(False)   # stop the Live metrics polling
+                self.canvas.scene_.running = False        # grey out console/logs/login actions
+                self.inspector.set_fabric_snapshot({})
+                self.inspector.set_k8s_snapshot({})
                 self.ctx.log("All containers stopped.", "info")
                 self._update_status()
             return
@@ -613,10 +777,17 @@ class MainWindow(QMainWindow):
                 st = states.get(_svc(node.inst.name))
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
-            elif role in ("router", "ovs", "controller", "service", "compute"):
+            elif role in ("router", "ovs", "controller", "service", "compute", "k8scluster"):
                 st = states.get(_svc(node.inst.name))            # each its own container
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
+            elif role in ("k8sworkload", "hpa", "k8snode"):      # live inside the cluster
+                node.set_status("running" if fabric is not None or any(
+                    v == "running" for v in states.values()) else "idle")
+            elif role == "function":                # functions live in the shared faas runtime
+                f = states.get("faas")
+                node.set_status("running" if f == "running"
+                                else "error" if f else "idle")
             elif role == "switch":                  # switches live in the fabric container
                 node.set_status("running" if fabric == "running"
                                 else "error" if fabric else "idle")
@@ -625,7 +796,8 @@ class MainWindow(QMainWindow):
         from ..services.compiler import _role
         for node in self.canvas.scene_.nodes.values():
             if _role(node.inst.type_key) in ("machine", "switch", "router", "ovs",
-                                             "controller", "service", "compute"):
+                                             "controller", "service", "compute", "function",
+                                             "k8scluster", "k8sworkload", "hpa", "k8snode"):
                 node.set_status(status)
 
     def _recompute_addressing(self) -> None:
@@ -643,6 +815,223 @@ class MainWindow(QMainWindow):
             return
         from ..domain.pricing import bill
         self.dashboard.set_estimate(bill(self.ctx.topology, self.ctx.settings.prices))
+
+    def _on_device_changed_live(self, device_id: str) -> None:
+        """A property changed while running — re-drive a Load Generator if its QPS/target
+        changed (the live throttle)."""
+        if not self._running:
+            return
+        d = self.ctx.topology.devices.get(device_id)
+        if d is None:
+            return
+        from ..services.compiler import _role, _svc
+        if d.type_key == "load_generator":
+            self._drive_loadgen(device_id)
+        elif _role(d.type_key) == "k8sworkload":          # Replicas slider -> kubectl scale
+            self._k8s_live(d, scale=True)
+        elif _role(d.type_key) == "hpa":                  # Target CPU slider -> patch HPA
+            self._k8s_live(d, scale=False)
+
+    def _k8s_live(self, d, *, scale: bool) -> None:
+        import threading
+        from ..services.compiler import _role, _svc
+        cluster = self._k8s_cluster_svc(d.id)
+        if not cluster:
+            return
+        if scale:
+            dep, n = _svc(d.name), d.properties.get("Replicas", "2")
+
+            def work_scale():
+                ok, msg = self._gloader.k8s_scale(cluster, dep, n)
+                self.ctx.log(f"{d.name}: scaled to {n} replicas." if ok
+                             else f"{d.name}: scale failed ({msg})", "ok" if ok else "info")
+            threading.Thread(target=work_scale, daemon=True).start()
+        else:
+            # the HPA name == the connected Pod's deployment name
+            hpa = None
+            for l in self.ctx.topology.links.values():
+                other = (l.target_id if l.source_id == d.id else
+                         l.source_id if l.target_id == d.id else None)
+                od = self.ctx.topology.devices.get(other) if other else None
+                if od and _role(od.type_key) == "k8sworkload":
+                    hpa = _svc(od.name); break
+            if not hpa:
+                return
+            tgt = d.properties.get("TargetCPU", "60")
+
+            def work_patch():
+                ok, msg = self._gloader.k8s_set_hpa(cluster, hpa, target=tgt,
+                                                    mn=d.properties.get("Min"),
+                                                    mx=d.properties.get("Max"))
+                self.ctx.log(f"{d.name}: HPA target {tgt}% applied." if ok
+                             else f"{d.name}: HPA patch failed ({msg})", "ok" if ok else "info")
+            threading.Thread(target=work_patch, daemon=True).start()
+
+    def _loadgen_target(self, did: str) -> str | None:
+        """The full URL a Load Generator should hit, from what it's wired to:
+          * a Function          -> http://faas:8000/<fn>           (direct invoke)
+          * an API Gateway      -> http://<gw>/<fn>                (through the front door)
+          * proxy/LB/web/service -> http://<name>/                 (the existing HTTP path)
+        Returns None if it isn't connected to anything drivable."""
+        from ..services.compiler import _role, _svc
+        topo = self.ctx.topology
+        for l in topo.links.values():
+            other = (l.target_id if l.source_id == did else
+                     l.source_id if l.target_id == did else None)
+            if not other or other not in topo.devices:
+                continue
+            d = topo.devices[other]
+            tk = d.type_key
+            if tk == "function":
+                return f"http://faas:8000/{_svc(d.name)}"
+            if tk == "api_gateway":
+                fn = self._gateway_function(other)
+                return f"http://{_svc(d.name)}/{fn}" if fn else None
+            if tk in ("proxy", "load_balancer", "web_app") or \
+                    _role(tk) in ("service", "compute"):
+                return f"http://{_svc(d.name)}/"
+        return None
+
+    def _gateway_function(self, gw_did: str) -> str | None:
+        """A function service name routed by this API Gateway (the first one connected)."""
+        from ..services.compiler import _svc
+        topo = self.ctx.topology
+        for l in topo.links.values():
+            other = (l.target_id if l.source_id == gw_did else
+                     l.source_id if l.target_id == gw_did else None)
+            if other and other in topo.devices and topo.devices[other].type_key == "function":
+                return _svc(topo.devices[other].name)
+        return None
+
+    def _loadgen_hostport(self, name: str) -> int | None:
+        from ..services.compiler import _svc
+        for s in getattr(self, "_last_services", []):
+            if _svc(s.name) == _svc(name):
+                for p in s.ports:
+                    if p.get("web"):
+                        return p["host"]
+        return None
+
+    def _drive_loadgen(self, did: str) -> None:
+        """Drive a single Load Generator at its QPS against its connected target."""
+        if not self._running:
+            return
+        import threading
+        d = self.ctx.topology.devices.get(did)
+        if d is None or d.type_key != "load_generator":
+            return
+        hp = self._loadgen_hostport(d.name)
+        url = self._loadgen_target(did)
+        if not hp or not url:
+            if self._running and d.type_key == "load_generator":
+                self.ctx.log(f"{d.name}: connect it to a Function, API Gateway, Web App "
+                             f"or Proxy to send load.", "info")
+            return
+        qps = d.properties.get("QPS", "100")
+        conns = d.properties.get("Connections", "8")
+        name = d.name
+        try:
+            off = float(qps) <= 0          # Fortio qps=0 means UNLIMITED — treat 0 as "off"
+        except ValueError:
+            off = False
+
+        def work():
+            if off:
+                self._gloader.stop_load(hp)
+                self.ctx.log(f"{name}: load paused (rate 0).", "info")
+                return
+            ok, msg = self._gloader.drive_load(hp, url, qps, conns)
+            self.ctx.log(f"{name}: {msg}" if ok else f"{name}: load failed ({msg})",
+                         "ok" if ok else "info")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _drive_loadgens(self) -> None:
+        for d in list(self.ctx.topology.devices.values()):
+            if d.type_key == "load_generator":
+                self._drive_loadgen(d.id)
+
+    def _poll_k8s(self) -> None:
+        if not self._running or not getattr(self, "_last_k8s", None):
+            return
+        import threading
+        clusters = list(self._last_k8s)
+
+        def work():
+            merged = {"deployments": {}, "pods": 0}
+            for k in clusters:
+                m = self._gloader.k8s_metrics(k.svc)
+                merged["deployments"].update(m.get("deployments", {}))
+                merged["pods"] += m.get("pods", 0)
+            self.ctx.bus.k8s_metrics.emit(merged)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_k8s_metrics(self, snap) -> None:
+        self.inspector.set_k8s_snapshot(snap)
+
+    def _k8s_cluster_svc(self, did: str) -> str | None:
+        """The k3s cluster service a K8s element belongs to (its connected cluster, or the
+        cluster of its connected Pod)."""
+        from ..services.compiler import _role, _svc
+        topo = self.ctx.topology
+        seen, frontier = set(), [did]
+        while frontier:                      # 2-hop walk: element -> [pod] -> cluster
+            cur = frontier.pop()
+            for l in topo.links.values():
+                other = (l.target_id if l.source_id == cur else
+                         l.source_id if l.target_id == cur else None)
+                od = topo.devices.get(other) if other else None
+                if not od or other in seen:
+                    continue
+                seen.add(other)
+                if _role(od.type_key) == "k8scluster":
+                    return _svc(od.name)
+                if _role(od.type_key) == "k8sworkload":
+                    frontier.append(other)
+        return self._last_k8s[0].svc if getattr(self, "_last_k8s", None) else None
+
+    def _apply_k8s(self) -> None:
+        """Once running, wait for each k3s cluster to be Ready and apply its manifests,
+        then report the pods that scheduled."""
+        import threading
+        clusters = list(getattr(self, "_last_k8s", []))
+
+        def work():
+            for k in clusters:
+                self.ctx.log(f"{k.name}: starting k3s cluster (this takes ~20-30s)…", "info")
+                ok, msg = self._gloader.k8s_apply(k.svc)
+                if not ok:
+                    self.ctx.log(f"{k.name}: kubectl apply failed — {msg}", "error")
+                    continue
+                pods = self._gloader.k8s_pods(k.svc)
+                self.ctx.log(f"{k.name}: applied {len(k.deployments)} deployment(s); "
+                             f"{len(pods)} pod(s) scheduling.", "ok")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _poll_fabric(self) -> None:
+        if not self._running:
+            return
+        import threading
+
+        def work():
+            snap = self._gloader.fabric_metrics()
+            if snap:
+                self.ctx.bus.fabric_metrics.emit(snap)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_fabric_metrics(self, snap) -> None:
+        self.dashboard.set_fabric(snap.get("totals", {}))
+        self.inspector.set_fabric_snapshot(snap)
+
+    def _element_stats(self, device_name: str):
+        """Live CPU%/memory sample for the Inspector's metrics plots (None if not running)."""
+        if not self._running:
+            return None
+        from ..services.compiler import _svc
+        return self._gloader.stats(_svc(device_name))
+
+    def _element_stats_all(self):
+        """CPU/mem/net for every running container — keeps per-element Live history."""
+        return self._gloader.stats_all() if self._running else {}
 
     def _on_device_resized(self, device_id: str) -> None:
         """An element's size tier changed. If the lab is running, apply the new CPU cap
@@ -743,6 +1132,76 @@ class MainWindow(QMainWindow):
         except Exception as e:
             return f"(query failed: {e})"
 
+    def _log_startup_times(self) -> None:
+        """Log per-element startup times to the Console — the VM-vs-container headline
+        (a Kata Instance boots a guest kernel, so it starts much slower than a container)."""
+        if not self._running:
+            return
+        import threading
+
+        def work():
+            times = self._gloader.startup_times()
+            if times:
+                line = ", ".join(f"{svc} {ms:.0f} ms" for svc, ms in sorted(times.items()))
+                self.ctx.log("Startup times — " + line, "info")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_function_deploy(self) -> None:
+        """AWS-style 'Deploy': push the current function code to the running runtime by
+        recreating only the faas container (the rest of the lab keeps running)."""
+        import threading
+        if not self._running or not self._workdir:
+            self.ctx.log("Run the topology first, then Deploy.", "info")
+            return
+        cfg = self._compile()
+        if not cfg.faas:
+            self.ctx.log("No Functions on the canvas to deploy.", "info")
+            return
+        self.ctx.log("Deploying functions — recreating the faas runtime…", "info")
+
+        def worker(c=cfg, ai=self.ctx.settings.auto_internet):
+            ok, msg = self._gloader.redeploy_faas(c, auto_internet=ai)
+            self.ctx.log("Functions deployed — the runtime restarted with your latest code."
+                         if ok else f"Deploy failed: {msg}", "ok" if ok else "error")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_function_invoke(self, device_id: str, method: str, body: str) -> None:
+        """Invoke a Function from the inspector's Test panel: call it inside the faas
+        runtime, capture status/duration/cold, and send the result back to the inspector."""
+        import json
+        import subprocess
+        import threading
+        from ..services.compiler import _svc
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        if not self._running or not self._workdir:
+            self.ctx.bus.function_invoke_result.emit(
+                device_id, "Start the topology first (Run), then Invoke.")
+            return
+        fn = _svc(dev.name)
+
+        def work():
+            cmd = ["docker", "compose", "exec", "-T",
+                   "-e", f"GINI_FN={fn}", "-e", f"GINI_METHOD={method}",
+                   "-e", f"GINI_BODY={body}", "faas", "python", "-c", _FAAS_INVOKE]
+            try:
+                r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
+                                   text=True, timeout=30)
+                line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
+                d = json.loads(line) if line else None
+                if d:
+                    warm = "cold start" if d.get("cold") else "warm"
+                    text = f"HTTP {d['code']} · {d['ms']} ms · {warm}\n\n{d['body']}"
+                else:
+                    text = "(no response)\n" + (r.stderr or "").strip()
+            except Exception as e:
+                text = f"Invoke failed: {e}"
+            self.ctx.bus.function_invoke_result.emit(device_id, text)
+
+        threading.Thread(target=work, daemon=True).start()
+
     # -- double-click: routers open the Router Lab, others open a terminal -- #
     def _on_device_activated(self, device_id: str) -> None:
         from ..services.compiler import _role, _svc
@@ -813,16 +1272,28 @@ class MainWindow(QMainWindow):
         dev = self.ctx.topology.devices.get(device_id)
         if dev is None:
             return
-        if _role(dev.type_key) == "switch":   # plain switches live in the fabric container
-            svc = "fabric"
-        else:
-            svc = _svc(dev.name)
         if not self._running or not self._workdir:
             self.ctx.log("Start the topology first (Run), then right-click → View logs.",
                          "info")
             return
-        ok, msg = open_terminal(f"GINI {dev.name} logs", self._workdir,
-                                f"docker compose logs --tail=200 -f {svc}")
+        role = _role(dev.type_key)
+        if role == "switch":                  # plain switches live in the fabric container
+            log_cmd = "docker compose logs --tail=200 -f fabric"
+        elif role == "k8sworkload":           # a Pod has no container — tail it via kubectl
+            cluster = self._k8s_cluster_svc(device_id)
+            if not cluster:
+                self.ctx.log(f"{dev.name} isn't connected to a K8s Cluster yet.", "info")
+                return
+            log_cmd = f"docker compose exec {cluster} kubectl logs deploy/{_svc(dev.name)} --tail=200 -f"
+        elif role == "hpa":
+            self.ctx.log(f"{dev.name} (autoscaler) has no logs — double-click it for status.",
+                         "info")
+            return
+        elif role == "function":              # functions share the one `faas` runtime container
+            log_cmd = "docker compose logs --tail=200 -f faas"
+        else:
+            log_cmd = f"docker compose logs --tail=200 -f {_svc(dev.name)}"
+        ok, msg = open_terminal(f"GINI {dev.name} logs", self._workdir, log_cmd)
         self.ctx.log(f"Opening logs for {dev.name}…" if ok
                      else f"Could not open logs: {msg}", "info" if ok else "error")
 
@@ -855,6 +1326,35 @@ class MainWindow(QMainWindow):
         elif role in ("service", "compute"):   # cloud service / compute container — shell
             cmd = f"docker compose exec {svc} sh"
             kind = "service shell" if role == "service" else "instance shell"
+        elif role in ("k8scluster", "k8snode"):   # the real k3s container — kubectl lives here
+            cmd = f"docker compose exec {svc} sh"
+            kind = "Kubernetes shell (run kubectl here)"
+        elif role == "k8sworkload":   # a Pod = a Deployment; exec into one of its pods via the cluster
+            cluster = self._k8s_cluster_svc(device_id)
+            if not cluster:
+                self.ctx.log(f"{dev.name} isn't connected to a K8s Cluster yet.", "info")
+                return
+            cmd = f"docker compose exec {cluster} kubectl exec -it deploy/{svc} -- sh"
+            kind = "pod shell"
+        elif role == "hpa":   # the Pod Autoscaler (HPA) — show its live status
+            cluster = self._k8s_cluster_svc(device_id)
+            hpa = next((_svc(self.ctx.topology.devices[o].name)
+                        for l in self.ctx.topology.links.values()
+                        for o in (l.target_id if l.source_id == device_id else
+                                  l.source_id if l.target_id == device_id else None,)
+                        if o and _role(self.ctx.topology.devices[o].type_key) == "k8sworkload"), None)
+            if not cluster or not hpa:
+                self.ctx.log(f"{dev.name} isn't attached to a Pod yet.", "info")
+                return
+            cmd = f"docker compose exec {cluster} kubectl describe hpa {hpa}"
+            kind = "autoscaler status"
+        elif role == "function":   # a handler in the shared `faas` runtime, not its own container
+            cmd = "docker compose exec faas sh"
+            kind = "faas runtime shell"
+            self.ctx.log(
+                f"{dev.name} runs in the shared faas runtime. Invoke it from this shell with:\n"
+                f"  python -c \"import urllib.request as u; "
+                f"print(u.urlopen('http://localhost:8000/{svc}').read().decode())\"", "info")
         else:  # plain switch — attach to that element's console in the fabric container
             cmd = f"docker compose exec fabric python -m dataplane.console {svc}"
             kind = "console"
@@ -865,12 +1365,12 @@ class MainWindow(QMainWindow):
     # -- reactions ---------------------------------------------------------- #
     def _on_scene_selection(self) -> None:
         # single source of truth for selection -> inspector (avoids the click race)
-        from .canvas import NodeItem
+        from .canvas import GroupItem, NodeItem
         try:
             selected = self.canvas.scene_.selectedItems()
         except RuntimeError:
             return                              # scene torn down (window closing)
-        nodes = [i for i in selected if isinstance(i, NodeItem)]
+        nodes = [i for i in selected if isinstance(i, (NodeItem, GroupItem))]
         if nodes:
             self.ctx.select(nodes[0].inst.id)
         else:

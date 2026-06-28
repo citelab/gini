@@ -74,6 +74,11 @@ class GLoader:
         workdir = workdir or tempfile.mkdtemp(prefix="gini-lab-")
         return self._orch.up(cfg, workdir, auto_internet=auto_internet)
 
+    def redeploy_faas(self, spec, auto_internet: bool = True) -> tuple[bool, str]:
+        """Re-deploy only the serverless runtime with the current function code (AWS-style
+        'Deploy') — recreates just the `faas` container, leaving the rest of the lab up."""
+        return self._orch.redeploy_faas(self._as_config(spec), auto_internet=auto_internet)
+
     def simulate(self, spec) -> Sim:
         """Compile and run the topology in-process (no Docker)."""
         return simulate(self._as_config(spec))
@@ -81,6 +86,51 @@ class GLoader:
     def update_cpus(self, service: str, cpus: float) -> tuple[bool, str]:
         """Live-change a running container's CPU cap (vertical scaling), no restart."""
         return self._orch.update_cpus(service, cpus)
+
+    def stats(self, service: str) -> dict | None:
+        """One CPU%/memory sample for a running container (for the Live tab plots)."""
+        return self._orch.stats(service)
+
+    def stats_all(self) -> dict:
+        """CPU/mem/net for every running container in one call (per-element Live history)."""
+        return self._orch.stats_all()
+
+    def runtime_available(self, name: str) -> bool:
+        """Whether the active Docker backend has an OCI runtime (e.g. 'kata') registered."""
+        return self._orch.runtime_available(name)
+
+    def startup_times(self) -> dict:
+        """Per-element startup time in ms (the VM-vs-container headline metric)."""
+        return self._orch.startup_times()
+
+    def k8s_apply(self, service: str) -> tuple[bool, str]:
+        """Apply the generated K8s manifests once the k3s cluster is Ready."""
+        return self._orch.k8s_apply(service)
+
+    def k8s_pods(self, service: str) -> list:
+        """Current pods in a k3s cluster (for canvas/status read-back)."""
+        return self._orch.k8s_pods(service)
+
+    def k8s_metrics(self, service: str) -> dict:
+        """Per-deployment replicas / CPU% / target for the Live view."""
+        return self._orch.k8s_metrics(service)
+
+    def k8s_scale(self, service: str, deployment: str, replicas) -> tuple[bool, str]:
+        return self._orch.k8s_scale(service, deployment, replicas)
+
+    def k8s_set_hpa(self, service: str, hpa: str, target=None, mn=None, mx=None):
+        return self._orch.k8s_set_hpa(service, hpa, target, mn, mx)
+
+    def fabric_metrics(self) -> dict | None:
+        """The cloud-fabric agent's normalized app-level metrics for the whole lab."""
+        return self._orch.fabric_metrics()
+
+    def drive_load(self, host_port: int, url: str, qps, conns=8) -> tuple[bool, str]:
+        """(Re)start a Fortio load generator at `qps` against `url` — also the throttle."""
+        return self._orch.drive_load(host_port, url, qps, conns)
+
+    def stop_load(self, host_port: int) -> tuple[bool, str]:
+        return self._orch.stop_load(host_port)
 
     def down(self) -> tuple[bool, str]:
         """Tear the running network down."""

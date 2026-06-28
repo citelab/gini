@@ -30,6 +30,47 @@ def test_bill_sums_rate_and_groups_by_category():
     assert "Observability" not in b["by_category"]   # empty categories are dropped
 
 
+def test_k8s_topology_is_billed():
+    # regression: K8s elements used to fall outside the rate table and bill $0
+    t = Topology("k8s")
+    t.add_device("k8s_cluster")        # 8.0
+    t.add_device("instance_group")     # HPA — 2.0
+    t.add_device("pod")                # 5.0 × 2 default replicas = 10.0
+    b = bill(t)
+    assert b["by_category"]["Kubernetes"] == {"rate": 8.0 + 2.0 + 10.0, "count": 3}
+    assert b["rate_per_hr"] == 20.0
+
+
+def test_pod_bills_per_replica():
+    t = Topology("k8s")
+    pod = t.add_device("pod")
+    pod.properties["Replicas"] = "5"
+    assert bill(t)["rate_per_hr"] == 5.0 * 5      # scaling the workload costs more
+    pod.properties["Replicas"] = "1"
+    assert bill(t)["rate_per_hr"] == 5.0
+
+
+def test_serverless_topology_is_billed():
+    # regression: the API Gateway had no rate and billed $0
+    t = Topology("fn")
+    t.add_device("function")           # 1.0 — cheap, scale-to-zero
+    t.add_device("api_gateway")        # 5.0
+    b = bill(t)
+    assert b["by_category"]["Serverless"] == {"rate": 6.0, "count": 2}
+    assert category_of("function") == "Serverless"
+    assert category_of("api_gateway") == "Serverless"
+
+
+def test_every_element_is_priced_or_explicitly_free():
+    """Guard: every element in the domain must be either billable or in the deliberate
+    FREE list. A new element that's neither would bill $0 and make the meter under-count
+    (the bug that hit K8s + serverless). This keeps pricing in sync with the palette."""
+    from gini.domain.devices import REGISTRY
+    from gini.domain.pricing import BILLABLE, FREE
+    missing = sorted(k for k in REGISTRY if k not in BILLABLE and k not in FREE)
+    assert not missing, f"unpriced elements — add to a category or to FREE: {missing}"
+
+
 def test_price_overrides_from_settings():
     t = Topology("net"); t.add_device("database")
     assert rate_of("database", {"database": 99}) == 99.0

@@ -21,7 +21,9 @@ from .cloud_catalog import is_service, service_for
 
 ROUTERS = {"router", "firewall"}
 SWITCHES = {"switch", "hub"}        # plain L2 — live in the shared `fabric` container
-GROUPS = {"vpc", "cloud_subnet", "region", "k8s_cluster", "instance_group", "pod"}
+GROUPS = {"vpc", "cloud_subnet", "region"}
+K8S_ROLES = {"k8s_cluster": "k8scluster", "pod": "k8sworkload",
+             "instance_group": "hpa", "k8s_node": "k8snode"}
 
 # SDN: an OVS is an OpenFlow switch that runs as its OWN container (the gRouter in
 # --openflow mode), programmed by a controller over a management channel. A controller
@@ -39,10 +41,14 @@ def _role(type_key: str) -> str:
         return "ovs"
     if type_key == "controller":
         return "controller"
+    if type_key in K8S_ROLES:          # kubernetes: real k3s cluster + manifests
+        return K8S_ROLES[type_key]
+    if type_key == "function":         # serverless — a handler in the shared faas runtime
+        return "function"
     if is_service(type_key):           # cloud managed service (own container, bridge net)
         return "service"
-    if type_key in ("instance", "container"):   # cloud compute — own bridge container
-        return "compute"
+    if type_key in ("instance", "container", "kinstance"):   # cloud compute — own bridge container
+        return "compute"                                     # (kinstance = VM-isolated via Kata)
     if type_key in GROUPS:
         return "group"
     return "machine"                   # host = a node on the simulated tun fabric
@@ -56,6 +62,39 @@ def _cpus_for(device) -> float:
     """CPU limit (vCPUs) for a device from its size tier — 0.5/1/2/4 for S/M/L/XL."""
     from ..domain import pricing
     return pricing.size_tier(pricing.size_level(getattr(device, "size", 1)))[1]
+
+
+def _int(v, default: int) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _k8s_deployment_yaml(d: dict) -> str:
+    return (f"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {d['name']}\n"
+            f"  labels: {{app: {d['name']}}}\nspec:\n  replicas: {d['replicas']}\n"
+            f"  selector:\n    matchLabels: {{app: {d['name']}}}\n  template:\n"
+            f"    metadata:\n      labels: {{app: {d['name']}}}\n    spec:\n"
+            f"      containers:\n        - name: {d['name']}\n          image: {d['image']}\n"
+            f"          ports:\n            - containerPort: {d['port']}\n"
+            f"          resources:\n            requests:\n              cpu: 50m")
+
+
+def _k8s_service_yaml(d: dict) -> str:
+    return (f"apiVersion: v1\nkind: Service\nmetadata:\n  name: {d['name']}\nspec:\n"
+            f"  selector: {{app: {d['name']}}}\n  ports:\n    - port: {d['port']}\n"
+            f"      targetPort: {d['port']}")
+
+
+def _k8s_hpa_yaml(d: dict) -> str:
+    h = d["hpa"]
+    return (f"apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n"
+            f"  name: {d['name']}\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n"
+            f"    kind: Deployment\n    name: {d['name']}\n  minReplicas: {h['min']}\n"
+            f"  maxReplicas: {h['max']}\n  metrics:\n    - type: Resource\n"
+            f"      resource:\n        name: cpu\n        target:\n"
+            f"          type: Utilization\n          averageUtilization: {h['cpu']}")
 
 
 def _norm_image(raw: str) -> str:
@@ -138,10 +177,20 @@ def _is_ipv4(s: str) -> bool:
         return False
 
 
+def _valid_cidr(s: str) -> bool:
+    import ipaddress
+    try:
+        ipaddress.ip_network((s or "").strip(), strict=False)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 @dataclass
 class SwitchSpec:
     name: str
     eps: list[Endpoint]
+    hub: bool = False          # True = a Layer-1 hub (flood-all repeater), not a learning switch
 
 
 @dataclass
@@ -191,6 +240,39 @@ class ServiceSpec:
     privileged: bool = False
     files: dict[str, str] = field(default_factory=dict)
     cpus: float = 0.0              # CPU limit from the size tier (0 = unset)
+    network: str = "gini"         # the Docker network to attach to (a VPC's net, or "gini")
+    runtime: str = ""             # OCI runtime override (e.g. "kata" for a Kata Instance)
+
+
+@dataclass
+class K8sSpec:
+    """A real Kubernetes cluster (k3s in a container) + the workloads to deploy in it.
+    `deployments` = [{name,image,replicas,port,hpa:{min,max,cpu}|None}]; `manifests` is
+    the combined YAML applied via `kubectl apply` once the cluster is up."""
+    name: str
+    svc: str
+    image: str
+    deployments: list = field(default_factory=list)
+    manifests: str = ""
+
+
+@dataclass
+class FabricSpec:
+    """The GINI Cloud Fabric agent: one container that polls each cloud service's native
+    metrics and serves them to gBuilder. `services` = [{name,type,host,port,creds}]."""
+    services: list = field(default_factory=list)
+    port: int = 9099
+
+
+@dataclass
+class NetworkSpec:
+    """A VPC rendered as a real isolated Docker bridge network. Containers on different
+    VPC networks cannot reach each other (the isolation a VPC actually provides); within
+    one they can. `cidr` is the network's subnet (the VPC's address space)."""
+    name: str                      # docker network name (the VPC's slug)
+    cidr: str                      # e.g. 10.0.0.0/16
+    label: str = ""                # the VPC's display name (for notes/UI)
+    region: str = ""
 
 
 @dataclass
@@ -201,6 +283,10 @@ class RuntimeConfig:
     ovs_switches: list[OvsSpec] = field(default_factory=list)
     controllers: list[ControllerSpec] = field(default_factory=list)
     services: list[ServiceSpec] = field(default_factory=list)
+    fabric: "FabricSpec | None" = None                      # cloud telemetry agent
+    k8s: list = field(default_factory=list)                 # real k3s clusters + manifests
+    faas: list = field(default_factory=list)                # serverless functions (shared runtime)
+    networks: list = field(default_factory=list)            # VPCs as isolated Docker networks
     subnets: dict[int, str] = field(default_factory=dict)   # seg -> cidr
     notes: list[str] = field(default_factory=list)
 
@@ -217,7 +303,8 @@ class RuntimeConfig:
                 for m in self.machines
             ],
             "switches": [
-                {"name": _svc(s.name), "ports": [e.wiring(docker) for e in s.eps]}
+                {"name": _svc(s.name), "ports": [e.wiring(docker) for e in s.eps],
+                 "hub": s.hub}
                 for s in self.switches
             ],
             "routers": [
@@ -253,9 +340,18 @@ class RuntimeConfig:
                 {"name": _svc(s.name), "type": s.type_key, "image": s.image,
                  "summary": s.summary, "command": s.command, "env": s.env,
                  "ports": s.ports, "volumes": s.volumes, "privileged": s.privileged,
-                 "files": s.files, "cpus": s.cpus}
+                 "files": s.files, "cpus": s.cpus, "network": s.network,
+                 "runtime": s.runtime}
                 for s in self.services
             ],
+            "fabric": ({"port": self.fabric.port, "services": self.fabric.services}
+                       if self.fabric else None),
+            "k8s": [{"name": _svc(k.name), "image": k.image,
+                     "deployments": k.deployments} for k in self.k8s],
+            "faas": self.faas,        # serverless: [{name, handler, code}] -> one faas container
+            # VPCs as isolated Docker networks (empty -> only the flat `gini` bridge).
+            "networks": [{"name": n.name, "cidr": n.cidr, "label": n.label,
+                          "region": n.region} for n in self.networks],
         }
 
 
@@ -288,6 +384,42 @@ _GRAFANA_PROVIDER = (
     "    type: file\n"
     "    options:\n"
     "      path: /var/lib/grafana/dashboards\n"
+)
+
+
+# Traefik dynamic (file-provider) config: route everything to the drawn backends.
+_TRAEFIK_DYNAMIC = (
+    "http:\n"
+    "  routers:\n"
+    "    gini:\n"
+    "      rule: \"PathPrefix(`/`)\"\n"
+    "      entryPoints: [web]\n"
+    "      service: gini\n"
+    "  services:\n"
+    "    gini:\n"
+    "      loadBalancer:\n"
+    "        servers:\n"
+    "{servers}\n"
+)
+
+# nginx load-balancer config: an upstream over the drawn backends (honoring the chosen
+# algorithm) + a /nginx_status endpoint so the cloud fabric can read its request rate.
+_NGINX_LB = (
+    "events {{}}\n"
+    "http {{\n"
+    "  upstream gini_backend {{\n"
+    "{algo}"
+    "{servers}\n"
+    "  }}\n"
+    "  server {{\n"
+    "    listen 80;\n"
+    "    location / {{\n"
+    "      proxy_pass http://gini_backend;\n"
+    "      proxy_set_header Host $host;\n"
+    "    }}\n"
+    "    location /nginx_status {{ stub_status; }}\n"
+    "  }}\n"
+    "}}\n"
 )
 
 
@@ -364,6 +496,10 @@ class RuntimeCompiler:
             if rs == "group" or rt == "group":
                 cfg.notes.append(f"skipped link touching grouping: "
                                  f"{name.get(l.source_id)}–{name.get(l.target_id)}")
+            elif rs in K8S_ROLES.values() or rt in K8S_ROLES.values():
+                # kubernetes associations (cluster↔pod, pod↔autoscaler) are intent for
+                # manifest generation, not data-plane segments.
+                cfg.notes.append(f"k8s link: {name.get(l.source_id)}–{name.get(l.target_id)}")
             elif rs in ("service", "compute") or rt in ("service", "compute"):
                 # cloud services + compute live on the bridge net and are reached by
                 # name, so a link to one is intent ("uses"), not a data-plane segment.
@@ -530,16 +666,23 @@ class RuntimeCompiler:
                     fabric_default=have_internet and bool(m_gw.get(did)),
                     cpus=_cpus_for(topo.devices[did])))   # size tier -> CPU limit
 
-        # switches
+        # switches (a Hub is the same fabric node in flood-all mode — no MAC learning)
         for did, r in role.items():
             if r != "switch":
                 continue
             ports = [eps[(l.id, did)] for l in by_device.get(did, []) if l in kept]
             if ports:
-                cfg.switches.append(SwitchSpec(name=name[did], eps=ports))
+                is_hub = topo.devices[did].type_key == "hub"
+                cfg.switches.append(SwitchSpec(name=name[did], eps=ports, hub=is_hub))
 
         # OVS switches — own gRouter --openflow container, programmed by a controller
         props = {d.id: getattr(d, "properties", {}) or {} for d in topo.devices.values()}
+
+        # VPCs -> isolated Docker networks. Each VPC element with members becomes its own
+        # bridge (unique subnet); every element inside it (via parent_id) attaches to that
+        # network instead of the flat `gini` bridge, so different VPCs can't reach each
+        # other. Elements with no VPC ancestor stay on `gini` (unchanged flat behavior).
+        vpc_net_of = self._build_networks(cfg, topo, name)
         for did, r in role.items():
             if r != "ovs":
                 continue
@@ -586,7 +729,8 @@ class RuntimeCompiler:
             cfg.services.append(ServiceSpec(
                 name=d.name, type_key=d.type_key, image=svc.image,
                 summary=svc.summary, command=command, env=env, ports=ports,
-                cpus=_cpus_for(d)))                   # size tier -> CPU limit
+                cpus=_cpus_for(d),                    # size tier -> CPU limit
+                network=vpc_net_of.get(d.id, "gini")))   # VPC isolation (or flat bridge)
 
         # cloud compute (instance / container) — a plain bridge container the student can
         # log into and run an app on, reaching services by name. Image from the element's
@@ -599,17 +743,33 @@ class RuntimeCompiler:
             if d.type_key == "container":
                 image = _norm_image(p.get("Image") or "alpine:latest")
                 summary = f"Container ({image})."
+            elif d.type_key == "kinstance":              # VM-isolated workload via Kata
+                image = _norm_image(p.get("Image") or "ubuntu:22.04")
+                summary = f"Kata Instance — VM-isolated ({image})."
             else:
                 image = _norm_image(p.get("Image") or "ubuntu:22.04")
                 summary = f"Compute instance ({image}, {p.get('Type', 'vm')})."
             cmd = p.get("Command") or ""
             command = shlex.split(cmd) if cmd.strip() else ["tail", "-f", "/dev/null"]
+            is_kata = d.type_key == "kinstance"
             cfg.services.append(ServiceSpec(
                 name=d.name, type_key=d.type_key, image=image, summary=summary,
-                command=command, env={}, ports=[], cpus=_cpus_for(d)))   # size -> CPU
+                command=command, env={}, ports=[], cpus=_cpus_for(d),    # size -> CPU
+                # Kata Instances stay flat (no VPC) and run under the kata OCI runtime.
+                network="gini" if is_kata else vpc_net_of.get(d.id, "gini"),
+                runtime="kata" if is_kata else ""))
 
+        # make proxies / load balancers actually route to their drawn backends
+        self._wire_proxies(cfg, topo, role, name, props)
+        # serverless: gather Functions into the shared faas runtime + route API Gateways to it
+        self._build_faas(cfg, topo, role, name, props)
+        self._wire_api_gateway(cfg, topo, role, name, props)
         # auto-wire an observability stack so Prometheus/Grafana actually show data
         host_port = self._wire_observability(cfg, host_port)
+        # auto-add the cloud-fabric telemetry agent if there are cloud services to watch
+        self._build_fabric(cfg)
+        # real Kubernetes: k3s clusters + generated Deployment/Service/HPA manifests
+        self._build_k8s(cfg, topo, role, name, props)
 
         # routers
         ridx = 0
@@ -713,6 +873,231 @@ class RuntimeCompiler:
                                            "gw": rtr_seg_ip[(nh, shared)],
                                            "dev": rtr_seg_dev[(did, shared)]})
             spec_of[did].routes = routes
+
+    # backend elements a proxy / load balancer can route HTTP traffic to
+    _PROXY_BACKENDS = {"web_app", "instance", "container"}
+
+    @classmethod
+    def _wire_proxies(cls, cfg, topo, role, name, props) -> None:
+        """A Reverse Proxy / Load Balancer only forwards if it has a backend config.
+        Build that config from the drawn links: the connected Web Apps / Instances /
+        Containers become its upstreams. Traefik gets a file-provider config; nginx gets
+        an `upstream` block honoring the chosen Scheme + a /nginx_status endpoint."""
+        id_of = {n: i for i, n in name.items()}
+        # adjacency from the drawn links
+        nbrs: dict[str, list] = {d: [] for d in topo.devices}
+        for l in topo.links.values():
+            nbrs[l.source_id].append(l.target_id)
+            nbrs[l.target_id].append(l.source_id)
+
+        svc_by_name = {s.name: s for s in cfg.services}
+        for s in cfg.services:
+            if s.type_key not in ("proxy", "load_balancer"):
+                continue
+            did = id_of.get(s.name)
+            if did is None:
+                continue
+            backends = []
+            for nb in nbrs.get(did, []):
+                tk = topo.devices[nb].type_key
+                if tk in cls._PROXY_BACKENDS:
+                    port = 80
+                    backends.append((_svc(name[nb]), port))
+                elif role.get(nb) == "service" and tk not in ("proxy", "load_balancer"):
+                    bs = svc_by_name.get(name[nb])
+                    port = bs.ports[0]["container"] if (bs and bs.ports) else 80
+                    backends.append((_svc(name[nb]), port))
+            if not backends:
+                cfg.notes.append(f"{s.name}: no backends wired — connect a Web App to it")
+                continue
+            sname = _svc(s.name)
+            if s.type_key == "proxy":
+                servers = "\n".join(f'          - url: "http://{h}:{p}"' for h, p in backends)
+                s.files[f"{sname}/dynamic.yml"] = _TRAEFIK_DYNAMIC.format(servers=servers)
+                s.volumes.append(f"./{sname}/dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro")
+                s.command = list(s.command) + ["--providers.file.directory=/etc/traefik/dynamic"]
+            else:                                          # nginx load balancer
+                scheme = (props.get(did, {}).get("Scheme") or "round-robin").lower()
+                directive = {"least_conn": "    least_conn;\n", "least-conn": "    least_conn;\n",
+                             "ip_hash": "    ip_hash;\n", "ip-hash": "    ip_hash;\n"}.get(scheme, "")
+                servers = "\n".join(f"    server {h}:{p};" for h, p in backends)
+                s.files[f"{sname}/nginx.conf"] = _NGINX_LB.format(algo=directive, servers=servers)
+                s.volumes.append(f"./{sname}/nginx.conf:/etc/nginx/nginx.conf:ro")
+
+    @classmethod
+    def _build_networks(cls, cfg, topo, name) -> dict:
+        """Turn each VPC (that has members) into an isolated Docker network and return a
+        {device_id -> docker-net-name} map for every element inside a VPC. Membership is by
+        containment (parent_id), walking up through a Subnet to its VPC. VPC subnets are
+        kept unique so Docker won't reject overlapping bridges."""
+        parent = {d.id: d.parent_id for d in topo.devices.values()}
+        tkey = {d.id: d.type_key for d in topo.devices.values()}
+
+        def vpc_ancestor(did):
+            seen, cur = set(), parent.get(did)
+            while cur and cur not in seen:
+                seen.add(cur)
+                if tkey.get(cur) == "vpc":
+                    return cur
+                cur = parent.get(cur)
+            return None
+
+        members = {d.id: vpc_ancestor(d.id) for d in topo.devices.values()}
+        members = {did: v for did, v in members.items() if v}    # only those in a VPC
+        if not members:
+            return {}
+
+        used: set[str] = set()
+
+        def unique_cidr(want):
+            want = (want or "").strip()
+            if _valid_cidr(want) and want not in used:
+                used.add(want)
+                return want
+            for i in range(10, 250):                              # 10.10.0.0/16 … (avoids wan)
+                c = f"10.{i}.0.0/16"
+                if c not in used:
+                    used.add(c)
+                    return c
+            return "10.249.0.0/16"
+
+        for vdid in dict.fromkeys(members.values()):             # stable order, deduped
+            v = topo.devices[vdid]
+            p = getattr(v, "properties", {}) or {}
+            cfg.networks.append(NetworkSpec(
+                name=_svc(name[vdid]), cidr=unique_cidr(p.get("CIDR")),
+                label=v.name, region=p.get("Region", "")))
+        return {did: _svc(name[vdid]) for did, vdid in members.items()}
+
+    # event sources that can trigger a Function: element type_key -> client port. The
+    # queue/topic/subject the runtime subscribes to is named after the function itself.
+    _EVENT_PORTS = {"queue": 5672, "stream": 9092, "messaging": 4222}
+
+    @classmethod
+    def _build_faas(cls, cfg, topo, role, name, props) -> None:
+        """Gather every Function into the shared faas runtime (one container). A Function
+        node = a handler hosted by the platform, reachable at http://faas:8000/<name>.
+        A Function wired to an event source (Queue/Stream/Pub-Sub) also gets a trigger so
+        the runtime subscribes and invokes the handler on each message (event-driven FaaS)."""
+        nbrs: dict[str, list] = {d: [] for d in topo.devices}
+        for l in topo.links.values():
+            nbrs[l.source_id].append(l.target_id)
+            nbrs[l.target_id].append(l.source_id)
+        funcs = []
+        for did, r in role.items():
+            if r != "function":
+                continue
+            p = props.get(did, {})
+            triggers = []
+            for nb in nbrs.get(did, []):
+                tk = topo.devices[nb].type_key
+                port = cls._EVENT_PORTS.get(tk)
+                if port:
+                    triggers.append({"type": tk, "host": _svc(name[nb]), "port": port})
+            funcs.append({"name": _svc(name[did]),
+                          "handler": (p.get("Handler") or "echo").strip().lower(),
+                          "code": p.get("Code", ""),
+                          "triggers": triggers})
+        cfg.faas = funcs
+
+    @classmethod
+    def _wire_api_gateway(cls, cfg, topo, role, name, props) -> None:
+        """An API Gateway (Traefik) routes a URL path to each connected Function: a request
+        to /<fn> is forwarded to the faas runtime, which dispatches to that handler."""
+        id_of = {n: i for i, n in name.items()}
+        nbrs: dict[str, list] = {d: [] for d in topo.devices}
+        for l in topo.links.values():
+            nbrs[l.source_id].append(l.target_id)
+            nbrs[l.target_id].append(l.source_id)
+        for s in cfg.services:
+            if s.type_key != "api_gateway":
+                continue
+            did = id_of.get(s.name)
+            routes = [_svc(name[nb]) for nb in nbrs.get(did, [])
+                      if role.get(nb) == "function"]
+            if not routes:
+                cfg.notes.append(f"{s.name}: connect a Function to it to route to one")
+                continue
+            sname = _svc(s.name)
+            routers = "\n".join(
+                f"    fn-{fn}:\n      rule: \"PathPrefix(`/{fn}`)\"\n"
+                f"      service: faas\n      entryPoints: [web]" for fn in routes)
+            dyn = ("http:\n  routers:\n" + routers +
+                   "\n  services:\n    faas:\n      loadBalancer:\n        servers:\n"
+                   "          - url: \"http://faas:8000\"\n")
+            s.files[f"{sname}/dynamic.yml"] = dyn
+            s.volumes.append(f"./{sname}/dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro")
+            s.command = list(s.command) + ["--providers.file.directory=/etc/traefik/dynamic"]
+
+    # how the cloud-fabric agent probes each service type: (port, creds-kind)
+    _FABRIC_PROBE = {"cache": (6379, None), "queue": (15672, "rabbit"),
+                     "database": (5432, "postgres"), "messaging": (8222, None),
+                     "proxy": (8080, None), "load_balancer": (80, None)}
+    # infra services the fabric should not monitor (it watches the *app* services)
+    _FABRIC_SKIP = {"_cadvisor", "metrics", "dashboard", "tracing"}
+
+    K3S_IMAGE = "rancher/k3s:v1.30.6-k3s1"
+
+    @classmethod
+    def _build_k8s(cls, cfg: RuntimeConfig, topo, role, name, props) -> None:
+        """Turn each drawn K8s Cluster + its connected Pods/Autoscalers into a real k3s
+        cluster spec with generated Deployment/Service/HPA manifests."""
+        id_of = {n: i for i, n in name.items()}
+        nbrs: dict[str, list] = {d: [] for d in topo.devices}
+        for l in topo.links.values():
+            nbrs[l.source_id].append(l.target_id)
+            nbrs[l.target_id].append(l.source_id)
+
+        for cdid, r in role.items():
+            if r != "k8scluster":
+                continue
+            deployments = []
+            for nb in nbrs.get(cdid, []):
+                if role.get(nb) != "k8sworkload":          # a Pod (= a Deployment)
+                    continue
+                p = props.get(nb, {})
+                dep = {"name": _svc(name[nb]),
+                       "image": _norm_image(p.get("Image") or "nginxdemos/hello:latest"),
+                       "replicas": _int(p.get("Replicas"), 2),
+                       "port": _int(p.get("Port"), 80), "hpa": None}
+                for nb2 in nbrs.get(nb, []):                # an Autoscaling Group on it -> HPA
+                    if role.get(nb2) == "hpa":
+                        ap = props.get(nb2, {})
+                        dep["hpa"] = {"min": _int(ap.get("Min"), 1),
+                                      "max": _int(ap.get("Max"), 5),
+                                      "cpu": _int(ap.get("TargetCPU"), 60)}
+                        break
+                deployments.append(dep)
+            manifests = "\n---\n".join(
+                m for d in deployments for m in (
+                    _k8s_deployment_yaml(d), _k8s_service_yaml(d),
+                    *( [_k8s_hpa_yaml(d)] if d["hpa"] else [] )))
+            cfg.k8s.append(K8sSpec(name=name[cdid], svc=_svc(name[cdid]),
+                                   image=cls.K3S_IMAGE, deployments=deployments,
+                                   manifests=manifests))
+
+    @classmethod
+    def _build_fabric(cls, cfg: RuntimeConfig) -> None:
+        """List the cloud services the GINI Cloud Fabric agent should watch, with the
+        per-type probe port + credentials pulled from the catalog config."""
+        watched = []
+        for s in cfg.services:
+            if s.type_key in cls._FABRIC_SKIP:
+                continue
+            port, credkind = cls._FABRIC_PROBE.get(
+                s.type_key, (s.ports[0]["container"] if s.ports else 80, None))
+            if credkind == "postgres":
+                creds = {"user": s.env.get("POSTGRES_USER", "gini"),
+                         "password": s.env.get("POSTGRES_PASSWORD", "gini"),
+                         "db": s.env.get("POSTGRES_DB", "postgres")}
+            elif credkind == "rabbit":
+                creds = {"user": "guest", "password": "guest"}
+            else:
+                creds = {}
+            watched.append({"name": _svc(s.name), "type": s.type_key,
+                            "host": _svc(s.name), "port": port, "creds": creds})
+        if watched:
+            cfg.fabric = FabricSpec(services=watched)
 
     @staticmethod
     def _wire_observability(cfg: RuntimeConfig, host_port: int) -> int:

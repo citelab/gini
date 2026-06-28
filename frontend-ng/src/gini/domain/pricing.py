@@ -14,9 +14,18 @@ from __future__ import annotations
 DEFAULT_RATES: dict[str, float] = {
     # --- compute (you pay most for managed/large compute) ------------------- #
     "instance": 10.0,        # VM
+    "kinstance": 14.0,       # Kata Instance — a real microVM, so it costs more than a VM image
     "container": 5.0,
     "host": 2.0,             # a plain Machine / end host
-    "function": 1.0,         # serverless — cheap, scale-to-zero
+    # --- serverless (cheap, scale-to-zero; pay per use, not per idle hour) --- #
+    "function": 1.0,         # a handler in the shared FaaS runtime
+    "api_gateway": 5.0,      # a managed API front door (Traefik)
+    # --- containers & kubernetes -------------------------------------------- #
+    "pod": 5.0,              # a Deployment — billed per replica (scaling costs money)
+    "k8s_cluster": 8.0,      # a managed control plane (k3s)
+    "k8s_node": 8.0,         # a worker node (a VM)
+    "instance_group": 2.0,   # Pod Autoscaler (HPA) — the autoscaling feature itself
+    "registry": 3.0,         # an image registry
     # --- networking --------------------------------------------------------- #
     "router": 3.0,
     "ovs": 3.0,              # OpenFlow switch (a gRouter in OF mode)
@@ -37,7 +46,6 @@ DEFAULT_RATES: dict[str, float] = {
     "load_balancer": 5.0,
     "proxy": 3.0,
     "web_app": 4.0,
-    "registry": 3.0,
     # --- observability / workload ------------------------------------------ #
     "metrics": 5.0,          # Prometheus
     "dashboard": 5.0,        # Grafana
@@ -79,25 +87,35 @@ def resizable(type_key: str) -> bool:
     """Which elements expose a size knob — things that run a real workload container
     and meaningfully have a capacity (compute + managed services). Not switches/hubs."""
     from ..services.cloud_catalog import is_service   # lazy: keep domain below services
-    return is_service(type_key) or type_key in ("instance", "container", "host")
+    return is_service(type_key) or type_key in ("instance", "kinstance", "container", "host")
 
 
 # Dashboard breakdown groups. Order is the display order.
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "Compute": ("instance", "container", "host", "function"),
+    "Compute": ("instance", "kinstance", "container", "host"),
+    "Serverless": ("function", "api_gateway"),
+    "Kubernetes": ("k8s_cluster", "pod", "k8s_node", "instance_group", "registry"),
     "Networking": ("router", "ovs", "controller", "firewall", "switch",
                    "wap", "hub", "cloud"),
     "Services": ("database", "nosql", "object_store", "stream", "queue",
-                 "messaging", "cache", "load_balancer", "proxy", "web_app",
-                 "registry"),
+                 "messaging", "cache", "load_balancer", "proxy", "web_app"),
     "Observability": ("metrics", "dashboard", "tracing", "load_generator"),
 }
 CATEGORY_ORDER = tuple(CATEGORIES.keys())
 _CAT_OF = {tk: cat for cat, tks in CATEGORIES.items() for tk in tks}
 
-# the type_keys that are actually billable (everything in a category). Grouping
-# elements (VPC/region boundaries) and unknown types are free and skipped.
+# the type_keys that are actually billable (everything in a category).
 BILLABLE = frozenset(_CAT_OF)
+
+# Intentionally-free elements, listed so the coverage test can tell "deliberately not
+# billed" from "someone added an element and forgot to price it" (the latter would make
+# the meter under-count — the bug this guards against). Two kinds:
+#   * grouping boundaries — visual regions, not rented resources;
+#   * placeholders — elements with no real runtime yet (priced once they become real).
+FREE = frozenset({
+    "vpc", "cloud_subnet", "region",              # grouping boundaries
+    "security_group", "gateway", "block_volume",  # not-yet-real placeholders
+})
 
 
 def category_of(type_key: str) -> str | None:
@@ -112,6 +130,22 @@ def rate_of(type_key: str, overrides: dict | None = None) -> float:
         except (TypeError, ValueError):
             pass
     return float(DEFAULT_RATES.get(type_key, 0.0))
+
+
+def _int(v, default: int = 1) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def units(type_key: str, properties: dict | None) -> int:
+    """How many billable units one element represents. A Pod is a Deployment of N
+    replicas, so it bills per replica — scaling a workload up costs more, which is the
+    whole point of Kubernetes/HPA. Everything else is a single unit."""
+    if type_key == "pod":
+        return max(1, _int((properties or {}).get("Replicas"), 1))
+    return 1
 
 
 def bill(topology, overrides: dict | None = None) -> dict:
@@ -133,7 +167,9 @@ def bill(topology, overrides: dict | None = None) -> dict:
         cat = _CAT_OF[tk]
         # bigger instance size = proportionally more GINI $/hr (x1/x2/x4/x8)
         mult = size_cost_mult(getattr(d, "size", 1)) if resizable(tk) else 1
-        r = rate_of(tk, overrides) * mult
+        # a Pod bills per replica (scaling a workload costs more)
+        qty = units(tk, getattr(d, "properties", None))
+        r = rate_of(tk, overrides) * mult * qty
         by_cat[cat]["rate"] += r
         by_cat[cat]["count"] += 1
         total += r

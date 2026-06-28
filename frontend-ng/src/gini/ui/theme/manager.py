@@ -139,6 +139,23 @@ QPushButton#WizardBtn:checked {{
     background: {t.accent_soft}; color: {t.accent2}; border: 1px solid {t.accent2};
 }}
 
+/* small toggle chips — requirement chips in the Wizard, follow-up suggestions */
+QPushButton#Chip {{
+    background: {t.bg3}; color: {t.muted};
+    border: 1px solid {t.line}; border-radius: 12px;
+    padding: 4px 11px; font-weight: 500;
+}}
+QPushButton#Chip:hover {{ color: {t.text}; border-color: {t.accent}; }}
+QPushButton#Chip:checked {{
+    background: {t.accent_soft}; color: {t.accent};
+    border: 1px solid {t.accent}; font-weight: 600;
+}}
+
+/* Wizard goal banner — the "🎯 Building: …" objective card */
+QWidget#GoalBanner {{
+    background: {t.accent_soft}; border: 1.4px solid {t.accent}; border-radius: 11px;
+}}
+
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
     background: {t.bg3}; color: {t.text};
     border: 1px solid {t.line}; border-radius: 7px; padding: 6px 9px;

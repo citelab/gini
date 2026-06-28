@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..runtime import HostSim, LearningSwitch, Router
+from ..runtime import HostSim, Router, make_switch
 from .compiler import RuntimeConfig
 
 # The real C gRouter runs as its own container from this prebuilt image
@@ -33,6 +33,42 @@ POX_IMAGE = os.environ.get("GINI_POX_IMAGE", "gini-pox")
 WAN_NET = "wan"
 WAN_SUBNET = "192.168.244.0/24"
 WAN_GATEWAY = "192.168.244.1"
+
+# GINI Cloud Fabric telemetry agent — one container polling every cloud service's native
+# metrics. Published on a fixed host port so gBuilder can poll http://localhost:PORT.
+CLOUDFABRIC_PORT = 9099
+CLOUDFABRIC_HOST_PORT = 39099
+
+
+def _parse_bytes(s: str) -> float:
+    """A docker-stats size string ('1.2kB' / '3.4MB' / '512B') -> bytes (decimal units)."""
+    s = s.strip()
+    factors = {"GB": 1e9, "MB": 1e6, "kB": 1e3, "KB": 1e3, "B": 1.0,
+               "GiB": 2**30, "MiB": 2**20, "KiB": 2**10}
+    for unit in sorted(factors, key=len, reverse=True):
+        if s.endswith(unit):
+            try:
+                return float(s[:-len(unit)].strip()) * factors[unit]
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+def _parse_mem_mib(s: str) -> float:
+    """A docker-stats memory string ('45.2MiB' / '1.1GiB' / '512B') -> MiB."""
+    s = s.strip()
+    factors = {"GiB": 1024.0, "MiB": 1.0, "KiB": 1 / 1024.0, "B": 1 / 1048576.0,
+               "GB": 1000.0 / 1024, "MB": 1000.0 / 1048576 * 1024, "kB": 1 / 1024.0}
+    for unit in sorted(factors, key=len, reverse=True):   # match 'MiB' before 'B'
+        if s.endswith(unit):
+            try:
+                return float(s[:-len(unit)].strip()) * factors[unit]
+            except ValueError:
+                return 0.0
+    try:
+        return float(s) / 1048576.0
+    except ValueError:
+        return 0.0
 
 
 class Sim:
@@ -71,7 +107,7 @@ def simulate(config: RuntimeConfig) -> Sim:
         sim.machines[m["name"]] = h
         sim._nodes.append(h)
     for s in rt["switches"]:
-        sim._nodes.append(LearningSwitch(s))
+        sim._nodes.append(make_switch(s))
     for r in rt["routers"]:
         sim._nodes.append(Router(r))
     sim.start()
@@ -120,6 +156,278 @@ COPY run_fabric.py /app/run_fabric.py
 CMD ["python", "/app/run_fabric.py"]
 """
 
+# the GINI Cloud Fabric telemetry agent image (psycopg2 for the Postgres adapter; the
+# rest is stdlib). Same `dataplane/` copy as the machine image, so the agent ships with it.
+_DOCKERFILE_CLOUDFABRIC = """FROM python:3.12-slim
+RUN pip install --no-cache-dir psycopg2-binary
+WORKDIR /app
+COPY dataplane/ /app/dataplane/
+CMD ["python", "-m", "dataplane.cloudfabric_agent"]
+"""
+
+_DOCKERFILE_FAAS = """FROM python:3.12-slim
+# event-trigger clients: RabbitMQ (queue), NATS (pub/sub), Kafka/Redpanda (stream).
+# kafka-python-ng is the maintained fork that supports Python 3.12.
+RUN pip install --no-cache-dir pika nats-py kafka-python-ng
+WORKDIR /app
+COPY run_faas.py /app/run_faas.py
+CMD ["python", "/app/run_faas.py"]
+"""
+
+# The GINI serverless runtime: ONE process hosts every Function as a handler (multiplexed,
+# like real FaaS). Reachable at http://faas:8000/<name>; meters each invocation. Stdlib only.
+_RUN_FAAS = '''"""GINI serverless runtime — hosts every Function as a handler in one process.
+
+A Function node is NOT its own container; it is a handler registered here and reachable
+at http://faas:8000/<name>. This mirrors real FaaS: no servers to run, the platform
+multiplexes your functions, runs them on demand, and meters each invocation. Config
+arrives as FAAS_CONFIG (JSON): {"functions": [{"name", "handler", "code"}]}.
+"""
+import inspect, json, os, random, threading, time, uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+CFG = json.loads(os.environ.get("FAAS_CONFIG", "{}"))
+FUNCS = {f["name"]: f for f in CFG.get("functions", [])}
+STATS = {n: {"invocations": 0, "errors": 0, "events": 0, "last_ms": 0.0,
+             "cold": True, "count": 0} for n in FUNCS}
+LOCK = threading.Lock()
+
+
+class Context:
+    """The invocation context passed to a handler — the GINI analogue of AWS Lambda's
+    `context`: who is running, a unique id per call, and how long is left."""
+    def __init__(self, name):
+        self.function_name = name
+        self.invocation_id = uuid.uuid4().hex
+        self.aws_request_id = self.invocation_id      # alias for AWS-style code
+        self.remaining_ms = 30000
+
+    def get_remaining_time_in_millis(self):
+        return self.remaining_ms
+
+
+def _compile_custom(code):
+    """Compile a student's `def handle(event, context)` (one arg also accepted) into a
+    normalized 2-arg callable, or None if the code doesn't define a callable `handle`."""
+    ns = {}
+    try:
+        exec(code, ns)
+    except Exception:
+        return None
+    fn = ns.get("handle")
+    if not callable(fn):
+        return None
+    try:
+        nparams = len(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        nparams = 2
+    return fn if nparams >= 2 else (lambda event, context, _f=fn: _f(event))
+
+
+CUSTOM = {n: _compile_custom(f.get("code", "")) for n, f in FUNCS.items()
+          if f.get("handler") == "custom"}
+
+
+def run_handler(name, event, context):
+    f = FUNCS[name]
+    h = f.get("handler", "echo")
+    cold = STATS[name]["cold"]
+    if cold and h != "slow":
+        time.sleep(0.25)                         # cold start: the first call pays init latency
+    if h == "slow":
+        time.sleep(1.5 if cold else 0.05)        # an extra-slow function: always sleeps
+        return 200, {"function": name, "cold": cold}
+    if h == "fail":
+        if random.random() < 0.3:
+            raise RuntimeError("simulated failure (shows retries/error handling)")
+        return 200, {"function": name, "ok": True}
+    if h == "transform":
+        body = event.get("body", "")
+        return 200, {"function": name, "input": body, "output": body.upper()}
+    if h == "counter":
+        with LOCK:
+            STATS[name]["count"] += 1
+            c = STATS[name]["count"]
+        return 200, {"function": name, "count": c,
+                     "note": "resets when the runtime restarts (functions are stateless)"}
+    if h == "custom":
+        fn = CUSTOM.get(name)
+        if fn is None:
+            return 500, {"error": "custom handler did not define handle(event, context)"}
+        result = fn(event, context)
+        # AWS proxy-style: a {statusCode, body} return sets the HTTP status + raw body.
+        if isinstance(result, dict) and "statusCode" in result:
+            return int(result["statusCode"]), result.get("body", "")
+        return 200, {"function": name, "result": result}
+    return 200, {"function": name, "method": event.get("method"),
+                 "path": event.get("path"), "body": event.get("body")}   # echo (default)
+
+
+def invoke(name, event):
+    """Run a function and meter it. Both HTTP requests and event triggers go through
+    here, so a queue/stream message counts as a real invocation just like an HTTP call."""
+    context = Context(name)
+    t0 = time.time()
+    try:
+        code, result = run_handler(name, event, context)
+    except Exception as e:
+        code, result = 500, {"error": str(e)}
+    ms = (time.time() - t0) * 1000.0
+    with LOCK:
+        s = STATS[name]
+        s["invocations"] += 1
+        s["last_ms"] = round(ms, 1)
+        s["cold"] = False
+        if event.get("source") and event.get("source") != "http":
+            s["events"] += 1
+        if code >= 500:
+            s["errors"] += 1
+    return code, result
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj, ctype=None):
+        # bytes -> raw; str -> text (a handler's {statusCode, body} returns a string body);
+        # dict/list -> JSON.
+        if isinstance(obj, bytes):
+            body, ctype = obj, ctype or "application/json"
+        elif isinstance(obj, str):
+            body, ctype = obj.encode(), ctype or "text/plain"
+        else:
+            body, ctype = json.dumps(obj).encode(), ctype or "application/json"
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _dispatch(self, method):
+        path = self.path.split("?", 1)[0]
+        if path in ("/_gini/health", "/healthz"):
+            return self._send(200, {"ok": True})
+        if path == "/_gini/metrics":
+            with LOCK:
+                snap = {n: {"invocations": s["invocations"], "errors": s["errors"],
+                            "events": s["events"], "last_ms": s["last_ms"]}
+                        for n, s in STATS.items()}
+            return self._send(200, {"functions": snap,
+                                    "total": sum(s["invocations"] for s in STATS.values())})
+        if path in ("/", "/_gini/console"):
+            rows = "".join("<li><b>%s</b> [%s] - %d calls</li>"
+                           % (n, FUNCS[n].get("handler", "echo"), STATS[n]["invocations"])
+                           for n in FUNCS)
+            html = ("<h2>GINI Functions</h2><ul>" + (rows or "<i>none</i>") + "</ul>").encode()
+            return self._send(200, html, "text/html")
+        fn = path.strip("/").split("/", 1)[0]
+        if fn not in FUNCS:
+            return self._send(404, {"error": "no such function", "name": fn})
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        from urllib.parse import urlsplit, parse_qs
+        parts = urlsplit(self.path)
+        query = {k: v[0] for k, v in parse_qs(parts.query).items()}
+        event = {"method": method, "path": self.path, "rawPath": parts.path,
+                 "query": query, "headers": dict(self.headers.items()),
+                 "body": body, "source": "http"}
+        code, result = invoke(fn, event)
+        self._send(code, result)
+
+    def do_GET(self):
+        self._dispatch("GET")
+
+    def do_POST(self):
+        self._dispatch("POST")
+
+
+# --- event triggers: subscribe to each Function's sources and invoke per message ---
+# The queue/topic/subject is named after the function, so "publish to <fn>" invokes it.
+# Each subscriber runs in its own thread with a reconnect loop (the broker may start late);
+# the client import lives inside so a missing client only disables that one trigger type.
+def _sub_queue(name, host, port):
+    """Message Queue (RabbitMQ / AMQP): consume the queue named after the function."""
+    import pika
+    creds = pika.PlainCredentials("guest", "guest")
+    while True:
+        try:
+            conn = pika.BlockingConnection(pika.ConnectionParameters(
+                host=host, port=port, credentials=creds, heartbeat=30,
+                connection_attempts=1, socket_timeout=5))
+            ch = conn.channel()
+            ch.queue_declare(queue=name, durable=False)
+            print("[faas] queue trigger ready:", name, "@", host, flush=True)
+            for method, _props, body in ch.consume(name, inactivity_timeout=1):
+                if body is None:
+                    continue
+                invoke(name, {"method": "EVENT", "source": "queue",
+                              "body": body.decode("utf-8", "replace")})
+                ch.basic_ack(method.delivery_tag)
+        except Exception as e:
+            print("[faas] queue trigger retry:", name, e, flush=True)
+            time.sleep(3)
+
+
+def _sub_stream(name, host, port):
+    """Event Stream (Redpanda / Kafka API): consume the topic named after the function."""
+    from kafka import KafkaConsumer
+    while True:
+        try:
+            c = KafkaConsumer(name, bootstrap_servers="%s:%d" % (host, port),
+                              auto_offset_reset="latest", consumer_timeout_ms=1000,
+                              group_id="gini-faas-" + name)
+            print("[faas] stream trigger ready:", name, "@", host, flush=True)
+            for msg in c:
+                invoke(name, {"method": "EVENT", "source": "stream",
+                              "body": (msg.value or b"").decode("utf-8", "replace")})
+        except Exception as e:
+            print("[faas] stream trigger retry:", name, e, flush=True)
+            time.sleep(3)
+
+
+def _sub_pubsub(name, host, port):
+    """Pub/Sub (NATS): subscribe to the subject named after the function."""
+    import asyncio
+    import nats
+    async def run():
+        nc = await nats.connect("nats://%s:%d" % (host, port))
+        print("[faas] pubsub trigger ready:", name, "@", host, flush=True)
+        async def cb(m):
+            invoke(name, {"method": "EVENT", "source": "pubsub",
+                          "body": m.data.decode("utf-8", "replace")})
+        await nc.subscribe(name, cb=cb)
+        while True:
+            await asyncio.sleep(3600)
+    while True:
+        try:
+            asyncio.run(run())
+        except Exception as e:
+            print("[faas] pubsub trigger retry:", name, e, flush=True)
+            time.sleep(3)
+
+
+_SUBS = {"queue": _sub_queue, "stream": _sub_stream, "messaging": _sub_pubsub}
+
+
+def start_triggers():
+    """Spawn a subscriber thread for every event trigger declared on a function."""
+    for name, f in FUNCS.items():
+        for trig in f.get("triggers", []):
+            sub = _SUBS.get(trig.get("type"))
+            if not sub:
+                continue
+            threading.Thread(target=sub, name="trig-%s-%s" % (trig["type"], name),
+                             args=(name, trig["host"], int(trig["port"])),
+                             daemon=True).start()
+
+
+if __name__ == "__main__":
+    print("[faas] hosting", len(FUNCS), "function(s):", ", ".join(FUNCS), flush=True)
+    start_triggers()
+    ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+'''
+
 _RUN_FABRIC = '''"""Fabric supervisor: spawn each L2 switch as its own process.
 
 Routers are NOT here anymore — each router runs as its own `gini-grouter` container
@@ -158,13 +466,20 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
         shutil.copy(py, work / "dataplane" / py.name)
     (work / "docker" / "Dockerfile.machine").write_text(_DOCKERFILE_MACHINE)
     (work / "docker" / "Dockerfile.fabric").write_text(_DOCKERFILE_FABRIC)
+    (work / "docker" / "Dockerfile.cloudfabric").write_text(_DOCKERFILE_CLOUDFABRIC)
+    (work / "docker" / "Dockerfile.faas").write_text(_DOCKERFILE_FAAS)
     (work / "run_fabric.py").write_text(_RUN_FABRIC)
+    (work / "run_faas.py").write_text(_RUN_FAAS)
     # generated service config (e.g. observability: prometheus.yml, grafana provisioning)
     for s in config.services:
         for rel, content in s.files.items():
             dst = work / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(content)
+    # kubernetes manifests, bind-mounted into each k3s cluster container for kubectl apply
+    for k in config.k8s:
+        (work / "k8s" / k.svc).mkdir(parents=True, exist_ok=True)
+        (work / "k8s" / k.svc / "manifests.yaml").write_text(k.manifests or "")
     (work / "docker-compose.yml").write_text(_compose(config, auto_internet))
     return work
 
@@ -185,6 +500,14 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         net += [f"  {WAN_NET}:", "    driver: bridge",
                 "    ipam:", "      config:",
                 f"        - subnet: {WAN_SUBNET}", f"          gateway: {WAN_GATEWAY}"]
+    # each VPC is its own isolated bridge with its CIDR — containers on different VPC
+    # networks can't reach each other (real cloud isolation); elements with no VPC stay
+    # on the flat `gini` bridge above.
+    vpc_nets = rt.get("networks", [])
+    for vnet in vpc_nets:
+        net += [f"  {vnet['name']}:", "    driver: bridge"]
+        if vnet.get("cidr"):
+            net += ["    ipam:", "      config:", f"        - subnet: {vnet['cidr']}"]
     lines = ["name: gini-lab", "networks:", *net, "services:"]
 
     # fabric = the L2 switch substrate only (skip entirely if there are no switches)
@@ -247,8 +570,10 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         lines += [
             f"  {s['name']}:",
             f"    image: {s['image']}",
-            "    networks: [gini]",
+            f"    networks: [{s.get('network', 'gini')}]",     # its VPC net, or flat gini
         ]
+        if s.get("runtime"):                                  # Kata Instance -> VM isolation
+            lines.append(f"    runtime: {s['runtime']}")
         if s.get("command"):
             lines.append("    command: " + json.dumps(s["command"]))
         if s.get("env"):
@@ -266,6 +591,54 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             lines.append("    volumes:")
             for v in s["volumes"]:
                 lines.append(f'      - "{v}"')
+
+    # the GINI Cloud Fabric agent — watches every cloud service, serves normalized
+    # app-level metrics to gBuilder on a fixed host port.
+    fab = rt.get("fabric")
+    if fab:
+        fcfg = {"services": fab["services"]}
+        # the agent polls every cloud service for the dashboard, so it must reach into each
+        # VPC — multi-home it onto gini + every VPC network (GINI's own infra, not a tenant
+        # resource, so crossing VPC boundaries here is intentional).
+        fab_nets = ", ".join(["gini"] + [v["name"] for v in vpc_nets])
+        lines += [
+            "  cloudfabric:",
+            "    build: { context: ., dockerfile: docker/Dockerfile.cloudfabric }",
+            f"    networks: [{fab_nets}]",
+            "    environment:",
+            f"      FABRIC_CONFIG: '{json.dumps(fcfg)}'",
+            f"      FABRIC_PORT: '{fab['port']}'",
+            "    ports:",
+            f'      - "{CLOUDFABRIC_HOST_PORT}:{fab["port"]}"',
+        ]
+
+    # serverless: ONE faas runtime container hosts every Function (multiplexed handlers),
+    # reachable by name at http://faas:8000/<name>. Only emitted if the canvas has Functions.
+    faas_funcs = rt.get("faas")
+    if faas_funcs:
+        lines += [
+            "  faas:",
+            "    build: { context: ., dockerfile: docker/Dockerfile.faas }",
+            "    networks: [gini]",
+            "    environment:",
+            f"      FAAS_CONFIG: '{json.dumps({'functions': faas_funcs})}'",
+        ]
+
+    # real Kubernetes clusters — k3s in a container (privileged). Pods are scheduled by
+    # k3s inside it; gBuilder applies manifests + reads state via `kubectl exec`.
+    for k in rt.get("k8s", []):
+        lines += [
+            f"  {k['name']}:",
+            f"    image: {k['image']}",
+            "    command: server --disable=traefik --snapshotter=native",
+            "    privileged: true",
+            "    tmpfs: [/run, /var/run]",
+            "    environment:",
+            '      K3S_KUBECONFIG_MODE: "644"',
+            "    networks: [gini]",
+            "    volumes:",
+            f"      - ./k8s/{k['name']}:/gini-manifests:ro",
+        ]
 
     for m in rt["machines"]:
         m = dict(m)
@@ -300,12 +673,39 @@ def _cpu_limit_lines(cpus) -> list[str]:
     return ["    deploy:", "      resources:", "        limits:", f'          cpus: "{c:g}"']
 
 
+def _startup_ms(created: str, started: str) -> float | None:
+    """Milliseconds from a container's Created to its StartedAt — the headline
+    VM-vs-container signal (a Kata microVM boots a guest kernel, so it starts much slower
+    than a plain container). Tolerates Docker's RFC3339 nanosecond timestamps."""
+    import re
+    from datetime import datetime
+
+    def parse(ts: str):
+        ts = (ts or "").strip()
+        if not ts or ts.startswith("0001"):          # Docker's zero value = never started
+            return None
+        ts = ts.replace("Z", "+00:00")
+        m = re.match(r"(.*\.\d{6})\d*([+-]\d\d:\d\d)?$", ts)   # trim ns -> microseconds
+        if m:
+            ts = m.group(1) + (m.group(2) or "")
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+
+    c, s = parse(created), parse(started)
+    if c is None or s is None:
+        return None
+    return round((s - c).total_seconds() * 1000.0, 1)
+
+
 class Orchestrator:
     """Manages the Docker lifecycle of a compiled topology on the user's machine."""
 
-    def __init__(self, runtime_dir: str | Path) -> None:
+    def __init__(self, runtime_dir: str | Path, project: str | None = None) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.workdir: Path | None = None
+        self.project = project        # docker compose -p <project> (per-student namespacing)
 
     def up(self, config: RuntimeConfig, workdir: str | Path,
            auto_internet: bool = True) -> tuple[bool, str]:
@@ -322,6 +722,21 @@ class Orchestrator:
         # this compose, so stale services (e.g. an old web app) can't linger on the
         # network and shadow / break name resolution.
         return self._compose("up", "--build", "-d", "--remove-orphans")
+
+    def redeploy_faas(self, config: RuntimeConfig, auto_internet: bool = True
+                      ) -> tuple[bool, str]:
+        """Re-deploy ONLY the serverless runtime with the current function code — the GINI
+        analogue of AWS 'Deploy'. Regenerates the project files (new FAAS_CONFIG / run_faas.py)
+        and recreates just the `faas` container; everything else in the lab keeps running
+        (databases, queues, their data). Needs a lab already up (self.workdir set)."""
+        if not self.workdir:
+            return False, "the lab isn't running — press Run first"
+        if not config.faas:
+            return False, "no Functions on the canvas to deploy"
+        write_project(config, self.workdir, self.runtime_dir, auto_internet)
+        # --no-deps: don't touch the function's dependencies (queues/DBs stay up);
+        # --force-recreate: pick up the new FAAS_CONFIG even though the image is cached.
+        return self._compose("up", "-d", "--no-deps", "--force-recreate", "--build", "faas")
 
     def _ensure_grouter_image(self) -> tuple[bool, str]:
         """The real gRouter runs from a locally-built image. Check it exists and, if we
@@ -433,9 +848,295 @@ class Orchestrator:
         except subprocess.TimeoutExpired:
             return False, "docker update timed out"
 
-    def _compose(self, *args: str) -> tuple[bool, str]:
+    def stats(self, service: str, workdir: str | Path | None = None) -> dict | None:
+        """One cheap sample of a running container's CPU% and memory (MiB) via
+        `docker stats --no-stream` (just reads cgroup counters). None if unavailable."""
+        wd = workdir or self.workdir
+        if not wd:
+            return None
         try:
-            r = subprocess.run(["docker", "compose", *args], cwd=str(self.workdir),
+            r = subprocess.run(["docker", "compose", "ps", "-q", service],
+                               cwd=str(wd), capture_output=True, text=True, timeout=15)
+            ids = (r.stdout or "").strip().splitlines()
+            if not ids or not ids[0]:
+                return None
+            s = subprocess.run(
+                ["docker", "stats", "--no-stream", "--format",
+                 "{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}", ids[0]],
+                capture_output=True, text=True, timeout=15)
+            line = (s.stdout or "").strip()
+            if s.returncode != 0 or not line:
+                return None
+            parts = line.split("|")
+            cpu = float(parts[0].strip().rstrip("%") or 0)
+            mem = _parse_mem_mib(parts[1].split("/")[0]) if len(parts) > 1 else 0.0
+            net = 0.0
+            if len(parts) > 2:                  # "1.2kB / 3.4kB" (rx / tx) -> total bytes
+                rx, _, tx = parts[2].partition("/")
+                net = _parse_bytes(rx) + _parse_bytes(tx)
+            return {"cpu": cpu, "mem_used": mem, "net_bytes": net}
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            return None
+
+    def k8s_apply(self, service: str) -> tuple[bool, str]:
+        """Wait for the k3s API to be Ready, then `kubectl apply` the generated manifests
+        (run inside the cluster container — k3s ships kubectl, so no host kubectl needed)."""
+        if not self.workdir:
+            return False, "not running"
+        base = ["docker", "compose", "exec", "-T", service, "kubectl"]
+        for _ in range(40):                  # k3s takes ~15-30s to come up
+            try:
+                r = subprocess.run(base + ["get", "nodes", "--no-headers"],
+                                   cwd=str(self.workdir), capture_output=True,
+                                   text=True, timeout=20)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False, "docker/cluster not reachable"
+            if r.returncode == 0 and " Ready" in (" " + r.stdout):
+                break
+            time.sleep(3)
+        else:
+            return False, "k3s API did not become Ready in time"
+        a = subprocess.run(base + ["apply", "-f", "/gini-manifests/"],
+                           cwd=str(self.workdir), capture_output=True, text=True, timeout=60)
+        return a.returncode == 0, (a.stderr or a.stdout).strip()
+
+    def k8s_pods(self, service: str) -> list:
+        """`kubectl get pods -o json` inside the cluster -> [{name,app,phase,node,restarts}]."""
+        if not self.workdir:
+            return []
+        try:
+            r = subprocess.run(
+                ["docker", "compose", "exec", "-T", service, "kubectl", "get", "pods",
+                 "-A", "-o", "json"], cwd=str(self.workdir),
+                capture_output=True, text=True, timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return []
+        if r.returncode != 0:
+            return []
+        try:
+            data = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return []
+        pods = []
+        for it in data.get("items", []):
+            md, st = it.get("metadata", {}), it.get("status", {})
+            if md.get("namespace") in ("kube-system",):     # hide cluster infra pods
+                continue
+            pods.append({"name": md.get("name"),
+                         "app": (md.get("labels") or {}).get("app"),
+                         "phase": st.get("phase"),
+                         "node": (it.get("spec") or {}).get("nodeName")})
+        return pods
+
+    def k8s_metrics(self, service: str) -> dict:
+        """Per-deployment K8s metrics for the Live view: replicas, CPU% vs HPA target,
+        min/max. From `kubectl get hpa,deploy -o json` (one exec). {deployments:{name:{…}}}."""
+        if not self.workdir:
+            return {}
+        try:
+            r = subprocess.run(
+                ["docker", "compose", "exec", "-T", service, "kubectl",
+                 "get", "hpa,deploy", "-o", "json"], cwd=str(self.workdir),
+                capture_output=True, text=True, timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return {}
+        if r.returncode != 0:
+            return {}
+        try:
+            data = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return {}
+        deps: dict = {}
+        for it in data.get("items", []):
+            md = it.get("metadata", {}) or {}
+            if md.get("namespace") in ("kube-system", "kube-public", "kube-node-lease"):
+                continue
+            kind, nm = it.get("kind"), md.get("name")
+            if kind == "Deployment":
+                d = deps.setdefault(nm, {})
+                d["replicas"] = (it.get("status") or {}).get("readyReplicas", 0)
+                d["desired"] = (it.get("spec") or {}).get("replicas", 0)
+            elif kind == "HorizontalPodAutoscaler":
+                sp, st = it.get("spec", {}) or {}, it.get("status", {}) or {}
+                tgt = (sp.get("scaleTargetRef") or {}).get("name", nm)
+                d = deps.setdefault(tgt, {})
+                d["min"], d["max"] = sp.get("minReplicas"), sp.get("maxReplicas")
+                d["hpa"] = nm
+                if st.get("currentReplicas") is not None:
+                    d["replicas"] = st["currentReplicas"]
+                for m in sp.get("metrics", []) or []:
+                    res = m.get("resource") or {}
+                    if res.get("name") == "cpu":
+                        d["target_pct"] = (res.get("target") or {}).get("averageUtilization")
+                for cm in st.get("currentMetrics", []) or []:
+                    res = cm.get("resource") or {}
+                    if res.get("name") == "cpu":
+                        d["cpu_pct"] = (res.get("current") or {}).get("averageUtilization")
+                if d.get("target_pct") is None:
+                    d["target_pct"] = sp.get("targetCPUUtilizationPercentage")
+                if d.get("cpu_pct") is None:
+                    d["cpu_pct"] = st.get("currentCPUUtilizationPercentage")
+        pods = sum(int(d.get("desired") or d.get("replicas") or 0) for d in deps.values())
+        return {"deployments": deps, "pods": pods}
+
+    def k8s_scale(self, service: str, deployment: str, replicas) -> tuple[bool, str]:
+        """Live `kubectl scale` a Deployment (the Pod Replicas slider)."""
+        if not self.workdir:
+            return False, "not running"
+        try:
+            r = subprocess.run(
+                ["docker", "compose", "exec", "-T", service, "kubectl", "scale",
+                 f"deployment/{deployment}", f"--replicas={int(replicas)}"],
+                cwd=str(self.workdir), capture_output=True, text=True, timeout=20)
+            return r.returncode == 0, (r.stderr or r.stdout).strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+            return False, str(e)
+
+    def k8s_set_hpa(self, service: str, hpa: str, target=None, mn=None,
+                    mx=None) -> tuple[bool, str]:
+        """Live-patch an HPA's target CPU% / min / max (the Autoscaling Group sliders)."""
+        if not self.workdir:
+            return False, "not running"
+        spec: dict = {}
+        if mn is not None:
+            spec["minReplicas"] = int(mn)
+        if mx is not None:
+            spec["maxReplicas"] = int(mx)
+        if target is not None:
+            spec["metrics"] = [{"type": "Resource", "resource": {"name": "cpu",
+                "target": {"type": "Utilization", "averageUtilization": int(target)}}}]
+        try:
+            r = subprocess.run(
+                ["docker", "compose", "exec", "-T", service, "kubectl", "patch",
+                 f"hpa/{hpa}", "--type", "merge", "-p", json.dumps({"spec": spec})],
+                cwd=str(self.workdir), capture_output=True, text=True, timeout=20)
+            return r.returncode == 0, (r.stderr or r.stdout).strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+            return False, str(e)
+
+    def stats_all(self, workdir: str | Path | None = None) -> dict:
+        """One `docker stats --no-stream` for ALL containers -> {service: {cpu,mem_used,
+        net_bytes}}. One call keeps every element's history live regardless of selection."""
+        wd = workdir or self.workdir
+        if not wd:
+            return {}
+        try:
+            s = subprocess.run(
+                ["docker", "stats", "--no-stream", "--format",
+                 "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}"],
+                cwd=str(wd), capture_output=True, text=True, timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return {}
+        if s.returncode != 0:
+            return {}
+        import re
+        out: dict = {}
+        for line in (s.stdout or "").strip().splitlines():
+            parts = line.split("|")
+            if len(parts) < 4:
+                continue
+            m = re.search(r"[-_]([a-z0-9]+)[-_]\d+$", parts[0].strip())   # …_<svc>_1
+            if not m:
+                continue
+            try:
+                cpu = float(parts[1].strip().rstrip("%") or 0)
+            except ValueError:
+                cpu = 0.0
+            rx, _, tx = parts[3].partition("/")
+            out[m.group(1)] = {"cpu": cpu,
+                               "mem_used": _parse_mem_mib(parts[2].split("/")[0]),
+                               "net_bytes": _parse_bytes(rx) + _parse_bytes(tx)}
+        return out
+
+    def runtime_available(self, name: str, workdir: str | Path | None = None) -> bool:
+        """Whether the active Docker daemon has an OCI runtime registered under `name`
+        (e.g. 'kata'). Used to gate the Kata Instance element + warn on Run."""
+        wd = workdir or self.workdir
+        try:
+            r = subprocess.run(["docker", "info", "--format", "{{json .Runtimes}}"],
+                               cwd=(str(wd) if wd else None),
+                               capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                return False
+            import json
+            return name in (json.loads(r.stdout or "{}") or {})
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            return False
+
+    def startup_times(self, workdir: str | Path | None = None) -> dict:
+        """Per-element startup time in ms (Created -> StartedAt) for the running stack —
+        the VM-vs-container experiment's headline metric. {service: ms}."""
+        wd = workdir or self.workdir
+        if not wd:
+            return {}
+        import re
+        try:
+            ids = subprocess.run(["docker", "compose", "ps", "-q"], cwd=str(wd),
+                                 capture_output=True, text=True, timeout=20).stdout.split()
+            if not ids:
+                return {}
+            r = subprocess.run(
+                ["docker", "inspect", "--format",
+                 "{{.Name}}\t{{.Created}}\t{{.State.StartedAt}}", *ids],
+                cwd=str(wd), capture_output=True, text=True, timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return {}
+        out: dict = {}
+        for line in (r.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            m = re.search(r"[-_]([a-z0-9]+)[-_]\d+$", parts[0].strip().lstrip("/"))
+            ms = _startup_ms(parts[1], parts[2])
+            if m and ms is not None:
+                out[m.group(1)] = ms
+        return out
+
+    def drive_load(self, host_port: int, url: str, qps, conns=8,
+                   dur: str = "3600s") -> tuple[bool, str]:
+        """Drive a Fortio load generator via its REST API: (re)start a continuous run at
+        `qps` against `url`. Stops any current run first, so this doubles as the throttle."""
+        import urllib.parse
+        import urllib.request
+        base = f"http://localhost:{host_port}/fortio/rest"
+        try:
+            urllib.request.urlopen(base + "/stop", timeout=5)
+        except Exception:                       # noqa: BLE001 — nothing running yet is fine
+            pass
+        q = urllib.parse.urlencode({"url": url, "qps": qps, "t": dur,
+                                    "c": conns, "async": "on"})
+        try:
+            urllib.request.urlopen(f"{base}/run?{q}", timeout=5).read()
+            return True, f"load → {url} @ {qps} req/s"
+        except Exception as e:                  # noqa: BLE001
+            return False, str(e)
+
+    def stop_load(self, host_port: int) -> tuple[bool, str]:
+        import urllib.request
+        try:
+            urllib.request.urlopen(f"http://localhost:{host_port}/fortio/rest/stop",
+                                   timeout=5)
+            return True, "stopped"
+        except Exception as e:                  # noqa: BLE001
+            return False, str(e)
+
+    def fabric_metrics(self) -> dict | None:
+        """Poll the GINI Cloud Fabric agent's normalized app-level metrics for the lab.
+        None if the lab isn't running or the agent isn't reachable yet."""
+        if not self.workdir:
+            return None
+        try:
+            import urllib.request
+            url = f"http://localhost:{CLOUDFABRIC_HOST_PORT}/metrics.json"
+            with urllib.request.urlopen(url, timeout=3) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:                       # noqa: BLE001 — agent may not be up yet
+            return None
+
+    def _compose(self, *args: str) -> tuple[bool, str]:
+        pflag = ["-p", self.project] if self.project else []
+        try:
+            r = subprocess.run(["docker", "compose", *pflag, *args], cwd=str(self.workdir),
                                capture_output=True, text=True, timeout=600)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
         except FileNotFoundError:

@@ -91,23 +91,3 @@ def test_wizard_mode_is_mutually_exclusive_with_explain():
     w.assistant._explain_btn.setChecked(True)        # entering Explain exits Wizard
     assert w.assistant.explain_mode and not w.assistant.wizard_mode
     assert not w.assistant._wizard_btn.isChecked()
-
-
-def test_wizard_box_suggests_and_lays_out_a_blueprint():
-    app = QApplication.instance() or QApplication([])
-    w = MainWindow(app)
-    w.assistant._wizard_btn.setChecked(True)
-    posted = []
-    w.ctx.bus.assistant_message.connect(lambda role, t: posted.append((role, t)))
-
-    w.assistant.input.setText("monitor and visualize my system with dashboards and metrics")
-    w.assistant._send()                              # offline: posts blueprints + chips
-    assert any("observability" in t.lower() for _r, t in posted)
-    # the Wizard offered "Lay out" chips; the top match is the observability stack
-    chips = [w.assistant._follow_lay.itemAt(i).widget()
-             for i in range(w.assistant._follow_lay.count())
-             if w.assistant._follow_lay.itemAt(i).widget()]
-    assert chips and chips[0].text().startswith("Lay out")
-    chips[0].click()
-    types = {d.type_key for d in w.ctx.topology.devices.values()}
-    assert "metrics" in types and "dashboard" in types   # a real stack was laid out

@@ -31,7 +31,15 @@ class EventBus(QObject):
     warning_explain_requested = Signal(str)  # device id (clicked its lint warning badge)
     device_logs_requested = Signal(str)      # device id (right-click -> View logs)
     device_console_requested = Signal(str)   # device id (right-click -> Open console in browser)
+    function_invoke_requested = Signal(str, str, str)  # device id, method, body (Invoke a Function)
+    function_invoke_result = Signal(str, str)          # device id, result text (back to inspector)
+    function_deploy_requested = Signal()               # redeploy the faas runtime (AWS-style Deploy)
     runtime_status = Signal(object)   # {service: state} from the status poller
+    mission_changed = Signal(object)  # Wizard objective (Mission) set/cleared -> guide the canvas
+    wizard_ghosts_requested = Signal(str)     # device id -> resolve goal-relevant neighbours (LLM)
+    wizard_ghosts_ready = Signal(str, object)  # device id, [(type_key, reason)] -> draw ghosts
+    fabric_metrics = Signal(object)   # normalized cloud-fabric app metrics snapshot
+    k8s_metrics = Signal(object)      # per-deployment kubernetes metrics snapshot
     addressing_changed = Signal()     # compiler-derived IP/MAC map refreshed
     warnings_changed = Signal()       # advisory topology-lint results refreshed
     edges_restyled = Signal()         # connector style (bent/straight) changed -> reroute edges
@@ -65,6 +73,13 @@ class Settings:
     llm_url: str = "http://localhost:11434"
     llm_model: str = "llama3.1"
     llm_think: bool = False          # ask reasoning models (e.g. gemma4:e2b) to think
+    llm_num_ctx: int = 8192          # context window (Ollama defaults to only 2048 + truncates)
+    # backend: run the lab on the LOCAL Docker daemon, or a remote brokered GINI server
+    # (a Kata-enabled Linux host reached over an authenticated API — see gini/server/).
+    backend: str = "local"               # "local" | "gini-server"
+    gini_server_host: str = ""           # the GINI server host (for "gini-server")
+    gini_server_port: int = 10000
+    gini_server_user: str = ""           # username; password is entered at connect, never stored
     # auto-internet: every container gets a default eth to the internet (Docker NAT).
     # Off = "faithful mode": no internet unless an Internet element is drawn + wired.
     auto_internet: bool = False
@@ -83,6 +98,7 @@ class AppContext:
         self.selected_id: str | None = None
         self.addressing: dict[str, dict] = {}   # device name -> {interfaces:[…]}
         self.warnings: dict[str, list] = {}     # device name -> [lint messages]
+        self.mission = None                     # active Wizard objective (domain.missions.Mission)
 
     # convenience wrappers that emit the right events ----------------------- #
     def add_device(self, type_key: str, x: float = 0.0, y: float = 0.0, **kw):
@@ -107,6 +123,11 @@ class AppContext:
     def select(self, device_id: str | None) -> None:
         self.selected_id = device_id
         self.bus.selection_changed.emit(device_id)
+
+    def set_mission(self, mission) -> None:
+        """Set (or clear, with None) the Wizard objective and notify the canvas/palette."""
+        self.mission = mission
+        self.bus.mission_changed.emit(mission)
 
     def log(self, message: str, level: str = "info") -> None:
         self.bus.log.emit(level, message)

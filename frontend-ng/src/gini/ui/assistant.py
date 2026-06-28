@@ -29,6 +29,7 @@ class Assistant(QWidget):
     answer_ready = Signal(str, str)         # (device_name_or_empty, text)
     answer_chunk = Signal(str)              # a streamed token delta (live "typing")
     status_changed = Signal(str, bool)      # (mode label, busy) -> toolbar indicator
+    starter_ready = Signal(str, str)        # (type_key, reason) for the Wizard's first element
 
     def __init__(self, ctx: AppContext, api: GiniAPI, theme: ThemeManager) -> None:
         super().__init__()
@@ -48,6 +49,10 @@ class Assistant(QWidget):
         self._last_ref: tuple[str, str] | None = None   # what we last explained (for chips)
         self.answer_ready.connect(self._on_answer)
         self.answer_chunk.connect(self._on_chunk)
+        self.starter_ready.connect(self._place_starter)
+        self._ghost_cache: dict = {}              # (goal, type_key) -> [(type_key, reason)]
+        ctx.bus.wizard_ghosts_requested.connect(self._resolve_ghosts_async)
+        ctx.bus.wizard_ghosts_ready.connect(self._learn_on_goal)   # endorsed types are on-goal
         theme.themeChanged.connect(lambda *_: self._rerender())   # recolor on theme switch
 
         lay = QVBoxLayout(self)
@@ -73,6 +78,7 @@ class Assistant(QWidget):
         self._wizard_btn.setToolTip("Wizard mode: describe the system you want and GINI "
                                     "suggests working blueprints to lay out")
         self._wizard_btn.toggled.connect(self._toggle_wizard)
+        self._wizard_btn.setEnabled(False)          # Wizard needs a model; set_loop enables it
         chips.addWidget(self._wizard_btn)
 
         for label, cmd in (("Show a path", "__path__"), ("Status", "status")):
@@ -108,6 +114,10 @@ class Assistant(QWidget):
         self._follow_box.setVisible(False)
         lay.addWidget(self._follow_box)
 
+        # Wizard objective banner (shown once a goal is set) — the canvas does the guiding
+        self._wz_panel = self._make_wizard_panel()
+        lay.addWidget(self._wz_panel)
+
         row = QHBoxLayout()
         self.input = QLineEdit()
         self.input.setPlaceholderText("Ask GINI to build, inspect, or explain…")
@@ -130,8 +140,15 @@ class Assistant(QWidget):
         self._llm = fn
 
     def set_loop(self, loop) -> None:
-        """Attach an AgentLoop (Ollama-backed) for open-ended questions."""
+        """Attach an AgentLoop (Ollama-backed) for open-ended questions. The Wizard needs a
+        model, so its button is enabled/disabled with the loop."""
         self._loop = loop
+        self._wizard_btn.setEnabled(loop is not None)
+        self._wizard_btn.setToolTip(
+            "Wizard: describe a goal and GINI guides you to build it" if loop is not None
+            else "Wizard needs a local model — enable one in Settings → LLM")
+        if loop is None and self._wizard_btn.isChecked():
+            self._wizard_btn.setChecked(False)
 
     # chat ------------------------------------------------------------------ #
     def _msg_html(self, role: str, text: str) -> str:
@@ -168,9 +185,8 @@ class Assistant(QWidget):
             return
         self.input.clear()
         self._post("You", text)
-        if self.wizard_mode:                    # the box is a wish list for the Wizard
-            self._run_wizard(text)
-            return
+        # Wizard's objective is set via its own goal box; the chat box here is for
+        # refining / asking (goal-aware via the injected context) — same brain as Q&A.
         try:
             reply = self._handle(text)
         except Exception as e:  # surface errors to the student rather than crashing
@@ -371,24 +387,27 @@ class Assistant(QWidget):
             self.ctx.bus.present_clear.emit()      # exit: clear the stage
 
     def _toggle_wizard(self, on: bool) -> None:
-        """Wizard mode: the input box becomes a wish list. Describe the system you want
-        ('something I can visualize under load') and GINI matches curated, working
-        blueprints and offers to lay them out. The LLM only selects+explains; the build
-        is deterministic, so it can't produce a broken topology."""
+        """Wizard mode = X-ray with a goal. Describe an objective ("a multi-LAN IP network")
+        and GINI guides you toward it: it highlights on-goal elements, long-press shows only
+        the connections that serve the goal, and off-goal drops get flagged. You build it."""
         self.wizard_mode = on
         if on and self._explain_btn.isChecked():
             self._explain_btn.setChecked(False)
+        self._wz_panel.setVisible(on)
+        self._wz_banner_box.setVisible(on and self.ctx.mission is not None)
         self.input.setPlaceholderText(
-            "Wizard — describe the system you want to build…" if on
+            "Refine the goal or ask GINI…" if on
             else "Ask GINI to build, inspect, or explain…")
         self._emit_status()
         if on:
             self._clear_followups()
-            rs = self.api.list_recipes()
-            names = ", ".join(r["name"] for r in rs)
-            self._post("GINI", "Wizard mode on. Tell me what you want to build or explore "
-                               "— e.g. “something I can watch under load”, “a streaming "
-                               f"pipeline”, “a web app with a database”. I know: {names}.")
+            self._post("GINI", "Wizard mode on. Type your objective above and press <b>Set</b> "
+                               "— e.g. “a multi-LAN IP network”, “a cloud service on "
+                               "Kubernetes”. I'll reason about what it needs and guide you to "
+                               "build it: on-goal elements are highlighted, and long-pressing "
+                               "shows only the connections that fit the goal.")
+        elif self.ctx.mission is not None:
+            self.ctx.set_mission(None)                # leaving guided mode clears the objective
 
     def _run_overview(self) -> None:
         self._last_ref = ("overview", "")
@@ -477,47 +496,192 @@ class Assistant(QWidget):
                 else "Explain mode" if self.explain_mode else "Q&A mode")
         self.status_changed.emit(mode, self._busy)
 
-    # --- Wizard mode: match the student's wish to curated, working blueprints --- #
-    def _run_wizard(self, wish: str) -> None:
-        ranked = (self.api.suggest_recipes(wish) or self.api.list_recipes())[:3]
-        if self._loop is not None:
-            catalog = "; ".join(f"{r['name']} — {r['summary']}" for r in ranked)
-            self._ask_async(            # clears followups, starts the spinner
-                f"The student wants: \"{wish}\". From ONLY these GINI blueprints, recommend "
-                f"the best fit and say in 2-3 sentences what it builds and why it matches "
-                f"(do not invent components): {catalog}", "")
-        else:
-            lines = "<br>".join(f"• <b>{r['name']}</b> — {r['summary']}" for r in ranked)
-            self._post("GINI", "Blueprints that fit — pick one below to lay it out:<br>"
-                       + lines)
-        # deterministic, always-correct chips to lay each blueprint out (set AFTER
-        # _ask_async, which clears followups; kept through the answer by the wizard guard)
-        self._wizard_chips(ranked)
+    # --- Wizard mode: an objective that guides X-ray (no auto-build) ---------- #
+    def _make_wizard_panel(self) -> QWidget:
+        panel = QWidget()
+        pl = QVBoxLayout(panel); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(6)
+        cap = QLabel("Describe what you want to build"); cap.setObjectName("Muted")
+        pl.addWidget(cap)
+        inrow = QHBoxLayout(); inrow.setSpacing(6)
+        self._wz_goal = QLineEdit()
+        self._wz_goal.setPlaceholderText("e.g. a multi-LAN IP network")
+        self._wz_goal.returnPressed.connect(self._set_goal_from_input)
+        setbtn = QPushButton("Set"); setbtn.setObjectName("Accent")
+        setbtn.setCursor(Qt.PointingHandCursor)
+        setbtn.clicked.connect(self._set_goal_from_input)
+        inrow.addWidget(self._wz_goal, 1); inrow.addWidget(setbtn)
+        pl.addLayout(inrow)
+        # the "🎯 Building: …" banner appears once a goal is set
+        self._wz_banner_box = QWidget(); self._wz_banner_box.setObjectName("GoalBanner")
+        brow = QHBoxLayout(self._wz_banner_box); brow.setContentsMargins(12, 8, 12, 8)
+        self._wz_banner = QLabel(""); self._wz_banner.setWordWrap(True)
+        brow.addWidget(self._wz_banner, 1)
+        self._wz_clear = QPushButton("Clear"); self._wz_clear.setObjectName("Chip")
+        self._wz_clear.setCursor(Qt.PointingHandCursor)
+        self._wz_clear.clicked.connect(self._clear_mission)
+        brow.addWidget(self._wz_clear)
+        self._wz_banner_box.setVisible(False)
+        pl.addWidget(self._wz_banner_box)
+        panel.setVisible(False)
+        return panel
 
-    def _wizard_chips(self, recipes: list[dict]) -> None:
-        self._clear_followups()
-        if not recipes:
+    def _set_goal_from_input(self) -> None:
+        goal = self._wz_goal.text().strip()
+        if not goal:
             return
-        for r in recipes:
-            b = QPushButton(f"Lay out: {r['name']}")
-            b.setObjectName("Chip")
-            b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(lambda _=False, rid=r["id"]: self._apply_recipe(rid))
-            self._follow_lay.addWidget(b)
-        self._follow_lay.addStretch(1)
-        self._follow_box.setVisible(True)
+        self._wz_goal.clear()
+        self._post("You", goal)
+        self._set_mission(goal)
 
-    def _apply_recipe(self, recipe_id: str) -> None:
-        self._clear_followups()
-        try:
-            res = self.api.apply_recipe(recipe_id)
-        except KeyError:
-            self._post("GINI", "I couldn't find that blueprint.")
+    def _set_mission(self, goal: str) -> None:
+        """Set the objective and let the model drive: it picks a starter element (placed
+        for the student), and from then on it filters each element's neighbours to the
+        goal. Requires a connected model (the Wizard button is disabled otherwise)."""
+        from ..domain import missions
+        goal = (goal or "").strip()
+        if not goal:
             return
-        self.ctx.bus.topology_changed.emit()
-        self._post("GINI", f"Laid out the <b>{res['name']}</b> blueprint — "
-                   f"{len(res['added'])} elements, {res['links']} links. Press Run to "
-                   f"start it, then open the consoles from the run log.")
+        if self._loop is None:
+            self._post("GINI", "The Wizard needs a local model. Enable one in Settings → LLM.")
+            return
+        self._ghost_cache = {}
+        # One source of truth: the on-goal set is what the MODEL endorses (the starter +
+        # each approved neighbour), grown as we build — never a separate keyword guess.
+        mission = missions.Mission(goal, frozenset(), None)
+        self.ctx.set_mission(mission)
+        self._show_mission(mission)
+        self._post("GINI", f"Thinking about how to start “{goal}”…")
+        self._pick_starter_async(goal)
+
+    def _add_on_goal(self, types) -> None:
+        """Grow the mission's on-goal set with element types the model has endorsed, so the
+        off-goal flag never contradicts what the Wizard itself placed/suggested."""
+        from ..domain.missions import Mission
+        m = self.ctx.mission
+        if m is None:
+            return
+        new = frozenset(set(m.types) | set(types))
+        if new != m.types:
+            self.ctx.set_mission(Mission(m.goal, new, m.first))
+
+    def _learn_on_goal(self, _device_id: str, items) -> None:
+        self._add_on_goal({t for t, _r in items})
+
+    # -- LLM helpers (quiet, stateless — don't pollute the chat history) ------- #
+    def _llm_complete(self, prompt: str,
+                      system: str = "You are GINI, a precise gBuilder assistant. Be brief.") -> str:
+        from ..agent.llm.backend import Message
+        out = []
+        for c in self._loop.backend.chat([Message("system", system), Message("user", prompt)]):
+            if c.text:
+                out.append(c.text)
+        return "".join(out)
+
+    def _canvas_summary(self) -> str:
+        devs = list(self.ctx.topology.devices.values())
+        if not devs:
+            return "nothing yet"
+        return ", ".join(f"{d.name} ({d.type.label})" for d in devs[:12])
+
+    def _pick_starter_async(self, goal: str) -> None:
+        import threading
+        from ..agent import wizard as wz
+        catalog, names = wz.element_catalog(), wz.element_names()
+
+        def work():
+            # Ask, validate, and RE-ASK (up to 3) — never guess. The retry prompt is terse and
+            # demands one exact element name. If still no valid pick, we ask the user.
+            prompts = [wz.starter_prompt(goal, catalog),
+                       wz.starter_retry_prompt(goal, names),
+                       wz.starter_retry_prompt(goal, names)]
+            key, reason, last = "", "", ""
+            for p in prompts:
+                try:
+                    text = self._llm_complete(p)
+                except Exception:                      # noqa: BLE001
+                    text = ""
+                last = text
+                k, r = wz.parse_starter(text)
+                if k:
+                    key, reason = k, r
+                    break
+            snippet = " ".join((last or "(empty)").split())[:300]
+            self.ctx.log(f"Wizard starter — model said: “{snippet}” → parsed: {key or '(none)'}",
+                         "info")
+            self.starter_ready.emit(key, reason)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _place_starter(self, type_key: str, reason: str) -> None:
+        from ..domain.devices import REGISTRY
+        if self.ctx.mission is None:
+            return
+        if not type_key or type_key not in REGISTRY:   # no valid pick after retries — ask, don't guess
+            self._post("GINI", f"I couldn't settle on a clear first element for "
+                               f"“{self.ctx.mission.goal}”. Could you make the goal more specific "
+                               "(e.g. name the kind of network or service), or tell me which "
+                               "element to start with? I'd rather ask than guess.")
+            return
+        self._add_on_goal({type_key})              # the starter is on-goal by definition
+        devs = list(self.ctx.topology.devices.values())
+        x = (max(d.x for d in devs) + 320.0) if devs else 220.0
+        y = (sum(d.y for d in devs) / len(devs)) if devs else 200.0
+        d = self.api.add_device(type_key, x=x, y=y)
+        self.ctx.select(d["id"])
+        label = REGISTRY[type_key].label
+        self._post("GINI", f"Start with a <b>{label}</b> — {reason or 'the foundation for this goal'}. "
+                           "Tap a glowing suggestion to add the next piece.")
+        self.ctx.bus.wizard_ghosts_requested.emit(d["id"])     # auto-show its goal ghosts
+
+    def _resolve_ghosts_async(self, device_id: str) -> None:
+        """Filter an element's grammar-valid neighbours to the goal (one batched LLM call,
+        cached per goal+type). Emits wizard_ghosts_ready for the canvas to draw."""
+        from ..domain import connection_rules as cr
+        from ..domain.devices import REGISTRY
+        m = self.ctx.mission
+        d = self.ctx.topology.devices.get(device_id)
+        if m is None or d is None:
+            return
+        partners = cr.partners_for(d.type_key)
+        candidates = [(p.type_key, REGISTRY[p.type_key].label) for p in partners]
+        if not candidates:
+            self.ctx.bus.wizard_ghosts_ready.emit(device_id, [])
+            return
+        grammar_items = [(p.type_key, p.why) for p in partners]
+        key = (m.goal, d.type_key)
+        if key in self._ghost_cache:
+            self.ctx.bus.wizard_ghosts_ready.emit(device_id, self._ghost_cache[key])
+            return
+        if self._loop is None:                          # safety: no model -> grammar ring
+            self.ctx.bus.wizard_ghosts_ready.emit(device_id, grammar_items)
+            return
+        import threading
+        from ..agent import wizard as wz
+        goal, cur = m.goal, REGISTRY[d.type_key].label
+        summary = self._canvas_summary()
+
+        def work():
+            try:
+                text = self._llm_complete(wz.filter_prompt(goal, cur, candidates, summary))
+                items = wz.parse_filter(text, candidates) or grammar_items
+            except Exception:                          # noqa: BLE001
+                items = grammar_items
+            self._ghost_cache[key] = items
+            self.ctx.bus.wizard_ghosts_ready.emit(device_id, items)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_mission(self, mission, refined: bool = False, speak: bool = True) -> None:
+        t = self.theme.theme
+        self._wz_banner.setText(
+            f'<span style="color:{t.accent};font-weight:700">🎯 Building:</span> '
+            f'<span style="color:{t.text}">{mission.goal}</span>')
+        self._wz_banner_box.setVisible(True)
+        self._wz_panel.setVisible(self.wizard_mode)
+
+    def _clear_mission(self) -> None:
+        self.ctx.set_mission(None)
+        self._ghost_cache = {}
+        self._wz_banner_box.setVisible(False)
+        self._post("GINI", "Goal cleared — X-ray is back to showing every valid connection.")
 
     def _start_spinner(self, what: str = "GINI is thinking") -> None:
         self._busy = True
@@ -543,7 +707,8 @@ class Assistant(QWidget):
     def _ask_async(self, prompt: str, device: str) -> None:
         import threading
         # one place for "waiting" feedback: the spinner in the pane (no canvas popup).
-        self._start_spinner("GINI is thinking" + (f" about {device}" if device else ""))
+        about = f" about {device}" if device and not device.startswith("__") else ""
+        self._start_spinner("GINI is thinking" + about)
         self._streaming = False
         self._stream_buf = ""
         self._clear_followups()                  # hide stale suggestions while answering
@@ -605,7 +770,7 @@ class Assistant(QWidget):
             did = self._device_id(device)
             if did:                              # element-specific: short anchored callout
                 self.ctx.bus.present_callout.emit(did, self._callout_line(text))
-        if not self.wizard_mode:                 # keep the Wizard's "Lay out" chips
+        if not self.wizard_mode:                 # don't auto-suggest chips mid-Wizard
             self._refresh_followups()            # offer context-aware next questions
 
     def exit_explain_mode(self) -> None:

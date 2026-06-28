@@ -9,7 +9,9 @@ def test_registry_spans_networks_and_cloud():
     # all four cloud domains represented
     assert "container" in keys and get("container").category is Category.CONTAINERS
     assert "vpc" in keys and get("vpc").category is Category.CLOUD_NETWORK
-    assert "instance_group" in keys and get("instance_group").category is Category.COMPUTE
+    assert "instance" in keys and get("instance").category is Category.COMPUTE
+    # the Pod Autoscaler (HPA) lives with the Kubernetes elements, not generic compute
+    assert get("instance_group").category is Category.CONTAINERS
     assert "object_store" in keys and get("object_store").category is Category.STORAGE
     assert "function" in keys and get("function").category is Category.SERVERLESS
 
