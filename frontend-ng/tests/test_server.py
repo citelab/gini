@@ -94,12 +94,23 @@ def _login(srv):
     return body["token"]
 
 
+def _wait_running(srv, token, tries=400):
+    import time
+    for _ in range(tries):
+        body = srv.handle("GET", "/status", token, {})[1]
+        if body.get("run", {}).get("state") == "running":
+            return True
+        time.sleep(0.005)
+    return False
+
+
 def test_login_then_run_a_kata_topology():
     srv, created = _server()
     token = _login(srv)
     topo = Topology("vm"); topo.add_device("kinstance"); topo.add_device("database")
     st, body = srv.handle("POST", "/run", token, {"topology": topo.to_dict()})
-    assert st == 200 and body["ok"]
+    assert st == 202 and body["ok"]                    # accepted; launch runs in the background
+    assert _wait_running(srv, token)                   # finished -> running
     assert "gini-jane" in created                      # student's namespaced project ran
     assert "up" in created["gini-jane"].calls
 
@@ -134,6 +145,7 @@ def test_metrics_and_stop_go_through_the_orchestrator():
     srv, created = _server()
     token = _login(srv)
     srv.handle("POST", "/run", token, {"topology": Topology("vm").to_dict()})  # creates session
+    _wait_running(srv, token)
     st, body = srv.handle("GET", "/metrics", token, {})
     assert st == 200 and "startup" in body and body["startup"]["k1"] == 1840.0
     assert srv.handle("POST", "/stop", token, {})[0] == 200

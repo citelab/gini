@@ -47,7 +47,8 @@ def test_login_run_metrics_stop_round_trip():
     assert client.login("jane", "pw") == (True, "")
     assert client.token
     t = Topology("vm"); t.add_device("kinstance")
-    assert client.run(t) == (True, "running")
+    assert client.run(t)[0] is True                     # accepted (launch runs async on the server)
+    assert client.wait_until_running(timeout=5, interval=0.01) == (True, "running")
     assert "up" in created["gini-jane"].calls           # ran in the user's namespaced project
     assert client.metrics()["startup"]["k1"] == 1840.0
     assert client.kata_available() is True

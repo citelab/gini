@@ -607,7 +607,12 @@ class MainWindow(QMainWindow):
         self.ctx.log("Sending topology to the GINI server…", "info")
 
         def worker():
-            ok, msg = self._remote.run(topo)
+            ok, msg = self._remote.run(topo)              # start (returns once accepted)
+            if not ok:
+                self.ctx.bus.run_state.emit(False, msg)
+                return
+            self.ctx.log("Launching on the server (pulling images / booting)…", "info")
+            ok, msg = self._remote.wait_until_running()   # poll until up / error
             self.ctx.bus.run_state.emit(ok, msg)
         threading.Thread(target=worker, daemon=True).start()
 

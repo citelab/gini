@@ -19,7 +19,13 @@ class FakeRemote:
 
     def run(self, topology):
         self.ran = True
+        return True, "starting"
+
+    def wait_until_running(self, *a, **k):
         return True, "running"
+
+    def run_state(self):
+        return {"state": "running"}
 
     def stop(self):
         self.stopped = True

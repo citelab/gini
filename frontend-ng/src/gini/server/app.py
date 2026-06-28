@@ -11,6 +11,7 @@ Docker command.
 from __future__ import annotations
 
 import json
+import threading
 
 from ..domain.topology import Topology
 from ..services.compiler import RuntimeCompiler
@@ -29,6 +30,8 @@ class GiniServer:
         self.allowed_images = set(allowed_images) if allowed_images else default_allowed_images()
         self.max_cpus = max_cpus
         self._orch: dict = {}                          # user -> orchestrator
+        self._runs: dict = {}                          # user -> {"state", "message"}
+        self._lock = threading.Lock()
 
     def _orch_for(self, user: str):
         if user not in self._orch:
@@ -53,9 +56,13 @@ class GiniServer:
                 return self._run(user, body)
             if method == "POST" and path == "/stop":
                 ok, msg = self._orch_for(user).down()
+                with self._lock:
+                    self._runs[user] = {"state": "stopped", "message": msg}
                 return (200 if ok else 500), {"ok": ok, "message": msg}
             if method == "GET" and path == "/status":
-                return 200, {"status": self._orch_for(user).status()}
+                with self._lock:
+                    run = dict(self._runs.get(user, {"state": "stopped", "message": ""}))
+                return 200, {"status": self._orch_for(user).status(), "run": run}
             if method == "GET" and path == "/metrics":
                 o = self._orch_for(user)
                 return 200, {"stats": o.stats_all(), "startup": o.startup_times()}
@@ -72,10 +79,25 @@ class GiniServer:
             return 400, {"error": "missing topology"}
         topo = Topology.from_dict(body["topology"])     # the student described elements + links
         cfg = RuntimeCompiler().compile(topo)           # WE compile it, with our trusted compiler
-        enforce(cfg, self.allowed_images, self.max_cpus)  # raises PolicyError on a violation
+        enforce(cfg, self.allowed_images, self.max_cpus)  # raises PolicyError on a violation (fast)
         o = self._orch_for(user)
-        ok, msg = o.up(cfg, str(self.sessions.workdir(user)))
-        return (200 if ok else 500), {"ok": ok, "message": msg}
+        workdir = str(self.sessions.workdir(user))
+        with self._lock:
+            self._runs[user] = {"state": "starting", "message": ""}
+
+        # `docker compose up` can take minutes on first run (image pulls + builds), so run it
+        # in the background and let the client poll /status — never block the HTTP request.
+        def launch():
+            try:
+                ok, msg = o.up(cfg, workdir)
+                state = "running" if ok else "error"
+            except Exception as e:                       # noqa: BLE001
+                ok, msg, state = False, str(e), "error"
+            with self._lock:
+                self._runs[user] = {"state": state, "message": msg}
+
+        threading.Thread(target=launch, daemon=True).start()
+        return 202, {"ok": True, "state": "starting"}
 
 
 # --------------------------------------------------------------------------- #

@@ -52,8 +52,29 @@ class RemoteClient:
         return False, body.get("error", "login failed")
 
     def run(self, topology) -> tuple[bool, str]:
+        """Start the lab on the server (returns once accepted — the launch runs async there,
+        because image pulls/builds can take minutes). Poll `wait_until_running` for the result."""
         st, body = self._call("POST", "/run", {"topology": topology.to_dict()})
-        return (st == 200 and bool(body.get("ok"))), body.get("message") or body.get("error", "")
+        if st in (200, 202) and body.get("ok"):
+            return True, body.get("state", "starting")
+        return False, body.get("error", "run failed")
+
+    def run_state(self) -> dict:
+        """{'state': starting|running|error|stopped, 'message': ...}."""
+        return self._call("GET", "/status")[1].get("run", {})
+
+    def wait_until_running(self, timeout: float = 240, interval: float = 2.0) -> tuple[bool, str]:
+        """Poll until the server's launch finishes (or fails / times out)."""
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rs = self.run_state()
+            if rs.get("state") == "running":
+                return True, rs.get("message", "")
+            if rs.get("state") == "error":
+                return False, rs.get("message", "run failed")
+            time.sleep(interval)
+        return False, "timed out waiting for the lab to come up"
 
     def stop(self) -> tuple[bool, str]:
         st, body = self._call("POST", "/stop")

@@ -31,26 +31,26 @@ def main() -> int:
     print(f"login         : {'ok' if ok else 'FAILED — ' + err}")
     if not ok:
         return 1
-    print(f"capabilities  : {c.capabilities()}")
+    caps = c.capabilities()
+    print(f"capabilities  : {caps}")
 
-    # a small all-Kata experiment: a VM workload + a database, driven by a load generator
-    t = Topology("kata-smoke")
-    k = t.add_device("kinstance")
-    db = t.add_device("database")
-    lg = t.add_device("load_generator")
-    t.add_link(k.id, db.id)
-    t.add_link(lg.id, k.id)
+    # a tiny one-element lab. Use a Kata Instance (VM) if the box has Kata, else a normal
+    # container — so this validates the pipeline even before Kata is installed.
+    use_kata = bool(caps.get("kata"))
+    t = Topology("smoke")
+    t.add_device("kinstance" if use_kata else "container")
+    print(f"topology      : a single {'Kata Instance (VM)' if use_kata else 'container'}")
 
     ok, msg = c.run(t)
-    print(f"run           : {'ok' if ok else 'FAILED'} — {msg}")
+    print(f"run (accepted): {'ok' if ok else 'FAILED'} — {msg}")
     if not ok:
         return 1
-
-    time.sleep(5)                                    # let the microVM(s) boot
-    print(f"status        : {c.status()}")
-    m = c.metrics()
-    print(f"startup (ms)  : {m.get('startup')}")
-    print(f"stats         : {m.get('stats')}")
+    print("launching     : pulling images / booting … (first run can take a minute)")
+    ok, msg = c.wait_until_running()                 # poll the async launch
+    print(f"up            : {'ok' if ok else 'FAILED'} — {msg}")
+    if ok:
+        m = c.metrics()
+        print(f"startup (ms)  : {m.get('startup')}")
 
     ok, msg = c.stop()
     print(f"stop          : {'ok' if ok else 'FAILED'} — {msg}")
