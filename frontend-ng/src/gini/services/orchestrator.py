@@ -707,6 +707,12 @@ class Orchestrator:
         self.workdir: Path | None = None
         self.project = project        # docker compose -p <project> (per-student namespacing)
 
+    @property
+    def _dc(self) -> list:
+        """`docker compose` (+ `-p <project>` when namespaced). Use for EVERY compose call
+        so read-backs hit the same project the stack was launched under."""
+        return ["docker", "compose"] + (["-p", self.project] if self.project else [])
+
     def up(self, config: RuntimeConfig, workdir: str | Path,
            auto_internet: bool = True) -> tuple[bool, str]:
         if config.routers or config.ovs_switches:   # routers & OVS use the gRouter image
@@ -802,7 +808,7 @@ class Orchestrator:
         if not wd:
             return {}
         try:
-            r = subprocess.run(["docker", "compose", "ps", "--format", "json"],
+            r = subprocess.run([*self._dc, "ps", "--format", "json"],
                                cwd=str(wd), capture_output=True, text=True, timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return {}
@@ -835,7 +841,7 @@ class Orchestrator:
         if not wd:
             return False, "not running"
         try:
-            r = subprocess.run(["docker", "compose", "ps", "-q", service],
+            r = subprocess.run([*self._dc, "ps", "-q", service],
                                cwd=str(wd), capture_output=True, text=True, timeout=20)
             ids = (r.stdout or "").strip().splitlines()
             if not ids or not ids[0]:
@@ -855,7 +861,7 @@ class Orchestrator:
         if not wd:
             return None
         try:
-            r = subprocess.run(["docker", "compose", "ps", "-q", service],
+            r = subprocess.run([*self._dc, "ps", "-q", service],
                                cwd=str(wd), capture_output=True, text=True, timeout=15)
             ids = (r.stdout or "").strip().splitlines()
             if not ids or not ids[0]:
@@ -883,7 +889,7 @@ class Orchestrator:
         (run inside the cluster container — k3s ships kubectl, so no host kubectl needed)."""
         if not self.workdir:
             return False, "not running"
-        base = ["docker", "compose", "exec", "-T", service, "kubectl"]
+        base = [*self._dc, "exec", "-T", service, "kubectl"]
         for _ in range(40):                  # k3s takes ~15-30s to come up
             try:
                 r = subprocess.run(base + ["get", "nodes", "--no-headers"],
@@ -906,7 +912,7 @@ class Orchestrator:
             return []
         try:
             r = subprocess.run(
-                ["docker", "compose", "exec", "-T", service, "kubectl", "get", "pods",
+                [*self._dc, "exec", "-T", service, "kubectl", "get", "pods",
                  "-A", "-o", "json"], cwd=str(self.workdir),
                 capture_output=True, text=True, timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -935,7 +941,7 @@ class Orchestrator:
             return {}
         try:
             r = subprocess.run(
-                ["docker", "compose", "exec", "-T", service, "kubectl",
+                [*self._dc, "exec", "-T", service, "kubectl",
                  "get", "hpa,deploy", "-o", "json"], cwd=str(self.workdir),
                 capture_output=True, text=True, timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -985,7 +991,7 @@ class Orchestrator:
             return False, "not running"
         try:
             r = subprocess.run(
-                ["docker", "compose", "exec", "-T", service, "kubectl", "scale",
+                [*self._dc, "exec", "-T", service, "kubectl", "scale",
                  f"deployment/{deployment}", f"--replicas={int(replicas)}"],
                 cwd=str(self.workdir), capture_output=True, text=True, timeout=20)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
@@ -1007,7 +1013,7 @@ class Orchestrator:
                 "target": {"type": "Utilization", "averageUtilization": int(target)}}}]
         try:
             r = subprocess.run(
-                ["docker", "compose", "exec", "-T", service, "kubectl", "patch",
+                [*self._dc, "exec", "-T", service, "kubectl", "patch",
                  f"hpa/{hpa}", "--type", "merge", "-p", json.dumps({"spec": spec})],
                 cwd=str(self.workdir), capture_output=True, text=True, timeout=20)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
@@ -1071,7 +1077,7 @@ class Orchestrator:
             return {}
         import re
         try:
-            ids = subprocess.run(["docker", "compose", "ps", "-q"], cwd=str(wd),
+            ids = subprocess.run([*self._dc, "ps", "-q"], cwd=str(wd),
                                  capture_output=True, text=True, timeout=20).stdout.split()
             if not ids:
                 return {}
@@ -1134,9 +1140,8 @@ class Orchestrator:
             return None
 
     def _compose(self, *args: str) -> tuple[bool, str]:
-        pflag = ["-p", self.project] if self.project else []
         try:
-            r = subprocess.run(["docker", "compose", *pflag, *args], cwd=str(self.workdir),
+            r = subprocess.run([*self._dc, *args], cwd=str(self.workdir),
                                capture_output=True, text=True, timeout=600)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
         except FileNotFoundError:
