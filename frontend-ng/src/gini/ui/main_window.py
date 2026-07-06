@@ -23,6 +23,40 @@ from .inspector import Inspector
 from .palette import Palette
 from .theme import ThemeManager, icons
 
+
+def _theme_swatch(theme, size: int = 18):
+    """A little palette chip for a theme menu row: the theme's surface with its
+    accent + success dots, so each theme is recognisable at a glance."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+    s = size * 2
+    pm = QPixmap(s, s); pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(QPen(QColor(theme.line), 1.5)); p.setBrush(QColor(theme.bg))
+    p.drawRoundedRect(QRectF(1, 1, s - 2, s - 2), s * 0.30, s * 0.30)
+    p.setPen(Qt.NoPen)
+    d = s * 0.42
+    p.setBrush(QColor(theme.accent)); p.drawEllipse(QRectF(s*0.30 - d/2, s*0.42 - d/2, d, d))
+    ds = s * 0.34
+    p.setBrush(QColor(theme.success)); p.drawEllipse(QRectF(s*0.66 - ds/2, s*0.60 - ds/2, ds, ds))
+    p.end()
+    return QIcon(pm)
+
+
+def _theme_dots_icon(theme, size: int = 19):
+    """Three coloured dots for the toolbar button, signalling 'this changes colours'."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+    s = size * 2
+    pm = QPixmap(s, s); pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing, True); p.setPen(Qt.NoPen)
+    d = s * 0.44
+    for col, x, y in ((theme.accent, 0.28, 0.40), (theme.warning, 0.72, 0.40),
+                      (theme.success, 0.50, 0.64)):
+        p.setBrush(QColor(col)); p.drawEllipse(QRectF(s*x - d/2, s*y - d/2, d, d))
+    p.end()
+    return QIcon(pm)
+
 # Runs INSIDE the faas container (python -c). Reads GINI_FN/METHOD/BODY from the env,
 # checks whether this is the function's first call (cold), invokes it on localhost:8000,
 # and prints one JSON line {code, ms, cold, body} for the inspector to display.
@@ -68,6 +102,7 @@ class MainWindow(QMainWindow):
         self._stopping = False
         self._workdir: str | None = None
         self._project_path: str | None = None
+        self._project_dir: str | None = None       # active project folder (Projects)
         self._router_programs: dict = {}        # device id -> RouterProgram (Router Lab)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
@@ -84,13 +119,19 @@ class MainWindow(QMainWindow):
         self._k8s_poll.setInterval(3000)
         self._k8s_poll.timeout.connect(self._poll_k8s)
         self.ctx.bus.k8s_metrics.connect(self._on_k8s_metrics)
+        self.ctx.bus.llm_reachable.connect(self._on_llm_reachable)
         self.theme = ThemeManager(app, self.ctx.settings.theme)
         self.theme.apply()
 
         self.setWindowTitle("gBuilder 6.0 — networks + cloud")
         from .branding import app_icon
         self.setWindowIcon(app_icon())              # window + taskbar/dock icon (the GINI mascot)
-        self.resize(1280, 820)
+        # open to a sensible size, but never larger than the screen (a wide dock must never push
+        # the window off-screen)
+        screen = app.primaryScreen().availableGeometry() if app.primaryScreen() else None
+        w = min(1280, screen.width() - 40) if screen else 1280
+        h = min(820, screen.height() - 80) if screen else 820
+        self.resize(w, h)
 
         self.canvas = CanvasView(self.ctx, self.theme.theme)
         self.setCentralWidget(self.canvas)
@@ -105,9 +146,16 @@ class MainWindow(QMainWindow):
 
         self.theme.themeChanged.connect(self._on_theme_changed)
         self.ctx.bus.topology_changed.connect(self._update_status)
-        self.ctx.bus.topology_changed.connect(self._recompute_addressing)
-        self.ctx.bus.topology_changed.connect(self._revalidate)
-        self.ctx.bus.topology_changed.connect(self._rebill)
+        # Debounce the HEAVY per-change recompute: addressing, lint, and billing each run the
+        # compiler, and topology_changed fires once PER device — so loading a project, the
+        # agent building a recipe, or a multi-delete would trigger a burst of synchronous
+        # compiles on the GUI thread (a momentary freeze). Coalesce them into ONE recompute a
+        # short idle after the last change so the UI stays responsive.
+        self._recompute_timer = QTimer(self)
+        self._recompute_timer.setSingleShot(True)
+        self._recompute_timer.setInterval(120)
+        self._recompute_timer.timeout.connect(self._do_recompute)
+        self.ctx.bus.topology_changed.connect(self._recompute_timer.start)
         self.ctx.bus.device_resized.connect(self._on_device_resized)
         self.ctx.bus.device_changed.connect(self._on_device_changed_live)
         self.ctx.bus.log.connect(self._on_log)
@@ -118,12 +166,16 @@ class MainWindow(QMainWindow):
         self.ctx.bus.function_invoke_requested.connect(self._on_function_invoke)
         self.ctx.bus.function_deploy_requested.connect(self._on_function_deploy)
         self.ctx.bus.selection_changed.connect(self._on_selection_explain)
+        self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self.palette.element_selected.connect(self._on_palette_explain)
         self.assistant.status_changed.connect(self.mode_indicator.set_status)
-        self.mode_indicator.set_status("Q&A mode", False)   # initial
+        self.mode_indicator.set_status("Chat mode", False)   # initial
+        self.mode_indicator.model_clicked.connect(self._open_settings)   # Model pill -> Settings
         # Ask GINI messages live in the right-hand pane only; the Console is for
         # build/run logs, so we deliberately do NOT mirror chat into it.
         self._update_status()
+        # NOTE: reopening last session's project is done by the app entry point
+        # (restore_last_project), NOT here — so constructing a window in tests is inert.
 
     def _load_config(self) -> None:
         """Load persisted defaults from ~/.gini/config.json into Settings (applied as the
@@ -143,18 +195,34 @@ class MainWindow(QMainWindow):
             return
         v = dlg.values()
         s = self.ctx.settings
-        for k in ("reduced_motion", "auto_internet",
-                  "llm_enabled", "llm_url", "llm_model", "llm_think"):
-            setattr(s, k, v[k])
-        s.theme = v["theme"]
-        s.name_prefixes = v["name_prefixes"]
-        s.prices = v["prices"]
+        # apply every value the dialog returned (a missing key must never abort the save)
+        for k in ("theme", "reduced_motion", "auto_internet",
+                  "llm_enabled", "llm_url", "llm_model", "llm_think",
+                  "name_prefixes", "prices", "show_help_on_launch"):
+            if k in v:
+                setattr(s, k, v[k])
         self.ctx.topology.prefix_overrides = dict(s.name_prefixes)   # apply to current topo
         self.theme.set_theme(v["theme"])               # live theme switch
         self._wire_llm()                               # re-create / clear the LLM loop
         self._rebill()                                 # prices may have changed
         save_config({k: getattr(s, k) for k in PERSISTED_KEYS})
         self.ctx.log("Settings saved to ~/.gini/config.json.", "ok")
+
+    def _persist_settings(self) -> None:
+        """Save the current Settings to ~/.gini/config.json (used by the Cue Cards tour
+        when the user toggles 'show at launch' / voice-over)."""
+        from ..app.paths import PERSISTED_KEYS, save_config
+        save_config({k: getattr(self.ctx.settings, k) for k in PERSISTED_KEYS})
+
+    def show_feature_tour(self) -> None:
+        from .cue_cards import CueCards
+        CueCards(self, self.theme, self.ctx.settings, persist=self._persist_settings).exec()
+
+    def maybe_start_tour(self) -> None:
+        """Open the Cue Cards tour at launch unless the user turned it off (called from
+        __main__ after the window is shown, so widget tests never trigger the modal)."""
+        if self.ctx.settings.show_help_on_launch:
+            self.show_feature_tour()
 
     def _apply_env_settings(self) -> None:
         import os
@@ -183,6 +251,7 @@ class MainWindow(QMainWindow):
         s = self.ctx.settings
         if not s.llm_enabled:
             self.assistant.set_loop(None)              # clear any existing loop
+            self.mode_indicator.set_model("", False)   # toolbar Model pill -> "no model"
             self.ctx.log("GINI AI: offline mode (deterministic). Enable a local LLM in "
                          "Settings (or set GINI_LLM_URL).", "info")
             return
@@ -190,18 +259,35 @@ class MainWindow(QMainWindow):
             from ..agent.llm import OllamaBackend
             from ..agent.loop import AgentLoop
             backend = OllamaBackend(s.llm_url, s.llm_model, think=s.llm_think,
-                                    num_ctx=getattr(s, "llm_num_ctx", 8192))
+                                    num_ctx=getattr(s, "llm_num_ctx", 8192),
+                                    embed_model=getattr(s, "llm_embed_model", "all-minilm"))
             self.assistant.set_loop(AgentLoop(backend, self.registry,
                                               context_provider=self._ai_context))
-            # actually check the server is reachable so the user gets real feedback
-            if backend.available():
-                self.ctx.log(f"GINI AI: connected to {s.llm_model} at {s.llm_url}.", "ok")
-            else:
-                self.ctx.log(f"GINI AI: set to {s.llm_model} at {s.llm_url}, but the server "
-                             f"isn't responding. Is Ollama running? (run: ollama serve)",
-                             "error")
+            self.mode_indicator.set_model(s.llm_model, True)       # optimistic; probe corrects
+            # Check reachability OFF the GUI thread — backend.available() does a blocking
+            # urlopen (up to 3s), which would freeze the UI on startup / settings-save.
+            import threading
+            url, model = s.llm_url, s.llm_model
+
+            def probe():
+                try:
+                    ok = backend.available()
+                except Exception:
+                    ok = False
+                self.ctx.bus.llm_reachable.emit(model, ok)
+            threading.Thread(target=probe, daemon=True).start()
         except Exception as e:  # never let LLM wiring break startup
+            self.mode_indicator.set_model("", False)
             self.ctx.log(f"GINI AI: LLM unavailable ({e}); offline mode.", "info")
+
+    def _on_llm_reachable(self, model: str, ok: bool) -> None:
+        s = self.ctx.settings
+        self.mode_indicator.set_model(model, ok)                   # green if up, amber if not
+        if ok:
+            self.ctx.log(f"GINI AI: connected to {model} at {s.llm_url}.", "ok")
+        else:
+            self.ctx.log(f"GINI AI: set to {model} at {s.llm_url}, but the server isn't "
+                         f"responding. Is Ollama running? (run: ollama serve)", "error")
 
     # -- toolbar ------------------------------------------------------------ #
     def _make_toolbar(self) -> None:
@@ -221,9 +307,9 @@ class MainWindow(QMainWindow):
             return a
 
         # build the actions (same wiring as before — checkable, enable/disable, slots)
-        act("new", "new", "New", self._new)
-        act("open", "open", "Open", self._open)
-        act("save", "save", "Save", self._save)
+        act("new", "new", "New project", self._new_project)
+        act("open", "open", "Open project", self._open_project_dialog)
+        act("save", "save", "Save project", self._save_project)
         act("compile", "compile", "Compile", self._compile)
         act("layout", "layout", "Arrange", self._auto_layout)
         self._connect_act = act("connect", "link", "Connect", self._toggle_connect, checkable=True)
@@ -265,47 +351,71 @@ class MainWindow(QMainWindow):
                 lay.addWidget(button(k))
             return f
 
-        # grouped trays: File · Tools · (Run/Stop, free-standing pills) · Zoom
-        tb.addWidget(tray(("new", "open", "save")))
-        tb.addWidget(self._tb_spacer(6))
-        tb.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete")))
-        tb.addWidget(self._tb_spacer(8))
-        run_grp = QWidget(tb); rg = QHBoxLayout(run_grp)
-        rg.setContentsMargins(0, 0, 0, 0); rg.setSpacing(6)
-        rg.addWidget(button("run", labelled=True, oname="RunBtn"))
-        rg.addWidget(button("stop", labelled=True, oname="StopBtn"))
-        tb.addWidget(run_grp)
-        tb.addWidget(self._tb_spacer(8))
-        tb.addWidget(tray(("zoom_in", "zoom_out")))
+        from PySide6.QtWidgets import QHBoxLayout, QMenu, QSizePolicy
 
-        spacer = QWidget()
-        spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding,
-                             spacer.sizePolicy().verticalPolicy().Preferred)
-        tb.addWidget(spacer)
+        def _cluster(build) -> QWidget:
+            """A toolbar cluster in an EXPANDING container. Left and right clusters both
+            expand, so they take equal widths — which lands the middle chip at the exact
+            centre regardless of how much each side actually holds."""
+            w = QWidget()
+            lay = QHBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+            build(lay)
+            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            return w
 
-        # prominent mode / activity indicator (Explain · Q&A · Thinking spinner)
+        # LEFT cluster: File · Tools · Run · Zoom, packed to the left.
+        from .run_button import RunButton
+        self.run_button = RunButton(self.theme)
+        self.run_button.clicked.connect(self._toggle_run)
+
+        def _build_left(lay) -> None:
+            lay.addWidget(tray(("new", "open", "save")))
+            lay.addWidget(self._tb_spacer(6))
+            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete")))
+            lay.addWidget(self._tb_spacer(8))
+            lay.addWidget(self.run_button)                    # morphing ▶/■ power button
+            lay.addWidget(self._tb_spacer(8))
+            lay.addWidget(tray(("zoom_in", "zoom_out")))
+            lay.addStretch(1)                                 # push the cluster left
+
+        # RIGHT cluster: mode/model/activity pills · theme picker, packed to the right.
         from .mode_indicator import ModeIndicator
         self.mode_indicator = ModeIndicator(self.theme)
-        tb.addWidget(self.mode_indicator)
-        tb.addWidget(self._tb_spacer(8))
-
-        # theme menu
-        self._theme_act = QAction("Theme", self)
         self._theme_btn = QToolButton(tb)
-        self._theme_btn.setDefaultAction(self._theme_act)
+        self._theme_btn.setToolTip("Theme")
         self._theme_btn.setAutoRaise(True)
         self._theme_btn.setPopupMode(QToolButton.InstantPopup)
-        from PySide6.QtWidgets import QMenu
+        from .theme.tokens import get_theme
         menu = QMenu(self)
         grp = QActionGroup(self)
-        for name in ("Dark", "Light", "GINI Brand", "High Contrast"):
-            a = QAction(name, self, checkable=True)
-            a.setChecked(name.lower().startswith(self.theme.theme.name.lower()[:4]))
+        self._theme_actions: dict[str, QAction] = {}
+
+        def add_theme(name: str) -> None:
+            a = QAction(_theme_swatch(get_theme(name)), name, self)
+            a.setCheckable(True)
+            a.setChecked(name.lower() == self.theme.theme.name.lower())
             a.triggered.connect(lambda _=False, n=name: self.theme.set_theme(n))
             grp.addAction(a); menu.addAction(a)
-        self._theme_act.setMenu(menu)
+            self._theme_actions[name] = a
+
+        for name in ("Light", "Sand", "Blue", "Green"):       # light family, lightest first
+            add_theme(name)
+        menu.addSeparator()                                   # divider between the families
+        for name in ("Dark", "GINI Brand", "High Contrast"):  # dark family
+            add_theme(name)
         self._theme_btn.setMenu(menu)
-        tb.addWidget(self._theme_btn)
+
+        def _build_right(lay) -> None:
+            lay.addStretch(1)                                 # push the cluster right
+            lay.addWidget(self.mode_indicator)
+            lay.addWidget(self._tb_spacer(8))
+            lay.addWidget(self._theme_btn)
+
+        # assemble: [ left (expand) ] [ centred project chip ] [ right (expand) ]
+        self._make_nav_button()
+        tb.addWidget(_cluster(_build_left))
+        tb.addWidget(self._nav_btn)
+        tb.addWidget(_cluster(_build_right))
         self._refresh_icons()
 
     @staticmethod
@@ -313,17 +423,304 @@ class MainWindow(QMainWindow):
         w = QWidget(); w.setFixedWidth(width)
         return w
 
+    # -- project navigator -------------------------------------------------- #
+    def _make_nav_button(self) -> None:
+        from PySide6.QtWidgets import QMenu, QToolButton
+        self._nav_btn = QToolButton(self)
+        self._nav_btn.setObjectName("NavBtn")
+        self._nav_btn.setText("Untitled")
+        self._nav_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._nav_btn.setPopupMode(QToolButton.InstantPopup)
+        self._nav_btn.setToolTip("Project — switch, create, save, or set the AI brief")
+        menu = QMenu(self)
+        menu.aboutToShow.connect(lambda: self._build_nav_menu(menu))
+        self._nav_btn.setMenu(menu)
+
+    def _build_nav_menu(self, menu) -> None:
+        from ..app.paths import projects_dir
+        from ..services import list_projects
+        menu.clear()
+        header = menu.addAction(f"● {self._nav_btn.text()}")
+        header.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("New project…", self._new_project)
+        menu.addAction("Open project…", self._open_project_dialog)
+        menu.addAction("Save", self._save_project)
+        menu.addAction("Save As…", self._save_project_as)
+        menu.addSeparator()
+        recents = list_projects(projects_dir())[:6]
+        if recents:
+            r = menu.addAction("Recent projects"); r.setEnabled(False)
+            for info in recents:
+                act = menu.addAction("   " + info["name"])
+                act.setCheckable(True)
+                act.setChecked(info["path"] == self._project_dir)
+                act.triggered.connect(lambda _=False, p=info["path"]: self._switch_project(p))
+            menu.addSeparator()
+        menu.addAction("Edit project brief…", self._edit_brief)
+        rev = menu.addAction("Reveal project folder", self._reveal_project)
+        rev.setEnabled(self._project_dir is not None)
+        menu.addSeparator()
+        ren = menu.addAction("Rename project…", self._rename_project)
+        ren.setEnabled(self._project_dir is not None)
+        dele = menu.addAction("Delete project…", self._delete_project)
+        dele.setEnabled(self._project_dir is not None)
+
+    def _set_project_label(self, name: str) -> None:
+        if hasattr(self, "_nav_btn"):
+            self._nav_btn.setText(name or "Untitled")
+
+    # -- project operations ------------------------------------------------- #
+    def _switch_blocked(self) -> bool:
+        """Switching projects would pull the topology out from under a running lab."""
+        if self._running or getattr(self, "_stopping", False):
+            self.ctx.log("Stop the topology before switching projects.", "info")
+            return True
+        return False
+
+    def _new_project(self) -> None:
+        from pathlib import Path
+        from PySide6.QtWidgets import QInputDialog
+        from ..app.paths import ensure_dirs, projects_dir
+        from ..domain import Topology
+        if self._switch_blocked():
+            return
+        name, ok = QInputDialog.getText(self, "New project", "Project name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        ensure_dirs()
+        folder = projects_dir() / name
+        if folder.exists():
+            self.ctx.log(f"A project named “{name}” already exists.", "info")
+            return
+        self._persist_current_project()          # save whatever we were on
+        self._project_dir = str(folder)
+        self._project_path = None
+        self._router_programs.clear()
+        self._set_topology(Topology(name))
+        self.assistant.clear_conversation()
+        self._set_project_label(name)
+        self.setWindowTitle(f"gBuilder 6.0 — {name}")
+        self._persist_current_project()          # materialise the folder on disk
+        self.ctx.log(f"New project “{name}”.", "ok")
+
+    def _rename_project(self) -> None:
+        from pathlib import Path
+        from PySide6.QtWidgets import QInputDialog
+        from ..app.paths import projects_dir, remember_project
+        if self._project_dir is None or self._switch_blocked():
+            return
+        cur = Path(self._project_dir)
+        name, ok = QInputDialog.getText(self, "Rename project", "New name:", text=cur.name)
+        if not ok or not name.strip() or name.strip() == cur.name:
+            return
+        name = name.strip()
+        dest = projects_dir() / name
+        if dest.exists():
+            self.ctx.log(f"A project named “{name}” already exists.", "info")
+            return
+        self._persist_current_project()          # flush current work to the old folder first
+        try:
+            cur.rename(dest)                     # rename the folder on disk
+        except OSError as e:
+            self.ctx.log(f"Couldn't rename project: {e}", "error")
+            return
+        self._project_dir = str(dest)
+        self.ctx.topology.name = name
+        self._set_project_label(name)
+        self.setWindowTitle(f"gBuilder 6.0 — {name}")
+        remember_project(str(dest))
+        self._persist_current_project()          # rewrite metadata under the new name
+        self.ctx.log(f"Renamed project to “{name}”.", "ok")
+
+    def _delete_project(self) -> None:
+        import shutil
+        from pathlib import Path
+        from PySide6.QtWidgets import QMessageBox
+        from ..app.paths import projects_dir
+        from ..domain import Topology
+        from ..services import list_projects
+        if self._project_dir is None or self._switch_blocked():
+            return
+        cur = Path(self._project_dir)
+        name = cur.name
+        if QMessageBox.question(
+                self, "Delete project",
+                f"Delete project “{name}” and all its files?\nThis cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._project_dir = None                 # stop any later save from recreating it
+        try:
+            shutil.rmtree(cur)
+        except OSError as e:
+            self._project_dir = str(cur)         # deletion failed -> keep the project active
+            self.ctx.log(f"Couldn't delete project: {e}", "error")
+            return
+        self.ctx.log(f"Deleted project “{name}”.", "ok")
+        others = [p for p in list_projects(projects_dir()) if p["path"] != str(cur)]
+        if others:
+            self._load_project_folder(others[0]["path"])   # open the next project
+        else:                                    # nothing left -> a fresh, unsaved project
+            self._project_path = None
+            self._router_programs.clear()
+            self._set_topology(Topology("Untitled"))
+            self.assistant.clear_conversation()
+            self._set_project_label("Untitled")
+            self.setWindowTitle("gBuilder 6.0")
+
+    def _open_project_dialog(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        from ..app.paths import projects_dir
+        from ..services import is_project_dir
+        if self._switch_blocked():
+            return
+        path = QFileDialog.getExistingDirectory(self, "Open project", str(projects_dir()))
+        if not path:
+            return
+        if not is_project_dir(path):
+            self.ctx.log("That folder isn't a GINI project (no topology.gini inside).", "info")
+            return
+        self._switch_project(path)
+
+    def _switch_project(self, path: str) -> None:
+        if path == self._project_dir or self._switch_blocked():
+            return
+        self._persist_current_project()          # keep the current project's work + chat
+        self._load_project_folder(path)
+
+    def _load_project_folder(self, path: str) -> None:
+        from ..app.paths import remember_project
+        from ..services import load_project_dir
+        try:
+            data = load_project_dir(path)
+        except Exception as e:
+            self.ctx.log(f"Open failed: {e}", "error")
+            return
+        self._router_programs.clear()
+        self._project_dir = data["path"]
+        self._project_path = None
+        self._set_topology(data["topology"])
+        self.assistant.set_brief(data["brief"])
+        self.assistant.load_ai_state(data["ai_state"])   # swap the Ask GINI conversation
+        self._set_project_label(data["name"])
+        self.setWindowTitle(f"gBuilder 6.0 — {data['name']}")
+        remember_project(data["path"])
+        self.ctx.log(f"Opened project “{data['name']}”.", "ok")
+
+    def _persist_current_project(self) -> None:
+        """Write the active project folder (topology + brief + AI conversation)."""
+        if not self._project_dir:
+            return
+        from pathlib import Path
+        from ..app.paths import remember_project
+        from ..services import save_project_dir
+        name = Path(self._project_dir).name
+        self.ctx.topology.name = name
+        save_project_dir(self._project_dir, self.ctx.topology, name=name,
+                         brief=self.assistant.brief(), ai_state=self.assistant.ai_state())
+        remember_project(self._project_dir)
+
+    def _save_project(self) -> None:
+        if self._project_dir:
+            self._persist_current_project()
+            self.ctx.log(f"Saved project “{self._nav_btn.text()}”.", "ok")
+        else:
+            self._save_project_as()
+
+    def _save_project_as(self) -> None:
+        from pathlib import Path
+        from PySide6.QtWidgets import QInputDialog
+        from ..app.paths import ensure_dirs, projects_dir
+        default = self.ctx.topology.name or "untitled"
+        name, ok = QInputDialog.getText(self, "Save project as", "Project name:", text=default)
+        if not ok or not name.strip():
+            return
+        ensure_dirs()
+        self._project_dir = str(projects_dir() / name.strip())
+        self._project_path = None
+        self._set_project_label(name.strip())
+        self.setWindowTitle(f"gBuilder 6.0 — {name.strip()}")
+        self._persist_current_project()
+        self.ctx.log(f"Saved project “{name.strip()}”.", "ok")
+
+    def _edit_brief(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Project brief",
+            "A short framing for the AI tutor in this project (guides every answer):",
+            self.assistant.brief())
+        if not ok:
+            return
+        self.assistant.set_brief(text)
+        self._persist_current_project()
+        self.ctx.log("Project brief updated.", "ok")
+
+    def _reveal_project(self) -> None:
+        if not self._project_dir:
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self._project_dir))
+
+    def restore_last_project(self) -> None:
+        """Reopen the project from the previous session (called by the app entry point).
+        If there's no prior project, land in a persistent 'Default' project so the very
+        first session's work and conversation survive a restart too."""
+        from ..app.paths import load_recents
+        from ..services import is_project_dir
+        last = load_recents().get("last")
+        if last and is_project_dir(last):
+            self._load_project_folder(last)
+        else:
+            self._open_or_create_default()
+        self._start_autosave()               # crash-safety on top of save-on-close
+
+    def _open_or_create_default(self) -> None:
+        from ..app.paths import ensure_dirs, projects_dir
+        from ..services import is_project_dir
+        ensure_dirs()
+        d = projects_dir() / "Default"
+        if is_project_dir(d):
+            self._load_project_folder(str(d))
+            return
+        self._project_dir = str(d)           # adopt the current (empty) canvas as Default
+        self._set_project_label("Default")
+        self.setWindowTitle("gBuilder 6.0 — Default")
+        self._persist_current_project()      # materialise it so it's there next launch
+        self.ctx.log("Working in the Default project — your topology and Ask GINI "
+                     "conversation here are saved and restored across restarts.", "info")
+
+    def _start_autosave(self) -> None:
+        """Persist the active project every so often, so a crash or force-quit loses at
+        most the last few seconds (save-on-close handles the normal path)."""
+        from PySide6.QtCore import QTimer
+        if getattr(self, "_autosave_timer", None) is not None:
+            return
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(30_000)
+        self._autosave_timer.timeout.connect(self._persist_current_project)
+        self._autosave_timer.start()
+
+    def closeEvent(self, e) -> None:
+        self._persist_current_project()      # never lose the active project's work / chat
+        super().closeEvent(e)
+
     def _refresh_icons(self) -> None:
         t = self.theme.theme
         col = t.muted
         for a, icon_name in self._actions.values():
             a.setIcon(icons.icon(icon_name, col, 19))
-        self._theme_act.setIcon(icons.icon("palette", col, 19))
-        # Run is a filled green primary button (white glyph); Stop reads in danger red
-        run_a, _ = self._actions["run"]
-        run_a.setIcon(icons.icon("play", "#ffffff", 19))
-        stop_a, _ = self._actions["stop"]
-        stop_a.setIcon(icons.icon("stop", t.danger, 19))
+        # coloured dots on the button say "this changes colours"; keep the menu ticks
+        # in sync with whatever theme is active (e.g. changed from the Settings dialog)
+        self._theme_btn.setIcon(_theme_dots_icon(t))
+        for name, act in getattr(self, "_theme_actions", {}).items():
+            act.setChecked(name.lower() == t.name.lower())
+        if hasattr(self, "_nav_btn"):
+            self._nav_btn.setIcon(icons.icon("open", t.accent, 18))
+        # the circular Run/Stop power button repaints itself in the new theme
+        if hasattr(self, "run_button"):
+            self.run_button.refresh_theme()
 
     # -- docks -------------------------------------------------------------- #
     def _make_docks(self) -> None:
@@ -397,11 +794,13 @@ class MainWindow(QMainWindow):
             menu.addAction(a)
             return a
 
-        add(filem, "&New", self._new, "Ctrl+N")
-        add(filem, "&Open…", self._open, "Ctrl+O")
-        add(filem, "&Save", self._save, "Ctrl+S")
-        add(filem, "Save &As…", self._save_as, "Ctrl+Shift+S")
+        add(filem, "&New Project…", self._new_project, "Ctrl+N")
+        add(filem, "&Open Project…", self._open_project_dialog, "Ctrl+O")
+        add(filem, "&Save", self._save_project, "Ctrl+S")
+        add(filem, "Save &As…", self._save_project_as, "Ctrl+Shift+S")
+        add(filem, "Edit Project &Brief…", self._edit_brief)
         filem.addSeparator()
+        add(filem, "&Import topology (.gini)…", self._open)   # legacy single-file import
         add(filem, "&Export PNG…", self._export_png)
         filem.addSeparator()
         # NoRole keeps these in the File menu on macOS (Qt otherwise hoists "Settings"
@@ -411,6 +810,10 @@ class MainWindow(QMainWindow):
         filem.addSeparator()
         quit_act = add(filem, "&Quit", self.close, "Ctrl+Q")
         quit_act.setMenuRole(QAction.MenuRole.NoRole)
+
+        helpm = mb.addMenu("&Help")
+        tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
+        tour_act.setMenuRole(QAction.MenuRole.NoRole)
 
     def _new(self) -> None:
         from ..domain import Topology
@@ -490,7 +893,9 @@ class MainWindow(QMainWindow):
             self.ctx.bus.device_added.emit(d.id)
         for link in topo.links.values():
             self.ctx.bus.link_added.emit(link.id)
-        self.ctx.bus.topology_changed.emit()
+        self.ctx.bus.topology_changed.emit()     # -> _rebill re-estimates the new topology
+        if hasattr(self, "dashboard"):           # fresh experiment -> fresh GINI $ meter
+            self.dashboard.reset()
         self.ctx.bus.selection_changed.emit(None)
 
     def _export_png(self) -> None:
@@ -541,6 +946,13 @@ class MainWindow(QMainWindow):
         self.canvas.set_connect_mode(on)
         self.ctx.log("Connect mode: click two devices to link them." if on
                      else "Connect mode off.", "info")
+
+    def _on_canvas_background(self) -> None:
+        # a click on empty canvas ends connect mode (linking elements keeps it on;
+        # clicking empty space is the natural "done" gesture). trigger() (not setChecked)
+        # so the action's `triggered` handler actually turns the canvas mode off.
+        if self._connect_act.isChecked():
+            self._connect_act.trigger()           # -> _toggle_connect(False)
 
     def _toggle_edge_style(self, bent: bool) -> None:
         self.ctx.settings.connector_style = "orthogonal" if bent else "straight"
@@ -605,6 +1017,7 @@ class MainWindow(QMainWindow):
         import threading
         topo = self.ctx.topology
         self.ctx.log("Sending topology to the GINI server…", "info")
+        self.run_button.set_state("booting")
 
         def worker():
             ok, msg = self._remote.run(topo)              # start (returns once accepted)
@@ -621,6 +1034,7 @@ class MainWindow(QMainWindow):
             self._running = True
             self._stopping = False
             self._set_runtime_status("running")
+            self.run_button.set_state("running")     # remote has no container poller
             self.canvas.scene_.running = True
             self.inspector.set_live_running(True)
             self.ctx.log("Topology running on the GINI server.", "ok")
@@ -628,6 +1042,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2500, self._poll_remote_metrics)
         else:
             self._running = False
+            self.run_button.set_state("error")
             self.ctx.log(f"Server run failed: {msg}", "error")
             self._set_runtime_status("idle")
 
@@ -643,6 +1058,15 @@ class MainWindow(QMainWindow):
                 line = ", ".join(f"{s} {ms:.0f} ms" for s, ms in sorted(startup.items()))
                 self.ctx.log("Startup times — " + line, "info")
         threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_run(self) -> None:
+        """The circular power button was pressed — what it means depends on state."""
+        st = self.run_button.state()
+        if st in ("ready", "error"):
+            self._run()
+        elif st in ("booting", "running"):
+            self._stop()
+        # "stopping": already winding down — ignore
 
     def _run(self) -> None:
         import tempfile
@@ -680,6 +1104,8 @@ class MainWindow(QMainWindow):
                          "Draw + wire an Internet element for egress. (Web consoles "
                          "still open — only outbound internet is cut.)", "info")
 
+        self.run_button.set_state("booting")        # ring fills as containers come up
+
         def worker(workdir=self._workdir, ai=auto_internet):
             ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai)
             self.ctx.bus.run_state.emit(ok, msg)
@@ -695,6 +1121,7 @@ class MainWindow(QMainWindow):
             self._set_runtime_status("running")
             self._poll.start()                  # reconcile with real container state
             self.ctx.log("Topology running on Docker.", "ok")
+            self._wire_xv6_providers()          # attach live GDB bridges to any xv6 kernels
             grafana = None
             for s in getattr(self, "_last_services", []):   # surface web consoles
                 for p in s.ports:
@@ -718,6 +1145,7 @@ class MainWindow(QMainWindow):
                 self._apply_k8s()                           # wait for k3s, kubectl apply
                 self._k8s_poll.start()                      # poll deployment metrics
         else:
+            self.run_button.set_state("error")
             self.ctx.log(f"Run failed: {msg}", "error")
         self._update_status()
 
@@ -728,6 +1156,7 @@ class MainWindow(QMainWindow):
             return
         self._stopping = True
         self._set_runtime_status("stopping")    # yellow while containers wind down
+        self.run_button.set_state("stopping")
         self.ctx.log("Stopping…", "info")
         self._update_status()
 
@@ -769,11 +1198,18 @@ class MainWindow(QMainWindow):
                 self.canvas.scene_.running = False        # grey out console/logs/login actions
                 self.inspector.set_fabric_snapshot({})
                 self.inspector.set_k8s_snapshot({})
+                self.run_button.set_state("ready")
                 self.ctx.log("All containers stopped.", "info")
                 self._update_status()
             return
         if self._stopping:
             return   # keep the yellow 'stopping' chips until containers are actually gone
+
+        # feed the boot ring real progress, and morph ▶→■ once everything is up
+        up = sum(1 for v in states.values() if v == "running")
+        total = len(states)
+        self.run_button.set_progress(up, total)
+        self.run_button.set_state("running" if total and up >= total else "booting")
 
         fabric = states.get("fabric")
         for node in self.canvas.scene_.nodes.values():
@@ -782,7 +1218,8 @@ class MainWindow(QMainWindow):
                 st = states.get(_svc(node.inst.name))
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
-            elif role in ("router", "ovs", "controller", "service", "compute", "k8scluster"):
+            elif role in ("router", "ovs", "controller", "service", "compute", "k8scluster",
+                          "xv6"):
                 st = states.get(_svc(node.inst.name))            # each its own container
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
@@ -796,14 +1233,26 @@ class MainWindow(QMainWindow):
             elif role == "switch":                  # switches live in the fabric container
                 node.set_status("running" if fabric == "running"
                                 else "error" if fabric else "idle")
+            elif role == "peripheral":              # terminal / disk: mirror the wired xv6 Machine
+                xid = self._xv6_for_peripheral(node.inst.id)
+                st = states.get(_svc(self.ctx.topology.devices[xid].name)) if xid else None
+                node.set_status("running" if st == "running" else "idle")
 
     def _set_runtime_status(self, status: str) -> None:
         from ..services.compiler import _role
         for node in self.canvas.scene_.nodes.values():
             if _role(node.inst.type_key) in ("machine", "switch", "router", "ovs",
                                              "controller", "service", "compute", "function",
-                                             "k8scluster", "k8sworkload", "hpa", "k8snode"):
+                                             "k8scluster", "k8sworkload", "hpa", "k8snode",
+                                             "xv6", "peripheral"):
                 node.set_status(status)
+
+    def _do_recompute(self) -> None:
+        # one coalesced pass after a burst of topology changes (debounced) — keeps the three
+        # compiler-backed refreshes off the per-change hot path.
+        self._recompute_addressing()
+        self._revalidate()
+        self._rebill()
 
     def _recompute_addressing(self) -> None:
         from ..services.compiler import address_map
@@ -1213,8 +1662,14 @@ class MainWindow(QMainWindow):
         dev = self.ctx.topology.devices.get(device_id)
         if dev is None:
             return
-        if _role(dev.type_key) == "router":
-            self._open_router_lab(device_id)
+        if _role(dev.type_key) in ("router", "ovs"):
+            self._open_router_lab(device_id)     # OVS opens the lab in SDN dashboard mode
+            return
+        if dev.type_key == "xv6":                # xv6 Machine -> the OS workbench
+            self._open_machine_lab(device_id)
+            return
+        if dev.type_key in ("terminal", "storage_volume"):
+            self._open_peripheral(device_id)     # Terminal / disk view on its xv6
             return
         # a running service with a web dashboard -> open it (Grafana, MinIO, …)
         if self._running and _role(dev.type_key) == "service":
@@ -1228,19 +1683,135 @@ class MainWindow(QMainWindow):
 
     def _open_router_lab(self, device_id: str) -> None:
         from ..domain.router_modules import RouterProgram
+        from ..services.compiler import _role
         from .router_lab import RouterLab
         dev = self.ctx.topology.devices[device_id]
         program = self._router_programs.setdefault(device_id, RouterProgram())
+        # role-specialized face of the one gRouter engine: OVS -> SDN dashboard, Firewall ->
+        # rules-first, plain Router -> full pipeline.
+        face = ("ovs" if dev.type_key == "ovs"
+                else "firewall" if dev.type_key == "firewall" else "router")
+        sdn = face == "ovs"
         # When running, the Router Lab drives the REAL C gRouter's pipeline via `gpipe`
         # over its control socket (gr_rctl); offline it uses the local trace.
         cf = ((lambda c, n=dev.name: self.element_query(n, "gpipe " + c))
               if self._running else None)
+        # raw CLI query used by the live panels: `openflow …` for an OVS, `route`/`arp`
+        # for a router. Same control socket as the console.
+        qf = ((lambda c, n=dev.name: self.element_query(n, c)) if self._running else None)
         self._router_lab = RouterLab(
             self, self.theme, dev, program,
             on_console=lambda: self._open_terminal(device_id),
-            command_fn=cf)
+            command_fn=cf, sdn=sdn, query_fn=qf, face=face)
         self._router_lab.show()
         self._router_lab.raise_()
+
+    def _wire_xv6_providers(self) -> None:
+        """After a run, build a live Xv6Bridge for each xv6 service from its published gdb (1234)
+        and serial (4444) host ports, and reset any open MachineState so the Lab/agent read live
+        state. Safe no-op if the bridge deps (gdb/qemu container) aren't reachable."""
+        providers = getattr(self, "_xv6_providers", {})
+        for s in getattr(self, "_last_services", []):
+            if getattr(s, "type_key", None) != "xv6":
+                continue
+            agent = next((p["host"] for p in s.ports if p.get("label") == "agent"), None)
+            if agent is None:
+                continue
+            did = next((d.id for d in self.ctx.topology.devices.values()
+                        if d.name == s.name and d.type_key == "xv6"), None)
+            if did is None:
+                continue
+            try:
+                from ..runtime.xv6_bridge import connect
+                q = int((self.ctx.topology.devices[did].properties or {}).get("Timeslice", "1"))
+                providers[did] = connect(agent, quantum=q)      # HTTP to the in-container agent
+            except Exception as e:
+                self.ctx.log(f"xv6 live bridge unavailable for {s.name}: {e}", "info")
+                continue
+            self.ctx.machine_states.pop(did, None)     # rebuilt live on next open
+        self._xv6_providers = providers
+
+    def _machine_state_for(self, device_id: str):
+        """Get (or lazily create) the shared MachineState for an xv6 Machine — the bridge the
+        Lab renders from and the Ask GINI agent reads from. When running, a live GDB-backed
+        provider is used if one has been registered (Mac-side); otherwise the offline demo feed.
+        Kept on ctx so the assistant can find it without the Lab dialog being open."""
+        from ..domain.machine_state import MachineState
+        from ..domain.xv6 import DemoScheduler
+        states = self.ctx.machine_states
+        ms = states.get(device_id)
+        if ms is None:
+            provider = None
+            if self._running:
+                provider = getattr(self, "_xv6_providers", {}).get(device_id)
+            live = provider is not None
+            if provider is None:
+                dev = self.ctx.topology.devices[device_id]
+                provider = DemoScheduler(
+                    timeslice=int((dev.properties or {}).get("Timeslice", "1") or "1"))
+            # a live bridge brings its own vm/fs readers; the demo feed lets MachineState default
+            # them to DemoVm/DemoDisk.
+            ms = MachineState(provider, device_id=device_id,
+                              vm=getattr(provider, "vm", None),
+                              fs=getattr(provider, "fs", None))
+            ms.live = live
+            # new teachable kernel events -> notify the assistant (proactive Coach)
+            ms.on_event = lambda s, did=device_id: self.ctx.bus.machine_events.emit(did)
+            states[device_id] = ms
+        return ms
+
+    def _xv6_for_peripheral(self, device_id: str) -> str | None:
+        """The xv6 Machine a peripheral is wired to (grammar guarantees at most one), or None."""
+        for l in self.ctx.topology.links.values():
+            other = (l.target_id if l.source_id == device_id else
+                     l.source_id if l.target_id == device_id else None)
+            if other is None:
+                continue
+            od = self.ctx.topology.devices.get(other)
+            if od is not None and od.type_key == "xv6":
+                return other
+        return None
+
+    def _open_peripheral(self, device_id: str) -> None:
+        """Open a peripheral's view bound to the xv6 Machine it's wired to. Terminal = the shell
+        console, Storage Volume = the disk's file-system face. Needs a wired xv6 (and, for the
+        Terminal, a running one)."""
+        dev = self.ctx.topology.devices[device_id]
+        xv6_id = self._xv6_for_peripheral(device_id)
+        if xv6_id is None:
+            self.ctx.log(f"Wire {dev.name} to an xv6 Machine first "
+                         "(long-press the Machine to see where peripherals attach).", "info")
+            return
+        xv6 = self.ctx.topology.devices[xv6_id]
+        ms = self._machine_state_for(xv6_id)
+        if dev.type_key == "storage_volume":
+            # the disk is the file system — reuse the Storage face against this Machine's FS reader
+            from .storage_lab import StorageLab
+            self._storage = StorageLab(self, self.theme, device=xv6, provider=ms.fs)
+            self._storage.show(); self._storage.raise_()
+            return
+        if not getattr(ms, "live", False) or not hasattr(ms.provider, "console"):
+            self.ctx.log(f"Start the topology (Run) so {xv6.name} is booted, then open "
+                         f"{dev.name}.", "info")
+            return
+        from .peripherals import TerminalView
+        self._peripheral = TerminalView(self, self.theme, ms.provider, dev)
+        self._peripheral.show(); self._peripheral.raise_()
+
+    def _open_machine_lab(self, device_id: str) -> None:
+        """Open the Machine Lab on an xv6 Machine — the OS workbench (scheduler face).
+
+        Renders from the shared MachineState (the bridge). When running, that state is fed by a
+        live provider reading the kernel over QEMU's GDB stub (Mac-side); offline it uses a
+        deterministic demo feed so the lab is always explorable."""
+        from .machine_lab import MachineLab
+        dev = self.ctx.topology.devices[device_id]
+        ms = self._machine_state_for(device_id)
+        self._machine_lab = MachineLab(
+            self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
+            on_console=lambda: self._open_terminal(device_id))
+        self._machine_lab.show()
+        self._machine_lab.raise_()
 
     def _open_console(self, device_id: str) -> None:
         """Open a service's web dashboard (Grafana, MinIO, RabbitMQ, …) in the browser.
@@ -1318,7 +1889,18 @@ class MainWindow(QMainWindow):
                          "info")
             return
         svc = _svc(dev.name)
-        if role == "machine":
+        if role == "xv6":                  # the real xv6 console is QEMU's serial (published TCP)
+            port = None
+            for ss in getattr(self, "_last_services", []):
+                if _svc(ss.name) == svc:
+                    port = next((p["host"] for p in ss.ports if p.get("label") == "serial"), None)
+                    break
+            if port is None:
+                self.ctx.log(f"{dev.name}: serial console not available yet.", "info")
+                return
+            cmd = f"nc localhost {port}"       # xv6 shell; Ctrl-P prints the process table
+            kind = "xv6 serial console"
+        elif role == "machine":
             cmd = f"docker compose exec {svc} sh"
             kind = "shell"
         elif role in ("router", "ovs"):   # real C gRouter CLI over its control socket
@@ -1430,6 +2012,10 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"Removed {', '.join(names)}.", "info")
 
     def _on_theme_changed(self, name: str) -> None:
+        # persist on EVERY theme switch (the toolbar palette menu used to change the theme
+        # live but never save it, so it reverted on restart)
+        self.ctx.settings.theme = name
+        self._persist_settings()
         self.canvas.scene_.set_theme(self.theme.theme)
         self._refresh_icons()
         self._update_status()
@@ -1441,8 +2027,13 @@ class MainWindow(QMainWindow):
     def _update_status(self) -> None:
         s = self.api.summary()
         running = getattr(self, "_running", False)
+        busy = running or getattr(self, "_stopping", False)
         self.status_conn.setText("  ● running" if running else "  ● idle")
         self.status_counts.setText(f"{s['devices']} devices · {s['links']} links   ")
         self.status_theme.setText(f"{self.theme.theme.name}   ")
         if hasattr(self, "_delete_act"):
             self._update_delete_enabled()        # disabled while running
+        if hasattr(self, "_nav_btn"):            # can't swap the project out from under a run
+            self._nav_btn.setEnabled(not busy)
+            self._nav_btn.setToolTip("Stop the topology before switching projects" if busy
+                                     else "Project — switch, create, save, or set the AI brief")

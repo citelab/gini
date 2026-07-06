@@ -13,6 +13,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect, QGraphicsItem, QGraphicsObject, QGraphicsScene,
@@ -255,7 +256,7 @@ class NodeItem(QGraphicsObject):
         t = self._scene.theme
         self._shadow.setColor(_qcolor(t.shadow))
         self._shadow.setBlurRadius(t.elevation + 10 * self._hover)
-        self._shadow.setOffset(0, 3 + 2 * self._hover)
+        self._shadow.setOffset(0, 4 + 2 * self._hover)
 
     # size tier (resizable elements grow taller; others stay at the base height) ----- #
     def _resizable(self) -> bool:
@@ -273,6 +274,12 @@ class NodeItem(QGraphicsObject):
         return (QRectF(NODE_W - 46, y, 19, 19), QRectF(NODE_W - 24, y, 19, 19))
 
     def _bump_size(self, delta: int) -> None:
+        # xv6's CPU count is fixed at boot (-smp), so changing vCPUs requires a stop + rerun —
+        # block the stepper while the machine is running (other elements resize live).
+        if self.inst.type_key == "xv6" and getattr(self._scene, "running", False):
+            self._scene.ctx.log("Stop the topology to change the xv6 Machine's vCPUs, "
+                                "then Run again.", "info")
+            return
         new = pricing.size_level(self._size() + delta)
         if new == self._size():
             return
@@ -321,7 +328,7 @@ class NodeItem(QGraphicsObject):
     def _set_hover(self, v: float) -> None:
         self._hover = v
         self._shadow.setBlurRadius(self._scene.theme.elevation + 10 * v)
-        self._shadow.setOffset(0, 3 + 2 * v)
+        self._shadow.setOffset(0, 4 + 2 * v)
         self.update()
 
     def paint(self, p: QPainter, opt, widget=None) -> None:
@@ -358,7 +365,7 @@ class NodeItem(QGraphicsObject):
             p.setPen(QPen(edge, 2.4))
             p.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), 11, 11)
 
-        p.setBrush(QBrush(_qcolor(t.panel2)))
+        p.setBrush(QBrush(_qcolor(t.node_fill())))
         border = accent if selected else _blend(_qcolor(t.line2), accent, hover)
         p.setPen(QPen(border, 2 if selected else 1.4))
         p.drawRoundedRect(rect, 10, 10)
@@ -773,6 +780,28 @@ class CanvasScene(QGraphicsScene):
         while y < rect.bottom():
             painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
             y += GRID
+        self._draw_vignette(painter, rect)
+
+    def _draw_vignette(self, painter: QPainter, rect: QRectF) -> None:
+        """A soft radial shade toward the viewport edges so the board reads as a
+        lit surface with depth. Anchored in scene coords (consistent across the
+        partial redraws drawBackground receives)."""
+        views = self.views()
+        if not views:
+            return
+        vp = views[0].viewport().rect()
+        center = views[0].mapToScene(vp.center())
+        corner = views[0].mapToScene(vp.topLeft())
+        radius = math.hypot(corner.x() - center.x(), corner.y() - center.y())
+        if radius <= 0:
+            return
+        edge = QColor(0, 0, 0, 78) if self.theme.dark else QColor(22, 30, 46, 30)
+        clear = QColor(edge.red(), edge.green(), edge.blue(), 0)
+        grad = QRadialGradient(center, radius)
+        grad.setColorAt(0.0, clear)
+        grad.setColorAt(0.58, clear)
+        grad.setColorAt(1.0, edge)
+        painter.fillRect(rect, QBrush(grad))
 
     # -- model -> scene ----------------------------------------------------- #
     def _on_device_added(self, device_id: str) -> None:
@@ -1321,6 +1350,10 @@ class CanvasView(QGraphicsView):
                 e.accept()
                 return
             self.clear_xray()                    # click anywhere else dismisses the overlay
+        # a left-click on empty canvas exits sticky modes (connect / explain). Emit BEFORE
+        # the connect handling so the mode is off by the time we get there.
+        if e.button() == Qt.LeftButton and self._node_at(e.pos()) is None:
+            self.ctx.bus.canvas_background_clicked.emit()
         # arm the long-press X-ray on a plain left-press over a node (cancelled by drag)
         if (e.button() == Qt.LeftButton and not self._connect_mode):
             node = self._node_at(e.pos())

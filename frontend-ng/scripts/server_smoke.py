@@ -4,7 +4,7 @@
 Exercises the exact gBuilder -> server protocol: log in, report capabilities, send a small
 all-Kata topology to RUN, poll metrics (startup times!), then STOP. Point it at your server:
 
-    cd frontend-ng
+    cd gbuilder
     python scripts/server_smoke.py  http://YOUR_HOST:10000  USERNAME  PASSWORD
 
 It uses GINI's own RemoteClient, so a green run here means gBuilder will work against this

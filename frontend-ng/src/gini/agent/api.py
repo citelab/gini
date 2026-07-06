@@ -113,6 +113,13 @@ class GiniAPI:
             y = base_y + 40.0 + el.row * 150.0
             d = self.add_device(el.type_key, x=x, y=y, properties=el.props or None)
             refs[el.ref] = d["id"]
+            # box containment (VPC / Subnet / Region): set parent_id so the compiler
+            # reads membership. Parents precede children in element order.
+            parent = getattr(el, "parent", "")
+            if parent and parent in refs:
+                dev = self.ctx.topology.devices.get(d["id"])
+                if dev is not None:
+                    dev.parent_id = refs[parent]
         links = 0
         for a, b in r.links:
             self.connect(refs[a], refs[b])

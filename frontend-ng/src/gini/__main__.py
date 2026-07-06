@@ -77,7 +77,12 @@ def main() -> int:
         print("EXPLAIN:", explanation)
         return 0
 
+    if not ({"--demo", "--selftest"} & args):
+        win.restore_last_project()                 # reopen last session's project
+
     win.show()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted
     return app.exec()
 
 

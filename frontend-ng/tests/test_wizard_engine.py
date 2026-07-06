@@ -8,6 +8,15 @@ def test_catalog_lists_elements_with_descriptions():
     assert "K8s Node" not in cat                       # hidden elements are excluded
 
 
+def test_coach_prompt_lists_detected_issues_and_forbids_invention():
+    issues = [{"level": "warn", "device": "R1", "message": "R1 isn't connected to anything."},
+              {"level": "warn", "device": "S1", "message": "S1 has no controller."}]
+    p = wz.coach_prompt(issues, "R1 (router), S1 (ovs)")
+    assert "R1 isn't connected to anything." in p and "S1 has no controller." in p
+    assert "not invent" in p.lower()                   # detection is deterministic, not the model's job
+    assert "prioriti" in p.lower()
+
+
 def test_starter_prompt_has_no_biasing_concrete_example():
     # a concrete example element makes weak models copy it for every goal — the prompt must
     # use a neutral placeholder instead

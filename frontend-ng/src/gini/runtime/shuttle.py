@@ -83,16 +83,56 @@ def _wan_iface() -> str | None:
     return None
 
 
-def setup_nat_gateway(cfg: dict) -> None:
-    """Turn this container into the lab's NAT gateway (the drawn Internet element):
-    enable IP forwarding, pin the default route out the external uplink, MASQUERADE the
-    fabric out to the world, and route the experiment supernet back via the local router
-    so replies reach the hosts behind us."""
+def _enable_ip_forward() -> None:
     try:
         with open("/proc/sys/net/ipv4/ip_forward", "w") as f:    # namespaced; NET_ADMIN ok
             f.write("1")
     except OSError:
         subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
+
+
+def vnf_commands(nf: str, rules: str, gw: str | None = None) -> list[list[str]]:
+    """The commands that make this container an inline VNF of kind `nf` (a network function
+    in the forwarding path). PURE — returns the argv lists; `setup_vnf` runs them — so the
+    rule-to-iptables translation is unit-testable without Docker.
+
+    firewall/block are real (iptables on the FORWARD chain); ids/cache/shaper forward-only
+    for now (no real data-plane backend yet — labeled illustrative in the UI)."""
+    cmds: list[list[str]] = []
+    if gw:                              # onward route so transit traffic continues to egress
+        cmds.append(["ip", "route", "replace", EXP_SUPERNET, "via", gw])
+    lines = [ln.strip() for ln in (rules or "").replace(",", "\n").splitlines() if ln.strip()]
+    if nf == "firewall":
+        for ln in lines:
+            toks = ln.split()
+            verb = toks[0].lower() if toks else ""
+            rest = toks[1:]
+            if verb in ("deny", "drop", "block") and rest:
+                if len(rest) >= 2 and rest[0].lower() == "from":
+                    cmds.append(["iptables", "-A", "FORWARD", "-s", rest[1], "-j", "DROP"])
+                else:
+                    cmds.append(["iptables", "-A", "FORWARD", "-d", rest[0], "-j", "DROP"])
+    elif nf == "block":
+        for ln in lines:
+            cmds.append(["iptables", "-A", "FORWARD", "-d", ln.split()[0], "-j", "DROP"])
+    return cmds
+
+
+def setup_vnf(cfg: dict) -> None:
+    """Inline VNF: forward between the interfaces and apply the network function."""
+    _enable_ip_forward()
+    for cmd in vnf_commands(cfg.get("nf", ""), cfg.get("nf_rules", ""), cfg.get("gw")):
+        subprocess.run(cmd, check=False)
+    print(f"[{cfg.get('name')}] VNF '{cfg.get('nf')}' inline (rules: {cfg.get('nf_rules')!r})",
+          file=sys.stderr)
+
+
+def setup_nat_gateway(cfg: dict) -> None:
+    """Turn this container into the lab's NAT gateway (the drawn Internet element):
+    enable IP forwarding, pin the default route out the external uplink, MASQUERADE the
+    fabric out to the world, and route the experiment supernet back via the local router
+    so replies reach the hosts behind us."""
+    _enable_ip_forward()
     subprocess.run(["ip", "route", "replace", "default", "via", WAN_GATEWAY], check=False)
     wan = _wan_iface()
     if wan:
@@ -129,6 +169,8 @@ def main() -> None:
 
     if cfg.get("gateway"):                       # the drawn Internet element = NAT gateway
         setup_nat_gateway(cfg)
+    elif cfg.get("nf"):                          # an inline VNF (network function in the path)
+        setup_vnf(cfg)
     elif cfg.get("fabric_default") and cfg.get("gw"):
         set_fabric_default(cfg["gw"])            # internet egresses through the fabric
     else:

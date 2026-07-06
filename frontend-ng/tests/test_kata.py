@@ -36,7 +36,7 @@ def test_kinstance_stays_out_of_vpcs():
     vpc = t.add_device("vpc")
     t.add_device("kinstance", parent_id=vpc.id)          # dropped inside a VPC box
     s = next(x for x in RuntimeCompiler().compile(t).services if x.type_key == "kinstance")
-    assert s.network == "gini"                            # forced flat, not the VPC net
+    assert s.networks == ["gini"]                         # forced flat, not the VPC net
 
 
 def test_compose_emits_kata_runtime_only_for_kinstance():

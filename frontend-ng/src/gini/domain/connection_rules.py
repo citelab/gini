@@ -47,6 +47,17 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("router", "firewall", "Filter traffic between trust zones with a firewall.", ()),
     ("firewall", "cloud", "Guard the boundary between the LAN and the Internet.", ()),
 
+    # ---- NFV / service function chaining --------------------------------- #
+    # A VNF is an inline network function: it sits BETWEEN two elements in the path, so it
+    # wires to hosts, switches, routers, the OVS, the Internet, and other VNFs (a chain).
+    ("vnf", "host", "Put this network function inline in front of a machine.", ()),
+    ("vnf", "switch", "Insert this network function on the path through a switch.", ()),
+    ("vnf", "router", "Chain this network function to a router in the path.", ()),
+    ("vnf", "ovs", "Attach this VNF to the SDN switch (steer flows through it).", ()),
+    ("vnf", "firewall", "Chain this VNF next to a firewall in the path.", ()),
+    ("vnf", "cloud", "Put this network function at the edge, before the Internet.", ()),
+    ("vnf", "vnf", "Chain VNFs in series — a Service Function Chain (e.g. firewall → IDS).", ()),
+
     # ---- software-defined networking ------------------------------------- #
     ("ovs", "controller", "An OpenFlow switch needs a controller to program its flow rules.",
      ("ovs",)),
@@ -78,6 +89,7 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      ("cloud_subnet",)),
     ("cloud_subnet", "WORKLOAD", "Place this workload inside the subnet.", ()),
     ("security_group", "WORKLOAD", "Attach a stateful firewall to this workload.", ()),
+    ("security_group", "DATASTORE", "Lock down this datastore — allow only the tiers you list.", ()),
     ("gateway", "vpc", "Give the VPC outbound Internet through this gateway.", ()),
     ("gateway", "cloud", "The gateway faces the public Internet.", ()),
 
@@ -116,7 +128,30 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("metrics", "load_balancer", "Scrape metrics from the load balancer.", ()),
     ("dashboard", "metrics", "A dashboard needs a metrics source to visualize.", ("dashboard",)),
     ("tracing", "APPISH", "Collect distributed traces from this service.", ()),
+
+    # ---- xv6 peripherals (xv6 has NO networking; you attach software devices) --- #
+    ("xv6", "terminal", "Attach a Terminal to type commands and watch xv6's console.", ()),
+    ("xv6", "storage_volume", "Attach the xv6 disk to inspect its file system.", ()),
 )
+
+
+# xv6 has no network stack, so unlike the advisory grammar above these ARE hard constraints:
+# an xv6 Machine wires ONLY to its peripherals, and a peripheral wires ONLY to an xv6 Machine.
+_XV6_PERIPHERALS = frozenset({"terminal", "storage_volume"})
+
+
+def link_blocked(a: str, b: str) -> str | None:
+    """A reason to REJECT an a–b link (a HARD constraint), or None to allow it."""
+    if a == "xv6" or b == "xv6":
+        other = b if a == "xv6" else a
+        if other != "xv6" and other not in _XV6_PERIPHERALS:
+            return ("xv6 has no networking — attach a Screen, Keyboard, or Storage Volume "
+                    "instead of a network connection.")
+    if a in _XV6_PERIPHERALS or b in _XV6_PERIPHERALS:
+        other = b if a in _XV6_PERIPHERALS else a
+        if other != "xv6":
+            return "An xv6 peripheral attaches only to an xv6 Machine."
+    return None
 
 
 @dataclass(frozen=True)

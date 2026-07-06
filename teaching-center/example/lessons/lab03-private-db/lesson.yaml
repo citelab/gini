@@ -1,0 +1,17 @@
+id: lab03-private-db
+title: Private database, public web
+time_limit: 25m
+attempts: 3
+help: warmer_colder
+persona: coach
+intent:
+  concept: vpc-networking
+  spirit: the database is reachable by the web tier but not from the Internet, by any mechanism
+brief: |
+  Make the web app (WEB1) reach the database (DB1), but keep the database hidden from the
+  Internet (NET). Both live in the VPC (VPC1).
+objectives:
+  - {id: in-boundary, say: Web and DB both live inside the VPC, kind: structural, check: "contains(VPC1, WEB1) and contains(VPC1, DB1)"}
+  - {id: reaches, say: Web app can reach the database, kind: behavioral, probe: "reach(WEB1 -> DB1) == ok"}
+  - {id: shielded, say: Database is unreachable from the Internet, kind: behavioral, probe: "reach(NET -> DB1) == fail"}
+complete_when: all

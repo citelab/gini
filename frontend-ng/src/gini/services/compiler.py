@@ -49,6 +49,14 @@ def _role(type_key: str) -> str:
         return "service"
     if type_key in ("instance", "container", "kinstance"):   # cloud compute — own bridge container
         return "compute"                                     # (kinstance = VM-isolated via Kata)
+    if type_key == "security_group":   # a policy, not a container — drives member iptables
+        return "secgroup"
+    if type_key == "vnf":              # NFV: an inline network function (forwarding container)
+        return "vnf"
+    if type_key == "xv6":              # standalone teaching kernel (QEMU-RISC-V) — no fabric
+        return "xv6"
+    if type_key in ("terminal", "storage_volume"):   # xv6 peripherals: pure UI, no
+        return "peripheral"                          # container; never emitted/addressed
     if type_key in GROUPS:
         return "group"
     return "machine"                   # host = a node on the simulated tun fabric
@@ -62,6 +70,13 @@ def _cpus_for(device) -> float:
     """CPU limit (vCPUs) for a device from its size tier — 0.5/1/2/4 for S/M/L/XL."""
     from ..domain import pricing
     return pricing.size_tier(pricing.size_level(getattr(device, "size", 1)))[1]
+
+
+def _xv6_harts(device) -> int:
+    """xv6 QEMU CPU count (-smp), capped at 2: S/M -> 1 hart, L/XL -> 2 harts. (xv6 SMP is kept
+    to 1-2 for a clear, legible scheduler demo.)"""
+    v = _cpus_for(device)                          # the shown vCPU count: 0.5/1/2/4
+    return max(1, min(2, int(round(v))))
 
 
 def _int(v, default: int) -> int:
@@ -157,6 +172,10 @@ class MachineSpec:
     fabric_default: bool = False   # send 0.0.0.0/0 INTO the fabric (egress via the gateway)
     fabric_gw: str | None = None   # for the gateway: the local router IP for the return path
     cpus: float = 0.0              # CPU limit from the size tier (0 = unset)
+    # --- inline VNF (NFV service function) ----------------------------------- #
+    forward: bool = False          # IP-forward between its interfaces (a transit node)
+    nf: str = ""                   # the network function kind: firewall|block|ids|cache|shaper
+    nf_rules: str = ""             # the function's config (e.g. firewall: "deny 10.0.3.0/24")
 
 
 @dataclass
@@ -184,6 +203,56 @@ def _valid_cidr(s: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+
+def _parse_ingress(text: str, sg_by_name: dict) -> list:
+    """Parse a Security Group's Ingress field into rule dicts {port, cidrs, svcs}. Rules are
+    `;`/newline separated, each like '5432 from app', '80 from anywhere', 'from 10.0.0.0/8'
+    or '443'. 'from <sg-name>' expands to that SG's member service names (SG→SG rules)."""
+    import re as _re
+    out = []
+    for raw in _re.split(r"[;\n]", text or ""):
+        s = raw.strip()
+        if not s:
+            continue
+        m = _re.match(r"(?i)^(?:port\s+)?(\d+|all|any|\*)?\s*(?:from\s+(.+))?$", s)
+        if not m:
+            continue
+        ptok = (m.group(1) or "").lower()
+        src = (m.group(2) or "anywhere").strip()
+        port = None if ptok in ("", "all", "any", "*") else int(ptok)
+        cidrs, svcs, low = [], [], src.lower()
+        if low in ("anywhere", "any", "all", "0.0.0.0/0", "public", "internet"):
+            cidrs.append("0.0.0.0/0")
+        elif "/" in src and _valid_cidr(src):
+            cidrs.append(src)
+        elif low in sg_by_name:
+            svcs.extend(sg_by_name[low])
+        else:
+            svcs.append(_svc(src))                 # treat an unknown name as a service/host
+        out.append({"port": port, "cidrs": cidrs, "svcs": svcs})
+    return out
+
+
+def _sg_script(rules: list) -> str:
+    """A stateful default-deny-inbound iptables script for one member's union of SG rules."""
+    L = [
+        "iptables -P INPUT DROP", "iptables -P FORWARD DROP", "iptables -P OUTPUT ACCEPT",
+        "iptables -A INPUT -i lo -j ACCEPT",
+        "iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        # the GINI telemetry agent is infra — always allow it (so the dashboard still polls)
+        "for ip in $(getent hosts cloudfabric 2>/dev/null | awk '{print $1}'); do "
+        'iptables -A INPUT -s "$ip" -j ACCEPT; done',
+    ]
+    for r in rules:
+        dport = f" --dport {r['port']}" if r.get("port") else ""
+        for cidr in r.get("cidrs", []):
+            L.append(f"iptables -A INPUT -p tcp{dport} -s {cidr} -j ACCEPT")
+        if r.get("svcs"):
+            names = " ".join(r["svcs"])
+            L.append(f"for ip in $(getent hosts {names} 2>/dev/null | awk '{{print $1}}'); "
+                     f'do iptables -A INPUT -p tcp{dport} -s "$ip" -j ACCEPT; done')
+    return "\n".join(L) + "\n"
 
 
 @dataclass
@@ -240,7 +309,7 @@ class ServiceSpec:
     privileged: bool = False
     files: dict[str, str] = field(default_factory=dict)
     cpus: float = 0.0              # CPU limit from the size tier (0 = unset)
-    network: str = "gini"         # the Docker network to attach to (a VPC's net, or "gini")
+    networks: list = field(default_factory=lambda: ["gini"])   # Docker networks to attach to
     runtime: str = ""             # OCI runtime override (e.g. "kata" for a Kata Instance)
 
 
@@ -266,13 +335,16 @@ class FabricSpec:
 
 @dataclass
 class NetworkSpec:
-    """A VPC rendered as a real isolated Docker bridge network. Containers on different
-    VPC networks cannot reach each other (the isolation a VPC actually provides); within
-    one they can. `cidr` is the network's subnet (the VPC's address space)."""
-    name: str                      # docker network name (the VPC's slug)
-    cidr: str                      # e.g. 10.0.0.0/16
-    label: str = ""                # the VPC's display name (for notes/UI)
+    """A VPC/subnet rendered as a real Docker bridge network. Containers on different VPC
+    networks can't reach each other; within one they can. A VPC's shared net is `internal`
+    (no internet of its own — the implicit VPC fabric); a per-VPC *egress* net is a normal
+    bridge that public-subnet members also join for real internet + host-published consoles.
+    `cidr` is the network's subnet (empty = let Docker auto-assign)."""
+    name: str                      # docker network name (the VPC's slug, or <slug>_egress)
+    cidr: str                      # e.g. 10.0.0.0/16, or "" for auto
+    label: str = ""                # display name (for notes/UI)
     region: str = ""
+    internal: bool = False         # True = no external connectivity (the VPC fabric net)
 
 
 @dataclass
@@ -287,6 +359,7 @@ class RuntimeConfig:
     k8s: list = field(default_factory=list)                 # real k3s clusters + manifests
     faas: list = field(default_factory=list)                # serverless functions (shared runtime)
     networks: list = field(default_factory=list)            # VPCs as isolated Docker networks
+    firewalls: list = field(default_factory=list)           # security-group iptables per member
     subnets: dict[int, str] = field(default_factory=dict)   # seg -> cidr
     notes: list[str] = field(default_factory=list)
 
@@ -297,6 +370,7 @@ class RuntimeConfig:
                 {"name": _svc(m.name), "gw": m.gw,
                  "gateway": m.gateway, "fabric_default": m.fabric_default,
                  "fabric_gw": m.fabric_gw, "cpus": m.cpus,
+                 "forward": m.forward, "nf": m.nf, "nf_rules": m.nf_rules,
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "tap": f"gini{idx}",
                              "port": i.ep.wiring(docker)}
                             for idx, i in enumerate(m.ifaces)]}
@@ -340,7 +414,7 @@ class RuntimeConfig:
                 {"name": _svc(s.name), "type": s.type_key, "image": s.image,
                  "summary": s.summary, "command": s.command, "env": s.env,
                  "ports": s.ports, "volumes": s.volumes, "privileged": s.privileged,
-                 "files": s.files, "cpus": s.cpus, "network": s.network,
+                 "files": s.files, "cpus": s.cpus, "networks": s.networks,
                  "runtime": s.runtime}
                 for s in self.services
             ],
@@ -349,9 +423,11 @@ class RuntimeConfig:
             "k8s": [{"name": _svc(k.name), "image": k.image,
                      "deployments": k.deployments} for k in self.k8s],
             "faas": self.faas,        # serverless: [{name, handler, code}] -> one faas container
-            # VPCs as isolated Docker networks (empty -> only the flat `gini` bridge).
+            # VPC/subnet Docker networks (empty -> only the flat `gini` bridge).
             "networks": [{"name": n.name, "cidr": n.cidr, "label": n.label,
-                          "region": n.region} for n in self.networks],
+                          "region": n.region, "internal": n.internal} for n in self.networks],
+            # security groups -> per-member iptables (a sidecar in each member's netns).
+            "firewalls": self.firewalls,
         }
 
 
@@ -568,9 +644,11 @@ class RuntimeCompiler:
         seg_gateway: dict[int, str] = {}
         # interfaces on each segment: (device_id, link)
         iface_ip: dict[tuple, str] = {}
-        # routers first (so .1 is the gateway), then machines
+        # routers (and inline VNFs) first (so .1 is the gateway), then machines. A VNF is a
+        # forwarding node in the path, so it's addressed like a router and becomes the
+        # gateway on its point-to-point segments — neighbours then route THROUGH it.
         ordered = sorted(kept, key=lambda l: 0)
-        for did_role in ("router", "machine"):
+        for did_role in ("router", "vnf", "machine"):
             for l in kept:
                 seg = seg_ids[seg_of_link[l.id]]
                 base = f"10.0.{seg + 1}."
@@ -580,7 +658,7 @@ class RuntimeCompiler:
                     key = (l.id, end)
                     if key in iface_ip:
                         continue
-                    if did_role == "router":
+                    if did_role in ("router", "vnf"):
                         n = seg_rtr.get(seg, 0) + 1
                         seg_rtr[seg] = n
                         ip = base + str(n)            # .1, .2 ...
@@ -605,7 +683,7 @@ class RuntimeCompiler:
             for l in kept:
                 seg = seg_ids[seg_of_link[l.id]]
                 for end in (l.source_id, l.target_id):
-                    if role[end] == "router" and (l.id, end) in iface_ip:
+                    if role[end] in ("router", "vnf") and (l.id, end) in iface_ip:
                         seg_gateway.setdefault(seg, iface_ip[(l.id, end)])
 
         # the Internet node's IP on each segment it touches; if a segment has an
@@ -665,6 +743,39 @@ class RuntimeCompiler:
                     name=name[did], ifaces=m_ifaces[did], gw=m_gw.get(did),
                     fabric_default=have_internet and bool(m_gw.get(did)),
                     cpus=_cpus_for(topo.devices[did])))   # size tier -> CPU limit
+
+        # inline VNFs: a forwarding container that applies a network function between its
+        # segments (the Internet-element pattern, but fabric<->fabric + an NF instead of NAT).
+        # Addressed like a router above, so it's the gateway on its point-to-point segments;
+        # `gw` is a next hop toward egress (a router/gateway on its OTHER segment).
+        v_ifaces: dict[str, list] = {}
+        v_gw: dict[str, str] = {}
+        v_order: list[str] = []
+        for l in kept:
+            seg = seg_ids[seg_of_link[l.id]]
+            for end in (l.source_id, l.target_id):
+                if role[end] != "vnf":
+                    continue
+                key = (l.id, end)
+                if key not in iface_ip:
+                    continue
+                midx += 1
+                my_ip = iface_ip[key]
+                if end not in v_ifaces:
+                    v_ifaces[end] = []
+                    v_order.append(end)
+                v_ifaces[end].append(IfaceSpec(ip=my_ip + "/24", mac=mac(seg, 3, midx),
+                                               ep=eps[key], link_id=l.id))
+                g = seg_gateway.get(seg)
+                if g and g != my_ip and end not in v_gw:   # onward route toward egress
+                    v_gw[end] = g
+        vprops = {d.id: getattr(d, "properties", {}) or {} for d in topo.devices.values()}
+        for did in v_order:
+            p = vprops[did]
+            cfg.machines.append(MachineSpec(
+                name=name[did], ifaces=v_ifaces[did], gw=v_gw.get(did),
+                forward=True, nf=(p.get("Kind") or "firewall"),
+                nf_rules=(p.get("Rules") or ""), cpus=_cpus_for(topo.devices[did])))
 
         # switches (a Hub is the same fabric node in flood-all mode — no MAC learning)
         for did, r in role.items():
@@ -730,7 +841,7 @@ class RuntimeCompiler:
                 name=d.name, type_key=d.type_key, image=svc.image,
                 summary=svc.summary, command=command, env=env, ports=ports,
                 cpus=_cpus_for(d),                    # size tier -> CPU limit
-                network=vpc_net_of.get(d.id, "gini")))   # VPC isolation (or flat bridge)
+                networks=vpc_net_of.get(d.id, ["gini"])))   # VPC/subnet nets (or flat bridge)
 
         # cloud compute (instance / container) — a plain bridge container the student can
         # log into and run an app on, reaching services by name. Image from the element's
@@ -756,14 +867,36 @@ class RuntimeCompiler:
                 name=d.name, type_key=d.type_key, image=image, summary=summary,
                 command=command, env={}, ports=[], cpus=_cpus_for(d),    # size -> CPU
                 # Kata Instances stay flat (no VPC) and run under the kata OCI runtime.
-                network="gini" if is_kata else vpc_net_of.get(d.id, "gini"),
+                networks=["gini"] if is_kata else vpc_net_of.get(d.id, ["gini"]),
                 runtime="kata" if is_kata else ""))
+
+        # xv6 teaching kernel — a standalone QEMU-RISC-V machine that boots a real kernel and
+        # exposes its GDB stub (port 1234) so the Machine Lab's bridge can read and steer it.
+        # No fabric wiring (xv6 is standalone); the time-slice tier seeds the kernel quantum.
+        for d in topo.devices.values():
+            if role.get(d.id) != "xv6":
+                continue
+            p = props[d.id]
+            cfg.services.append(ServiceSpec(
+                name=d.name, type_key="xv6", image="gini-xv6:latest",
+                summary="xv6 teaching kernel (QEMU-RISC-V); in-container agent serves live state.",
+                command=[], env={"XV6_QUANTUM": str(p.get("Timeslice", "1")),
+                                 "XV6_CPUS": str(_xv6_harts(d))},   # size stepper -> real harts
+                # agent HTTP (the Machine Lab bridge talks here) + serial (the human console).
+                ports=[{"container": 5000, "host": host_port, "label": "agent",
+                        "web": False, "path": ""},
+                       {"container": 4444, "host": host_port + 1, "label": "serial",
+                        "web": False, "path": ""}],
+                cpus=_cpus_for(d), networks=["gini"]))
+            host_port += 2
 
         # make proxies / load balancers actually route to their drawn backends
         self._wire_proxies(cfg, topo, role, name, props)
         # serverless: gather Functions into the shared faas runtime + route API Gateways to it
         self._build_faas(cfg, topo, role, name, props)
         self._wire_api_gateway(cfg, topo, role, name, props)
+        # security groups: per-member iptables (default-deny inbound + the listed rules)
+        self._build_security_groups(cfg, topo, role, name, props)
         # auto-wire an observability stack so Prometheus/Grafana actually show data
         host_port = self._wire_observability(cfg, host_port)
         # auto-add the cloud-fabric telemetry agent if there are cloud services to watch
@@ -926,26 +1059,52 @@ class RuntimeCompiler:
 
     @classmethod
     def _build_networks(cls, cfg, topo, name) -> dict:
-        """Turn each VPC (that has members) into an isolated Docker network and return a
-        {device_id -> docker-net-name} map for every element inside a VPC. Membership is by
-        containment (parent_id), walking up through a Subnet to its VPC. VPC subnets are
-        kept unique so Docker won't reject overlapping bridges."""
+        """VPCs + Subnets as real Docker networks (cloud-networking Phase 2).
+
+        A VPC is an **internal** bridge with its CIDR that every member joins — the implicit
+        VPC fabric: members reach each other by name, but it has no internet of its own. A
+        **public** subnet additionally puts its members on a per-VPC **egress** bridge (real
+        internet + host-published consoles); a **private** subnet's members stay on the
+        internal VPC net only — no internet, not reachable from the host (what 'private'
+        means). Membership + tier come from containment: device → Subnet(Tier) → VPC.
+        Returns {device_id -> [docker networks to join]}; non-members default to ["gini"].
+        """
         parent = {d.id: d.parent_id for d in topo.devices.values()}
         tkey = {d.id: d.type_key for d in topo.devices.values()}
+        props = {d.id: getattr(d, "properties", {}) or {} for d in topo.devices.values()}
 
-        def vpc_ancestor(did):
+        def ancestors(did):
+            """(vpc_id, subnet_id) — the nearest VPC and Subnet boxes above `did`."""
+            vpc = sub = None
             seen, cur = set(), parent.get(did)
             while cur and cur not in seen:
                 seen.add(cur)
-                if tkey.get(cur) == "vpc":
-                    return cur
+                t = tkey.get(cur)
+                if t == "cloud_subnet" and sub is None:
+                    sub = cur
+                if t == "vpc":
+                    vpc = cur
+                    break
                 cur = parent.get(cur)
-            return None
+            return vpc, sub
 
-        members = {d.id: vpc_ancestor(d.id) for d in topo.devices.values()}
-        members = {did: v for did, v in members.items() if v}    # only those in a VPC
-        if not members:
+        from ..domain.grouping import BOX_TYPES        # VPC/Subnet/Region are containers,
+        member_vpc, member_sub = {}, {}                #   not workloads — never "members"
+        for d in topo.devices.values():
+            if d.type_key in BOX_TYPES:
+                continue
+            v, s = ancestors(d.id)
+            if v is not None:
+                member_vpc[d.id] = v
+                member_sub[d.id] = s
+        if not member_vpc:
             return {}
+
+        def is_public(did) -> bool:
+            s = member_sub.get(did)
+            if s is None:
+                return True            # in a VPC but not in a subnet -> default public (egress)
+            return (props[s].get("Tier", "private") or "private").strip().lower() == "public"
 
         used: set[str] = set()
 
@@ -961,13 +1120,62 @@ class RuntimeCompiler:
                     return c
             return "10.249.0.0/16"
 
-        for vdid in dict.fromkeys(members.values()):             # stable order, deduped
+        vpc_has_public = {member_vpc[did] for did in member_vpc if is_public(did)}
+        net_of_vpc = {}        # vpc_id -> (shared_internal_name, egress_name | None)
+        for vdid in dict.fromkeys(member_vpc.values()):           # stable, deduped
             v = topo.devices[vdid]
-            p = getattr(v, "properties", {}) or {}
+            slug = _svc(name[vdid])
             cfg.networks.append(NetworkSpec(
-                name=_svc(name[vdid]), cidr=unique_cidr(p.get("CIDR")),
-                label=v.name, region=p.get("Region", "")))
-        return {did: _svc(name[vdid]) for did, vdid in members.items()}
+                name=slug, cidr=unique_cidr(props[vdid].get("CIDR")),
+                label=v.name, region=props[vdid].get("Region", ""), internal=True))
+            egress = None
+            if vdid in vpc_has_public:
+                egress = f"{slug}_egress"
+                cfg.networks.append(NetworkSpec(
+                    name=egress, cidr="", label=f"{v.name} (public egress)", internal=False))
+            net_of_vpc[vdid] = (slug, egress)
+
+        out = {}
+        for did, vdid in member_vpc.items():
+            shared, egress = net_of_vpc[vdid]
+            nets = [shared]
+            if egress and is_public(did):
+                nets.append(egress)
+            out[did] = nets
+        return out
+
+    @classmethod
+    def _build_security_groups(cls, cfg, topo, role, name, props) -> None:
+        """Security Groups → a stateful per-member firewall (the classic web→app→db least
+        privilege). An SG wired to a workload/datastore makes it default-deny inbound (only
+        stateful replies + the GINI agent allowed) and opens the ports its Ingress lists,
+        from a CIDR or from the members of another SG. Realized as an iptables init sidecar
+        that shares each member's network namespace (so stock images need no changes)."""
+        sgs = [d for d in topo.devices.values() if d.type_key == "security_group"]
+        if not sgs:
+            return
+        nbrs: dict[str, list] = {did: [] for did in topo.devices}
+        for l in topo.links.values():
+            nbrs[l.source_id].append(l.target_id)
+            nbrs[l.target_id].append(l.source_id)
+
+        def members_of(sg):
+            return [nb for nb in nbrs[sg.id] if role.get(nb) in ("service", "compute")]
+
+        sg_by_name: dict[str, list] = {}        # "from <sg>" -> that SG's member svc names
+        for sg in sgs:
+            ms = [_svc(name[m]) for m in members_of(sg)]
+            sg_by_name[_svc(sg.name)] = ms
+            sg_by_name[(sg.name or "").strip().lower()] = ms
+
+        per_member: dict[str, list] = {}        # member did -> union of its SGs' rules
+        for sg in sgs:
+            rules = _parse_ingress(props.get(sg.id, {}).get("Ingress", ""), sg_by_name)
+            for m in members_of(sg):
+                per_member.setdefault(m, []).extend(rules)
+
+        for did, rules in per_member.items():
+            cfg.firewalls.append({"member": _svc(name[did]), "script": _sg_script(rules)})
 
     # event sources that can trigger a Function: element type_key -> client port. The
     # queue/topic/subject the runtime subscribes to is named after the function itself.
@@ -1177,11 +1385,16 @@ def validate(topo: Topology) -> list[dict]:
         nbrs[l.source_id].append(l.target_id)
         nbrs[l.target_id].append(l.source_id)
 
-    # 1. isolated devices (degree 0) — not part of any network
+    # 1. isolated devices (degree 0) — not part of any network. xv6 runs standalone (it
+    #    has no networking), and its peripherals are optional, so none of them are "islands".
+    tkey = {d.id: d.type_key for d in topo.devices.values()}
     for did, r in role.items():
-        if r != "group" and not nbrs[did]:
-            issues.append({"level": "warn", "device": name[did],
-                           "message": f"{name[did]} isn't connected to anything."})
+        if r == "group" or nbrs[did]:
+            continue
+        if tkey[did] in ("xv6", "terminal", "storage_volume"):
+            continue
+        issues.append({"level": "warn", "device": name[did],
+                       "message": f"{name[did]} isn't connected to anything."})
 
     # 2. machines with no gateway (no router on any of their subnets) — islands.
     #    A host on a switched/SDN L2 domain is fine without a router (it reaches its

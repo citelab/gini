@@ -85,9 +85,13 @@ def _do_import (name):
       # print a stack trace so that it can be fixed.
       # Sorting out the two cases is an ugly hack.
 
-      if exc.name and name.endswith(exc.name):
-        # It was the one we tried to import itself. (Case 1)
-        # If we have other names to try, try them!
+      if exc.name and (name == exc.name or name.startswith(exc.name + ".")):
+        # The candidate import path itself doesn't exist — the missing module is
+        # `name` or a parent package of it (e.g. trying "pox.gini.samples.switch"
+        # when there is no "pox.gini"; the ext component lives at bare
+        # "gini.samples.switch"). (Case 1) Try the next candidate name.
+        # NB: the old test `name.endswith(exc.name)` only caught the whole-name
+        # case and mis-handled prefix misses, aborting before the ext fallback.
         return do_import2(base_name, names_to_try)
       elif name.endswith(".py"):
         print("Import by filename is not supported.")

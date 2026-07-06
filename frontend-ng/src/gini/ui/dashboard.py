@@ -116,6 +116,15 @@ class Dashboard(QWidget):
         self._by_cat = dict(bill.get("by_category", {}))
         self._render()
 
+    def reset(self) -> None:
+        """Zero the session meter — used when a different project is loaded so the sticker
+        doesn't carry the previous experiment's accrued bill."""
+        self._accrued = 0.0
+        self._running = False
+        self._start = None
+        self._tick.stop()
+        self._render()
+
     def start(self, rate_per_hr: float) -> None:
         """Begin billing: reset the meter and accrue at `rate_per_hr`."""
         self._rate = float(rate_per_hr)

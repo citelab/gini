@@ -123,6 +123,11 @@ int main(int ac, char *av[])
 
 	// Initialize OpenFlow packet processor
 	if (rconfig.openflow) {
+		// Allocate + default the flowtable HERE, in the main thread, BEFORE starting the
+		// openflow worker and (further down) the flowtable-timeout thread. This used to run
+		// lazily inside the worker thread (openflowPacketProcessor), so the timeout thread
+		// could start first and dereference a still-NULL `flowtable` -> SIGSEGV at startup.
+		openflow_pkt_proc_init(pcore);
 		rconfig.openflow_worker = PktCoreOpenflowWorkerInit(pcore);
 	}
 

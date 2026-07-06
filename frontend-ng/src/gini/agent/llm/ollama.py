@@ -50,10 +50,11 @@ def _to_ollama_message(m: Message) -> dict:
 class OllamaBackend:
     def __init__(self, url: str = "http://localhost:11434", model: str = "llama3.1",
                  timeout: float = 120.0, think: bool = False, stream: bool = True,
-                 num_ctx: int = 8192,
+                 num_ctx: int = 8192, embed_model: str = "all-minilm",
                  transport: Callable[[str, dict], dict] | None = None) -> None:
         self.url = url.rstrip("/")
         self.model = model
+        self.embed_model = embed_model     # small embed model for L2 semantic recall (/api/embed)
         self.timeout = timeout
         # Ollama's DEFAULT context window is only 2048 tokens — far smaller than the model's
         # real window — and it SILENTLY TRUNCATES the prompt when exceeded. Set it explicitly
@@ -82,6 +83,18 @@ class OllamaBackend:
             return True
         except (urllib.error.URLError, OSError):
             return False
+
+    # -- embeddings (L2 semantic recall) ------------------------------------- #
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed one or more texts via Ollama's `/api/embed` (same server as chat). Returns a
+        list of vectors aligned with `texts`; [] on any failure so callers degrade to lexical."""
+        if not texts:
+            return []
+        try:
+            data = self._transport("/api/embed", {"model": self.embed_model, "input": texts})
+        except Exception:
+            return []
+        return data.get("embeddings") or []
 
     # -- chat ---------------------------------------------------------------- #
     def chat(self, messages: list[Message], tools: list[dict] | None = None,

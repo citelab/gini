@@ -24,6 +24,15 @@ class ModuleType:
     kind: str           # base | inline | custom
     description: str
     default_params: dict = field(default_factory=dict)
+    # How this VNF maps onto the REAL gRouter data-plane module (gpipe): (module_name,
+    # arg_param_key or None). None => illustrative (no real backend yet — labeled as such).
+    gpipe: tuple | None = None
+
+    @property
+    def real(self) -> bool:
+        """True if this service function has a real gRouter data-plane backend (deployable
+        via `gpipe add …`), False if it's an illustrative teaching stub."""
+        return self.gpipe is not None
 
 
 BASE: list[ModuleType] = [
@@ -32,24 +41,32 @@ BASE: list[ModuleType] = [
     ModuleType("rewrite", "Rewrite", "send", "blue", "base", "Dec TTL, checksum, next-hop MAC"),
 ]
 
+# Inline VNFs (service functions). `gpipe` marks the ones with a REAL gRouter data-plane
+# backend (acl/nat/counter/block); classify/tap are illustrative until a backend exists.
 INLINE: list[ModuleType] = [
     ModuleType("acl", "ACL / Firewall", "firewall", "amber", "inline",
-               "Stateless packet filter", {"deny": "10.0.3.0/24"}),
+               "Stateless packet filter (drop a CIDR)", {"deny": "10.0.3.0/24"},
+               gpipe=("acl", "deny")),
     ModuleType("nat", "NAT", "gateway", "indigo", "inline",
-               "Source / destination translation", {"mode": "snat"}),
-    ModuleType("rate", "Rate limit", "queue", "green", "inline",
-               "Token-bucket policer", {"rate": "10mbps"}),
+               "Source NAT / masquerade to an address", {"ip": "203.0.113.1"},
+               gpipe=("nat", "ip")),
+    ModuleType("block", "Block IP", "firewall", "red", "inline",
+               "Drop packets to a destination IP (native Zig module)", {"ip": "10.0.3.5"},
+               gpipe=("block", "ip")),
+    ModuleType("rate", "Rate / meter", "queue", "green", "inline",
+               "Per-packet counter / token-bucket meter", {}, gpipe=("counter", None)),
     ModuleType("classify", "QoS classifier", "layout", "teal", "inline",
-               "Tag traffic into classes", {}),
+               "Tag traffic into classes (illustrative)", {}),
     ModuleType("tap", "Tap / capture", "link", "purple", "inline",
-               "Mirror to a collector (original continues)", {}),
+               "Mirror to a collector (illustrative)", {}),
 ]
 
 CUSTOM: list[ModuleType] = [
-    ModuleType("lua", "Lua module", "compile", "cyan", "custom",
-               "Per-packet Lua hook", {"script": "function process(pkt, ctx)\n  return CONTINUE\nend"}),
-    ModuleType("native", "Native module", "controller", "purple", "custom",
-               "Zig / C module", {}),
+    ModuleType("lua", "Lua VNF", "compile", "cyan", "custom",
+               "Per-packet Lua hook (a function you write)",
+               {"script": "function process(pkt, ctx)\n  return CONTINUE\nend"}),
+    ModuleType("native", "Native VNF", "controller", "purple", "custom",
+               "Zig / C module you write", {}),
 ]
 
 MODULE_BY_KEY: dict[str, ModuleType] = {m.key: m for m in (*BASE, *INLINE, *CUSTOM)}
@@ -80,6 +97,29 @@ class RouterProgram:
     def __init__(self) -> None:
         self.mode = "legacy"             # 'legacy' | 'openflow'
         self.inline: list[ModuleInstance] = []
+        self.classifier = ""             # which traffic enters the chain ("" = all)
+
+    # SFC: classifier + deploy to the real gRouter -------------------------- #
+    def set_classifier(self, expr: str) -> None:
+        self.classifier = (expr or "").strip()
+
+    def deploy_commands(self) -> list[str]:
+        """The `gpipe` argument-lines that program THIS chain into the running gRouter (each
+        is sent as `gpipe <cmd>`): clear, then add each service function that has a real
+        data-plane backend, in order. Illustrative modules are skipped."""
+        cmds = ["clear"]
+        for inst in self.inline:
+            g = inst.type.gpipe
+            if g is None:
+                continue
+            name, argkey = g
+            arg = inst.params.get(argkey) if argkey else None
+            cmds.append(f"add {name} {arg}" if arg else f"add {name}")
+        return cmds
+
+    def illustrative(self) -> list[ModuleInstance]:
+        """Inline functions with no real gRouter backend yet (shown, not deployed)."""
+        return [i for i in self.inline if i.type.gpipe is None]
 
     # editing -------------------------------------------------------------- #
     def add(self, type_key: str) -> ModuleInstance:

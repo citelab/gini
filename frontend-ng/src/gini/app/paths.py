@@ -46,10 +46,41 @@ def save_config(data: dict) -> None:
         pass
 
 
+# -- recent projects (last-opened + MRU list), kept out of config.json so a settings
+#    write never clobbers them --------------------------------------------------- #
+def recents_path() -> Path:
+    return gini_home() / "recents.json"
+
+
+def load_recents() -> dict:
+    try:
+        data = json.loads(recents_path().read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_recents(data: dict) -> None:
+    ensure_dirs()
+    try:
+        recents_path().write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
+def remember_project(path: str, *, limit: int = 8) -> None:
+    """Record `path` as the last-opened project and push it to the front of the MRU list."""
+    data = load_recents()
+    mru = [p for p in data.get("list", []) if p != path]
+    mru.insert(0, path)
+    save_recents({"last": path, "list": mru[:limit]})
+
+
 # settings fields that are persisted to / loaded from config.json
 PERSISTED_KEYS = (
     "theme", "reduced_motion",
     "llm_enabled", "llm_url", "llm_model", "llm_think",
     "auto_internet", "name_prefixes", "prices",
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
+    "show_help_on_launch",
 )

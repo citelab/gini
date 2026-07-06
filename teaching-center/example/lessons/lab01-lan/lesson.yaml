@@ -1,0 +1,18 @@
+id: lab01-lan
+title: A basic switched LAN
+time_limit: 20m
+attempts: 3
+help: warmer_colder
+persona: coach
+intent:
+  concept: networking-basics
+  spirit: two hosts on a switched LAN reach each other, with a router as the gateway
+brief: |
+  Build a switched LAN: two hosts (M1, M2) on a switch (S1), with a router (R1) as the
+  gateway off the subnet.
+objectives:
+  - {id: has-switch, say: There is a switch, kind: structural, check: "exists(switch)"}
+  - {id: two-hosts, say: At least two hosts, kind: structural, check: "count(host) >= 2"}
+  - {id: has-gw, say: There is a router (gateway), kind: structural, check: "exists(router)"}
+  - {id: reach, say: The two hosts are connected, kind: structural, check: "connected(M1, M2)"}
+complete_when: all

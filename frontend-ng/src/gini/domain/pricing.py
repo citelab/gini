@@ -17,6 +17,7 @@ DEFAULT_RATES: dict[str, float] = {
     "kinstance": 14.0,       # Kata Instance — a real microVM, so it costs more than a VM image
     "container": 5.0,
     "host": 2.0,             # a plain Machine / end host
+    "xv6": 2.0,              # xv6 teaching kernel under QEMU-RISC-V (a single-CPU learning VM)
     # --- serverless (cheap, scale-to-zero; pay per use, not per idle hour) --- #
     "function": 1.0,         # a handler in the shared FaaS runtime
     "api_gateway": 5.0,      # a managed API front door (Traefik)
@@ -31,6 +32,7 @@ DEFAULT_RATES: dict[str, float] = {
     "ovs": 3.0,              # OpenFlow switch (a gRouter in OF mode)
     "controller": 4.0,       # SDN controller
     "firewall": 2.0,
+    "vnf": 3.0,              # a network-function container in the path (NFV)
     "switch": 1.0,
     "wap": 1.5,              # access point
     "hub": 0.5,
@@ -87,15 +89,15 @@ def resizable(type_key: str) -> bool:
     """Which elements expose a size knob — things that run a real workload container
     and meaningfully have a capacity (compute + managed services). Not switches/hubs."""
     from ..services.cloud_catalog import is_service   # lazy: keep domain below services
-    return is_service(type_key) or type_key in ("instance", "kinstance", "container", "host")
+    return is_service(type_key) or type_key in ("instance", "kinstance", "container", "host", "xv6")
 
 
 # Dashboard breakdown groups. Order is the display order.
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "Compute": ("instance", "kinstance", "container", "host"),
+    "Compute": ("instance", "kinstance", "container", "host", "xv6"),
     "Serverless": ("function", "api_gateway"),
     "Kubernetes": ("k8s_cluster", "pod", "k8s_node", "instance_group", "registry"),
-    "Networking": ("router", "ovs", "controller", "firewall", "switch",
+    "Networking": ("router", "ovs", "controller", "firewall", "vnf", "switch",
                    "wap", "hub", "cloud"),
     "Services": ("database", "nosql", "object_store", "stream", "queue",
                  "messaging", "cache", "load_balancer", "proxy", "web_app"),
@@ -115,6 +117,7 @@ BILLABLE = frozenset(_CAT_OF)
 FREE = frozenset({
     "vpc", "cloud_subnet", "region",              # grouping boundaries
     "security_group", "gateway", "block_volume",  # not-yet-real placeholders
+    "terminal", "storage_volume",                 # xv6 peripherals (software devices, no cost)
 })
 
 

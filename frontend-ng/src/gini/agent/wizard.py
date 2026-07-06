@@ -46,11 +46,50 @@ def starter_prompt(goal: str, catalog: str) -> str:
     # first element it happens to mention while reasoning.
     return (f'A student wants to build this and nothing else: "{goal}".\n\n'
             f"Choose the single best FIRST element strictly from this list:\n{catalog}\n\n"
-            "Pick the ONE element that is the foundation for THAT specific goal, matching its "
-            "domain (e.g. a networking goal needs networking gear, not cloud/Kubernetes). "
+            "Match the goal's DOMAIN:\n"
+            "- An IP / LAN / subnet / routing / Ethernet / VLAN goal is a COMPUTER-NETWORKING "
+            "goal — start with a Router or Switch. Do NOT start with a VPC, Kubernetes, or "
+            "any cloud element just because the goal contains the word 'network'.\n"
+            "- A cloud / Kubernetes / serverless / database / web-service goal is a CLOUD "
+            "goal — start with the cloud element it's built around.\n"
+            "Pick the ONE element that is the foundation for THAT specific goal. "
             "You may reason briefly, but END with ONE final line in EXACTLY this form, "
             "copying a real element name from the list:\n"
             "    PICK: <element name> - <short reason it fits this goal>")
+
+
+def coach_prompt(issues, canvas_summary: str) -> str:
+    """Coach mode: the issues are DETECTED deterministically (the advisory lint) — the model
+    only coaches. `issues` = [{level, device, message}]. The model must prioritize + explain,
+    never invent problems and never claim it's fine when issues were found."""
+    lines = "\n".join(f"- {(i.get('device') or 'topology')}: {i.get('message', '')}"
+                      for i in issues)
+    return (f"You are reviewing a student's GINI network/cloud topology and coaching them on "
+            f"what to fix.\nCanvas: {canvas_summary or '(empty)'}\n\n"
+            f"These problems were detected (ground truth — do NOT invent any others, and do "
+            f"NOT say the topology is fine):\n{lines}\n\n"
+            "In 2-4 short sentences, tell the student what to fix FIRST and why, in plain "
+            "language, referring to devices by name. Prioritize and guide — don't just "
+            "restate the list.")
+
+
+def os_coach_prompt(events, card: str, remaining: int) -> str:
+    """OS Coach: measured, Socratic help grounded in the LIVE xv6 kernel state. `events` are
+    detected deterministically by the StateWatcher (ground truth — the model coaches, it does
+    not invent). The model gives ONE nudge, never the full answer, so the help is a hint-ladder
+    rather than an offload — the 'measured' delivery on top of the state-grounded moat."""
+    ev = "\n".join(f"- {e.kind}: {e.detail}" for e in events) \
+        or "- (no new events — the run looks steady right now)"
+    return (
+        "You are Coaching a student through an experiment on a REAL xv6 kernel running inside "
+        "GINI. Below is the live kernel state (ground truth) and the teachable moments GINI "
+        "detected in it. Coach SOCRATICALLY: ask ONE guiding question, or give ONE targeted "
+        "hint, that leads the student to NOTICE and reason about what is happening. Do NOT dump "
+        "the full explanation, do NOT write code, and do NOT invent processes or values that "
+        "aren't in the state. Refer to processes by pid.\n\n"
+        f"Live kernel state:\n{card}\n\nDetected moments:\n{ev}\n\n"
+        f"(The student has {remaining} Coach hint(s) left this session, so make it count.)\n"
+        "Reply with 2-3 sentences: one nudge.")
 
 
 def starter_retry_prompt(goal: str, names: str) -> str:

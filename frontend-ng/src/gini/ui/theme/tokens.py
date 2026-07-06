@@ -42,14 +42,21 @@ class Theme:
     grid: str
     # category accents (icon recolor + node accent), keyed by Accent.value
     accents: dict[str, str] = field(default_factory=dict)
+    # fill for element cards ON the canvas — a lighter, theme-tinted surface so nodes
+    # pop off the background (empty = fall back to panel2, i.e. the dark themes' behaviour)
+    node: str = ""
     # depth + motion
     shadow: str = "rgba(0,0,0,120)"
-    elevation: int = 16          # node drop-shadow blur radius
+    elevation: int = 22          # node drop-shadow blur radius (deeper = more depth)
     dur_fast: int = 120          # ms — hover/press
     dur_base: int = 200          # ms — transitions
 
     def accent_for(self, key: str) -> str:
         return self.accents.get(key, self.accent)
+
+    def node_fill(self) -> str:
+        """The canvas element-card fill (see `node`)."""
+        return self.node or self.panel2
 
 
 _CATEGORY_DARK = {
@@ -94,6 +101,7 @@ LIGHT = Theme(
     danger="#cf222e", danger_soft="rgba(207,34,46,26)",
     grid="rgba(20,30,50,16)",
     shadow="rgba(60,80,120,50)",
+    node="#fdfeff",
     accents=_CATEGORY_LIGHT,
 )
 
@@ -129,7 +137,55 @@ HIGH_CONTRAST = Theme(
 )
 
 
-THEMES: dict[str, Theme] = {t.name.lower(): t for t in (DARK, LIGHT, BRAND, HIGH_CONTRAST)}
+# --- light family: warmer/cooler tints of the Light theme ------------------- #
+SAND = Theme(
+    name="Sand", dark=False,
+    bg="#f4efe4", bg2="#ece5d6", bg3="#e3dac7", panel="#fdfaf3", panel2="#f4efe4",
+    line="#ddd2be", line2="#cabca3",
+    text="#2b2418", muted="#5d5240", faint="#7e715c",
+    accent="#b46e28", accent2="#985c1c", accent_soft="rgba(180,110,40,30)",
+    success="#4c7a2f", success_soft="rgba(76,122,47,26)",
+    warning="#9a6700", warning_soft="rgba(154,103,0,26)",
+    danger="#c0392b", danger_soft="rgba(192,57,43,26)",
+    grid="rgba(90,70,35,16)",
+    shadow="rgba(90,70,40,55)",
+    node="#fffdf6",
+    accents=_CATEGORY_LIGHT,
+)
+
+BLUE = Theme(
+    name="Blue", dark=False,
+    bg="#eef2f9", bg2="#e4ecf6", bg3="#d9e3f2", panel="#ffffff", panel2="#f3f7fc",
+    line="#d2ddec", line2="#becde2",
+    text="#111a2b", muted="#3c4a63", faint="#5b6a85",
+    accent="#2f6fe0", accent2="#2560c8", accent_soft="rgba(47,111,224,28)",
+    success="#1a7f37", success_soft="rgba(26,127,55,26)",
+    warning="#9a6700", warning_soft="rgba(154,103,0,26)",
+    danger="#cf222e", danger_soft="rgba(207,34,46,26)",
+    grid="rgba(30,60,120,16)",
+    shadow="rgba(40,70,130,55)",
+    node="#fafdff",
+    accents=_CATEGORY_LIGHT,
+)
+
+GREEN = Theme(
+    name="Green", dark=False,
+    bg="#eef4ee", bg2="#e4eee4", bg3="#d8e7d8", panel="#fbfdfb", panel2="#f0f7f0",
+    line="#d1e0d1", line2="#bcd0bc",
+    text="#14231a", muted="#3e5245", faint="#5d7163",
+    accent="#2e8b57", accent2="#237045", accent_soft="rgba(46,139,87,28)",
+    success="#1a7f37", success_soft="rgba(26,127,55,26)",
+    warning="#9a6700", warning_soft="rgba(154,103,0,26)",
+    danger="#cf222e", danger_soft="rgba(207,34,46,26)",
+    grid="rgba(30,90,50,16)",
+    shadow="rgba(40,90,60,50)",
+    node="#f9fefb",
+    accents=_CATEGORY_LIGHT,
+)
+
+
+THEMES: dict[str, Theme] = {t.name.lower(): t for t in
+                            (DARK, LIGHT, BRAND, HIGH_CONTRAST, SAND, BLUE, GREEN)}
 # friendly aliases
 THEMES["brand"] = BRAND
 

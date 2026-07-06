@@ -102,22 +102,16 @@ QFrame#TbGroup QToolButton:pressed {{ background: {t.bg3}; }}
 QFrame#TbGroup QToolButton:checked {{
     background: {t.accent_soft}; color: {t.accent}; border-color: {t.accent}; }}
 
-/* Run = green primary pill, Stop = red-tinted pill — the toolbar's two key actions.
-   Labelled (icon + text) so they read as buttons, not saturated icon squares. */
-QToolButton#RunBtn {{
-    background: {t.success}; color: #ffffff; font-weight: 600;
-    border: 1px solid {t.success}; border-radius: 8px;
-    margin: 0 2px; padding: 6px 16px 6px 12px;
+/* Run/Stop is now a single custom-painted circular RunButton (ui/run_button.py). */
+
+/* Project navigator — a centred chip in the toolbar that names the current project. */
+QToolButton#NavBtn {{
+    background: {t.panel2}; color: {t.text}; font-weight: 600;
+    border: 1px solid {t.line}; border-radius: 9px;
+    padding: 5px 14px 5px 10px;
 }}
-QToolButton#RunBtn:hover {{ background: {t.success}; color: #ffffff;
-                            border-color: {t.text}; }}
-QToolButton#RunBtn:pressed {{ background: {t.success}; color: #ffffff; }}
-QToolButton#StopBtn {{
-    background: {t.danger_soft}; color: {t.danger}; font-weight: 600;
-    border: 1px solid {t.danger_soft}; border-radius: 8px;
-    margin: 0 2px; padding: 6px 16px 6px 12px;
-}}
-QToolButton#StopBtn:hover {{ border-color: {t.danger}; }}
+QToolButton#NavBtn:hover {{ border-color: {t.accent}; color: {t.accent}; }}
+QToolButton#NavBtn::menu-indicator {{ image: none; width: 0; }}
 
 QPushButton#Primary {{ background: {t.success}; color: #ffffff; border: none; font-weight: 500; }}
 QPushButton#Primary:hover {{ background: {t.success}; }}

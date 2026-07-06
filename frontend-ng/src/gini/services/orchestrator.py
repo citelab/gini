@@ -165,6 +165,10 @@ COPY dataplane/ /app/dataplane/
 CMD ["python", "-m", "dataplane.cloudfabric_agent"]
 """
 
+_DOCKERFILE_SG = """FROM alpine:3.20
+RUN apk add --no-cache iptables
+"""
+
 _DOCKERFILE_FAAS = """FROM python:3.12-slim
 # event-trigger clients: RabbitMQ (queue), NATS (pub/sub), Kafka/Redpanda (stream).
 # kafka-python-ng is the maintained fork that supports Python 3.12.
@@ -468,8 +472,14 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     (work / "docker" / "Dockerfile.fabric").write_text(_DOCKERFILE_FABRIC)
     (work / "docker" / "Dockerfile.cloudfabric").write_text(_DOCKERFILE_CLOUDFABRIC)
     (work / "docker" / "Dockerfile.faas").write_text(_DOCKERFILE_FAAS)
+    (work / "docker" / "Dockerfile.sg").write_text(_DOCKERFILE_SG)
     (work / "run_fabric.py").write_text(_RUN_FABRIC)
     (work / "run_faas.py").write_text(_RUN_FAAS)
+    # security-group iptables scripts, bind-mounted into each member's firewall sidecar
+    for fw in config.firewalls:
+        d = work / "sg"
+        d.mkdir(exist_ok=True)
+        (d / f"{fw['member']}.sh").write_text(fw["script"])
     # generated service config (e.g. observability: prometheus.yml, grafana provisioning)
     for s in config.services:
         for rel, content in s.files.items():
@@ -500,12 +510,15 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         net += [f"  {WAN_NET}:", "    driver: bridge",
                 "    ipam:", "      config:",
                 f"        - subnet: {WAN_SUBNET}", f"          gateway: {WAN_GATEWAY}"]
-    # each VPC is its own isolated bridge with its CIDR — containers on different VPC
-    # networks can't reach each other (real cloud isolation); elements with no VPC stay
-    # on the flat `gini` bridge above.
+    # VPC/subnet networks. A VPC's shared net is `internal` (the implicit VPC fabric — no
+    # internet of its own); the per-VPC `_egress` net is a normal bridge that public-subnet
+    # members also join for real internet + host-published consoles. Elements with no VPC
+    # stay on the flat `gini` bridge above.
     vpc_nets = rt.get("networks", [])
     for vnet in vpc_nets:
         net += [f"  {vnet['name']}:", "    driver: bridge"]
+        if vnet.get("internal"):
+            net.append("    internal: true")
         if vnet.get("cidr"):
             net += ["    ipam:", "      config:", f"        - subnet: {vnet['cidr']}"]
     lines = ["name: gini-lab", "networks:", *net, "services:"]
@@ -570,8 +583,10 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         lines += [
             f"  {s['name']}:",
             f"    image: {s['image']}",
-            f"    networks: [{s.get('network', 'gini')}]",     # its VPC net, or flat gini
+            f"    networks: [{', '.join(s.get('networks') or ['gini'])}]",   # VPC/subnet nets, or flat gini
         ]
+        if s.get("type") == "xv6":            # locally-built kernel image, never on a registry
+            lines.append("    pull_policy: never")
         if s.get("runtime"):                                  # Kata Instance -> VM isolation
             lines.append(f"    runtime: {s['runtime']}")
         if s.get("command"):
@@ -600,7 +615,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         # the agent polls every cloud service for the dashboard, so it must reach into each
         # VPC — multi-home it onto gini + every VPC network (GINI's own infra, not a tenant
         # resource, so crossing VPC boundaries here is intentional).
-        fab_nets = ", ".join(["gini"] + [v["name"] for v in vpc_nets])
+        # the agent reaches members over each VPC's internal fabric net (private members
+        # live ONLY there); it doesn't need the public egress nets.
+        fab_nets = ", ".join(["gini"] + [v["name"] for v in vpc_nets if v.get("internal")])
         lines += [
             "  cloudfabric:",
             "    build: { context: ., dockerfile: docker/Dockerfile.cloudfabric }",
@@ -624,6 +641,23 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             f"      FAAS_CONFIG: '{json.dumps({'functions': faas_funcs})}'",
         ]
 
+    # security groups: a tiny iptables sidecar per firewalled member. It shares the member's
+    # network namespace (network_mode: service:<member>) so its rules filter the member's
+    # traffic without changing the member's image; it installs the rules once and exits.
+    for fw in rt.get("firewalls", []):
+        member = fw["member"]
+        lines += [
+            f"  {member}_fw:",
+            "    build: { context: ., dockerfile: docker/Dockerfile.sg }",
+            f"    network_mode: \"service:{member}\"",
+            "    cap_add: [NET_ADMIN]",
+            f"    depends_on: [{member}]",
+            "    restart: \"no\"",
+            "    volumes:",
+            f'      - "./sg/{member}.sh:/sg/run.sh:ro"',
+            '    command: ["sh", "/sg/run.sh"]',
+        ]
+
     # real Kubernetes clusters — k3s in a container (privileged). Pods are scheduled by
     # k3s inside it; gBuilder applies manifests + reads state via `kubectl exec`.
     for k in rt.get("k8s", []):
@@ -645,8 +679,8 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         # faithful mode: a plain host with no internet path of its own drops its docker
         # default route, so it genuinely can't reach the world (the management NIC isn't a
         # back door). Hosts that route to a drawn Internet element keep/replace it instead.
-        m["cut_default"] = (not auto_internet
-                            and not m.get("fabric_default") and not m.get("gateway"))
+        m["cut_default"] = (not auto_internet and not m.get("fabric_default")
+                            and not m.get("gateway") and not m.get("nf"))  # VNFs are transit
         nets = f"[gini, {WAN_NET}]" if m.get("gateway") else "[gini]"
         lines += [
             f"  {m['name']}:",

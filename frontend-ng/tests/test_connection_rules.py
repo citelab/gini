@@ -54,3 +54,32 @@ def test_every_partner_is_a_real_element_type():
         assert src in REGISTRY, src
         for partner in cr.partner_types(src):
             assert partner in REGISTRY, partner
+
+
+def test_xv6_offers_only_its_peripherals():
+    partners = cr.partner_types("xv6")
+    assert partners == {"terminal", "storage_volume"}
+
+
+def test_link_blocked_rejects_xv6_to_network():
+    # xv6 has no networking — wiring it to a switch/router/host is a HARD reject
+    for net in ("switch", "router", "host", "hub", "cloud"):
+        assert cr.link_blocked("xv6", net)          # a reason string
+        assert cr.link_blocked(net, "xv6")          # symmetric
+
+
+def test_link_blocked_allows_xv6_to_peripherals():
+    for p in ("terminal", "storage_volume"):
+        assert cr.link_blocked("xv6", p) is None
+        assert cr.link_blocked(p, "xv6") is None
+
+
+def test_link_blocked_peripheral_needs_an_xv6():
+    # a peripheral attaches ONLY to an xv6 Machine, never to a switch or another peripheral
+    assert cr.link_blocked("terminal", "switch")
+    assert cr.link_blocked("terminal", "storage_volume")
+
+
+def test_link_blocked_leaves_normal_links_alone():
+    assert cr.link_blocked("host", "switch") is None
+    assert cr.link_blocked("pod", "k8s_cluster") is None

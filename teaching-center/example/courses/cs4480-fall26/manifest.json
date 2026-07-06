@@ -1,0 +1,18 @@
+[
+  {
+    "id": "lab01-lan",
+    "title": "A basic switched LAN",
+    "release": "2026-09-07",
+    "due": "2026-09-14",
+    "attempts": 3,
+    "pack_hash": "b8bdcdcc4c9bdb433cde334a7e5f916a99456d6f19d5a9473a2d426dcc818275"
+  },
+  {
+    "id": "lab03-private-db",
+    "title": "Private database, public web",
+    "release": "2026-09-14",
+    "due": "2026-09-21",
+    "attempts": 3,
+    "pack_hash": "ae56421bff5f899a82a239c9000f15f38b4af050bc31a9d1a1ffdb57a598fcd1"
+  }
+]

@@ -15,8 +15,12 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "../../../frontend-ng/src")))
+# the app package lives in the sibling app dir's src/ (gbuilder/, formerly frontend-ng/)
+for _cand in ("../../../gbuilder/src", "../../../frontend-ng/src"):
+    _p = os.path.abspath(os.path.join(os.path.dirname(__file__), _cand))
+    if os.path.isdir(_p):
+        sys.path.insert(0, _p)
+        break
 
 from gini.domain.topology import Topology          # noqa: E402
 from gini.services.compiler import RuntimeCompiler  # noqa: E402

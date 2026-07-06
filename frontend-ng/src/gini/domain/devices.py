@@ -23,6 +23,7 @@ class Category(str, Enum):
     WORKLOAD = "Workload & Testing"
     SERVERLESS = "Serverless"
     EXTERNAL = "External"
+    XV6 = "xv6"                       # the OS-course family: the xv6 kernel + its peripherals
 
 
 # Color-category keys; the theme maps each to a concrete accent color per theme.
@@ -92,15 +93,55 @@ _DEVICES: list[DeviceType] = [
     ),
     DeviceType(
         "host", "Machine", Category.COMPUTE, "host", Accent.PURPLE,
-        "Virtual host / end machine (UML or container backed).",
+        "Virtual host / end machine — a Linux container on the fabric.",
         backend_kind="vm",
         default_properties={"Name": "", "OS": "linux", "Interfaces": "1"},
+    ),
+    DeviceType(
+        "xv6", "xv6 Machine", Category.XV6, "host", Accent.RED,
+        "A real teaching kernel: xv6 (MIT 6.1810) running on QEMU-RISC-V. Not a container — a "
+        "genuine OS you can watch and steer. Double-click it to open the Machine Lab: observe the "
+        "scheduler, process table, CPU registers, memory and kernel stack live, and slow the "
+        "time-slice to watch context switches. Runs standalone; xv6 has no networking, so instead "
+        "of network links you attach peripherals — a Terminal and a Storage Volume.",
+        backend_kind="xv6",
+        default_properties={"Name": "", "Timeslice": "1", "CPUs": "1"},
+        property_choices={"Timeslice": ("1", "5", "10", "100")},
+    ),
+    # --- xv6 peripherals (software devices attached to the xv6 Machine) -------
+    DeviceType(
+        "terminal", "Terminal", Category.XV6, "dashboard", Accent.RED,
+        "A console for an xv6 Machine — one shell terminal (a screen and keyboard in one, like a "
+        "real tty). Connect it to an xv6 Machine and double-click to open it: type xv6 commands "
+        "(ls, cat, echo, spin 10 &, …) and watch their output inline. Up-arrow recalls history; "
+        "`help` lists what you can run.",
+        default_properties={"Name": ""},
+        max_links=1,
+    ),
+    DeviceType(
+        "storage_volume", "Storage Volume", Category.XV6, "database", Accent.RED,
+        "The xv6 disk. Connect it to an xv6 Machine and double-click to open the Storage view — "
+        "the on-disk layout, inodes, buffer cache and write-ahead log. (xv6 has a single custom "
+        "file system; alternate file systems are an advanced student project.)",
+        default_properties={"Name": "", "File system": "xv6fs"},
+        property_choices={"File system": ("xv6fs",)},
+        max_links=1,
     ),
     DeviceType(
         "firewall", "Firewall", Category.NETWORKING, "firewall", Accent.BLUE,
         "Packet-filtering firewall node.",
         backend_kind="vr",
         default_properties={"Name": "", "Policy": "default-deny"},
+    ),
+    DeviceType(
+        "vnf", "VNF (Service Function)", Category.NETWORKING, "controller", Accent.TEAL,
+        "A Virtualized Network Function: a container that runs a network function (firewall, "
+        "IDS, cache, shaper) and is inserted INLINE in the forwarding path — wire it between "
+        "two elements and traffic flows through it. Pick the function in 'Kind'; give its "
+        "config in 'Rules' (e.g. firewall: 'deny 10.0.3.0/24'; block: '10.0.3.5'). Chain "
+        "several in series (host → firewall → IDS → NAT) for a Service Function Chain (SFC).",
+        default_properties={"Name": "", "Kind": "firewall", "Rules": "deny 10.0.3.0/24"},
+        property_choices={"Kind": ("firewall", "block", "ids", "cache", "shaper")},
     ),
     DeviceType(
         "wap", "Access Point", Category.NETWORKING, "wifi", Accent.GREEN,
@@ -184,14 +225,20 @@ _DEVICES: list[DeviceType] = [
     ),
     DeviceType(
         "cloud_subnet", "Cloud Subnet", Category.CLOUD_NETWORK, "cloud_subnet", Accent.INDIGO,
-        "A subnet within a VPC (public or private).",
+        "A subnet inside a VPC. Drop elements in it. A *public* subnet's members reach the "
+        "internet (and their consoles are reachable); a *private* subnet's members stay "
+        "inside the VPC only — reachable by other VPC members, but with no internet.",
         is_container=True,
         default_properties={"Name": "", "CIDR": "10.0.1.0/24", "Tier": "private"},
+        property_choices={"Tier": ("private", "public")},
     ),
     DeviceType(
         "security_group", "Security Group", Category.CLOUD_NETWORK, "security_group", Accent.INDIGO,
-        "Stateful virtual firewall for cloud instances.",
-        default_properties={"Name": "", "Ingress": "", "Egress": "allow-all"},
+        "A stateful, default-deny firewall. Connect it to the workloads/datastores it "
+        "protects, then list inbound rules in Ingress (one per line): '<port> from <source>', "
+        "where source is a CIDR, 'anywhere', or another Security Group's name — e.g. "
+        "'80 from anywhere' or '5432 from app-sg'. Only listed ports open; outbound is allowed.",
+        default_properties={"Name": "", "Ingress": "80 from anywhere", "Egress": "allow-all"},
     ),
     DeviceType(
         "gateway", "Gateway", Category.CLOUD_NETWORK, "gateway", Accent.INDIGO,
@@ -347,7 +394,7 @@ REGISTRY: dict[str, DeviceType] = {d.key: d for d in _DEVICES}
 DEFAULT_PREFIXES: dict[str, str] = {
     # networking
     "router": "R", "switch": "S", "hub": "H", "host": "M", "firewall": "FW",
-    "wap": "AP", "cloud": "NET",
+    "wap": "AP", "cloud": "NET", "vnf": "VNF",
     # sdn
     "ovs": "OVS", "controller": "OFC",
     # compute / containers

@@ -76,3 +76,23 @@ def test_click_connect_with_stale_first_endpoint_does_not_raise():
                               button=Qt.LeftButton))
     assert len(w.ctx.topology.links) == before          # no bogus link created
     assert view._connect_first == b                     # recovered: b is the new first
+
+
+def test_add_link_hard_blocks_xv6_to_network():
+    """xv6 has no networking: wiring it to a switch must be rejected at the context choke
+    point (all canvas connect paths funnel through ctx.add_link)."""
+    import pytest
+
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(app)
+    k = w.api.add_device("xv6", x=80, y=80)["id"]
+    s = w.api.add_device("switch", x=420, y=360)["id"]
+    before = len(w.ctx.topology.links)
+    with pytest.raises(ValueError):
+        w.ctx.add_link(k, s)
+    assert len(w.ctx.topology.links) == before          # no link created
+
+    # but a peripheral attaches fine
+    term = w.api.add_device("terminal", x=420, y=80)["id"]
+    w.ctx.add_link(k, term)
+    assert len(w.ctx.topology.links) == before + 1

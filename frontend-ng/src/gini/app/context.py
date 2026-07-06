@@ -22,11 +22,14 @@ class EventBus(QObject):
     device_resized = Signal(str)      # device id (size tier changed -> maybe live CPU update)
     link_added = Signal(str)          # link id
     selection_changed = Signal(object)  # device id or None
+    canvas_background_clicked = Signal()  # left-click on empty canvas (exit sticky modes)
+    llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
     theme_changed = Signal(str)       # theme name
     log = Signal(str, str)            # level, message
     assistant_message = Signal(str, str)  # role, text
     run_state = Signal(bool, str)     # ok, message (from the orchestrator worker thread)
     device_activated = Signal(str)    # device id (double-clicked -> open terminal/console)
+    machine_events = Signal(str)      # xv6 device id — new teachable kernel events (proactive Coach)
     device_delete_requested = Signal(str)  # device id (right-click -> Delete)
     warning_explain_requested = Signal(str)  # device id (clicked its lint warning badge)
     device_logs_requested = Signal(str)      # device id (right-click -> View logs)
@@ -68,6 +71,8 @@ class Settings:
     high_contrast: bool = False
     sound: bool = False
     tutor_mode: bool = False
+    # onboarding: the Cue Cards feature tour
+    show_help_on_launch: bool = True
     # self-hosted LLM (Ollama by default)
     llm_enabled: bool = False
     llm_url: str = "http://localhost:11434"
@@ -99,6 +104,9 @@ class AppContext:
         self.addressing: dict[str, dict] = {}   # device name -> {interfaces:[…]}
         self.warnings: dict[str, list] = {}     # device name -> [lint messages]
         self.mission = None                     # active Wizard objective (domain.missions.Mission)
+        # live xv6 kernel state per Machine (domain.machine_state.MachineState) — the bridge the
+        # Machine Lab renders from and the Ask GINI agent reads for OS help. device_id -> state.
+        self.machine_states: dict = {}
 
     # convenience wrappers that emit the right events ----------------------- #
     def add_device(self, type_key: str, x: float = 0.0, y: float = 0.0, **kw):
@@ -108,6 +116,14 @@ class AppContext:
         return inst
 
     def add_link(self, source_id: str, target_id: str, label: str = ""):
+        # xv6 has no networking: hard-block xv6<->non-peripheral (and peripheral<->non-xv6) links.
+        from ..domain.connection_rules import link_blocked
+        s, t = self.topology.devices.get(source_id), self.topology.devices.get(target_id)
+        if s is not None and t is not None:
+            reason = link_blocked(s.type_key, t.type_key)
+            if reason:
+                self.log(reason, "info")
+                raise ValueError(reason)
         link = self.topology.add_link(source_id, target_id, label)
         self.bus.link_added.emit(link.id)
         self.bus.topology_changed.emit()
