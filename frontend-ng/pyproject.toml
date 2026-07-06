@@ -12,6 +12,7 @@ license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "GINI Toolkit" }]
 dependencies = [
     "PySide6-Essentials>=6.6",
+    "PyYAML>=6.0",          # reads authored Lesson packs (Missions / Teaching Center)
 ]
 
 [project.optional-dependencies]
