@@ -34,6 +34,19 @@ class AgentGameMaster:
         self.agent = MissionAgent(self.runner, self.bb, lesson)
         self.reasoning = self.agent.reasoning
         self._prev_met: int | None = None
+        self._get_world = None                          # bound by the controller (for the explainer)
+
+    def bind_world(self, getter) -> None:
+        """The controller hands us a way to read the live world, so the Reasoning persona can ground
+        its 'why is this red' diagnosis in the actual board (the predicate explainer)."""
+        self._get_world = getter
+
+    def _sync_world(self) -> None:
+        if self._get_world is not None:
+            try:
+                self.bb._world = self._get_world()
+            except Exception:
+                self.bb._world = None
 
     # -- narration (Reasoning persona, grounded in mission intent) ----------- #
     def brief_line(self) -> str:
@@ -79,6 +92,7 @@ class AgentGameMaster:
         if self.llm is None:
             return Move("quiet")
         self.bb.ingest_results(results)                     # sync truth from the mission's own eval
+        self._sync_world()                                  # give the explainer the live board
 
         if utterance:                                       # a question → full trio (grounded + audited)
             return self.agent.turn(utterance=utterance)

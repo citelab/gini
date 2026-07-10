@@ -5,6 +5,7 @@ spirit: a database is reachable by the web tier but NOT from the Internet — by
   group, or firewall placement; the mechanism is free.
 summary: Keep a database reachable from the web tier but hidden from the Internet.
 parent: cloud/vpc
+complete_when: at_least(3)
 provides:
 - vpc-boundary
 - web-endpoint
@@ -19,6 +20,14 @@ objectives:
 - id: shielded
   say: The database is not reachable from the Internet
   check: not path(cloud, database)
+- id: live-reach
+  say: 'Live: the web app actually reaches the database (Run to check)'
+  kind: behavioral
+  probe: reach(web_app -> database) == ok
+- id: live-shield
+  say: 'Live: the database refuses the Internet (Run to check)'
+  kind: behavioral
+  probe: reach(cloud -> database) == fail
 misconceptions:
 - Thinking 'private' means unreachable by everything (still reachable inside).
 - Exposing the DB to the Internet to 'make it work'.

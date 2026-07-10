@@ -96,9 +96,17 @@ class TeachingCenterClient:
         return sorted(out, key=lambda m: _epoch(m.get("release")) or 0, reverse=True)
 
     def fetch_lesson(self, lesson_id: str, *, expected_hash: str = ""):
-        """Return a parsed Lesson; verify the pack hash (when known) and cache on success. Uses
-        the on-disk cache when offline. A hash mismatch is rejected (never trust a corrupt pack)."""
+        """Return a playable Lesson; verify the pack hash (when known) and cache on success. Uses the
+        on-disk cache when offline. A hash mismatch is rejected.
+
+        The pack may be a **composition-by-reference** (references local fragment ids) or a
+        self-contained lesson. A composition that references fragments/roles this GINI doesn't have
+        fails gracefully (the version/existence check), returning None rather than mis-grading."""
         import hashlib
+
+        import yaml
+
+        from ..domain import composition as _comp
         status, obj = self._transport("GET", f"/lessons/{lesson_id}/pack", None)
         text = obj if isinstance(obj, str) else (obj or {}).get("yaml") if isinstance(obj, dict) else None
         if status == 200 and text:
@@ -109,7 +117,17 @@ class TeachingCenterClient:
             text = self._cache_read(f"pack_{lesson_id}.yaml")
         if not text:
             return None
-        return _lesson.from_yaml(text)
+        try:
+            spec = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return None
+        try:
+            if _comp.is_composition(spec):
+                return _comp.from_composition(spec, lesson_id=lesson_id)
+            return _lesson.from_yaml(text)
+        except (_comp.CompositionError, _lesson.LessonError):
+            return None                          # incompatible / invalid pack → don't play a broken one
+
 
     # -- profile (git-style checkout / checkin) ----------------------------- #
     def _profile_path(self) -> Path:

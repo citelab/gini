@@ -29,6 +29,7 @@ class Archetype:
     misconceptions: tuple[str, ...] = ()
     complete_when: str = "all"
     difficulty: dict = field(default_factory=dict)
+    stage: dict = field(default_factory=dict)
 
 
 # Type-based objectives need no name bindings, so archetypes launch with no params.
@@ -38,7 +39,8 @@ DEMO_PARAMS: dict[str, dict] = {}
 def _arch_of(frag) -> Archetype:
     return Archetype(id=frag.id, teaches=frag.teaches, spirit=frag.spirit, summary=frag.summary,
                      params=(), objectives=tuple(frag.objectives),
-                     misconceptions=tuple(frag.misconceptions), complete_when=frag.complete_when)
+                     misconceptions=tuple(frag.misconceptions), complete_when=frag.complete_when,
+                     stage=dict(frag.stage))
 
 
 def get(archetype_id: str) -> Archetype | None:

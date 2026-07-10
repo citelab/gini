@@ -125,3 +125,31 @@ def gradebook(submissions) -> Gradebook:
         cur = rows.setdefault(student, {}).get(lesson_id, "")
         rows[student][lesson_id] = better_band(cur, s.get("band", ""))
     return Gradebook(rows=rows)
+
+
+def official_from_composition(spec, submission) -> OfficialResult:
+    """Re-grade a submission against a COMPOSITION (assemble the referenced fragments locally, then
+    apply the structural authority). The Center's server side of the M4/M6 bridge."""
+    from . import composition as _comp
+    lesson = _comp.from_composition(spec)
+    return official_result(lesson, submission)
+
+
+def gradebook_official(submissions, resolve_lesson) -> Gradebook:
+    """The authoritative gradebook: each submission is SERVER re-graded (structural authority) before
+    aggregation, so a tampered client band is downgraded. `resolve_lesson(lesson_id) -> Lesson`
+    (return None to fall back to the client-claimed band, e.g. an unknown lesson)."""
+    rows: dict[str, dict[str, str]] = {}
+    for s in submissions:
+        student = s.get("student", "")
+        lesson_id = s.get("lesson_id", "")
+        if not student or not lesson_id:
+            continue
+        les = resolve_lesson(lesson_id)
+        try:
+            band = official_result(les, s).band if les is not None else s.get("band", "")
+        except Exception:
+            band = s.get("band", "")
+        cur = rows.setdefault(student, {}).get(lesson_id, "")
+        rows[student][lesson_id] = better_band(cur, band)
+    return Gradebook(rows=rows)

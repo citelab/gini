@@ -10,9 +10,9 @@ to `refresh`. Theme is optional (sensible fallback colors) so the widget renders
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..domain import objectives as _obj
@@ -47,6 +47,8 @@ def _fmt_clock(remaining) -> str:
 
 
 class MissionPanel(QWidget):
+    run_requested = Signal()          # the student pressed Run/Check → run behavioral probes
+
     def __init__(self, theme=None, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
@@ -89,6 +91,15 @@ class MissionPanel(QWidget):
         self._obj_box.setSpacing(4)
         lay.addLayout(self._obj_box)
 
+        # Run/Check — resolves behavioral objectives against the live runtime. Shown only when the
+        # lesson HAS behavioral objectives (nothing to run otherwise).
+        self._run_btn = QPushButton("▶  Run / Check")
+        self._run_btn.setObjectName("Accent")
+        self._run_btn.setCursor(Qt.PointingHandCursor)
+        self._run_btn.setVisible(False)
+        self._run_btn.clicked.connect(self.run_requested.emit)
+        lay.addWidget(self._run_btn)
+
         self._band = QLabel("")
         self._band.setStyleSheet("font-size:14px; font-weight:700;")
         self._band.setVisible(False)
@@ -117,6 +128,7 @@ class MissionPanel(QWidget):
         self._brief.setStyleSheet(f"color:{self._c('muted')};")
         self._render_objectives([_obj.ObjectiveResult(o.id, o.say, o.kind, _obj.UNMET)
                                  for o in les.objectives])
+        self._run_btn.setVisible(any(o.is_behavioral() for o in les.objectives))
         self._sync_header()
 
     def set_step(self, text: str, index: int, total: int) -> None:

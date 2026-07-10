@@ -166,9 +166,10 @@ def assemble(core_ids, *, genre: str | None = None, level: int | None = None, le
     summary = brief or " ".join(f.summary for f in chosen if f.summary)
     quest_tag = f"[Quest L{level} · {genre}] "
 
+    cw = overrides.get("complete_when") or getattr(primary, "complete_when", "all")
     lesson = _lesson.Lesson(
         id=lesson_id, title=title or primary.summary, brief=quest_tag + summary, objectives=objs,
-        steps=steps, complete_when=overrides.get("complete_when", "all"),
+        steps=steps, stage=dict(getattr(primary, "stage", {}) or {}), complete_when=cw,
         time_limit_s=_lesson.parse_duration(overrides.get("time_limit", "20m")),
         attempts=int(overrides.get("attempts", 3)), help=help_level, persona=persona,
         intent=intent, archetype=primary.id, genre=genre, level=level,

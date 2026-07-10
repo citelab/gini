@@ -174,7 +174,8 @@ def from_archetype(archetype_id: str, params: dict, *, id: str, title: str = "",
                   objectives=objs, complete_when=over.get("complete_when", arch.complete_when),
                   time_limit_s=parse_duration(over.get("time_limit")),
                   attempts=int(over.get("attempts", 3)), help=over.get("help", "warmer_colder"),
-                  persona=over.get("persona", "coach"), stage=over.get("stage", ""),
+                  persona=over.get("persona", "coach"),
+                  stage=over.get("stage") or getattr(arch, "stage", "") or "",
                   intent=intent, archetype=archetype_id, params=dict(params))
 
 

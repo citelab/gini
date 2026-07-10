@@ -56,6 +56,8 @@ class MissionController:
             return False
         self.mission = Mission(lesson) if self._now is None else Mission(lesson, now=self._now)
         self.gm = self._gm_factory(lesson, llm=self.llm)
+        if hasattr(self.gm, "bind_world"):              # let the game master ground diagnosis (explainer)
+            self.gm.bind_world(self._world)
         self._recorded = False
         self.mission.brief()
         self.mission.start()

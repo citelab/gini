@@ -11,7 +11,7 @@ _DIR = os.path.join(os.path.dirname(F.__file__), "missions", "networking")
 
 def test_all_packs_load_and_validate():
     loaded = FY.load_dir(_DIR)
-    assert len(loaded) == 15
+    assert len(loaded) >= 15                              # the seed library (grows as we add packs)
     for frag in loaded.values():
         assert FY.validate(frag) == []
 
@@ -21,13 +21,13 @@ def test_every_fragment_round_trips_losslessly():
         assert FY.from_yaml(FY.to_yaml(frag)) == frag
 
 
-def test_catalog_archetypes_reproduce_the_pre_migration_set():
+def test_catalog_archetypes_are_the_standalone_missions():
     ids = {a.id for a in C.all_archetypes()}
-    assert len(ids) == 12                                # 11 cores + observe-it
     assert "observe-it" in ids                           # standalone mission AND observe companion
+    assert {"basic-lan", "reachability-boundary"} <= ids
     assert not ({"drive-load", "send-request", "inspect-flows"} & ids)   # pure layers excluded
     assert {f.id for f in F.all_fragments() if not f.catalog} == {
-        "drive-load", "send-request", "inspect-flows"}
+        "drive-load", "send-request", "inspect-flows"}   # only these are non-catalog layers
 
 
 def test_the_k8s_fix_lives_in_yaml_now():

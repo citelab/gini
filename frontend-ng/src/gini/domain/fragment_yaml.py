@@ -15,10 +15,11 @@ import os
 import yaml
 
 from . import capabilities as _caps
-from .fragments import CORE, EXERCISE, OBSERVE, Fragment, ObjectiveTemplate
 from .objectives import check_ok, unknown_element_types
 
-_LAYERS = {CORE, EXERCISE, OBSERVE}
+# `fragments` is imported lazily inside the functions below — importing this module must NOT trigger
+# the fragments load (fragments imports us back to load its YAML packs; a top-level import would cycle).
+_LAYERS = {"core", "exercise", "observe"}
 
 
 def to_dict(frag: Fragment) -> dict:
@@ -42,6 +43,8 @@ def to_dict(frag: Fragment) -> dict:
         d["peers"] = list(frag.peers)
     if not frag.catalog:                     # standalone-mission by default; only note the exceptions
         d["catalog"] = False
+    if frag.stage:
+        d["stage"] = frag.stage
     return d
 
 
@@ -56,19 +59,20 @@ def _obj_to_dict(o: ObjectiveTemplate) -> dict:
     return d
 
 
-def fragment_from_dict(d: dict) -> Fragment:
+def fragment_from_dict(d: dict):
+    from .fragments import Fragment, ObjectiveTemplate
     objs = tuple(ObjectiveTemplate(id=o["id"], say=o.get("say", o["id"]),
                                    kind=o.get("kind", "structural"),
                                    check=o.get("check", ""), probe=o.get("probe", ""))
                  for o in (d.get("objectives", []) or []))
     return Fragment(
-        id=d["id"], layer=d.get("layer", CORE), teaches=d.get("teaches", ""),
+        id=d["id"], layer=d.get("layer", "core"), teaches=d.get("teaches", ""),
         spirit=d.get("spirit", ""), summary=d.get("summary", ""),
         provides=tuple(d.get("provides", []) or ()), requires=tuple(d.get("requires", []) or ()),
         objectives=objs, misconceptions=tuple(d.get("misconceptions", []) or ()),
         complete_when=d.get("complete_when", "all"), parent=d.get("parent", ""),
         peers=tuple(d.get("peers", []) or ()), step=d.get("step", ""),
-        catalog=bool(d.get("catalog", True)))
+        catalog=bool(d.get("catalog", True)), stage=dict(d.get("stage", {}) or {}))
 
 
 def to_yaml(frag: Fragment) -> str:
@@ -101,6 +105,12 @@ def validate(frag: Fragment) -> list[str]:
                 bad = unknown_element_types(o.check)
                 if bad:
                     problems.append(f"objective {o.id!r}: unknown element types {bad}")
+        elif o.kind == "behavioral":
+            from .probes import probe_ok
+            if not o.probe:
+                problems.append(f"behavioral objective {o.id!r} has no probe")
+            elif not probe_ok(o.probe):
+                problems.append(f"objective {o.id!r}: probe does not parse: {o.probe!r}")
     return problems
 
 

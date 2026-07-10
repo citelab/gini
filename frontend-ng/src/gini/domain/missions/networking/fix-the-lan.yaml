@@ -1,0 +1,32 @@
+id: fix-the-lan
+layer: core
+teaches: networking-basics
+spirit: a switched LAN was pre-built but has no gateway off-subnet — the student diagnoses the gap and
+  adds a router wired to the switch so the hosts can reach beyond their segment.
+summary: 'Fix the LAN: two hosts sit on a switch, but there is no gateway. Add the router.'
+parent: lan/switched
+stage:
+  devices:
+  - {ref: s1, type: switch, x: 380, y: 260}
+  - {ref: h1, type: host, x: 200, y: 160}
+  - {ref: h2, type: host, x: 200, y: 360}
+  links:
+  - [h1, s1]
+  - [h2, s1]
+objectives:
+- id: has-switch
+  say: There is a switch (pre-built)
+  check: exists(switch)
+- id: two-hosts
+  say: At least two hosts (pre-built)
+  check: count(host) >= 2
+- id: add-gateway
+  say: Add a router as the gateway
+  check: exists(router)
+- id: switch-to-gateway
+  say: Wire the switch to the router gateway
+  check: link(switch, router)
+misconceptions:
+- Adding a second switch instead of a router — a switch doesn't route off-subnet.
+peers:
+- basic-lan

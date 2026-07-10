@@ -48,6 +48,7 @@ class Fragment:
     peers: tuple[str, ...] = ()             # horizontal "goes-with" hints
     step: str = ""                          # optional guided beat this fragment contributes
     catalog: bool = True                    # a standalone, pickable mission? (False = pure layer)
+    stage: dict = field(default_factory=dict)   # optional pre-built board (M3 staging)
 
     def instantiate(self) -> list[Objective]:
         return [Objective(id=t.id, say=t.say, kind=t.kind, check=t.check, probe=t.probe)

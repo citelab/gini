@@ -104,6 +104,7 @@ class Assistant(QWidget):
         # sitting ABOVE the chat so game-master narration flows in the log below it.
         self._mission_panel = MissionPanel(theme)
         self._mission_panel.setVisible(False)
+        self._mission_panel.run_requested.connect(lambda: self._dispatch_mission("run_check"))
         lay.addWidget(self._mission_panel)
         self._mission_ctrl = None                       # agent.mission_controller.MissionController
         self._mission_profile = None                    # lazily created student profile
@@ -499,6 +500,12 @@ class Assistant(QWidget):
             if low in ("end mission", "quit mission", "stop mission"):
                 self.end_mission()
                 return "Mission ended."
+            if low in ("run", "check", "run check", "run/check", "/run"):
+                self._dispatch_mission("run_check")     # behavioral probes on the live runtime
+                return None
+            if low in ("hint", "/hint", "help", "i'm stuck", "im stuck", "stuck"):
+                self._dispatch_mission("ask", "I'm stuck — give me a hint, but don't solve it for me.")
+                return None
             self._dispatch_mission("ask", text)         # game master reasons off the UI thread
             return None
 
@@ -1018,6 +1025,7 @@ class Assistant(QWidget):
         self._mission_busy = self._mission_dirty = False
         self._hide_mission_picker()         # drop the picker once we're playing
         self._mission_panel.setVisible(True)
+        self._apply_stage(lesson)               # M3: pre-build the board, if the lesson stages one
         self._mission_world = self._snapshot_world()
         self._archive_chat()                    # focus the panel on the mission (restored on exit)
         ok = self._mission_ctrl.start(lesson)
@@ -1027,8 +1035,21 @@ class Assistant(QWidget):
             self._update_mission_flags()        # flag any off-task elements already on the canvas
         return ok
 
+    def _apply_stage(self, lesson) -> None:
+        """M3: build the lesson's pre-set board onto the canvas (scaffolded / fault-injection labs)."""
+        from ..domain import staging
+        if not staging.is_staged(lesson):
+            return
+        try:
+            staging.apply(lesson.stage,
+                          add_device=lambda tk, x, y: self.ctx.add_device(tk, x, y),
+                          add_link=lambda s, t: self.ctx.add_link(s, t))
+        except Exception:
+            pass                                # a bad stage never blocks the mission from starting
+
     def end_mission(self) -> None:
         self._mission_ctrl = None
+        self._last_mission_say = None                   # reset the anti-spam tracker between missions
         self._mission_busy = self._mission_dirty = False
         self._mission_panel.setVisible(False)
         self._hide_mission_picker()
@@ -1065,7 +1086,11 @@ class Assistant(QWidget):
         """Deliver a worker's chat/panel update on the UI thread."""
         kind = op[0]
         if kind == "say":
-            self._post("GINI", op[1], markdown=True)
+            text = (op[1] or "").strip()
+            if not text or text == getattr(self, "_last_mission_say", None):
+                return                          # M7: drop empty + consecutive-duplicate game-master lines
+            self._last_mission_say = text
+            self._post("GINI", text, markdown=True)
         elif kind == "tracker":
             self._mission_panel.render_current()
         elif kind == "step":
@@ -1170,8 +1195,11 @@ class Assistant(QWidget):
         if orch is None:
             return None
         try:
+            from ..domain.probes import TypeRunner
             from ..services.probe_runner import DockerProbeRunner
-            return DockerProbeRunner(orch)
+            # TypeRunner resolves type-based probe tokens (web_app, database…) to the student's
+            # actual device names against the live topology — name-agnostic behavioral objectives.
+            return TypeRunner(DockerProbeRunner(orch), lambda: self.ctx.topology)
         except Exception:
             return None
 

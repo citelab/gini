@@ -95,6 +95,41 @@ def evaluate(probe: str, runner: Runner) -> bool:
     raise ProbeError(f"unknown probe kind {p.kind!r}")
 
 
+# -- type-aware resolution (name-agnostic behavioral probes) ---------------- #
+class TypeRunner:
+    """Wraps a name-based `Runner` so a probe's tokens are element TYPE keys, resolved existentially
+    against the live topology — the behavioral analogue of our type-based structural predicates.
+    `reach(web_app -> database)` becomes "SOME web_app device reaches SOME database device", so a
+    behavioral objective matches whatever the student actually named things (exactly like `path`).
+
+    `get_topology()` returns the live topology (anything with `.devices` whose values have
+    `.name`/`.type_key`). Delegates availability to the wrapped runner."""
+
+    def __init__(self, base: Runner, get_topology) -> None:
+        self.base = base
+        self._get_topology = get_topology
+
+    def available(self) -> bool:
+        return bool(self.base) and self.base.available()
+
+    def _names(self, type_key: str) -> list[str]:
+        t = self._get_topology()
+        return [d.name for d in getattr(t, "devices", {}).values()
+                if getattr(d, "type_key", None) == type_key]
+
+    def reach(self, src: str, dst: str, port: int | None = None) -> bool:
+        return any(self.base.reach(s, d, port) for s in self._names(src) for d in self._names(dst))
+
+    def http(self, src: str, dst: str, port: int) -> bool:
+        return any(self.base.http(s, d, port) for s in self._names(src) for d in self._names(dst))
+
+    def backends(self, lb: str) -> int:
+        return max((self.base.backends(n) for n in self._names(lb)), default=0)
+
+    def flow(self, ovs: str, match: str) -> bool:
+        return any(self.base.flow(n, match) for n in self._names(ovs))
+
+
 # -- a fake runner for tests + offline authoring ---------------------------- #
 class FakeRunner:
     """A scriptable runner backed by a facts dict — for unit tests and lesson playtests without

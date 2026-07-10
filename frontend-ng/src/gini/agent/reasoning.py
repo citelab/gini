@@ -40,7 +40,8 @@ class ReasoningAgent:
         say = {o.id: o.say for o in self.lesson.objectives}
         met = [say.get(s, s) for s in
                (v.subject for v in self.bb.verdicts() if v.verifier_id.startswith("objective:") and v.value)]
-        unmet = [say.get(s, s) for s in self.bb.unmet_objectives()]
+        unmet_ids = self.bb.unmet_objectives()
+        unmet = [say.get(s, s) + self._why(s) for s in unmet_ids]   # each open item + WHY it's red
         flags = self.bb.flags()
         lines = [f"Objectives met ({len(met)}/{len(met) + len(unmet)}): " + ("; ".join(met) or "none"),
                  "Still open: " + ("; ".join(unmet) or "none — all done")]
@@ -49,6 +50,20 @@ class ReasoningAgent:
         if flags.get("illegal_links"):
             lines.append("Illegal connections present.")
         return "\n".join(lines)
+
+    def _why(self, objective_id: str) -> str:
+        """A deterministic, board-grounded reason an objective is red (the predicate explainer). We
+        need the live topology for this; the blackboard caches the world on evaluation."""
+        obj = next((o for o in self.lesson.objectives if o.id == objective_id), None)
+        world = getattr(self.bb, "_world", None)
+        if obj is None or world is None:
+            return ""
+        try:
+            from ..domain import explain as _explain
+            reason = _explain.diagnose(obj, world)
+        except Exception:
+            reason = ""
+        return f" — {reason}" if reason else ""
 
     def _intent(self) -> str:
         it = self.lesson.intent
