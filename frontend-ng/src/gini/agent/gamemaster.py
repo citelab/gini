@@ -208,6 +208,15 @@ class GameMaster:
             f"acted but hasn't satisfied it yet. Objectives: {self._facts(results)}. Give ONE short "
             "nudge toward THIS beat's goal — don't do it for them.") or "Not quite yet — keep at this step."
 
+    def flag_note(self, reasons) -> str:
+        """Call out an off-task / wrongly-wired move the student just made — playfully firm, and
+        it tells them to FIX it (the game master never deletes anything itself)."""
+        joined = "; ".join(reasons)
+        return self._ask(
+            f"{self._voice()}\n{self._intent()}\nThe student just did something that doesn't fit "
+            f"this mission: {joined}. In ONE short, in-character line, flag it and tell them to fix "
+            "it — do NOT remove it for them.") or ("Heads up — " + joined)
+
     def _say_victory(self, mission) -> str:
         return self._ask(f"{self._voice()}\n{self._intent()}\nThe student just completed the "
                          f"mission ({mission.score().summary}). Congratulate them in ONE short, "

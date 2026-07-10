@@ -25,7 +25,7 @@ def test_llm_pick_fills_params_and_time():
     assert p.archetype_id == "serverless-api"
     assert p.lesson.title == "FaaS behind a gateway"
     assert p.lesson.time_limit_s == 1800
-    assert p.params == {"gw": "GW9", "fn": "FN9"} and L.is_valid(p.lesson)
+    assert L.is_valid(p.lesson)                       # type-based archetypes need no params
 
 
 def test_bad_model_falls_back_to_a_valid_candidate():
@@ -34,11 +34,11 @@ def test_bad_model_falls_back_to_a_valid_candidate():
     assert L.is_valid(p.lesson)                      # always a usable proposal
 
 
-def test_partial_llm_params_are_completed_from_demo():
-    # model names only one ref; the rest are filled from demo params so the lesson is valid
+def test_resolve_always_yields_a_valid_lesson():
+    # even when the model returns odd params (ignored for type-based archetypes), the proposal
+    # is a valid, ratifiable lesson
     def llm(prompt):
         return '{"archetype":"reachability-boundary","params":{"protected":"MYDB"}}'
-    p = R.resolve("hide the db", llm=llm)
-    assert p.params["protected"] == "MYDB"
-    assert set(p.params) == {"inside", "protected", "outsider", "box"}
+    p = R.resolve("hide the db from the internet", llm=llm)
+    assert p.archetype_id == "reachability-boundary"
     assert L.is_valid(p.lesson)

@@ -1,0 +1,26 @@
+id: reachability-boundary
+layer: core
+teaches: vpc-networking
+spirit: a database is reachable by the web tier but NOT from the Internet — by a private subnet, a security
+  group, or firewall placement; the mechanism is free.
+summary: Keep a database reachable from the web tier but hidden from the Internet.
+parent: cloud/vpc
+provides:
+- vpc-boundary
+- web-endpoint
+- relational-store
+objectives:
+- id: in-vpc
+  say: Web app and database both live inside the VPC
+  check: contains_type(vpc, web_app) and contains_type(vpc, database)
+- id: reaches
+  say: The web app can reach the database
+  check: path(web_app, database)
+- id: shielded
+  say: The database is not reachable from the Internet
+  check: not path(cloud, database)
+misconceptions:
+- Thinking 'private' means unreachable by everything (still reachable inside).
+- Exposing the DB to the Internet to 'make it work'.
+peers:
+- put-in-vpc

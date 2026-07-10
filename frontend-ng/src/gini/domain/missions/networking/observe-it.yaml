@@ -1,0 +1,24 @@
+id: observe-it
+layer: observe
+teaches: observability
+spirit: a dashboard is fed by a metrics source so the system can be watched — the dashboard must connect
+  to a metrics collector.
+summary: Wire a dashboard to a metrics source.
+parent: observability
+provides:
+- visualizer
+- dashboard-view
+- metrics-collector
+- metrics-source
+objectives:
+- id: has-metrics
+  say: There is a metrics source
+  check: exists(metrics)
+- id: has-dash
+  say: There is a dashboard
+  check: exists(dashboard)
+- id: wired
+  say: The dashboard reads the metrics source
+  check: path(dashboard, metrics)
+misconceptions:
+- A dashboard with no metrics source has nothing to show.

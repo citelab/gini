@@ -1,0 +1,28 @@
+id: sdn-reactive
+layer: core
+teaches: sdn
+spirit: an OpenFlow switch has no built-in logic — it MUST be wired to a controller for traffic to flow;
+  hosts connect to the switch.
+summary: Wire an OpenVSwitch to a controller, with hosts on the switch.
+parent: sdn
+provides:
+- sdn-fabric
+- flow-control
+- service-endpoint
+objectives:
+- id: has-ovs
+  say: There is an OpenVSwitch
+  check: exists(ovs)
+- id: has-ctrl
+  say: There is a controller
+  check: exists(controller)
+- id: ovs-controlled
+  say: The switch is wired to the controller
+  check: link(ovs, controller)
+- id: hosts-on-ovs
+  say: Hosts are wired to the switch
+  check: link(host, ovs)
+misconceptions:
+- Expecting an OVS to forward with no controller attached (it can't).
+peers:
+- basic-lan

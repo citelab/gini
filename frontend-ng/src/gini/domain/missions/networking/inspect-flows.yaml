@@ -1,0 +1,16 @@
+id: inspect-flows
+layer: observe
+teaches: sdn
+spirit: the student opens the switch's flow table and watches entries and counters change as traffic flows
+  — seeing the control plane's decisions, not guessing them.
+summary: Open the OpenFlow table and watch it react to traffic.
+parent: observability
+step: Double-click the OpenVSwitch to open its flow table and watch the counters move.
+provides:
+- flow-inspector
+- visualizer
+requires:
+- sdn-fabric
+misconceptions:
+- Believing forwarding is magic instead of controller-installed flows.
+catalog: false

@@ -21,18 +21,18 @@ def test_archetypes_reference_real_concepts_and_elements():
                 assert not O.unknown_element_types(bound), f"{a.id}/{t.id} unknown element"
 
 
-def test_instantiate_binds_refs_to_names():
+def test_instantiate_produces_concrete_type_based_objectives():
     a = catalog.get("basic-lan")
-    objs = catalog.instantiate(a, {"h1": "M1", "h2": "M2", "sw": "S1", "gw": "R1"})
+    objs = catalog.instantiate(a, {})                # type-based archetypes need no bindings
     checks = {o.id: o.check for o in objs}
-    assert checks["hosts-reach"] == "connected(M1, M2)"
-    assert all("{" not in (o.check + o.probe) for o in objs)     # every placeholder bound
+    assert checks["hosts-on-switch"] == "link(host, switch)"
+    assert checks["switch-to-gateway"] == "link(switch, router)"
+    assert all("{" not in (o.check + o.probe) for o in objs)     # no placeholders left
 
 
-def test_unbound_refs_reported():
-    a = catalog.get("reachability-boundary")
-    missing = catalog.unbound_refs(a, {"inside": "WEB1"})
-    assert set(missing) >= {"protected", "outsider", "box"}
+def test_type_based_archetypes_need_no_params():
+    for a in catalog.all_archetypes():
+        assert catalog.unbound_refs(a, {}) == [], f"{a.id} has unbound {{refs}}"
 
 
 def test_every_element_type_lookup_is_registry_backed():

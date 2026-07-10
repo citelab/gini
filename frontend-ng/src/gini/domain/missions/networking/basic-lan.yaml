@@ -1,0 +1,32 @@
+id: basic-lan
+layer: core
+teaches: networking-basics
+spirit: two hosts share a switched LAN and reach off-subnet through a router gateway — hosts wire to the
+  switch, the switch wires to the router. Any valid such shape counts.
+summary: 'Build a switched LAN: two hosts on a switch, a router as the gateway.'
+parent: lan/switched
+provides:
+- switched-segment
+- router-gateway
+- service-endpoint
+objectives:
+- id: has-switch
+  say: There is a switch
+  check: exists(switch)
+- id: two-hosts
+  say: At least two hosts
+  check: count(host) >= 2
+- id: has-gateway
+  say: There is a router (the gateway)
+  check: exists(router)
+- id: hosts-on-switch
+  say: Hosts are wired to the switch
+  check: link(host, switch)
+- id: switch-to-gateway
+  say: The switch is wired to the router gateway
+  check: link(switch, router)
+misconceptions:
+- Wiring the two hosts directly together instead of through the switch.
+- Forgetting the router, so the LAN has no gateway off-subnet.
+peers:
+- sdn-reactive

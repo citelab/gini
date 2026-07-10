@@ -356,6 +356,13 @@ class NodeItem(QGraphicsObject):
                 p.setPen(QPen(glow, 6))
                 p.drawRoundedRect(rect.adjusted(-5, -5, 5, 5), 14, 14)
 
+        # Mission: a reddish glow when the game master has flagged this element as off-task or
+        # wrongly wired (non-destructive — clears the instant the student fixes it)
+        if self._mission_flagged():
+            dgl = _qcolor(t.danger); dgl.setAlpha(70)
+            p.setBrush(Qt.NoBrush); p.setPen(QPen(dgl, 6))
+            p.drawRoundedRect(rect.adjusted(-5, -5, 5, 5), 14, 14)
+
         # X-ray: ring the element currently being inspected (its ghosts float around it)
         if self._xray == "target":
             halo = QColor(accent); halo.setAlpha(60)
@@ -420,8 +427,18 @@ class NodeItem(QGraphicsObject):
         if self._resizable():
             self._paint_size(p, t, accent, H)
 
+        # Mission: red error badge (top-right) when flagged off-task / wrongly wired
+        if self._mission_flagged():
+            bx, by = NODE_W - 24, 6
+            p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
+            p.drawEllipse(QRectF(bx, by, 18, 18))
+            p.setPen(QColor("#ffffff"))
+            fb = QFont(); fb.setPointSize(11); fb.setBold(True); p.setFont(fb)
+            p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "!")
+
         # advisory-lint warning badge (top-right) — clickable to ask GINI about it
-        if self.inst.name in self._scene.ctx.warnings and not self._off_goal():
+        if (self.inst.name in self._scene.ctx.warnings and not self._off_goal()
+                and not self._mission_flagged()):
             warn = _qcolor(t.warning)
             bx, by = NODE_W - 22, 8
             p.setBrush(warn); p.setPen(Qt.NoPen)
@@ -487,6 +504,10 @@ class NodeItem(QGraphicsObject):
         """True if a Wizard objective is active and this element isn't part of it."""
         m = getattr(self._scene.ctx, "mission", None)
         return m is not None and not m.allows(self.inst.type_key)
+
+    def _mission_flagged(self) -> bool:
+        """True if a Mission has flagged this element (off-task or wrongly wired)."""
+        return self.inst.id in getattr(self._scene.ctx, "mission_flags", {})
 
     def _on_offgoal_badge(self, pos) -> bool:
         return self._off_goal() and QRectF(NODE_W - 26, 4, 22, 22).contains(pos)
@@ -730,6 +751,7 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.device_changed.connect(self._on_device_changed)
         ctx.bus.addressing_changed.connect(self._refresh_node_labels)
         ctx.bus.warnings_changed.connect(self._on_warnings)
+        ctx.bus.mission_flags_changed.connect(self._on_mission_flags)
         # tutor "present" channel
         ctx.bus.present_spotlight.connect(self._on_spotlight)
         ctx.bus.present_highlight.connect(self._on_highlight)
@@ -910,6 +932,14 @@ class CanvasScene(QGraphicsScene):
             msgs = warns.get(node.inst.name)
             node.setToolTip("\n".join(msgs) if msgs else "")
             node.update()
+
+    def _on_mission_flags(self) -> None:
+        flags = getattr(self.ctx, "mission_flags", {})
+        for node in self.nodes.values():
+            reason = flags.get(node.inst.id)
+            if reason:
+                node.setToolTip(reason)
+            node.update()                       # repaint red badge/glow (or clear it)
 
     def update_edges_for(self, device_id: str) -> None:
         for edge in self.edges.values():

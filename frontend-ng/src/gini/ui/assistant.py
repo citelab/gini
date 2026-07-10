@@ -25,12 +25,37 @@ from .mission_panel import MissionPanel
 from .theme import ThemeManager, icons
 
 
+class _MissionPanelProxy:
+    """Panel adapter for the MissionController: `set_mission` is a synchronous start-time call (UI
+    thread), but live updates are EMITTED as ('op', …) tuples so the game master, running on a
+    worker thread, can update the HUD safely on the UI thread via a queued signal."""
+
+    def __init__(self, real, emit) -> None:
+        self._real = real
+        self._emit = emit
+
+    def set_mission(self, mission) -> None:
+        self._real.set_mission(mission)
+
+    def render_current(self) -> None:
+        self._emit(("tracker",))
+
+    def set_step(self, text, index, total) -> None:
+        self._emit(("step", text, index, total))
+
+    def clear_step(self) -> None:
+        self._emit(("step_clear",))
+
+
 class Assistant(QWidget):
     # emitted from the LLM worker thread; delivered on the UI thread (queued)
     answer_ready = Signal(str, str)         # (device_name_or_empty, text)
     answer_chunk = Signal(str)              # a streamed token delta (live "typing")
     status_changed = Signal(str, bool)      # (mode label, busy) -> toolbar indicator
     starter_ready = Signal(str, str)        # (type_key, reason) for the Wizard's first element
+    # mission game-master runs on a worker thread; its chat/panel updates come back via this
+    # queued signal so the canvas never blocks on a model call. Payload = an ("op", …) tuple.
+    mission_ui_op = Signal(object)
 
     def __init__(self, ctx: AppContext, api: GiniAPI, theme: ThemeManager) -> None:
         super().__init__()
@@ -49,6 +74,7 @@ class Assistant(QWidget):
         from ..agent.session import SessionKnowledge
         self._session = SessionKnowledge()   # accumulated GINI knowledge for this session
         self._messages: list[tuple[str, str, bool, bool]] = []   # (role, text, err, md)
+        self._chat_archive: list | None = None   # pre-mission transcript, stashed while playing
         self._brief = ""                  # per-project teacher framing, fed to the model
         self._streaming = False           # a streamed answer is being typed into the log
         self._stream_buf = ""             # accumulated streamed text (for persistence)
@@ -81,6 +107,17 @@ class Assistant(QWidget):
         lay.addWidget(self._mission_panel)
         self._mission_ctrl = None                       # agent.mission_controller.MissionController
         self._mission_profile = None                    # lazily created student profile
+        # the game master reasons on a WORKER thread (so the canvas never blocks on a model call);
+        # its chat/panel updates arrive here on the UI thread via the queued mission_ui_op signal
+        self._mission_world = None                       # snapshot world for the current reaction
+        self._mission_busy = False                       # a reaction worker is running
+        self._mission_dirty = False                      # a change arrived while busy (coalesce)
+        self.mission_ui_op.connect(self._apply_mission_ui)
+        self._mission_debounce = QTimer(self)            # coalesce rapid drops/links
+        self._mission_debounce.setSingleShot(True)
+        self._mission_debounce.setInterval(180)
+        self._mission_debounce.timeout.connect(
+            lambda: self._dispatch_mission("on_canvas_changed"))
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_cloud())     # index 0: the cloud
@@ -165,7 +202,12 @@ class Assistant(QWidget):
         lay.addWidget(self._follow_box)
 
         # Missions picker — a VERTICAL, scrollable list. Mission labels are long, so a horizontal
-        # chip row would run thousands of px wide and drag the whole window off-screen.
+        # chip row would run thousands of px wide and drag the whole window off-screen. The prompt
+        # is a header ABOVE the list (not a chat post — that spammed the log on every re-entry).
+        self._picker_header = QLabel("Pick a mission to play:")
+        self._picker_header.setStyleSheet("font-weight:600;")
+        self._picker_header.setVisible(False)
+        lay.addWidget(self._picker_header)
         self._picker = QWidget()
         self._picker_lay = QVBoxLayout(self._picker)
         self._picker_lay.setContentsMargins(0, 0, 0, 0)
@@ -398,9 +440,24 @@ class Assistant(QWidget):
         self.input.setText(query)                      # show what was asked, then send it
         self._send()
 
-    def _show_cloud(self) -> None:
-        if hasattr(self, "_stack"):
+    def _in_chat_mode(self) -> bool:
+        return not (self.missions_mode or self.wizard_mode or self.coach_mode or self.explain_mode)
+
+    def _refresh_stack(self) -> None:
+        """The topic-cloud empty-state belongs to CHAT only; every other mode (Missions, Wizard,
+        Coach, Explain) has its own panel/picker, so the cloud would just waste the panel. Show the
+        cloud only for a Chat the student hasn't engaged yet (no message from them — the welcome line
+        is from GINI); otherwise show the conversation area."""
+        if not hasattr(self, "_stack"):
+            return
+        engaged = any(role == "You" for role, *_ in self._messages)
+        if self._in_chat_mode() and not engaged:
             self._stack.setCurrentIndex(0)           # index 0 is the cloud
+        else:
+            self._stack.setCurrentWidget(self.log)
+
+    def _show_cloud(self) -> None:
+        self._refresh_stack()
 
     def _raise_self(self) -> None:
         from PySide6.QtWidgets import QDockWidget
@@ -442,8 +499,16 @@ class Assistant(QWidget):
             if low in ("end mission", "quit mission", "stop mission"):
                 self.end_mission()
                 return "Mission ended."
-            self._mission_ctrl.ask(text)
+            self._dispatch_mission("ask", text)         # game master reasons off the UI thread
             return None
+
+        # In Missions mode with no mission playing yet, the chat box IS the "describe a mission"
+        # box: the student's words are composed into a playable, gradable mission (never fabricated).
+        if self.missions_mode and (self._mission_ctrl is None or not self._mission_ctrl.active):
+            mm = re.match(r"(?:/mission|start mission)\s+([\w-]+)", low)
+            if mm:
+                return self._start_preview_mission(mm.group(1))
+            return self._describe_mission(text)
 
         # Preview launcher (temporary; the real UI surface is a design decision): "/mission <id>"
         # or "start mission <id>" launches a seed archetype from the Game Catalog.
@@ -664,26 +729,66 @@ class Assistant(QWidget):
             self.end_mission()
             self._hide_mission_picker()
 
+    def _assigned_missions(self) -> list:
+        """Released, not-past-due missions from a connected Teaching Center (empty when no Center is
+        wired — the code path is future-ready; today that means the practice state)."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None:
+            return []
+        try:
+            return tc.available_lessons() or []
+        except Exception:
+            return []
+
+    def _picker_button(self, label: str, cb) -> None:
+        b = QPushButton(label)
+        b.setObjectName("Chip")
+        b.setCursor(Qt.PointingHandCursor)
+        b.setStyleSheet("text-align:left; padding:5px 10px;")
+        b.clicked.connect(lambda _=False: cb())
+        self._picker_lay.addWidget(b)
+
     def _show_mission_picker(self) -> None:
-        """List the missions the student can play as a VERTICAL list of full-width buttons. Today
-        these come from the Game Catalog; once the Teaching Center is wired, from the released
-        course manifest."""
+        """List the missions the student can play as a VERTICAL list of full-width buttons. When a
+        Teaching Center has ASSIGNED missions, show ONLY those (mandatory); otherwise offer the full
+        Game Catalog to practise, plus the describe box (the chat input) for a made-to-order one."""
         from ..domain import catalog
         while self._picker_lay.count():                 # rebuild the list
             it = self._picker_lay.takeAt(0)
             if it.widget() is not None:
                 it.widget().setParent(None)
-        self._post("GINI", "Pick a mission to play:")
-        for a in catalog.all_archetypes():
-            b = QPushButton(a.summary)
-            b.setObjectName("Chip")
-            b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet("text-align:left; padding:5px 10px;")
-            b.clicked.connect(lambda _=False, aid=a.id: self._start_preview_mission(aid))
-            self._picker_lay.addWidget(b)
+        assigned = self._assigned_missions()
+        if assigned:
+            self._picker_header.setText("Assigned Missions (Mandatory)")
+            for m in assigned:
+                self._picker_button(m.get("title") or m.get("id"),
+                                    lambda lid=m.get("id"): self._start_assigned_mission(lid))
+            self.input.setPlaceholderText("Playing a Mission — pick an assigned mission above…")
+        else:
+            self._picker_header.setText(
+                "No assigned missions — pick any to practice, or type what you want to build:")
+            for a in catalog.all_archetypes():
+                self._picker_button(a.summary, lambda aid=a.id: self._start_preview_mission(aid))
+            self.input.setPlaceholderText("Pick a mission above, or describe one to build…")
+        self._picker_header.setVisible(True)
         self._picker_scroll.setVisible(True)
 
+    def _start_assigned_mission(self, lesson_id: str) -> None:
+        """Fetch and play a Teaching-Center-assigned lesson by id."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        les = None
+        if tc is not None:
+            try:
+                les = tc.fetch_lesson(lesson_id)
+            except Exception:
+                les = None
+        if les is None:
+            self._post("GINI", "That mission couldn't be loaded right now.")
+            return
+        self.start_mission(les)
+
     def _hide_mission_picker(self) -> None:
+        self._picker_header.setVisible(False)
         self._picker_scroll.setVisible(False)
 
     def _toggle_chat(self, on: bool) -> None:
@@ -892,6 +997,7 @@ class Assistant(QWidget):
     def start_mission(self, lesson) -> bool:
         """Launch a Mission for `lesson` (a domain.lesson.Lesson). Requires a model (Missions
         are LLM-gated). Shows the objective tracker and hands control to the game master."""
+        from ..agent.agent_gamemaster import AgentGameMaster
         from ..agent.mission_controller import MissionController
         from ..domain import profile as _profile
         if self._loop is None:
@@ -899,24 +1005,123 @@ class Assistant(QWidget):
             return False
         if self._mission_profile is None:
             self._mission_profile = _profile.Profile(getattr(self.ctx.settings, "student_id", "local"))
+        # post + panel updates are marshaled to the UI thread (the reactions run on a worker); the
+        # world is a snapshot so the worker never reads the live canvas mid-mutation.
         self._mission_ctrl = MissionController(
-            get_topology=lambda: self.ctx.topology,
+            get_world=lambda: self._mission_world,
             llm=self._quick_llm,
-            post=lambda role, tx: self._post(role, tx, markdown=True),
+            post=lambda role, tx: self.mission_ui_op.emit(("say", tx)),
             make_runner=self._mission_runner,
-            panel=self._mission_panel,
-            profile=self._mission_profile)
+            panel=_MissionPanelProxy(self._mission_panel, self.mission_ui_op.emit),
+            profile=self._mission_profile,
+            gm_factory=AgentGameMaster)         # reasoning runs through the multi-agent stack
+        self._mission_busy = self._mission_dirty = False
         self._hide_mission_picker()         # drop the picker once we're playing
         self._mission_panel.setVisible(True)
+        self._mission_world = self._snapshot_world()
+        self._archive_chat()                    # focus the panel on the mission (restored on exit)
         ok = self._mission_ctrl.start(lesson)
         if not ok:
             self.end_mission()
+        else:
+            self._update_mission_flags()        # flag any off-task elements already on the canvas
         return ok
 
     def end_mission(self) -> None:
         self._mission_ctrl = None
+        self._mission_busy = self._mission_dirty = False
         self._mission_panel.setVisible(False)
         self._hide_mission_picker()
+        self._clear_mission_flags()
+        self._restore_chat()                    # bring back the pre-mission conversation
+
+    # -- focused-chat archive (a mission is a bounded episode) --------------- #
+    def _archive_chat(self) -> None:
+        """Stash the current transcript and clear the panel for a clean game-master session."""
+        if self._chat_archive is None:          # don't clobber an existing archive
+            self._chat_archive = list(self._messages)
+        self._messages = []
+        self.log.clear()
+        if hasattr(self, "_stack"):
+            self._stack.setCurrentWidget(self.log)
+
+    def _restore_chat(self) -> None:
+        """Put the pre-mission conversation back exactly as it was."""
+        if self._chat_archive is None:
+            return
+        self._messages = list(self._chat_archive)
+        self._chat_archive = None
+        self._rerender()
+        if not self._messages:
+            self._show_cloud()                  # empty history → back to the topic cloud
+
+    # -- async game-master plumbing (keeps model calls off the UI thread) ----- #
+    def _snapshot_world(self):
+        """A frozen copy of the canvas as an objectives World — safe to read from a worker."""
+        from ..domain import grader as _grader
+        return _grader.world_from_snapshot(self.ctx.topology.to_dict())
+
+    def _apply_mission_ui(self, op) -> None:
+        """Deliver a worker's chat/panel update on the UI thread."""
+        kind = op[0]
+        if kind == "say":
+            self._post("GINI", op[1], markdown=True)
+        elif kind == "tracker":
+            self._mission_panel.render_current()
+        elif kind == "step":
+            self._mission_panel.set_step(op[1], op[2], op[3])
+        elif kind == "step_clear":
+            self._mission_panel.clear_step()
+        elif kind == "compose_start":
+            les = op[1]
+            note = op[2] if len(op) > 2 else ""
+            if les is None:
+                self._post("GINI", note or "I couldn't shape that into a mission — try describing a "
+                                           "networking or cloud goal, e.g. 'a firewall protecting a server'.")
+            else:
+                self.start_mission(les)
+                if note:                              # e.g. "Built it without metrics, dashboard…"
+                    self._post("GINI", note)
+        elif kind == "busy":
+            self._set_llm_busy(bool(op[1]))
+        elif kind == "done":
+            self._mission_busy = False
+            if self._mission_dirty:                      # a change arrived mid-reaction → run once more
+                self._mission_dirty = False
+                self._dispatch_mission("on_canvas_changed")
+
+    def _set_llm_busy(self, on: bool) -> None:
+        """Reflect a worker-thread LLM call in the shared 'thinking' indicator. Counted, so several
+        overlapping engagements (a game-master reaction + a flag note) show one spinner and clear it
+        only when the last finishes. This is what makes EVERY LLM pathway visible, not just chat."""
+        n = max(0, getattr(self, "_llm_active", 0) + (1 if on else -1))
+        self._llm_active = n
+        if n > 0 and not self._busy:
+            self._start_spinner("GINI is thinking")
+        elif n == 0 and self._busy:
+            self._stop_spinner()
+
+    def _dispatch_mission(self, method: str, *args) -> None:
+        """Run a controller reaction on a worker thread (one at a time; coalesce extra changes)."""
+        if self._mission_ctrl is None or not self._mission_ctrl.active:
+            return
+        if self._mission_busy:
+            self._mission_dirty = True
+            return
+        self._mission_busy = True
+        self._mission_world = self._snapshot_world()     # snapshot on the UI thread
+        import threading
+
+        def work():
+            self.mission_ui_op.emit(("busy", True))      # the game master is reasoning (LLM)
+            try:
+                getattr(self._mission_ctrl, method)(*args)
+            except Exception:
+                pass
+            finally:
+                self.mission_ui_op.emit(("busy", False))
+                self.mission_ui_op.emit(("done",))
+        threading.Thread(target=work, daemon=True).start()
 
     def _start_preview_mission(self, archetype_id: str) -> str | None:
         """Launch a seed Game-Catalog archetype for a quick preview (temporary command)."""
@@ -929,6 +1134,32 @@ class Assistant(QWidget):
                                      id=f"preview-{archetype_id}", title=arch.summary,
                                      brief=arch.summary, time_limit="20m")
         self.start_mission(les)
+        return None
+
+    def _describe_mission(self, text: str) -> str | None:
+        """The student typed what they'd like to build — compose a playable mission from it (on a
+        worker thread so the UI never freezes) and launch it. The compose SELECTS/COMBINES verified
+        catalog archetypes; it never fabricates objectives, so the result is always gradable."""
+        self._post("GINI", "Shaping a mission from that…")
+        import threading
+
+        def work():
+            self.mission_ui_op.emit(("busy", True))      # composing a mission engages the LLM
+            les, note = None, ""
+            try:
+                from ..agent import lesson_resolver
+                prop = lesson_resolver.compose(text, self._quick_llm, lesson_id="described")
+                if prop is not None:
+                    les = prop.lesson
+                    if prop.infeasible:                  # DOs and DON'Ts conflict → explain, don't build
+                        note = prop.infeasible
+                    elif prop.suppressed:
+                        note = f"(Built it without {prop.suppressed}, as you asked.)"
+            except Exception:
+                les = None
+            self.mission_ui_op.emit(("busy", False))
+            self.mission_ui_op.emit(("compose_start", les, note))
+        threading.Thread(target=work, daemon=True).start()
         return None
 
     def _mission_runner(self):
@@ -945,8 +1176,56 @@ class Assistant(QWidget):
             return None
 
     def _on_topology_for_mission(self) -> None:
-        if self._mission_ctrl is not None and self._mission_ctrl.active:
-            self._mission_ctrl.on_canvas_changed()
+        if self._mission_ctrl is None or not self._mission_ctrl.active:
+            return
+        self._update_mission_flags()            # SYNCHRONOUS: instant red badges (no model)
+        # coalesce rapid drops/links, then run the game master's reaction on a worker thread so the
+        # canvas repaints immediately instead of blocking on a model call
+        self._mission_debounce.start()
+
+    def _update_mission_flags(self) -> None:
+        """Recompute move-legality flags (off-task elements, illegal links) and paint the red
+        badges instantly. Deterministic + fast — the game master's spoken reasoning is separate."""
+        if self._mission_ctrl is None or self._mission_ctrl.mission is None:
+            return
+        from ..domain import legality
+        try:
+            f = legality.flags(self._mission_ctrl.mission.lesson, self.ctx.topology)
+            flags = dict(f.get("devices", {}))
+        except Exception:
+            flags = {}
+        prev = getattr(self, "_mission_flag_ids", set())
+        self.ctx.mission_flags = flags
+        self.ctx.bus.mission_flags_changed.emit()
+        # if something NEW just got flagged, have the game master call it out (async, once)
+        new_ids = set(flags) - prev
+        self._mission_flag_ids = set(flags)
+        if new_ids:
+            self._speak_flag_note([flags[i] for i in new_ids])
+
+    def _speak_flag_note(self, reasons) -> None:
+        """The game master's spoken reasoning for a fresh flag — on a worker thread so it never
+        blocks the canvas; deduped so it doesn't nag."""
+        if self._loop is None or self._mission_ctrl is None or self._mission_ctrl.gm is None:
+            return
+        import threading
+        gm = self._mission_ctrl.gm
+
+        def work():
+            self.mission_ui_op.emit(("busy", True))      # the game master is reasoning (LLM)
+            try:
+                line = gm.flag_note(reasons)
+            except Exception:
+                line = "; ".join(reasons)
+            self.mission_ui_op.emit(("busy", False))
+            self.mission_ui_op.emit(("say", line))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _clear_mission_flags(self) -> None:
+        self._mission_flag_ids = set()
+        if getattr(self.ctx, "mission_flags", None):
+            self.ctx.mission_flags = {}
+            self.ctx.bus.mission_flags_changed.emit()
 
     def _offline_concept(self, target: str) -> str | None:
         """With no model attached, answer 'explain <topic>' from the matching concept note
@@ -1002,6 +1281,7 @@ class Assistant(QWidget):
                 else "Wizard mode" if self.wizard_mode
                 else "Coach mode" if self.coach_mode
                 else "Explain mode" if self.explain_mode else "Chat mode")
+        self._refresh_stack()          # keep the topic-cloud empty-state to Chat mode only
         self.status_changed.emit(mode, self._busy)
 
     # --- Wizard mode: an objective that guides X-ray (no auto-build) ---------- #

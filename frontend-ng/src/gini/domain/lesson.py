@@ -30,6 +30,15 @@ class Intent:
 
 
 @dataclass
+class Forbid:
+    """A rule the student must NOT trip — a structural predicate that should stay FALSE. When it
+    becomes true (e.g. `link(database, cloud)` — the DB wired to the Internet), the offending move
+    is flagged (red badge) and the game master explains. `say` is the student-facing reason."""
+    say: str
+    check: str
+
+
+@dataclass
 class Step:
     """One beat of a GUIDED mission: an instruction, and how the student advances past it.
     `advance` is one of: 'reply'/'ack' (any student message — a read/reflect beat), a structural
@@ -61,6 +70,7 @@ class Lesson:
     brief: str = ""
     objectives: list[Objective] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)   # optional GUIDED beats (empty = free-form)
+    forbid: list = field(default_factory=list)        # Forbid rules: predicates that must stay FALSE
     complete_when: str = "all"          # all | any | at_least(n)
     time_limit_s: int | None = None     # None = untimed
     attempts: int = 3
@@ -70,6 +80,9 @@ class Lesson:
     intent: Intent = field(default_factory=Intent)
     archetype: str = ""                 # the Game-Catalog archetype it was resolved from (if any)
     params: dict = field(default_factory=dict)
+    genre: str = ""                     # experience | expedition | challenge (defaults from assembly)
+    level: int | None = None            # quest level 0..3 (defaults from assembly; may be pinned)
+    fragments: list = field(default_factory=list)   # fragment ids this lesson was assembled from
 
     def behavioral_ids(self) -> list[str]:
         return [o.id for o in self.objectives if o.is_behavioral()]
@@ -125,13 +138,17 @@ def from_dict(d: dict) -> Lesson:
     objs = [_objective_from(o) for o in (d.get("objectives", []) or [])]
     steps = [Step(say=s.get("say", ""), advance=s.get("advance", "reply"), hint=s.get("hint", ""))
              for s in (d.get("steps", []) or [])]
+    forbid = [Forbid(say=f.get("say", ""), check=f.get("check", ""))
+              for f in (d.get("forbid", []) or [])]
     return Lesson(
         id=d["id"], title=d.get("title", ""), brief=d.get("brief", ""),
-        objectives=objs, steps=steps, complete_when=d.get("complete_when", "all"),
+        objectives=objs, steps=steps, forbid=forbid, complete_when=d.get("complete_when", "all"),
         time_limit_s=parse_duration(d.get("time_limit")),
         attempts=int(d.get("attempts", 3)), help=d.get("help", "warmer_colder"),
         persona=d.get("persona", "coach"), stage=d.get("stage", ""), intent=intent,
         archetype=d.get("archetype", ""), params=dict(d.get("params", {}) or {}),
+        genre=d.get("genre", ""), level=d.get("level"),
+        fragments=list(d.get("fragments", []) or []),
     )
 
 

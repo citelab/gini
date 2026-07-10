@@ -31,18 +31,17 @@ def test_from_dict_carries_intent_and_objectives():
 
 
 def test_from_archetype_builds_valid_lesson_with_spirit():
-    les = L.from_archetype("basic-lan", {"h1": "M1", "h2": "M2", "sw": "S1", "gw": "R1"},
-                           id="lab01", time_limit="20m")
+    les = L.from_archetype("basic-lan", {}, id="lab01", time_limit="20m")
     assert L.is_valid(les)
     assert les.archetype == "basic-lan"
     assert les.intent.spirit                       # inherited from the archetype
     assert len(les.objectives) == 5
 
 
-def test_from_archetype_missing_params_raises():
+def test_from_archetype_unknown_id_raises():
     import pytest
     with pytest.raises(L.LessonError):
-        L.from_archetype("reachability-boundary", {"inside": "WEB1"}, id="x")
+        L.from_archetype("no-such-archetype", {}, id="x")
 
 
 def test_validation_catches_bad_lessons():

@@ -38,6 +38,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "gini.ui" = ["assets/*.png", "assets/*.ico", "assets/*.icns"]
+"gini.domain" = ["missions/**/*.yaml"]
 
 [tool.ruff]
 line-length = 100

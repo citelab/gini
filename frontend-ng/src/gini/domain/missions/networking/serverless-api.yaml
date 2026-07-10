@@ -1,0 +1,25 @@
+id: serverless-api
+layer: core
+teaches: serverless
+spirit: an API gateway fronts a function so an HTTP request to the gateway invokes it — the gateway must
+  route to the function.
+summary: Put a function behind an API gateway.
+parent: serverless
+provides:
+- serverless-fn
+- api-endpoint
+- public-entrypoint
+objectives:
+- id: has-fn
+  say: There is a function
+  check: exists(function)
+- id: has-gw
+  say: There is an API gateway
+  check: exists(api_gateway)
+- id: routed
+  say: The gateway routes to the function
+  check: path(api_gateway, function)
+misconceptions:
+- A function with no gateway — nothing can invoke it over HTTP.
+peers:
+- decouple-with-queue

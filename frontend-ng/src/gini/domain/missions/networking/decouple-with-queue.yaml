@@ -1,0 +1,25 @@
+id: decouple-with-queue
+layer: core
+teaches: messaging-queue
+spirit: a producer and a consumer are decoupled by a queue — the producer publishes to it and the consumer
+  reads from it, so neither waits on the other.
+summary: Decouple a web app and a function with a queue.
+parent: messaging
+provides:
+- message-broker
+- web-endpoint
+- serverless-fn
+objectives:
+- id: has-queue
+  say: There is a queue
+  check: exists(queue)
+- id: produces
+  say: A producer (web app) reaches the queue
+  check: path(web_app, queue)
+- id: consumes
+  say: A consumer (function) reaches the queue
+  check: path(queue, function)
+misconceptions:
+- Wiring the producer straight to the consumer (no decoupling).
+peers:
+- serverless-api

@@ -1,0 +1,23 @@
+id: cache-in-front
+layer: core
+teaches: datastores
+spirit: a cache sits in front of a database to cut read load — both exist and are wired.
+summary: Put a cache in front of a database.
+parent: data
+provides:
+- cache-tier
+- relational-store
+objectives:
+- id: has-cache
+  say: There is a cache
+  check: exists(cache)
+- id: has-db
+  say: There is a database
+  check: exists(database)
+- id: fronted
+  say: The cache fronts the database
+  check: path(cache, database)
+misconceptions:
+- A cache not connected to anything it fronts.
+peers:
+- reachability-boundary

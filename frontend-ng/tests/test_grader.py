@@ -6,9 +6,19 @@ from gini.domain.topology import Topology
 
 
 def _lesson():
-    return L.from_archetype("reachability-boundary",
-                            {"inside": "WEB1", "protected": "DB1", "outsider": "NET", "box": "VPC1"},
-                            id="lab03", time_limit="25m")
+    # a lesson mixing a structural objective (server re-grades it authoritatively) with two
+    # behavioral ones (server trusts the client until the Docker re-grader lands)
+    return L.from_dict({
+        "id": "lab03", "time_limit": "25m",
+        "intent": {"concept": "vpc-networking", "spirit": "reachability"},
+        "objectives": [
+            {"id": "in-boundary", "say": "DB inside the VPC", "kind": "structural",
+             "check": "contains(VPC1, DB1)"},
+            {"id": "reaches", "say": "web reaches db", "kind": "behavioral",
+             "probe": "reach(WEB1 -> DB1) == ok"},
+            {"id": "shielded", "say": "db shielded", "kind": "behavioral",
+             "probe": "reach(NET -> DB1) == fail"}],
+        "complete_when": "all"})
 
 
 def _complete_snapshot():

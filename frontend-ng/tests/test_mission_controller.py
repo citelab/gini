@@ -15,9 +15,20 @@ class ScriptedLLM:
 
 
 def _lesson(**o):
-    return L.from_archetype("reachability-boundary",
-                            {"inside": "WEB1", "protected": "DB1", "outsider": "NET", "box": "VPC1"},
-                            id="lab03", time_limit="25m", **o)
+    d = {"id": "lab03", "time_limit": "25m",
+         "intent": {"concept": "vpc-networking", "spirit": "reachability"},
+         "objectives": [
+             {"id": "in-boundary", "say": "DB inside the VPC", "kind": "structural",
+              "check": "contains(VPC1, DB1)"},
+             {"id": "reaches", "say": "web reaches db", "kind": "behavioral",
+              "probe": "reach(WEB1 -> DB1) == ok"},
+             {"id": "shielded", "say": "db shielded", "kind": "behavioral",
+              "probe": "reach(NET -> DB1) == fail"}],
+         "complete_when": "all"}
+    d.update({k: v for k, v in o.items() if k in ("help", "persona", "attempts")})
+    if "help" in o:
+        d["help"] = o["help"]
+    return L.from_dict(d)
 
 
 def _topo():

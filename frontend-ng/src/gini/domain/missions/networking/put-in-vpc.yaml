@@ -1,0 +1,24 @@
+id: put-in-vpc
+layer: core
+teaches: vpc-networking
+spirit: the workloads sit inside the VPC boundary — however the student draws the grouping.
+summary: Place a web app and a database inside a VPC.
+parent: cloud/vpc
+provides:
+- vpc-boundary
+- web-endpoint
+- relational-store
+objectives:
+- id: has-vpc
+  say: There is a VPC
+  check: exists(vpc)
+- id: web-in
+  say: The web app is inside the VPC
+  check: contains_type(vpc, web_app)
+- id: db-in
+  say: The database is inside the VPC
+  check: contains_type(vpc, database)
+misconceptions:
+- Leaving a workload outside the box but wired in — containment is membership.
+peers:
+- reachability-boundary

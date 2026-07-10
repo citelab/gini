@@ -45,6 +45,7 @@ class EventBus(QObject):
     k8s_metrics = Signal(object)      # per-deployment kubernetes metrics snapshot
     addressing_changed = Signal()     # compiler-derived IP/MAC map refreshed
     warnings_changed = Signal()       # advisory topology-lint results refreshed
+    mission_flags_changed = Signal()  # Mission move-legality flags refreshed -> red badges/glow
     edges_restyled = Signal()         # connector style (bent/straight) changed -> reroute edges
     # --- AI tutor "present" channel (the stage the AI draws on) ---
     present_spotlight = Signal(object)    # list[device_id] to spotlight, or None to clear
@@ -103,6 +104,7 @@ class AppContext:
         self.selected_id: str | None = None
         self.addressing: dict[str, dict] = {}   # device name -> {interfaces:[…]}
         self.warnings: dict[str, list] = {}     # device name -> [lint messages]
+        self.mission_flags: dict[str, str] = {}  # device id -> reason (Mission off-task / bad-link)
         self.mission = None                     # active Wizard objective (domain.missions.Mission)
         # live xv6 kernel state per Machine (domain.machine_state.MachineState) — the bridge the
         # Machine Lab renders from and the Ask GINI agent reads for OS help. device_id -> state.

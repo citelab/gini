@@ -63,7 +63,12 @@ class ObjectiveResult:
 _CMP = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Gt: operator.gt,
         ast.GtE: operator.ge, ast.Lt: operator.lt, ast.LtE: operator.le}
 
-_PREDICATES = {"exists", "count", "linked", "connected", "contains", "property", "prop"}
+# name-based predicates take element NAMES; type-based ones take element TYPE_KEYS. Type-based
+# predicates are what missions should use, so an objective matches what the student built
+# regardless of the (auto-generated) device names.
+_PREDICATES = {"exists", "count", "linked", "connected", "contains", "property", "prop",
+               "link", "path", "contains_type", "through"}
+_TYPE_ARG_FUNCS = {"exists", "count", "link", "path", "contains_type", "through"}  # args are type_keys
 
 
 class PredicateError(ValueError):
@@ -119,6 +124,14 @@ def _call(fn: str, args: list, world) -> object:
         return world.contains(str(args[0]), str(args[1]))
     if fn in ("property", "prop"):
         return world.prop(str(args[0]), str(args[1]))
+    if fn == "link":                    # a link between ANY typeA device and ANY typeB device
+        return world.link_types(str(args[0]), str(args[1]))
+    if fn == "path":                    # a path between some typeA and some typeB device
+        return world.path_types(str(args[0]), str(args[1]))
+    if fn == "contains_type":           # a memberType device inside a boxType box
+        return world.contains_types(str(args[0]), str(args[1]))
+    if fn == "through":                 # every src->dst path crosses a gate (a chokepoint)
+        return world.through_types(str(args[0]), str(args[1]), str(args[2]))
     raise PredicateError(f"unknown predicate: {fn}")
 
 
@@ -259,6 +272,86 @@ class TopologyWorld:
         low = {k.lower(): v for k, v in props.items()}      # forgiving on case
         return low.get(key.lower())
 
+    # -- type-based (name-agnostic) predicates: match what the student built, not the names -- #
+    def link_types(self, type_a: str, type_b: str) -> bool:
+        """Is there a link directly connecting some device of type_a to some device of type_b?"""
+        for l in self.t.links.values():
+            s = self.t.devices.get(l.source_id)
+            d = self.t.devices.get(l.target_id)
+            if s is None or d is None:
+                continue
+            st, dt = s.type_key, d.type_key
+            if (st == type_a and dt == type_b) or (st == type_b and dt == type_a):
+                return True
+        return False
+
+    def path_types(self, type_a: str, type_b: str) -> bool:
+        """Is there a path (over links) between some device of type_a and some device of type_b?"""
+        dsts = {d.id for d in self.t.devices.values() if d.type_key == type_b}
+        if not dsts:
+            return False
+        adj = self._adjacency()
+        for src in [d.id for d in self.t.devices.values() if d.type_key == type_a]:
+            seen, frontier = {src}, [src]
+            while frontier:
+                nxt = []
+                for node in frontier:
+                    for peer in adj.get(node, ()):
+                        if peer in dsts and peer != src:
+                            return True
+                        if peer not in seen:
+                            seen.add(peer)
+                            nxt.append(peer)
+                frontier = nxt
+        return False
+
+    def through_types(self, gate_type: str, src_type: str, dst_type: str) -> bool:
+        """Chokepoint: some src-type reaches some dst-type, and EVERY such path crosses a device of
+        `gate_type` — i.e. removing all gate-type devices disconnects the src tier from the dst tier.
+        This is the correct "traffic passes THROUGH the gate" semantic (rejects a parallel bypass),
+        as opposed to `path` (any route counts) or `link` (a direct cable)."""
+        if not self.path_types(src_type, dst_type):
+            return False                      # no traffic flows at all → not "through" anything
+        gates = {d.id for d in self.t.devices.values() if d.type_key == gate_type}
+        if not gates:
+            return False                      # the gate isn't even present
+        dsts = {d.id for d in self.t.devices.values()
+                if d.type_key == dst_type and d.id not in gates}
+        srcs = [d.id for d in self.t.devices.values()
+                if d.type_key == src_type and d.id not in gates]
+        if not dsts or not srcs:
+            return True                       # removing gates erases a tier → the gate was on the path
+        adj = self._adjacency()
+        for src in srcs:                      # can any src reach a dst WITHOUT crossing a gate?
+            seen, frontier = {src}, [src]
+            while frontier:
+                nxt = []
+                for node in frontier:
+                    for peer in adj.get(node, ()):
+                        if peer in gates:
+                            continue          # never route through a gate node
+                        if peer in dsts and peer != src:
+                            return False      # a gate-free path exists → NOT a chokepoint
+                        if peer not in seen:
+                            seen.add(peer)
+                            nxt.append(peer)
+                frontier = nxt
+        return True
+
+    def contains_types(self, box_type: str, member_type: str) -> bool:
+        """Is some device of member_type inside a box of box_type (walking the parent chain)?"""
+        for d in self.t.devices.values():
+            if d.type_key != member_type:
+                continue
+            cur, seen = d, set()
+            while cur is not None and getattr(cur, "parent_id", None) and cur.id not in seen:
+                seen.add(cur.id)
+                parent = self.t.devices.get(cur.parent_id)
+                if parent is not None and parent.type_key == box_type:
+                    return True
+                cur = parent
+        return False
+
 
 def element_types_in_check(expr: str) -> list[str]:
     """The type_keys referenced by exists()/count() in a check — for lesson validation."""
@@ -269,12 +362,12 @@ def element_types_in_check(expr: str) -> list[str]:
         return out
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in ("exists", "count") and node.args):
-            a = node.args[0]
-            if isinstance(a, ast.Name):
-                out.append(a.id)
-            elif isinstance(a, ast.Constant) and isinstance(a.value, str):
-                out.append(a.value)
+                and node.func.id in _TYPE_ARG_FUNCS):
+            for a in node.args:                 # every arg of a type-based predicate is a type_key
+                if isinstance(a, ast.Name):
+                    out.append(a.id)
+                elif isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    out.append(a.value)
     return out
 
 

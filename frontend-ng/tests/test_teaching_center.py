@@ -103,9 +103,17 @@ def test_checkin_pushes_profile(tmp_path):
 def test_submission_queues_offline_then_flushes(tmp_path):
     server = FakeServer(online=False)
     c = _client(server, tmp_path)
-    les = L.from_archetype("reachability-boundary",
-                           {"inside": "WEB1", "protected": "DB1", "outsider": "NET", "box": "VPC1"},
-                           id="lab03", time_limit="25m")
+    les = L.from_dict({
+        "id": "lab03", "time_limit": "25m",
+        "intent": {"concept": "vpc-networking", "spirit": "reachability"},
+        "objectives": [
+            {"id": "in-boundary", "say": "DB inside the VPC", "kind": "structural",
+             "check": "contains(VPC1, DB1)"},
+            {"id": "reaches", "say": "web reaches db", "kind": "behavioral",
+             "probe": "reach(WEB1 -> DB1) == ok"},
+            {"id": "shielded", "say": "db shielded", "kind": "behavioral",
+             "probe": "reach(NET -> DB1) == fail"}],
+        "complete_when": "all"})
     t = Topology(); v = t.add_device("vpc", "VPC1")
     t.add_device("web_app", "WEB1", parent_id=v.id); t.add_device("database", "DB1", parent_id=v.id)
     runner = P.FakeRunner({("reach", "WEB1", "DB1", None): True, ("reach", "NET", "DB1", None): False})

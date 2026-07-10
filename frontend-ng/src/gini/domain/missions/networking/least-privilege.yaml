@@ -1,0 +1,21 @@
+id: least-privilege
+layer: core
+teaches: security-groups
+spirit: a workload is protected by a default-deny security group that opens only the ports it needs —
+  least privilege by design.
+summary: Protect a workload with a security group.
+parent: security
+provides:
+- micro-segmentation
+- web-endpoint
+objectives:
+- id: has-sg
+  say: There is a security group
+  check: exists(security_group)
+- id: has-workload
+  say: There is a workload to protect
+  check: exists(web_app) or exists(database) or exists(instance)
+misconceptions:
+- Leaving a datastore open to the world instead of scoping ingress.
+peers:
+- service-chain

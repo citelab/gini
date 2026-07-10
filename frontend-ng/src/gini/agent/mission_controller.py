@@ -5,7 +5,9 @@ Ties together the pieces built in Phases 1–4: the Mission state machine, the o
 the student Profile. It's the "brain" the UI drives.
 
 Kept UI-agnostic and fully testable by taking its couplings as callables:
-  • get_topology()          → the live topology (source of the world)
+  • get_topology()          → the live topology (source of the world); a `get_world` override may
+                              be passed instead (e.g. a snapshot world) so the game master's
+                              reasoning can run off the UI thread without touching the live canvas
   • make_runner()           → a probes.Runner for behavioral eval on Run/Check (or None)
   • post(role, text)        → deliver a game-master line to the chat
   • llm(prompt)->str        → the reasoning model (required; Missions are LLM-gated)
@@ -24,15 +26,17 @@ from .mission import Mission
 
 
 class MissionController:
-    def __init__(self, *, get_topology, llm, post, make_runner=None, panel=None,
-                 profile=None, now=None) -> None:
+    def __init__(self, *, llm, post, get_topology=None, get_world=None, make_runner=None,
+                 panel=None, profile=None, now=None, gm_factory=None) -> None:
         self.get_topology = get_topology
+        self._get_world = get_world             # optional: a snapshot world (thread-safe reasoning)
         self.llm = llm
         self.post = post
         self.make_runner = make_runner or (lambda: None)
         self.panel = panel
         self.profile = profile
         self._now = now
+        self._gm_factory = gm_factory or GameMaster   # swappable brain (AgentGameMaster in prod)
         self.mission: Mission | None = None
         self.gm: GameMaster | None = None
         self._recorded = False
@@ -51,7 +55,7 @@ class MissionController:
             self.post("GINI", "Missions need a local model — enable one in Settings.")
             return False
         self.mission = Mission(lesson) if self._now is None else Mission(lesson, now=self._now)
-        self.gm = GameMaster(lesson, llm=self.llm)
+        self.gm = self._gm_factory(lesson, llm=self.llm)
         self._recorded = False
         self.mission.brief()
         self.mission.start()
@@ -102,6 +106,8 @@ class MissionController:
         return False
 
     def _world(self):
+        if self._get_world is not None:
+            return self._get_world()
         return _obj.TopologyWorld(self.get_topology())
 
     # -- canvas changed → live structural eval + a game-master observation --- #
