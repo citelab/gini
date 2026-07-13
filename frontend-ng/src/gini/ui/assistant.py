@@ -1041,9 +1041,14 @@ class Assistant(QWidget):
         if not staging.is_staged(lesson):
             return
         try:
-            staging.apply(lesson.stage,
-                          add_device=lambda tk, x, y: self.ctx.add_device(tk, x, y),
-                          add_link=lambda s, t: self.ctx.add_link(s, t))
+            placed = staging.apply(lesson.stage,
+                                   add_device=lambda tk, x, y: self.ctx.add_device(tk, x, y),
+                                   add_link=lambda s, t: self.ctx.add_link(s, t))
+            # bring the pre-built board INTO VIEW — otherwise it can land off-screen and the student
+            # thinks the mission placed nothing (they shouldn't have to go hunting for it).
+            ids = [inst.id for inst in placed.values() if getattr(inst, "id", None)]
+            if ids:
+                self.ctx.bus.focus_requested.emit(ids)
         except Exception:
             pass                                # a bad stage never blocks the mission from starting
 

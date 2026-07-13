@@ -46,6 +46,7 @@ class EventBus(QObject):
     addressing_changed = Signal()     # compiler-derived IP/MAC map refreshed
     warnings_changed = Signal()       # advisory topology-lint results refreshed
     mission_flags_changed = Signal()  # Mission move-legality flags refreshed -> red badges/glow
+    focus_requested = Signal(object)  # device ids (or None = all) -> bring them into view
     edges_restyled = Signal()         # connector style (bent/straight) changed -> reroute edges
     # --- AI tutor "present" channel (the stage the AI draws on) ---
     present_spotlight = Signal(object)    # list[device_id] to spotlight, or None to clear

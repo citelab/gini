@@ -1150,6 +1150,7 @@ class CanvasView(QGraphicsView):
         self._narr_timer.setSingleShot(True)
         self._narr_timer.timeout.connect(self._narration.hide)
         ctx.bus.present_narrate.connect(self._show_narration)
+        ctx.bus.focus_requested.connect(self.focus_on_devices)   # e.g. a staged mission board
         ctx.bus.present_clear.connect(self._narration.hide)
         # Wizard: the assistant resolves goal-relevant neighbours (LLM) and hands them back
         ctx.bus.wizard_ghosts_requested.connect(self._on_wizard_requested)
@@ -1348,6 +1349,73 @@ class CanvasView(QGraphicsView):
                 self.scale(factor, factor)
         else:
             super().wheelEvent(e)
+
+    # -- finding things that are off-screen ---------------------------------- #
+    def visible_scene_rect(self) -> QRectF:
+        return self.mapToScene(self.viewport().rect()).boundingRect()
+
+    def focus_on_rect(self, rect: QRectF, *, margin: float = 70.0) -> None:
+        """Bring `rect` into view — zoom out to fit only if it doesn't already fit, else just pan."""
+        if rect.isNull() or rect.isEmpty():
+            return
+        r = rect.adjusted(-margin, -margin, margin, margin)
+        vis = self.visible_scene_rect()
+        if r.width() > vis.width() or r.height() > vis.height():
+            self.fitInView(r, Qt.KeepAspectRatio)
+            self._zoom = self.transform().m11()
+        else:
+            self.centerOn(r.center())
+
+    def focus_on_devices(self, ids=None) -> None:
+        """Frame the given devices (or everything, when ids is None). Used after a mission STAGES a
+        board — otherwise the pre-built elements can land off-screen and the student thinks the
+        mission placed nothing (they shouldn't have to hunt for it)."""
+        items = list(self.scene_.nodes.values()) + list(self.scene_.groups.values())
+        if ids:
+            want = set(ids)
+            items = [i for i in items if i.inst.id in want]
+        if not items:
+            return
+        rect = items[0].sceneBoundingRect()
+        for it in items[1:]:
+            rect = rect.united(it.sceneBoundingRect())
+        self.focus_on_rect(rect)
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        """Edge markers for elements that are OFF-SCREEN — a coloured dot pinned to the edge of the
+        viewport in the direction of each hidden element, so a student can always see that something
+        exists out there and which way to scroll."""
+        super().drawForeground(painter, rect)
+        scene = self.scene_
+        if scene is None:
+            return
+        vis = self.visible_scene_rect()
+        z = max(self._zoom, 0.05)
+        inset = 13.0 / z                       # keep the dot ~13px inside the edge, at any zoom
+        bounds = vis.adjusted(inset, inset, -inset, -inset)
+        if bounds.width() <= 0 or bounds.height() <= 0:
+            return
+        radius = 5.0 / z
+        theme = getattr(scene, "theme", None)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            for it in list(scene.nodes.values()) + list(scene.groups.values()):
+                b = it.sceneBoundingRect()
+                if vis.intersects(b):
+                    continue                   # visible — nothing to point at
+                c = b.center()
+                x = min(max(c.x(), bounds.left()), bounds.right())
+                y = min(max(c.y(), bounds.top()), bounds.bottom())
+                try:
+                    col = _qcolor(theme.accent_for(it.inst.type.accent.value))
+                except Exception:
+                    col = QColor(120, 140, 170)
+                painter.setBrush(QBrush(col))
+                painter.setPen(QPen(QColor(255, 255, 255, 200), 1.5 / z))
+                painter.drawEllipse(QPointF(x, y), radius, radius)
+        finally:
+            painter.restore()                  # never leave the painter unbalanced
 
     def zoom_by(self, factor: float) -> None:
         new = self._zoom * factor
