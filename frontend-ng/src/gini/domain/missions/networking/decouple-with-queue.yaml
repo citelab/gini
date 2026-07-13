@@ -11,13 +11,19 @@ provides:
 - serverless-fn
 objectives:
 - id: has-queue
-  say: There is a queue
+  say: Place a message queue
   check: exists(queue)
+- id: has-producer
+  say: Place a web app (the producer)
+  check: exists(web_app)
+- id: has-consumer
+  say: Place a function (the consumer)
+  check: exists(function)
 - id: produces
-  say: A producer (web app) reaches the queue
+  say: Connect the producer to the queue
   check: path(web_app, queue)
 - id: consumes
-  say: A consumer (function) reaches the queue
+  say: Connect the queue to the consumer
   check: path(queue, function)
 misconceptions:
 - Wiring the producer straight to the consumer (no decoupling).

@@ -53,6 +53,7 @@ class MissionPanel(QWidget):
         super().__init__(parent)
         self.theme = theme
         self._mission = None
+        self._toggled: dict[int, bool] = {}      # levels the student explicitly folded/unfolded
         # hard-cap the width so the HUD can never inflate the Ask GINI dock / the window
         self.setMaximumWidth(_PANEL_MAX_W)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -122,6 +123,7 @@ class MissionPanel(QWidget):
     # -- API ---------------------------------------------------------------- #
     def set_mission(self, mission) -> None:
         self._mission = mission
+        self._toggled.clear()                 # a new mission starts with a fresh ladder
         les = mission.lesson
         self._title.setText(les.title or les.id)
         self._brief.setText(les.brief)
@@ -175,11 +177,14 @@ class MissionPanel(QWidget):
                                   + (self._c("warn") if warn else self._c("text")) + ";")
         self._lives.setText("♥ " * m.lives_left() or "—")
         self._lives.setStyleSheet(f"color:{self._c('accent')};")
-        if m.state in ("witnessed", "done") and m.last_band:
-            col = _BAND_COLOR.get(m.last_band, self._c("text"))
+        # Show the LIVE band, computed from the objectives on screen — never a frozen snapshot, or the
+        # label can contradict the count ("PARTIAL — 9/9"). Appears once there's progress to report.
+        sc = m.score()
+        if sc.met > 0 or m.state in ("witnessed", "done"):
+            col = _BAND_COLOR.get(sc.band, self._c("text"))
             label = {"gold": "★ GOLD", "pass": "✓ PASS", "partial": "◐ PARTIAL",
-                     "incomplete": "✗ INCOMPLETE"}.get(m.last_band, m.last_band.upper())
-            self._band.setText(f"{label} — {m.score().summary}")
+                     "incomplete": "✗ INCOMPLETE"}.get(sc.band, sc.band.upper())
+            self._band.setText(f"{label} — {sc.summary}")
             self._band.setStyleSheet(f"font-size:14px; font-weight:700; color:{col};")
             self._band.setVisible(True)
         else:
@@ -193,11 +198,57 @@ class MissionPanel(QWidget):
                 w.setParent(None)      # detach immediately (deleteLater is async → stale paint)
                 w.deleteLater()
 
+    def _is_open(self, level: int, active: int | None) -> bool:
+        """Which rungs are expanded: the one you're working on, unless you've toggled it yourself."""
+        if level in self._toggled:
+            return self._toggled[level]
+        return level == active
+
+    def _toggle_level(self, level: int, active: int | None) -> None:
+        self._toggled[level] = not self._is_open(level, active)
+        self.render_current()
+
     def _render_objectives(self, results) -> None:
+        """The objectives as a PROGRESSIVE LADDER that COLLAPSES AS YOU CLIMB IT.
+
+        A task per basic action means a rich mission can run to a dozen-plus rows, which would crowd
+        out the chat. So: a finished level folds to one green summary line, the level you're working
+        on stays open, and later levels stay folded (with progress) — you keep the shape of the whole
+        journey without the clutter. Any header can be clicked to peek."""
         self._clear_objectives()
+        if not results:
+            return
+        # group into rungs, preserving the ladder order
+        rungs: list[tuple[int, list]] = []
         for r in results:
-            row = _fluid(QLabel(f"{_GLYPH.get(r.status, '•')}  {r.say}"))
-            role = {"met": "met", "unmet": "unmet", "pending": "pending"}.get(r.status, "text")
-            weight = "600" if r.status == _obj.MET else "400"
-            row.setStyleSheet(f"color:{self._c(role)}; font-weight:{weight};")
-            self._obj_box.addWidget(row)
+            lv = getattr(r, "level", 1)
+            if not rungs or rungs[-1][0] != lv:
+                rungs.append((lv, []))
+            rungs[-1][1].append(r)
+        # the ACTIVE rung is the first with anything still open — that's where the student is
+        active = next((lv for lv, rs in rungs if not all(x.met for x in rs)), None)
+
+        for lv, rs in rungs:
+            done = sum(1 for x in rs if x.met)
+            complete = done == len(rs)
+            open_ = self._is_open(lv, active)
+            chev = "▾" if open_ else "▸"
+            tick = "✓ " if complete else ""
+            head = QPushButton(f"{chev}  {tick}Level {lv} · {_obj.LEVEL_NAME.get(lv, '')}"
+                               f"   ({done}/{len(rs)})")
+            head.setCursor(Qt.PointingHandCursor)
+            col = self._c("met") if complete else (self._c("accent") if lv == active
+                                                   else self._c("muted"))
+            head.setStyleSheet(
+                f"QPushButton{{border:none; background:transparent; text-align:left; padding:3px 0; "
+                f"color:{col}; font-size:11px; font-weight:700;}}")
+            head.clicked.connect(lambda _=False, l=lv, a=active: self._toggle_level(l, a))
+            self._obj_box.addWidget(head)
+            if not open_:
+                continue                                  # folded — its rows stay out of the way
+            for r in rs:
+                row = _fluid(QLabel(f"     {_GLYPH.get(r.status, '•')}  {r.say}"))
+                role = {"met": "met", "unmet": "unmet", "pending": "pending"}.get(r.status, "text")
+                weight = "600" if r.status == _obj.MET else "400"
+                row.setStyleSheet(f"color:{self._c(role)}; font-weight:{weight};")
+                self._obj_box.addWidget(row)

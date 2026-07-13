@@ -54,6 +54,8 @@ def _obj_to_dict(o: ObjectiveTemplate) -> dict:
         d["kind"] = o.kind
     if o.probe:
         d["probe"] = o.probe
+    if o.level:
+        d["level"] = o.level
     if not o.check:
         d.pop("check")
     return d
@@ -63,7 +65,8 @@ def fragment_from_dict(d: dict):
     from .fragments import Fragment, ObjectiveTemplate
     objs = tuple(ObjectiveTemplate(id=o["id"], say=o.get("say", o["id"]),
                                    kind=o.get("kind", "structural"),
-                                   check=o.get("check", ""), probe=o.get("probe", ""))
+                                   check=o.get("check", ""), probe=o.get("probe", ""),
+                                   level=o.get("level"))
                  for o in (d.get("objectives", []) or []))
     return Fragment(
         id=d["id"], layer=d.get("layer", "core"), teaches=d.get("teaches", ""),

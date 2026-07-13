@@ -10,13 +10,19 @@ provides:
 - relational-store
 objectives:
 - id: has-vpc
-  say: There is a VPC
+  say: Place a VPC on the canvas
   check: exists(vpc)
+- id: has-web
+  say: Place a web app
+  check: exists(web_app)
+- id: has-db
+  say: Place a managed database
+  check: exists(database)
 - id: web-in
-  say: The web app is inside the VPC
+  say: The web app sits inside the VPC
   check: contains_type(vpc, web_app)
 - id: db-in
-  say: The database is inside the VPC
+  say: The database sits inside the VPC
   check: contains_type(vpc, database)
 misconceptions:
 - Leaving a workload outside the box but wired in — containment is membership.

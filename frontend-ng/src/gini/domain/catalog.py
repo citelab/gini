@@ -67,12 +67,14 @@ def _bind(text: str, params: dict) -> str:
 
 
 def instantiate(archetype: Archetype, params: dict) -> list[Objective]:
+    from .objectives import by_level
     out: list[Objective] = []
     for t in archetype.objectives:
         out.append(Objective(id=t.id, say=t.say, kind=t.kind,
                              check=_bind(t.check, params) if t.check else "",
-                             probe=_bind(t.probe, params) if t.probe else ""))
-    return out
+                             probe=_bind(t.probe, params) if t.probe else "",
+                             level=t.level))
+    return by_level(out)         # progressive ladder: place → connect → group → prove live
 
 
 def unbound_refs(archetype: Archetype, params: dict) -> list[str]:

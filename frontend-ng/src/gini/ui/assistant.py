@@ -1128,7 +1128,13 @@ class Assistant(QWidget):
 
     def _dispatch_mission(self, method: str, *args) -> None:
         """Run a controller reaction on a worker thread (one at a time; coalesce extra changes)."""
-        if self._mission_ctrl is None or not self._mission_ctrl.active:
+        ctrl = self._mission_ctrl
+        if ctrl is None or ctrl.mission is None:
+            return
+        # Run/Check and questions still work AFTER a mission completes (run the live checks, ask a
+        # follow-up) — a mission can go GOLD on its structural objectives while the behavioral 'Live'
+        # checks are still un-run. Only the automatic canvas reaction is gated on 'active'.
+        if not ctrl.active and method not in ("run_check", "ask"):
             return
         if self._mission_busy:
             self._mission_dirty = True

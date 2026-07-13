@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         from .. import runtime as _rt
         from ..services import GLoader
         self._gloader = GLoader(Path(_rt.__file__).parent)
+        self.ctx.orchestrator = self._gloader.orchestrator   # behavioral probes exec through this
         self._remote = None              # RemoteClient when connected to a GINI server, else None
         self._running = False
         self._stopping = False
@@ -1976,16 +1977,18 @@ class MainWindow(QMainWindow):
         self.canvas.addAction(a)
 
     def _update_delete_enabled(self) -> None:
-        from .canvas import NodeItem
-        has_sel = any(isinstance(i, NodeItem)
+        from .canvas import GroupItem, NodeItem
+        has_sel = any(isinstance(i, (NodeItem, GroupItem))     # boxes (VPC/Subnet/Region) too
                       for i in self.canvas.scene_.selectedItems())
         busy = self._running or getattr(self, "_stopping", False)
         self._delete_act.setEnabled(has_sel and not busy)
 
     def _delete_selected(self) -> None:
-        from .canvas import NodeItem
+        # delete selected CARDS *and* BOXES — GroupItems (VPC/Subnet/Region) were excluded, so a
+        # selected VPC/Subnet left Delete + the trash button doing nothing.
+        from .canvas import GroupItem, NodeItem
         ids = [i.inst.id for i in self.canvas.scene_.selectedItems()
-               if isinstance(i, NodeItem)]
+               if isinstance(i, (NodeItem, GroupItem))]
         self._remove_devices(ids)
 
     def _delete_device(self, device_id: str) -> None:

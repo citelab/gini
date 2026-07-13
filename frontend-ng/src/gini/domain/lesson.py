@@ -124,7 +124,7 @@ def _objective_from(d: dict) -> Objective:
     if kind not in _KINDS:
         raise LessonError(f"objective {d['id']}: bad kind {kind!r}")
     return Objective(id=d["id"], say=d.get("say", d["id"]), kind=kind,
-                     check=d.get("check", ""), probe=d.get("probe", ""))
+                     check=d.get("check", ""), probe=d.get("probe", ""), level=d.get("level"))
 
 
 def from_dict(d: dict) -> Lesson:

@@ -11,16 +11,19 @@ provides:
 - service-endpoint
 objectives:
 - id: has-ovs
-  say: There is an OpenVSwitch
+  say: Place an OpenVSwitch
   check: exists(ovs)
 - id: has-ctrl
-  say: There is a controller
+  say: Place a controller
   check: exists(controller)
+- id: has-hosts
+  say: Place at least two hosts
+  check: count(host) >= 2
 - id: ovs-controlled
-  say: The switch is wired to the controller
+  say: Wire the switch to the controller
   check: link(ovs, controller)
 - id: hosts-on-ovs
-  say: Hosts are wired to the switch
+  say: Wire the hosts to the switch
   check: link(host, ovs)
 misconceptions:
 - Expecting an OVS to forward with no controller attached (it can't).

@@ -10,17 +10,17 @@ provides:
 - metrics-source
 objectives:
 - id: has-cluster
-  say: There is a Kubernetes cluster
+  say: Place a Kubernetes cluster
   check: exists(k8s_cluster)
 - id: has-pod
-  say: There is a pod
+  say: Place a pod
   check: exists(pod)
+- id: has-hpa
+  say: Place a pod autoscaler
+  check: exists(instance_group)
 - id: pod-in-cluster
   say: The pod lives in the cluster
   check: link(k8s_cluster, pod) or contains_type(k8s_cluster, pod)
-- id: has-hpa
-  say: There is a pod autoscaler
-  check: exists(instance_group)
 misconceptions:
 - A pod outside any cluster — a pod must live in a cluster.
 peers:

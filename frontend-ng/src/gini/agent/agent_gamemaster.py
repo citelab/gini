@@ -77,6 +77,17 @@ class AgentGameMaster:
                  "short lines — affirm or gently correct, grounded in the goal; then we move on."
         ) or "Good — let's continue."
 
+    def run_note(self, failed) -> str:
+        """React to a Run whose live checks FAILED — grounded so the model can't claim a false win."""
+        joined = "; ".join(failed)
+        if self.llm is None:
+            return f"The live check didn't pass yet: {joined}. Check the real connection."
+        return self.runner.call(
+            REASONING, context=self.reasoning._context(),
+            task=f"The student ran the system and a LIVE check FAILED: {joined}. In ONE short line, "
+                 "tell them the live verification did not pass yet and to check the actual "
+                 "connection — do NOT claim it succeeded.") or f"The live check didn't pass: {joined}."
+
     def flag_note(self, reasons) -> str:
         joined = "; ".join(reasons)
         if self.llm is None:

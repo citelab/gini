@@ -121,8 +121,10 @@ def _merge_objectives(chosen: list) -> list[Objective]:
                 seen_checks.add(o.check)
             oid = o.id if o.id not in seen_ids else f"{f.id}-{o.id}"
             seen_ids.add(oid)
-            objs.append(Objective(id=oid, say=o.say, kind=o.kind, check=o.check, probe=o.probe))
-    return objs
+            objs.append(Objective(id=oid, say=o.say, kind=o.kind, check=o.check, probe=o.probe,
+                                  level=o.level))
+    from .objectives import by_level
+    return by_level(objs)        # progressive ladder: place → connect → group → prove live
 
 
 def assemble(core_ids, *, genre: str | None = None, level: int | None = None, lesson_id: str,

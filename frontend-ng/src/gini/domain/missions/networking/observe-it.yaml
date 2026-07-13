@@ -12,13 +12,13 @@ provides:
 - metrics-source
 objectives:
 - id: has-metrics
-  say: There is a metrics source
+  say: Place a metrics source
   check: exists(metrics)
 - id: has-dash
-  say: There is a dashboard
+  say: Place a dashboard
   check: exists(dashboard)
 - id: wired
-  say: The dashboard reads the metrics source
+  say: Wire the dashboard to the metrics source
   check: path(dashboard, metrics)
 misconceptions:
 - A dashboard with no metrics source has nothing to show.

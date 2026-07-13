@@ -141,13 +141,31 @@ class MissionController:
             return None
         world = self._world()
         runner = self.make_runner()
+        # tell the student WHY nothing changed when the live checks can't run (no running stack)
+        if self.mission.lesson.behavioral_ids() and (
+                runner is None or not getattr(runner, "available", lambda: False)()):
+            self.post("GINI", "The live checks (⏳) need the running system — start the topology with "
+                              "the ▶ Run button on the toolbar first, then press Run / Check again. "
+                              "Your build already meets the objectives to complete this mission.")
         score = self.mission.check(world, runner)
         if self.panel is not None:
             self.panel.render_current()
         if self.mission.guided and not self.mission.steps_done:
             self._advance_guided(world, runner=runner)        # a run advanced a behavioral beat?
+        # A DETERMINISTIC summary of the live checks, straight from the probe verdicts — the oracle,
+        # not the model, so it can NEVER contradict the objective panel (kills the 'connection test
+        # successful' hallucination when a live check actually failed).
+        live = [r for r in self.mission.last_results if r.kind == "behavioral"]
+        if live:
+            mark = {"met": "✓", "unmet": "✗", "pending": "⏳"}
+            self.post("GINI", "Live checks — "
+                      + "; ".join(f"{mark.get(r.status, '?')} {r.say}" for r in live))
         if not self._maybe_finish():
-            self._speak(self.gm.decide(self.mission, self.mission.last_results))
+            failed = [r.say for r in live if not r.met]
+            if failed and hasattr(self.gm, "run_note"):
+                self.post("GINI", self.gm.run_note(failed))   # grounded: names what FAILED, no false wins
+            else:
+                self._speak(self.gm.decide(self.mission, self.mission.last_results))
         return score
 
     # -- a student message during a mission --------------------------------- #

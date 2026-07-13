@@ -10,10 +10,10 @@ provides:
 - web-endpoint
 objectives:
 - id: has-sg
-  say: There is a security group
+  say: Place a security group
   check: exists(security_group)
 - id: has-workload
-  say: There is a workload to protect
+  say: Place a workload to protect
   check: exists(web_app) or exists(database) or exists(instance)
 misconceptions:
 - Leaving a datastore open to the world instead of scoping ingress.

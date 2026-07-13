@@ -11,19 +11,19 @@ provides:
 - service-endpoint
 objectives:
 - id: has-switch
-  say: There is a switch
+  say: Place a switch on the canvas
   check: exists(switch)
 - id: two-hosts
-  say: At least two hosts
+  say: Place at least two hosts
   check: count(host) >= 2
 - id: has-gateway
-  say: There is a router (the gateway)
+  say: Place a router (the gateway)
   check: exists(router)
 - id: hosts-on-switch
-  say: Hosts are wired to the switch
+  say: Wire the hosts to the switch
   check: link(host, switch)
 - id: switch-to-gateway
-  say: The switch is wired to the router gateway
+  say: Wire the switch to the router
   check: link(switch, router)
 misconceptions:
 - Wiring the two hosts directly together instead of through the switch.

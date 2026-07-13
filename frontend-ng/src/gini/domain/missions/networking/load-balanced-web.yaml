@@ -11,13 +11,13 @@ provides:
 - metrics-source
 objectives:
 - id: has-lb
-  say: There is a load balancer
+  say: Place a load balancer
   check: exists(load_balancer)
-- id: enough-backends
-  say: At least two web backends
+- id: enough-backs
+  say: Place at least two web backends
   check: count(web_app) >= 2
 - id: fans-out
-  say: The load balancer reaches the web backends
+  say: Wire the load balancer to the backends
   check: path(load_balancer, web_app)
 misconceptions:
 - A single backend behind the LB (nothing to balance).

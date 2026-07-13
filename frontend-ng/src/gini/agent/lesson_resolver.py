@@ -54,23 +54,27 @@ def shortlist(intent_text: str, k: int = 5) -> list:
     return picks or list(_catalog.all_archetypes())[:k]
 
 
-def best_lexical(intent_text: str) -> str:
-    """The archetype id whose text overlaps the intent MOST (or '' if nothing overlaps). Used as a
-    deterministic coverage backstop: whatever the student literally asked for ('firewall') is always
-    represented among the assembled cores, even if a small model picks a different primary.
-
-    A word in the archetype's DEFINING fields (its id + summary) counts double a word that only
-    appears incidentally in the spirit/teaches — otherwise a game that merely *mentions* a firewall
-    as one option (reachability-boundary) ties the game that IS about a firewall (service-chain)."""
+def lexical_scores(intent_text: str) -> list[tuple[str, int]]:
+    """Archetypes scored by overlap with the intent, best first (score > 0 only). A word in the
+    archetype's DEFINING fields (id + summary) counts double a word that only appears incidentally in
+    the spirit/teaches — so a game that IS about a firewall (service-chain) outranks one that merely
+    mentions a firewall as one option (reachability-boundary)."""
     want = set(_lex.normalize(intent_text, query=True))
-    best_id, best_score = "", 0
+    scored = []
     for a in _catalog.all_archetypes():
         strong = set(_lex.normalize(a.id.replace("-", " ") + " " + a.summary))
         weak = set(_lex.normalize(a.spirit + " " + a.teaches.replace("-", " ")))
         score = 2 * len(want & strong) + len(want & (weak - strong))
-        if score > best_score:
-            best_score, best_id = score, a.id
-    return best_id
+        if score:
+            scored.append((a.id, score))
+    scored.sort(key=lambda s: -s[1])
+    return scored
+
+
+def best_lexical(intent_text: str) -> str:
+    """The single best lexical match (or '' if nothing overlaps)."""
+    s = lexical_scores(intent_text)
+    return s[0][0] if s else ""
 
 
 _PROMPT = (
@@ -168,11 +172,16 @@ _COMPOSE_PROMPT = (
 
 
 def compose(intent_text: str, llm=None, *, lesson_id: str = "", persona: str = "coach",
-            genre: str | None = None, level: int | None = None, **overrides) -> Proposal | None:
+            genre: str | None = None, level: int | None = None, fill: bool = False,
+            **overrides) -> Proposal | None:
     """Compose a playable Lesson from a student's free-form wish by ASSEMBLING catalog fragments
-    (select the closest core, optionally a second, then close the graph + fill exercise/observe
-    layers). Objectives are never authored — only copied from verified fragments. Returns a Proposal
-    (its `.lesson` is ready to launch), or None if nothing is even lexically close."""
+    (select the closest core, optionally a second the model explicitly names). Objectives are never
+    authored — only copied from verified fragments. Returns a Proposal (its `.lesson` is ready to
+    launch), or None if nothing is even lexically close.
+
+    `fill` defaults to FALSE for the describe box: a described mission stays LEAN — just what the
+    student asked for. We do NOT auto-add exercise/observe layers (load generators, dashboards,
+    metrics) they never requested. Enrichment is opt-in / for authored curricula, not terse wishes."""
     from ..domain import assembly as _assembly
     from ..domain import constraints as _con
     from ..domain import fragments as _frag
@@ -182,7 +191,6 @@ def compose(intent_text: str, llm=None, *, lesson_id: str = "", persona: str = "
 
     primary_id = secondary_id = title = brief = ""
     g = genre
-    llm_excl_terms: list = []
     if llm is not None:
         try:
             obj = _first_json(llm(_COMPOSE_PROMPT.format(intent=intent_text, menu=_menu(cands))))
@@ -196,29 +204,37 @@ def compose(intent_text: str, llm=None, *, lesson_id: str = "", persona: str = "
             if g is None and obj.get("genre") in (_assembly.EXPERIENCE, _assembly.EXPEDITION,
                                                   _assembly.CHALLENGE):
                 g = str(obj.get("genre"))
-            if isinstance(obj.get("exclude"), list):
-                llm_excl_terms = obj["exclude"]
 
-    # DON'Ts: a reliable model-free negation scan of the intent, plus the model's own exclude list
-    excl = _con.merge(_con.from_text(intent_text), _con.from_terms(llm_excl_terms))
+    # DON'Ts: a reliable, model-free negation scan of the intent (the model's self-volunteered
+    # `exclude` was dropped — small models hallucinate exclusions, e.g. an unasked "no dashboard").
+    excl = _con.from_text(intent_text)
 
-    primary = _catalog.get(primary_id) or cands[0]       # fall back to the top lexical candidate
+    # Core selection is faithful to the LITERAL words: a STRONG lexical match is the primary (so the
+    # student gets what they typed, even if a small model over-elaborates and picks a different game).
+    # For fuzzy intent (no strong match) we trust the model's interpretation. A SECOND core is added
+    # only when the model explicitly names one — we do NOT auto-combine, which caused "private db,
+    # public web" to also drag in an unasked message-queue mission.
+    scores = lexical_scores(_con.positive_text(intent_text))
+    if scores and scores[0][1] >= 3:
+        primary = _catalog.get(scores[0][0]) or cands[0]
+    else:
+        primary = _catalog.get(primary_id) or cands[0]
+
+    # A mission must never MISREPRESENT itself. The model writes title/brief from ITS reading of the
+    # intent; if the deterministic pick overrode that reading, the model's narrative describes a game
+    # we did NOT assemble (a queue story wrapped around VPC-isolation objectives). Drop it and let the
+    # assembled fragments describe themselves.
+    if primary_id and primary_id != primary.id:
+        title = brief = ""
+
     core_ids = [primary.id]
-    # coverage backstop: guarantee whatever was literally asked for is present, so the mission's
-    # objectives can't drift from its narrative (the "asked for a firewall, got none" bug). Match on
-    # the POSITIVE intent only, and never force in a core the student excluded.
-    cover = best_lexical(_con.positive_text(intent_text))
-    cover_frag = _frag.get(cover) if cover else None
-    if cover and cover not in core_ids and not (cover_frag and _con.fragment_excluded(cover_frag, excl)):
-        core_ids.append(cover)
-    if secondary_id and secondary_id != primary.id and _catalog.get(secondary_id) is not None \
-            and secondary_id not in core_ids:
-        core_ids.append(secondary_id)
-    core_ids = core_ids[:2]                               # cap at two cores (keep missions focused)
+    if secondary_id and secondary_id != primary.id and _catalog.get(secondary_id) is not None:
+        core_ids.append(secondary_id)                    # a second core only on an explicit request
+    core_ids = core_ids[:2]
 
     lid = lesson_id or f"described-{primary.id}"
     lesson = _assembly.assemble(core_ids, genre=g, level=level, lesson_id=lid, title=title,
-                                brief=brief, persona=persona, exclude=excl, **overrides)
+                                brief=brief, persona=persona, exclude=excl, fill=fill, **overrides)
 
     # feasibility: if a thing the student asked FOR still needs a thing they asked to leave OUT,
     # don't quietly build a mismatched mission — report the conflict back

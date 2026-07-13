@@ -42,8 +42,13 @@ class DockerProbeRunner:
 
     def _exec(self, service: str, argv: list[str]) -> tuple[int, str]:
         cmd = [*self.orch._dc, "exec", "-T", service, *argv]
+        # `docker compose` (no -f) finds the project via the CWD — every orchestrator call runs in
+        # the workdir, so the probe MUST too, or `exec` can't find the running stack (a false
+        # negative: probes fail even though the containers are up and reachable).
+        wd = getattr(self.orch, "workdir", None)
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
+            r = subprocess.run(cmd, cwd=str(wd) if wd else None,
+                               capture_output=True, text=True, timeout=self.timeout)
             return r.returncode, (r.stdout or "") + (r.stderr or "")
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return 124, ""

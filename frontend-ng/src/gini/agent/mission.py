@@ -79,10 +79,11 @@ class Mission:
     # -- evaluation --------------------------------------------------------- #
     def evaluate(self, world, runner=None) -> list:
         """Re-evaluate objectives against the live world (structural = instant; behavioral resolve
-        when a `runner`/runtime is supplied, else pending). Auto-witnesses when the mission
-        completes or the clock expires while playing."""
+        when a `runner`/runtime is supplied, else pending). Auto-witnesses when the mission genuinely
+        completes or the clock expires — including from an already-WITNESSED attempt, so a band can
+        still be *upgraded* if the student pushes on and finishes."""
         self.last_results = _obj.evaluate_all(self.lesson.objectives, world, runner)
-        if self.state == PLAYING and self._should_finish():
+        if self.state in (PLAYING, WITNESSED) and self._should_finish():
             self._witness()
         return self.last_results
 
@@ -97,11 +98,13 @@ class Mission:
         return self._complete()
 
     def check(self, world, runner=None) -> "_scoring.Score":
-        """Explicit 'Run/Check' — run the topology (behavioral probes via `runner`), evaluate, and
-        (unless it's a guided mission still mid-beats, where Run just advances a beat) witness."""
+        """Explicit 'Run/Check' — resolve the behavioral probes against the running system.
+
+        It must NOT end the attempt on its own. The live checks are REQUIRED to finish, so the
+        student presses Run precisely in order to complete — forcing a witness here froze a PARTIAL
+        band the moment they ran, and the mission could never be re-judged once it finished
+        ("PARTIAL — 9/9"). `evaluate()` witnesses when the mission is genuinely complete or expired."""
         self.evaluate(world, runner)
-        if self.state == PLAYING and (not self.guided or self.steps_done):
-            self._witness()
         return self.score()
 
     def _complete(self) -> bool:

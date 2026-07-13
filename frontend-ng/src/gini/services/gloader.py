@@ -45,6 +45,12 @@ class GLoader:
         self._compiler = RuntimeCompiler()
         self._orch = Orchestrator(runtime_dir)
 
+    @property
+    def orchestrator(self):
+        """The live Orchestrator (tracks the running compose project) — the seam behavioral probes
+        exec through. It carries the workdir/_dc set by the last `up()`."""
+        return self._orch
+
     # -- spec handling ------------------------------------------------------ #
     @staticmethod
     def read_spec(path: str | Path) -> Topology:

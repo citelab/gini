@@ -30,6 +30,7 @@ class ObjectiveTemplate:
     kind: str = "structural"     # structural | behavioral
     check: str = ""              # structural predicate (may contain {ref} placeholders)
     probe: str = ""              # behavioral probe (may contain {ref} placeholders)
+    level: int | None = None     # explicit ladder tier (1 place · 2 connect · 3 group · 4 live)
 
 
 @dataclass(frozen=True)
@@ -51,8 +52,8 @@ class Fragment:
     stage: dict = field(default_factory=dict)   # optional pre-built board (M3 staging)
 
     def instantiate(self) -> list[Objective]:
-        return [Objective(id=t.id, say=t.say, kind=t.kind, check=t.check, probe=t.probe)
-                for t in self.objectives]
+        return [Objective(id=t.id, say=t.say, kind=t.kind, check=t.check, probe=t.probe,
+                          level=t.level) for t in self.objectives]
 
 
 # -- registry: the foundational fragments, loaded from local YAML packs ------ #

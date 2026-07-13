@@ -42,6 +42,7 @@ class Objective:
     kind: str = "structural"  # structural | behavioral
     check: str = ""          # structural predicate expression
     probe: str = ""          # behavioral probe (opaque in Phase 1)
+    level: int | None = None  # explicit ladder tier; None = derived from the predicate
 
     def is_behavioral(self) -> bool:
         return self.kind == "behavioral"
@@ -53,6 +54,7 @@ class ObjectiveResult:
     say: str
     kind: str
     status: str              # met | unmet | pending
+    level: int = 1           # which rung of the progressive ladder this sits on
 
     @property
     def met(self) -> bool:
@@ -73,6 +75,55 @@ _TYPE_ARG_FUNCS = {"exists", "count", "link", "path", "contains_type", "through"
 
 class PredicateError(ValueError):
     """A structural check that doesn't parse or uses an unknown function."""
+
+
+# ---- the progressive ladder ------------------------------------------------ #
+# Objectives are ordered basic → advanced so a student always has an obvious next move: place the
+# elements, wire them, group them, then prove it live. The tier is DERIVED from the predicate, so
+# every mission (existing and future) gets the ladder for free — no hand-tagging.
+PLACEMENT, CONNECTION, CONTAINMENT, LIVE = 1, 2, 3, 4
+
+_PRED_LEVEL = {
+    "exists": PLACEMENT, "count": PLACEMENT, "property": PLACEMENT, "prop": PLACEMENT,
+    "link": CONNECTION, "path": CONNECTION, "through": CONNECTION,
+    "linked": CONNECTION, "connected": CONNECTION,
+    "contains": CONTAINMENT, "contains_type": CONTAINMENT,
+}
+
+LEVEL_NAME = {PLACEMENT: "Place the elements", CONNECTION: "Make the connections",
+              # L3 carries both containment (inside a VPC) and isolation (shielded / no bypass) —
+              # the "get the structure right" rung, not merely grouping.
+              CONTAINMENT: "Group & isolate", LIVE: "Prove it live (Run / Check)"}
+
+
+def check_level(expr: str) -> int:
+    """The tier of a structural check — the HARDEST predicate it uses (a compound is as advanced as
+    its most advanced part)."""
+    try:
+        tree = ast.parse(expr or "", mode="eval")
+    except SyntaxError:
+        return PLACEMENT
+    levels = [_PRED_LEVEL.get(n.func.id, PLACEMENT)
+              for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    return max(levels) if levels else PLACEMENT
+
+
+def level_of(objective) -> int:
+    """Which rung of the ladder an objective sits on. An explicit `level:` (authored in the YAML)
+    wins — the derived tier is only a sensible default, and some checks are semantically more
+    advanced than their predicate suggests (an isolation check reads as `path`, but it's an
+    advanced idea)."""
+    explicit = getattr(objective, "level", None)
+    if explicit:
+        return int(explicit)
+    if getattr(objective, "kind", "structural") == "behavioral":
+        return LIVE
+    return check_level(getattr(objective, "check", ""))
+
+
+def by_level(objectives) -> list:
+    """Objectives ordered basic → advanced (stable within a tier, so authored order is preserved)."""
+    return sorted(objectives, key=level_of)
 
 
 def _arg(node) -> object:
@@ -172,18 +223,18 @@ def evaluate(obj: Objective, world, runner=None) -> ObjectiveResult:
     the probe; without one they stay `pending` (Phase 1 behavior, and whenever nothing is running)."""
     if obj.is_behavioral():
         if runner is None or not getattr(runner, "available", lambda: False)():
-            return ObjectiveResult(obj.id, obj.say, obj.kind, PENDING)
+            return ObjectiveResult(obj.id, obj.say, obj.kind, PENDING, level_of(obj))
         from . import probes as _probes
         try:
             met = _probes.evaluate(obj.probe, runner)
         except _probes.ProbeError:
             met = False
-        return ObjectiveResult(obj.id, obj.say, obj.kind, MET if met else UNMET)
+        return ObjectiveResult(obj.id, obj.say, obj.kind, MET if met else UNMET, level_of(obj))
     try:
         met = evaluate_check(obj.check, world)
     except PredicateError:
         met = False
-    return ObjectiveResult(obj.id, obj.say, obj.kind, MET if met else UNMET)
+    return ObjectiveResult(obj.id, obj.say, obj.kind, MET if met else UNMET, level_of(obj))
 
 
 def evaluate_all(objectives, world, runner=None) -> list[ObjectiveResult]:

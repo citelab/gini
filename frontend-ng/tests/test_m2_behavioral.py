@@ -28,16 +28,18 @@ def test_type_runner_resolves_tokens_existentially():
     assert not tr.reach("cloud", "database")          # no cloud device present → unreachable
 
 
-def test_private_db_completes_offline_but_goes_full_on_run():
+def test_private_db_needs_the_run_to_complete():
+    # a mission with live checks must NOT complete while they're pending — you Run to finish it
     les = L.from_archetype("reachability-boundary", {}, id="rb")
     m = Mission(les); m.start()
     t, w, d = _private_db()
     res = m.evaluate(O.TopologyWorld(t))              # offline, no runner
-    assert m.complete                                 # structural at_least(3) → completable offline
-    assert sum(r.met for r in res) == 3
+    assert not m.complete                             # pending live checks block completion (honest)
+    structural = [r for r in res if r.kind == "structural"]
+    assert structural and all(r.met for r in structural)   # every structural rung is green
     runner = P.TypeRunner(P.FakeRunner({("reach", "Wname", "Dname", None): True}), lambda: t)
-    res2 = m.evaluate(O.TopologyWorld(t), runner)     # Run → behavioral resolve
-    assert all(r.met for r in res2)                   # reach/shield turned green
+    m.check(O.TopologyWorld(t), runner)               # Run → behavioral resolve
+    assert m.complete and all(r.met for r in m.last_results)   # now all 5 met → complete
 
 
 def test_behavioral_probes_are_validated_on_load():

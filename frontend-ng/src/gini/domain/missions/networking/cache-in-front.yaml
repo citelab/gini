@@ -9,13 +9,13 @@ provides:
 - relational-store
 objectives:
 - id: has-cache
-  say: There is a cache
+  say: Place a cache
   check: exists(cache)
 - id: has-db
-  say: There is a database
+  say: Place a database
   check: exists(database)
 - id: fronted
-  say: The cache fronts the database
+  say: Put the cache in front of the database
   check: path(cache, database)
 misconceptions:
 - A cache not connected to anything it fronts.

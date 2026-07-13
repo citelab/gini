@@ -9,7 +9,7 @@ def _scripted(resp):
     return lambda _prompt: resp
 
 
-def test_compose_selects_and_enriches_a_core():
+def test_compose_stays_lean_no_unasked_enrichment():
     prop = LR.compose(
         "I want to see how a load balancer spreads traffic",
         _scripted('{"primary":"load-balanced-web","secondary":"","genre":"expedition",'
@@ -19,10 +19,10 @@ def test_compose_selects_and_enriches_a_core():
     les = prop.lesson
     assert les.title == "LB Lab"
     assert _lesson.is_valid(les)
-    # enriched beyond the bare core: an exercise + observe layer were pulled in
-    assert "load-balanced-web" in les.fragments
-    assert len(les.fragments) >= 3
-    assert les.genre == "expedition" and les.level is not None
+    # a described mission is LEAN: just the core the student asked for — no auto-added load
+    # generator / dashboard / metrics they never requested
+    assert les.fragments == ["load-balanced-web"]
+    assert not any(t in o.check for o in les.objectives for t in ("metrics", "dashboard"))
 
 
 def test_compose_carries_the_core_win_conditions():
