@@ -1,0 +1,19 @@
+# Composition by reference — see lab01-lan for the rationale.
+#
+# The old objectives here were name-based (`contains(VPC1, WEB1)`, `reach(WEB1 -> DB1)`) and only
+# graded correctly if the student happened to name their devices VPC1/WEB1/DB1/NET. Referencing the
+# fragment gives type-based, name-agnostic checks that grade whatever they actually built.
+#
+# This lesson carries LIVE checks (inherited from the fragment), so the student must deploy the
+# topology and press Run / Check to finish: reachability is a property of the RUNNING system, not of
+# the drawing.
+id: lab03-private-db
+title: 'Lab 3 — Private database, public web'
+fragments:
+  - reachability-boundary
+genre: expedition          # they investigate; warmer/colder help
+time_limit: 25m
+attempts: 3
+brief: >
+  Keep the database reachable from the web tier but hidden from the Internet — both inside the VPC.
+  Deploy it and press Run / Check: the live checks prove the isolation is real, not just drawn.

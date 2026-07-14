@@ -29,11 +29,34 @@ def build_demo(api) -> None:
     api.connect(r1["name"], vpc["name"], "hybrid uplink")
 
 
+def _apply_branding(app) -> None:
+    """Name + icon so the taskbar/dock shows the GINI mascot (not the Python launcher)."""
+    from .ui.branding import app_icon, icon_path
+    app.setApplicationName("gBuilder")
+    app.setApplicationDisplayName("gBuilder")
+    app.setOrganizationName("GINI")
+    app.setWindowIcon(app_icon())
+    if sys.platform == "win32":          # make Windows group + show OUR icon, not python.exe's
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GINI.gBuilder")
+        except Exception:
+            pass
+    elif sys.platform == "darwin":       # set the Dock icon when run from source (needs pyobjc)
+        try:
+            from AppKit import NSApplication, NSImage
+            img = NSImage.alloc().initByReferencingFile_(icon_path())
+            NSApplication.sharedApplication().setApplicationIconImage_(img)
+        except Exception:
+            pass                          # no pyobjc → bundle a .app for a permanent Dock icon
+
+
 def main() -> int:
     args = set(sys.argv[1:])
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
+    _apply_branding(app)
     from .ui import MainWindow
 
     win = MainWindow(app)
@@ -54,7 +77,12 @@ def main() -> int:
         print("EXPLAIN:", explanation)
         return 0
 
+    if not ({"--demo", "--selftest"} & args):
+        win.restore_last_project()                 # reopen last session's project
+
     win.show()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted
     return app.exec()
 
 

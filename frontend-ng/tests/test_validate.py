@@ -14,6 +14,15 @@ def test_isolated_device_flagged():
     assert any("isn't connected" in m for m in msgs)
 
 
+def test_standalone_xv6_and_peripherals_not_flagged_as_isolated():
+    # xv6 runs standalone (no networking) and its peripherals are optional, so a lone
+    # xv6/Screen/Keyboard/Storage Volume is NOT an "isolated device" the lint should nag about.
+    t = Topology("lab")
+    for tk in ("xv6", "terminal", "storage_volume"):
+        t.add_device(tk)
+    assert not any("isn't connected" in m for m in _msgs(t))
+
+
 def test_machine_machine_link_has_no_gateway_warning():
     t = Topology("lab")
     a = t.add_device("host"); b = t.add_device("host")

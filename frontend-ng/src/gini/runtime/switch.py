@@ -61,9 +61,48 @@ class LearningSwitch:
         run_loop(self.ports, self.handle)
 
 
+class Hub(LearningSwitch):
+    """A Layer-1 repeater — the device a switch replaced.
+
+    A hub is "dumb wire with more ports": every frame that arrives is repeated out of
+    every *other* port, with no MAC learning and no filtering. All ports therefore share
+    one collision domain and one broadcast domain. Pedagogically this is the foil to the
+    Switch: send a unicast h1->h2 through a hub and h3 still sees it (repeated to all);
+    through a switch, once it has learned, only h2 does. The control console makes the
+    difference explicit — a hub has no MAC table to show."""
+
+    def handle(self, inport: Port, frame: bytes) -> None:
+        self._flood(inport, frame)                 # repeat everything; never learn, never filter
+        if self.log:
+            dst, src, _etype, _payload = parse_eth(frame)
+            print(f"[{self.name}] repeat {src} -> {dst} in={inport.name} (flood all)",
+                  file=sys.stderr)
+
+    def _control(self, cmd: str) -> str:
+        cmd = cmd.lower()
+        if cmd in ("help", "?", "h"):
+            return ("commands: ports, help, exit  "
+                    "(a hub has no MAC table — it repeats every frame to all ports)")
+        if cmd in ("mactable", "mac", "table"):
+            return "(a hub has no MAC table — it repeats every frame out all other ports)"
+        if cmd == "ports":
+            return ", ".join(p.name for p in self.ports)
+        return f"unknown command: {cmd} (try 'help')"
+
+    def run(self) -> None:
+        print(f"[{self.name}] hub up (L1 repeater), {len(self.ports)} ports", file=sys.stderr)
+        run_loop(self.ports, self.handle)
+
+
+def make_switch(cfg: dict):
+    """Build the right L2 node for a fabric entry: a Hub (flood-all repeater) when the
+    compiler marked it `hub`, else a learning Switch."""
+    return Hub(cfg) if cfg.get("hub") else LearningSwitch(cfg)
+
+
 def main() -> None:
     cfg = json.loads(os.environ["SWITCH_CONFIG"])
-    LearningSwitch(cfg).run()
+    make_switch(cfg).run()
 
 
 if __name__ == "__main__":

@@ -6,10 +6,13 @@ def test_registry_spans_networks_and_cloud():
     keys = {d.key for d in all_devices()}
     # classic networking
     assert {"router", "switch", "host", "ovs"} <= keys
-    # all four cloud domains represented
-    assert "container" in keys and get("container").category is Category.CONTAINERS
+    # all the cloud domains represented. NOTE: the things that RUN CODE (Container, Instance,
+    # Kata Instance, Machine, xv6) now live together in MACHINES — see test_palette_taxonomy.
+    assert "container" in keys and get("container").category is Category.MACHINES
     assert "vpc" in keys and get("vpc").category is Category.CLOUD_NETWORK
-    assert "instance_group" in keys and get("instance_group").category is Category.COMPUTE
+    assert "instance" in keys and get("instance").category is Category.MACHINES
+    # the Pod Autoscaler (HPA) lives with the Kubernetes elements, not with the machines
+    assert get("instance_group").category is Category.CONTAINERS
     assert "object_store" in keys and get("object_store").category is Category.STORAGE
     assert "function" in keys and get("function").category is Category.SERVERLESS
 

@@ -406,7 +406,9 @@ void *openflowPacketProcessor(void *pc) {
 
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
-	openflow_pkt_proc_init(pcore);
+	// NOTE: openflow_pkt_proc_init(pcore) is now called from main() BEFORE this thread
+	// and the flowtable-timeout thread start, so the flowtable is fully allocated up
+	// front. Re-initializing here would race the timeout thread and leak the flowtable.
 	while (1)
 	{
 		verbose(2, "[openflowPacketProcessor]:: Waiting for a packet...");

@@ -33,6 +33,13 @@ GUIDE: dict[str, str] = {
         "Place one between zones of different trust — e.g. between your LAN and the Internet "
         "— to control exactly what is permitted. In gBuilder it behaves like a router with "
         "an ACL stage, so use it when the lesson is about policy, not just connectivity."),
+    "vnf": (
+        "A VNF (Virtualized Network Function) is a CONTAINER running a network function — a "
+        "firewall, IDS, cache, or shaper — inserted INLINE in the forwarding path. Wire it "
+        "between two elements and traffic flows through it; pick the function in 'Kind' and "
+        "give its config in 'Rules'. Chain several in series (firewall → IDS → NAT) to build "
+        "a Service Function Chain (SFC). Use it to teach NFV — functions as software in the "
+        "path — versus a fixed hardware appliance."),
     "wap": (
         "An Access Point bridges WIRELESS clients onto the wired LAN — it's essentially a "
         "switch with a radio. Use it when the topology needs Wi-Fi devices joining an "
@@ -64,10 +71,41 @@ GUIDE: dict[str, str] = {
     "instance": (
         "A cloud Instance is a virtual machine in a cloud provider. Use it as a host inside "
         "cloud scenarios (VPCs, security groups) rather than a plain LAN."),
+    "xv6": (
+        "An xv6 Machine runs the real xv6 teaching kernel (MIT 6.1810) on QEMU-RISC-V — not a "
+        "container, an actual operating system booting from a tiny kernel. It is the OS-course "
+        "workbench: double-click it to open the Machine Lab and watch the kernel run — the "
+        "scheduler moving the CPU between processes, the process table, CPU registers, memory "
+        "and the kernel stack — then slow the time-slice to watch context switches one at a "
+        "time. It is standalone by default (no fabric wiring); you drive it from its own serial "
+        "console. Use it to teach processes, scheduling, virtual memory, traps and file "
+        "systems on a kernel small enough to read end to end."),
+    "terminal": (
+        "A Terminal is an xv6 Machine's console — a screen and keyboard in one, like a real tty "
+        "(xv6's console is a single bidirectional UART, so output and input share one stream). "
+        "Connect it to an xv6 Machine and double-click to open it: type xv6 commands (ls, cat, "
+        "echo, spin 10 &, …) and their output appears inline. Up-arrow recalls history and `help` "
+        "lists what you can run; this is the authentic way to launch programs with arguments."),
+    "storage_volume": (
+        "A Storage Volume is the xv6 Machine's disk. Connect it and double-click to open the "
+        "Storage view — the on-disk layout (boot/super/log/inodes/bitmap/data), the inodes and "
+        "directory tree, the buffer cache, and the write-ahead log. xv6 has a single custom file "
+        "system with no VFS; supporting alternate file systems is an advanced student project."),
+    "kinstance": (
+        "A Kata Instance runs your workload inside a lightweight microVM with its OWN guest "
+        "kernel (Kata Containers), instead of sharing the host kernel like a normal container. "
+        "Use it to compare VM-vs-container trade-offs: stronger isolation, but slower boot and "
+        "more memory/IO overhead. It needs a Kata-enabled Linux backend and is kept to flat "
+        "experiment topologies (no VPCs, no Kubernetes)."),
     "instance_group": (
-        "An Autoscaling Group is a managed set of identical instances that grows or shrinks "
-        "with load, usually behind a load balancer. Use it to model elastic, horizontally "
-        "scaled compute."),
+        "A Pod Autoscaler is a Kubernetes Horizontal Pod Autoscaler (HPA): it watches one "
+        "Deployment's CPU and adds or removes pod replicas between Min and Max to hold a "
+        "target CPU%. Connect it to a Pod — the HPA scales that one workload, not the whole "
+        "cluster, because each workload scales on its own policy. Note the contrast with two "
+        "other K8s autoscalers: the Cluster Autoscaler adds/removes Nodes (machines) when "
+        "pods don't fit, and the Vertical Pod Autoscaler (VPA) resizes each pod's CPU/memory. "
+        "The HPA is also the container-world cousin of a cloud Auto Scaling Group, which "
+        "instead scales VM instances behind a load balancer."),
     "region": (
         "A Region / Zone groups cloud resources by physical location. Use it to discuss "
         "latency, availability zones, and multi-region designs."),

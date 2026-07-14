@@ -1,0 +1,33 @@
+id: service-chain
+layer: core
+teaches: sfc
+spirit: traffic passes THROUGH a network function on its way out — a firewall sits in the path between
+  the host and the Internet, by any valid wiring.
+summary: Steer a host's traffic through a firewall to the Internet.
+parent: nfv/sfc
+provides:
+- inline-nf
+- perimeter-filter
+- internet-egress
+- service-endpoint
+objectives:
+- id: has-fw
+  say: Place a firewall
+  check: exists(firewall)
+- id: has-host
+  say: Place a host
+  check: exists(host)
+- id: has-net
+  say: Place an Internet element
+  check: exists(cloud)
+- id: host-reaches-fw
+  say: The host's traffic reaches the firewall
+  check: path(host, firewall)
+- id: through-fw
+  say: Traffic to the Internet passes through the firewall (no bypass)
+  check: through(firewall, host, cloud)
+  level: 3
+misconceptions:
+- Wiring the host straight to the Internet, bypassing the function.
+peers:
+- least-privilege

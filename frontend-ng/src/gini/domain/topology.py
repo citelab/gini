@@ -27,6 +27,10 @@ class DeviceInstance:
     # instance "size" tier (1=S … 4=XL) for resizable elements — bigger = more vCPU/mem
     # and proportionally more GINI $/hr. See domain/pricing.py SIZE_TIERS.
     size: int = 1
+    # for container elements (VPC/Subnet/Region): the box's drawn size on the canvas.
+    # 0 = use the type's default; non-container elements ignore these.
+    w: float = 0.0
+    h: float = 0.0
 
     @property
     def type(self) -> DeviceType:

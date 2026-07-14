@@ -1,35 +1,42 @@
+# --- Python ---
+__pycache__/
 *.pyc
-*~
+*.egg-info/
+.pytest_cache/
+pytest-cache-files-*/
+.venv/
+.mypy_cache/
+.ruff_cache/
+
+# --- C / Zig router build ---
 *.o
 config.log
-backend/build
+backend/build/
+backend/.zig-cache/
 bin/
 build/
-doc/
-etc/
 lib/
 share/
 root_fs_beta2
 .sconf_temp/
 .sconsign.dblite
-frontend/src/gbuilder/Core/paths.py
-.ctags*
-.tags*
-tags
+
+# --- editors / OS ---
+.idea/
+.settings
 .cproject*
 .project*
 .pydevproject*
-.settings
-backend/src/pox/ext/gini/samples/*.xml
+.ctags*
+.tags*
+tags
 *.swp
-*.deb
-.idea/
-.venv/
+*~
+.DS_Store
 
-# build caches / generated
-backend/.zig-cache/
-__pycache__/
-*.egg-info/
-.pytest_cache/
-# sandbox/editor scratch
+# --- artifacts / scratch ---
+*.deb
 .__unlink_test
+# offscreen render previews from scripts/gen_cue_shots.py and ad-hoc checks
+cue_*.png
+frontend-ng/src/gini/data/kb_index.json

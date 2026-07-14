@@ -1,0 +1,243 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GINI Teaching Center</title>
+<style>
+  :root{--bg:#f4f7f5;--card:#fff;--ink:#1d2b24;--muted:#6b7f76;--line:#dfe8e3;--accent:#1f7a4d;
+        --gold:#c99a20;--pass:#2f9e5e;--partial:#d0932a;--incomplete:#9aa8a1;--warn:#c0392b;}
+  *{box-sizing:border-box} body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+        background:var(--bg);color:var(--ink)}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;display:flex;
+        align-items:center;gap:18px}
+  h1{font-size:16px;margin:0;font-weight:700} .sp{flex:1}
+  nav button{border:none;background:none;font:inherit;font-weight:600;color:var(--muted);
+        padding:8px 12px;border-radius:8px;cursor:pointer}
+  nav button.on{background:#e7f2eb;color:var(--accent)}
+  main{padding:22px;max-width:1180px;margin:0 auto}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;
+        margin-bottom:16px}
+  .row{display:flex;gap:16px;align-items:flex-start} .col{flex:1;min-width:0}
+  label{display:block;font-weight:600;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input,textarea,select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+        font:inherit;background:#fbfdfc}
+  textarea{min-height:76px;resize:vertical}
+  button.act{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;
+        font-weight:600;cursor:pointer}
+  button.act[disabled]{opacity:.45;cursor:default}
+  button.ghost{background:none;border:1px solid var(--line);border-radius:8px;padding:6px 12px;
+        cursor:pointer;font:inherit}
+  .frag{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:7px;
+        cursor:pointer;background:#fbfdfc}
+  .frag.sel{border-color:var(--accent);background:#eef6f1}
+  .frag b{font-weight:600} .frag small{color:var(--muted);display:block}
+  .tag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;background:#e7f2eb;
+        color:var(--accent);margin-left:6px}
+  .lvl{font-weight:700;font-size:12px;color:var(--accent);margin:10px 0 3px}
+  .obj{padding:2px 0 2px 14px;color:#33473e} .obj.live{color:var(--gold)}
+  table{width:100%;border-collapse:collapse} th,td{padding:8px 10px;text-align:left;
+        border-bottom:1px solid var(--line);font-size:13px}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  .band{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:700;color:#fff}
+  .b-gold{background:var(--gold)} .b-pass{background:var(--pass)} .b-partial{background:var(--partial)}
+  .b-incomplete{background:var(--incomplete)} .b-{background:#eceff0;color:var(--muted)}
+  .bar{height:7px;border-radius:99px;background:#eceff0;overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--warn)}
+  .note{color:var(--muted);font-size:12px} .err{color:var(--warn);font-weight:600}
+  .pill{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:2px 8px}
+</style>
+<header>
+  <h1>GINI Teaching Center</h1>
+  <nav>
+    <button data-t="author" class="on">Author</button>
+    <button data-t="lessons">Lessons</button>
+    <button data-t="roster">Roster</button>
+    <button data-t="progress">Progress</button>
+    <button data-t="insights">Insights</button>
+  </nav>
+  <span class="sp"></span><span class="pill" id="course"></span>
+</header>
+<main>
+  <!-- AUTHOR ------------------------------------------------------------- -->
+  <section id="author">
+    <div class="row">
+      <div class="col card">
+        <b>1 · Pick the building blocks</b>
+        <div class="note">Verified fragments. Whatever you pick is what the student is graded on —
+          nothing is invented.</div>
+        <div id="frags" style="margin-top:10px"></div>
+      </div>
+      <div class="col card">
+        <b>2 · Frame it</b>
+        <label>Lesson id</label><input id="lid" placeholder="lab04-sdn">
+        <label>Title</label><input id="title" placeholder="Lab 4 — Wire an OpenFlow switch">
+        <label>Brief (what the student reads)</label><textarea id="brief"></textarea>
+        <div class="row">
+          <div class="col"><label>Genre</label><select id="genre">
+            <option value="experience">experience — guided, full help</option>
+            <option value="expedition" selected>expedition — investigate, warmer/colder</option>
+            <option value="challenge">challenge — prove it, little help</option>
+          </select></div>
+          <div class="col"><label>Time limit</label><input id="tl" value="25m"></div>
+        </div>
+        <div class="row">
+          <div class="col"><label>Release</label><input id="rel" type="date"></div>
+          <div class="col"><label>Due</label><input id="due" type="date"></div>
+          <div class="col"><label>Attempts</label><input id="att" type="number" value="3" min="1"></div>
+        </div>
+
+        <b style="display:block;margin-top:16px">3 · Your nuance (plain language)</b>
+        <div class="note">This travels with the mission. The game master on the student's machine
+          reads it and coaches accordingly — so no AI is needed here on the server.</div>
+        <label>What you want them to really understand</label>
+        <textarea id="goal" placeholder="That 'private' is about reachability, not secrecy."></textarea>
+        <label>Guidance for the game master</label>
+        <textarea id="notes" placeholder="Don't let them settle for a green structural check — make them Run it and see the real packet."></textarea>
+        <label>Misconceptions to watch for (one per line)</label>
+        <textarea id="misc" placeholder="They think private means nobody can reach it — the web tier still must."></textarea>
+      </div>
+      <div class="col card">
+        <b>3 · Exactly what the student will see</b>
+        <div class="note">Live preview of the graded ladder.</div>
+        <div id="prev" style="margin-top:10px"></div>
+        <div id="probs"></div>
+        <button class="act" id="release" style="margin-top:14px" disabled>Release to the class</button>
+        <div class="note" id="saved"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="lessons" hidden><div class="card"><table id="lessons-t"></table></div></section>
+  <section id="roster" hidden>
+    <div class="card">
+      <div class="row" style="align-items:flex-end">
+        <div class="col"><label>Student id</label><input id="sid" placeholder="a1234567"></div>
+        <div class="col"><label>Name</label><input id="sname" placeholder="Ada Lovelace"></div>
+        <div><button class="act" id="enrol">Enrol</button></div>
+      </div>
+      <div class="note">Each student gets an enrollment token — they paste it into
+        gBuilder → Settings → Teaching Center.</div>
+      <table id="roster-t" style="margin-top:14px"></table>
+    </div>
+  </section>
+  <section id="progress" hidden><div class="card"><div id="prog-sum" class="note"></div>
+      <table id="prog-t" style="margin-top:10px"></table></div></section>
+  <section id="insights" hidden>
+    <div class="card"><b>What to reteach</b>
+      <div class="note">Objectives the class is failing most — a gradebook tells you <i>who</i> is
+        struggling; this tells you <i>what</i> to fix in your teaching.</div>
+      <table id="stuck-t" style="margin-top:10px"></table></div>
+    <div class="card"><b>Concept mastery</b>
+      <div class="note">Weakest concepts first.</div>
+      <table id="con-t" style="margin-top:10px"></table></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, body) => fetch(p, body ? {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)} : {}).then(r => r.json());
+let FRAGS = [], SEL = [];
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  ['author','lessons','roster','progress','insights'].forEach(t =>
+      $('#'+t).hidden = (t !== b.dataset.t));
+  ({lessons:loadLessons, roster:loadRoster, progress:loadProgress, insights:loadInsights}[b.dataset.t]||(()=>{}))();
+});
+
+function spec(){
+  const misc = $('#misc').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const s = {id: $('#lid').value.trim() || 'draft', fragments: SEL,
+             genre: $('#genre').value, title: $('#title').value.trim(),
+             brief: $('#brief').value.trim(), time_limit: $('#tl').value.trim()};
+  const intent = {};
+  if ($('#goal').value.trim())  intent.goal  = $('#goal').value.trim();
+  if ($('#notes').value.trim()) intent.notes = $('#notes').value.trim();
+  if (misc.length) intent.misconceptions = misc;
+  if (Object.keys(intent).length) s.intent = intent;
+  return s;
+}
+
+async function refreshPreview(){
+  if (!SEL.length){ $('#prev').innerHTML = '<div class="note">Pick at least one fragment.</div>';
+      $('#probs').innerHTML=''; $('#release').disabled = true; return; }
+  const p = await api('/api/preview', {spec: spec()});
+  $('#prev').innerHTML = (p.ladder||[]).map(r =>
+      `<div class="lvl">Level ${r.level} · ${r.name}</div>` +
+      r.objectives.map(o => `<div class="obj ${o.live?'live':''}">• ${o.say}</div>`).join('')
+  ).join('') + (p.needs_run ? '<div class="note" style="margin-top:8px">Requires a live Run to complete.</div>' : '');
+  $('#probs').innerHTML = p.ok ? '' : '<div class="err">'+ (p.problems||[]).join('<br>') +'</div>';
+  $('#release').disabled = !p.ok || !$('#lid').value.trim();
+}
+
+async function loadFrags(){
+  FRAGS = await api('/api/fragments');
+  $('#frags').innerHTML = FRAGS.map(f => `
+    <div class="frag" data-id="${f.id}">
+      <b>${f.id}</b>${f.layer!=='core'?`<span class="tag">${f.layer}</span>`:''}${f.has_live?'<span class="tag">live</span>':''}
+      <small>${f.summary||''}</small></div>`).join('');
+  document.querySelectorAll('.frag').forEach(el => el.onclick = () => {
+    const id = el.dataset.id;
+    SEL = SEL.includes(id) ? SEL.filter(x=>x!==id) : [...SEL, id];
+    el.classList.toggle('sel', SEL.includes(id));
+    refreshPreview();
+  });
+}
+['#lid','#title','#brief','#genre','#tl','#goal','#notes','#misc'].forEach(s =>
+    $(s).addEventListener('input', refreshPreview));
+
+$('#release').onclick = async () => {
+  const r = await api('/api/lessons', {spec: spec(), release: $('#rel').value,
+                                       due: $('#due').value, attempts: +$('#att').value});
+  $('#saved').textContent = r.ok ? `Released "${r.lesson}" to the class.`
+                                 : 'Could not release: ' + (r.problems||[]).join('; ');
+};
+
+async function loadLessons(){
+  const rows = await api('/api/lessons');
+  $('#lessons-t').innerHTML = '<tr><th>Lesson</th><th>Built from</th><th>Genre</th><th>Release</th><th>Due</th><th></th></tr>'
+    + rows.map(r=>`<tr><td><b>${r.title||r.id}</b><br><span class="note">${r.id}</span></td>
+      <td>${(r.fragments||[]).join(', ')}</td><td>${r.genre||''}</td><td>${r.release||''}</td>
+      <td>${r.due||''}</td><td><button class="ghost" onclick="delLesson('${r.id}')">Unrelease</button></td></tr>`).join('');
+}
+async function delLesson(id){ await api('/api/lessons/delete', {id}); loadLessons(); }
+
+async function loadRoster(){
+  const rows = await api('/api/roster');
+  $('#roster-t').innerHTML = '<tr><th>Student</th><th>Name</th><th>Enrollment token</th><th></th></tr>'
+    + rows.map(r=>`<tr><td><b>${r.id}</b></td><td>${r.name||''}</td>
+      <td><code>${r.token||''}</code></td>
+      <td><button class="ghost" onclick="unenrol('${r.id}')">Remove</button></td></tr>`).join('');
+}
+$('#enrol').onclick = async () => {
+  await api('/api/roster', {id: $('#sid').value.trim(), name: $('#sname').value.trim()});
+  $('#sid').value=''; $('#sname').value=''; loadRoster();
+};
+async function unenrol(id){ await api('/api/roster/delete', {id}); loadRoster(); }
+
+async function loadProgress(){
+  const p = await api('/api/progress');
+  $('#prog-sum').textContent = `${p.submissions} submission(s)`
+      + (p.downgraded ? ` · ${p.downgraded} downgraded on re-grade (claimed better than the board showed)` : '');
+  $('#prog-t').innerHTML = '<tr><th>Student</th>' + p.lessons.map(l=>`<th>${l}</th>`).join('') + '<th>Done</th></tr>'
+    + p.rows.map(r => `<tr><td><b>${r.name}</b><br><span class="note">${r.student}</span></td>`
+      + r.cells.map(c => `<td><span class="band b-${c.band}">${c.band||'—'}</span>`
+          + (c.attempts>1?`<br><span class="note">${c.attempts} attempts</span>`:'')
+          + `</td>`).join('')
+      + `<td>${r.completed}/${p.lessons.length}</td></tr>`).join('');
+}
+
+async function loadInsights(){
+  const i = await api('/api/insights');
+  $('#stuck-t').innerHTML = '<tr><th>Objective</th><th>Lesson</th><th>Level</th><th>Failing</th></tr>'
+    + (i.stuck.length ? i.stuck.map(s=>`<tr><td>${s.objective}</td><td class="note">${s.lesson}</td>
+        <td>L${s.level}</td><td style="width:200px">
+        <div class="bar"><i style="width:${s.pct}%"></i></div>
+        <span class="note">${s.failed} of ${s.total} students (${s.pct}%)</span></td></tr>`).join('')
+      : '<tr><td class="note">No submissions yet.</td></tr>');
+  $('#con-t').innerHTML = '<tr><th>Concept</th><th>Mastered</th></tr>'
+    + (i.concepts.length ? i.concepts.map(c=>`<tr><td>${c.concept}</td>
+        <td>${c.mastered} of ${c.attempted}</td></tr>`).join('')
+      : '<tr><td class="note">No profiles yet.</td></tr>');
+}
+
+loadFrags().then(refreshPreview);
+</script>

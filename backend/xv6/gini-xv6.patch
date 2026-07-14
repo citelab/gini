@@ -1,0 +1,3 @@
+SUPERSEDED — kernel changes are now applied by `gini_patch.py` (anchored edits that always leave
+a buildable kernel), not a context diff. The Dockerfile runs `python3 gini_patch.py .`. The
+authoritative description of every edit is in GINI Project/XV6_BACKEND.md §4.

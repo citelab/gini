@@ -1,0 +1,56 @@
+id: reachability-boundary
+layer: core
+teaches: vpc-networking
+spirit: a database is reachable by the web tier but NOT from the Internet — by a private subnet, a security
+  group, or firewall placement; the mechanism is free.
+summary: Keep a database reachable from the web tier but hidden from the Internet.
+parent: cloud/vpc
+provides:
+- vpc-boundary
+- web-endpoint
+- relational-store
+# Objectives form a PROGRESSIVE LADDER (the engine orders them by tier automatically):
+#   L1 placement -> L2 connection -> L3 containment -> L4 live.
+# Independent tasks come first, so a beginner always has an obvious next move. Later tasks can be
+# satisfied incidentally by earlier ones (dropping the web app INSIDE the VPC ticks both L1 and L3).
+objectives:
+# --- L1: place the elements -------------------------------------------------
+- id: has-vpc
+  say: Place a VPC on the canvas
+  check: exists(vpc)
+- id: has-web
+  say: Place a web app
+  check: exists(web_app)
+- id: has-db
+  say: Place a managed database
+  check: exists(database)
+# --- L2: make the connection ------------------------------------------------
+- id: web-to-db
+  say: Connect the web app to the database
+  check: path(web_app, database)
+# --- L3: group them correctly (containment) ---------------------------------
+- id: web-in-vpc
+  say: The web app sits inside the VPC
+  check: contains_type(vpc, web_app)
+- id: db-in-vpc
+  say: The database sits inside the VPC
+  check: contains_type(vpc, database)
+- id: shielded
+  say: The database is not reachable from the Internet
+  # guard the negative with existence, or it passes VACUOUSLY on an empty board
+  check: exists(database) and not path(cloud, database)
+  level: 3          # isolation is an ADVANCED idea, even though its predicate reads as a connection
+# --- L4: prove it live (needs the running system) ----------------------------
+- id: live-reach
+  say: 'Live: the web app actually reaches the database (Run to check)'
+  kind: behavioral
+  probe: reach(web_app -> database) == ok
+- id: live-shield
+  say: 'Live: the database refuses the Internet (Run to check)'
+  kind: behavioral
+  probe: reach(cloud -> database) == fail
+misconceptions:
+- Thinking 'private' means unreachable by everything (still reachable inside).
+- Exposing the DB to the Internet to 'make it work'.
+peers:
+- put-in-vpc

@@ -1,6 +1,8 @@
 # GINI SDN controller — POX (gar, Python 3) speaking OpenFlow 1.0.
 # Build once:  cd backend/sdn && docker build -t gini-pox .
-FROM python:3.11-slim
+# POX (gar) officially supports Python 3.6–3.9; pin to 3.9 so its version check is happy
+# and we avoid subtle stdlib-removal breakage on newer interpreters.
+FROM python:3.9-slim
 
 WORKDIR /opt
 COPY pox/ /opt/pox/

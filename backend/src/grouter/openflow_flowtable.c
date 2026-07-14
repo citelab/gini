@@ -2344,6 +2344,13 @@ static void openflow_flowtable_timeout()
 	{
 		pthread_mutex_lock(&flowtable_mutex);
 
+		if (flowtable == NULL)      // not yet allocated (or released): nothing to expire
+		{
+			pthread_mutex_unlock(&flowtable_mutex);
+			sleep(1);
+			continue;
+		}
+
 		uint32_t i;
 		for (i = 0; i < OPENFLOW_MAX_FLOWTABLE_ENTRIES; i++)
 		{

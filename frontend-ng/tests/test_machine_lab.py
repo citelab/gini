@@ -1,0 +1,282 @@
+"""Machine Lab scheduler face — renders offscreen against a fake xv6 provider."""
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+from gini.domain.xv6 import DemoScheduler, Snapshot, parse_procdump
+
+QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+
+
+@pytest.fixture(scope="module")
+def app():
+    a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    yield a
+
+
+class _Dev:
+    type_key = "xv6"
+    name = "xv6-1"
+    properties = {"Timeslice": "1"}
+
+
+def _theme(app):
+    from gini.ui.theme import ThemeManager
+    return ThemeManager(app)
+
+
+def test_demo_scheduler_round_robins_and_switches():
+    sched = DemoScheduler(timeslice=1)
+    pids = [sched.snapshot().running_pid]
+    for _ in range(4):
+        pids.append(sched.step().running_pid)
+    assert len(set(pids)) > 1                 # the CPU moves between processes
+    assert all(p in (3, 4, 5) for p in pids)  # only the runnable CPU-bound procs run
+
+
+def test_lab_opens_and_steps(app):
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    assert lab._proc_tbl.rowCount() == 5          # proc[] rendered
+    before = lab.state.timeline.switches()
+    for _ in range(6):
+        lab._on_step()
+    assert lab.state.timeline.switches() > before  # stepping produces context switches
+    assert "sw" in lab._switch_lbl.text() and "/s" in lab._switch_lbl.text()
+    # per-CPU register table populated (pc is the first row, CPU 0 the first column)
+    assert lab._reg_tbl.columnCount() >= 1
+    assert lab._reg_tbl.item(0, 0).text().startswith("0x")
+    lab.close()
+
+
+def test_lab_timeslice_slider_feeds_state(app):
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    lab._slice.setValue(2)                      # dragging updates the label only, not the kernel
+    assert "~1.0s" in lab._slice_lbl.text()     # 2 ticks * 0.5s = 1.0s slice
+    lab._apply_slice()                          # committed on release
+    assert lab.state.timeslice == 2
+    lab.close()
+
+
+def test_lab_renders_from_shared_state(app):
+    # the Lab and the agent read ONE MachineState — steps taken via the state show in the Lab
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    ms = MachineState(DemoScheduler(timeslice=1), device_id="d1")
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    assert lab.live is True
+    assert lab.state is ms
+    lab.close()
+
+
+class _FakeLive:
+    """A live-shaped provider: procs incl. a killable user process, + program controls."""
+    timeslice = 1
+    def __init__(self):
+        self.ran, self.killed = [], []
+    def snapshot(self):
+        procs = parse_procdump("1 sleeping init\n2 sleeping sh\n5 running spin")
+        return Snapshot(procs=procs, running_pid=5, ticks=1)
+    def refresh(self):
+        return self.snapshot()
+    def step(self):
+        return self.snapshot()
+    def set_timeslice(self, v):
+        self.timeslice = v
+    def run(self, prog):
+        self.ran.append(prog); return True
+    def kill(self, pid):
+        self.killed.append(pid)
+    def console(self):
+        return "$ "
+
+
+def test_smp_shows_a_gantt_strip_per_cpu(app):
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+
+    class Smp:
+        timeslice = 1
+        def snapshot(self):
+            procs = parse_procdump("5 run spin\n6 run spin\n7 runble spin")
+            return Snapshot(procs=procs, running_pid=5, ticks=1, cpus={0: 5, 1: 6})
+        def refresh(self): return self.snapshot()
+        def step(self): return self.snapshot()
+        def set_timeslice(self, v): self.timeslice = v
+
+    ms = MachineState(Smp(), device_id="d1", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    assert set(lab._gantts) == {0, 1}                    # one strip per CPU
+    assert lab._gantts[0].label == "CPU 0" and lab._gantts[1].label == "CPU 1"
+    lab.close()
+
+
+def test_live_lab_has_launcher_and_kill_buttons(app):
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    prov = _FakeLive()
+    ms = MachineState(prov, device_id="d1", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    # the launcher dropdown is present with the long-running programs
+    assert "spin" in [lab._prog_combo.itemText(i) for i in range(lab._prog_combo.count())]
+    # a kill button exists for the user process (pid 5) but NOT for init/sh (rows 0,1)
+    assert lab._proc_tbl.cellWidget(2, 3) is not None      # pid 5 row -> kill button
+    assert lab._proc_tbl.cellWidget(0, 3) is None          # init -> no kill
+    lab.close()
+
+
+def test_live_lab_launch_and_kill_call_provider(app):
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    prov = _FakeLive()
+    ms = MachineState(prov, device_id="d1", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    lab._prog_combo.setCurrentText("alloc")
+    lab._launch()
+    lab._kill(5)
+    import time
+    for _ in range(50):                                    # let the daemon threads run
+        app.processEvents(); time.sleep(0.005)
+        if prov.ran and prov.killed:
+            break
+    assert prov.ran == ["alloc"] and prov.killed == [5]
+    lab.close()
+
+
+def test_machine_lab_has_no_console_button(app):
+    # the console is now a peripheral (the Terminal), not a button baked into the Lab
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    labels = [b.text().strip() for b in lab.findChildren(QtWidgets.QPushButton)]
+    assert "Console" not in labels
+    lab.close()
+
+
+class _Term(_FakeLive):
+    """A streaming console provider: records input and serves an append-only console."""
+    def __init__(self):
+        super().__init__()
+        self.sent = []
+        self.cleared = 0
+        self.interrupts = 0
+        self.since_calls = 0
+        self._log = ""
+    def send_input(self, s):
+        self.sent.append(s)
+        self._log += s                            # xv6 echoes input; model that here
+    def console_since(self, since):
+        self.since_calls += 1
+        return self._log[since:], len(self._log)
+    def clear_console(self):
+        self.cleared += 1
+        self._log = ""
+    def interrupt(self):
+        self.interrupts += 1
+
+
+def _wait(app, cond, n=60):
+    import time
+    for _ in range(n):
+        app.processEvents(); time.sleep(0.005)
+        if cond():
+            return
+
+
+def test_terminal_sends_command_with_args(app):
+    from gini.ui.peripherals import TerminalView
+    prov = _Term()
+    term = TerminalView(None, _theme(app), prov, _Dev())
+    term.input.setText("spin 10 &")               # a real shell command WITH an argument
+    term._submit()                                # Enter
+    _wait(app, lambda: bool(prov.sent))
+    assert prov.sent == ["spin 10 &\n"]           # args flow straight to xv6's sh
+    term.close()
+
+
+def test_terminal_streams_output_append_only(app):
+    from gini.ui.peripherals import TerminalView
+    prov = _Term()
+    term = TerminalView(None, _theme(app), prov, _Dev())
+    prov._log = "$ ls\nREADME cat echo\n"          # kernel output arrives
+    _wait(app, lambda: "README" in term.view.toPlainText())
+    assert "README cat echo" in term.view.toPlainText()
+    term.close()
+
+
+def test_terminal_history_recall(app):
+    from gini.ui.peripherals import TerminalView
+    term = TerminalView(None, _theme(app), _Term(), _Dev())
+    for c in ("ls", "spin &"):
+        term.input.setText(c); term._submit()
+    term._recall(-1)                              # up-arrow
+    assert term.input.text() == "spin &"
+    term._recall(-1)
+    assert term.input.text() == "ls"
+    term._recall(+1)
+    assert term.input.text() == "spin &"
+    term.close()
+
+
+def test_terminal_break_interrupts_foreground(app):
+    from gini.ui.peripherals import TerminalView
+    prov = _Term()
+    term = TerminalView(None, _theme(app), prov, _Dev())
+    term._break()                                 # the Break ⌃C button
+    _wait(app, lambda: prov.interrupts > 0)
+    assert prov.interrupts == 1                    # kernel-side break, works even while sh blocks
+    assert prov.sent == []                         # not sent as shell input
+    term.close()
+
+
+def test_terminal_break_button_is_not_default(app):
+    # regression: a dialog push button is auto-default, so Enter in the input would ALSO click
+    # Break and kill a process on every command. The Break button must opt out of default, so
+    # Enter only submits (proven separately by _submit not touching interrupt()).
+    from gini.ui.peripherals import TerminalView
+    term = TerminalView(None, _theme(app), _Term(), _Dev())
+    assert term._break_btn.autoDefault() is False and term._break_btn.isDefault() is False
+    term.close()
+
+
+def test_terminal_submit_never_interrupts(app):
+    # submitting any command must NOT fire a break (only the Break button does)
+    from gini.ui.peripherals import TerminalView
+    prov = _Term()
+    term = TerminalView(None, _theme(app), prov, _Dev())
+    for c in ("spin &", "ls", "ps"):
+        term.input.setText(c); term._submit()
+    _wait(app, lambda: len(prov.sent) >= 2)
+    assert prov.interrupts == 0
+    term.close()
+
+
+def test_terminal_refresh_never_overlaps(app):
+    # regression: a slow agent + fixed timer stacked reads from the SAME cursor -> doubled output.
+    # While a read is in flight (_fetching), a second _refresh must be a no-op.
+    from gini.ui.peripherals import TerminalView
+    prov = _Term()
+    term = TerminalView(None, _theme(app), prov, _Dev())
+    term._fetching = True                          # pretend a read is in flight
+    before = prov.since_calls
+    term._refresh()                                # must NOT start another read
+    assert prov.since_calls == before
+    term.close()
+
+
+def test_terminal_builtins_help_clear_ps(app):
+    from gini.ui.peripherals import TerminalView
+    prov = _Term()
+    term = TerminalView(None, _theme(app), prov, _Dev())
+    term.input.setText("help"); term._submit()
+    assert "xv6 programs" in term.view.toPlainText()
+    assert prov.sent == []                         # help is terminal-side, never sent to xv6
+    term.input.setText("ps"); term._submit()       # ps -> Ctrl-P to the kernel
+    _wait(app, lambda: "\x10" in prov.sent)
+    assert "\x10" in prov.sent
+    term.input.setText("clear"); term._submit()
+    _wait(app, lambda: prov.cleared > 0)
+    assert prov.cleared == 1
+    term.close()

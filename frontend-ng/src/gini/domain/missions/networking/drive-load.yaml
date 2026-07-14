@@ -1,0 +1,20 @@
+id: drive-load
+layer: exercise
+teaches: load-testing
+spirit: traffic is actively driven at the system so the student can watch it respond under load — a client
+  generates requests toward the entry point.
+summary: Add a client that generates load against the system.
+parent: traffic
+step: Add a host to act as a load generator and point it at the entry point, then run it and watch the
+  traffic spread.
+provides:
+- load-generator
+requires:
+- traffic-sink
+objectives:
+- id: has-client
+  say: There is a client to generate load
+  check: exists(host)
+misconceptions:
+- A system with nothing driving traffic shows nothing under load.
+catalog: false

@@ -9,10 +9,10 @@ from .frame import (
 )
 from .grouter import Router
 from .hostsim import HostSim
-from .switch import LearningSwitch
+from .switch import Hub, LearningSwitch, make_switch
 from .transport import Port, run_loop
 
 __all__ = [
-    "Router", "HostSim", "LearningSwitch", "Port", "run_loop",
+    "Router", "HostSim", "LearningSwitch", "Hub", "make_switch", "Port", "run_loop",
     "BROADCAST", "ETH_ARP", "ETH_IP", "PROTO_ICMP", "build_eth", "parse_eth",
 ]

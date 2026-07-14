@@ -3,12 +3,20 @@
 # sit at the context root, where the COPYs below expect them).
 #
 #   cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
-FROM debian:bookworm-slim
+#
+# TWO STAGES, deliberately. The router is a compiled C binary, so the compiler is a BUILD
+# dependency, not a runtime one — but this image used to be single-stage, which meant every Router
+# and every OVS in every student's topology carried the whole Zig/LLVM toolchain, gcc, pip and the
+# libslack source tree. That is hundreds of megabytes of compiler shipped in order to run a binary
+# that was already built. The runtime stage copies out the one artifact that matters (the grouter
+# binary) plus what the entrypoint actually needs, and nothing else.
+# --------------------------------------------------------------------------------------------- #
+FROM debian:bookworm-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget ca-certificates make gcc libc6-dev \
         libreadline-dev libncurses-dev liblua5.4-dev \
-        python3 python3-pip iproute2 \
+        python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Zig toolchain (bundled clang) via the pip 'ziglang' package
@@ -38,6 +46,24 @@ COPY grouter-zig/  ./grouter-zig/
 # build the real gRouter with zig cc (invoke via bash so it doesn't depend on the
 # copied file keeping its executable bit)
 RUN ZIG="python3 -m ziglang" OUT=/usr/local/bin/grouter bash ./grouter-zig/build.sh
+
+# --------------------------------------------------------------------------------------------- #
+# RUNTIME: the binary + the shared libraries it links against + python3 for the entrypoint +
+# iproute2 for the tun setup. NOT the compiler, not pip, not the source tree.
+FROM debian:bookworm-slim
+
+# runtime shared libs only (libreadline8 / libncurses6 / liblua5.4-0 — the -dev packages above
+# were build-time). If the router ever fails here with a missing .so, add the runtime lib, never
+# the -dev one.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 iproute2 libreadline8 libncurses6 liblua5.4-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/local/bin/grouter /usr/local/bin/grouter
+# the entrypoint + console scripts the RUNNING router needs. grconsole.py in particular is exec'd
+# from outside (the Router Lab's flow-table view, the mission `flow()` probe, probe_doctor), so it
+# has to exist in the runtime image — not just in the builder.
+COPY --from=build /build/grouter-zig/ /build/grouter-zig/
 
 WORKDIR /run
 ENV GINI_HOME=/run

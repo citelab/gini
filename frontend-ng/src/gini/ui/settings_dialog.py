@@ -1,13 +1,32 @@
-"""Settings dialog — defaults for theme and the GINI AI (local LLM), saved to ~/.gini."""
+"""Settings dialog — organized into tabs (Appearance, Networking, GINI AI, Naming,
+Pricing, Help). Edits the live Settings; the caller applies + persists the result."""
 from __future__ import annotations
 
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QVBoxLayout,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
-_THEMES = ("Dark", "Light", "GINI Brand", "High Contrast")
+_THEMES = ("Dark", "Light", "GINI Brand", "High Contrast", "Sand", "Blue", "Green")
+
+
+def _page(tabs: QTabWidget, title: str) -> QFormLayout:
+    """Add a tab whose body is a QFormLayout, and return that form."""
+    w = QWidget()
+    lay = QVBoxLayout(w)
+    form = QFormLayout()
+    lay.addLayout(form)
+    lay.addStretch(1)
+    tabs.addTab(w, title)
+    return form
+
+
+def _note(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setObjectName("Faint")
+    lbl.setWordWrap(True)
+    return lbl
 
 
 class SettingsDialog(QDialog):
@@ -16,33 +35,38 @@ class SettingsDialog(QDialog):
     def __init__(self, parent, settings) -> None:
         super().__init__(parent)
         self.setWindowTitle("GINI Settings")
-        self.setMinimumWidth(440)
-        lay = QVBoxLayout(self)
+        self.setMinimumWidth(480)
+        root = QVBoxLayout(self)
+        tabs = QTabWidget()
+        root.addWidget(tabs)
 
-        lay.addWidget(_head("Appearance"))
-        appf = QFormLayout(); lay.addLayout(appf)
+        # --- Appearance --------------------------------------------------- #
+        appf = _page(tabs, "Appearance")
         self.theme = QComboBox(); self.theme.addItems(_THEMES)
-        cur = (settings.theme or "Dark").lower()
-        self.theme.setCurrentIndex(
-            {"dark": 0, "light": 1, "gini brand": 2, "brand": 2, "high contrast": 3}
-            .get(cur, 0))
+        # Select the CURRENT theme by matching the list itself. This used to use a hand-written
+        # {name: index} map that only covered the first four themes — so Sand/Blue/Green fell through
+        # to index 0 and the dialog silently reported "Dark". Saving Settings for ANY reason (e.g.
+        # editing your Teaching Center credentials) then wrote Dark back and stole your theme.
+        # Deriving the index from _THEMES means the two can never drift apart again.
+        cur = (settings.theme or "Dark").strip().lower()
+        cur = {"brand": "gini brand"}.get(cur, cur)          # tolerate the old short alias
+        names = [t.lower() for t in _THEMES]
+        self.theme.setCurrentIndex(names.index(cur) if cur in names else 0)
         appf.addRow("Theme", self.theme)
         self.reduced = QCheckBox("Reduce motion / animations")
         self.reduced.setChecked(settings.reduced_motion)
         appf.addRow("", self.reduced)
 
-        lay.addWidget(_head("Networking"))
-        netf = QFormLayout(); lay.addLayout(netf)
+        # --- Networking --------------------------------------------------- #
+        netf = _page(tabs, "Networking")
         self.auto_internet = QCheckBox("Containers get internet automatically (default eth)")
         self.auto_internet.setChecked(settings.auto_internet)
         netf.addRow("", self.auto_internet)
-        net_note = QLabel("Off = faithful mode: a machine reaches the internet only via a "
-                          "drawn Internet element, routed through your network.")
-        net_note.setObjectName("Faint"); net_note.setWordWrap(True)
-        netf.addRow("", net_note)
+        netf.addRow("", _note("Off = faithful mode: a machine reaches the internet only via "
+                              "a drawn Internet element, routed through your network."))
 
-        lay.addWidget(_head("GINI AI  ·  local LLM"))
-        aif = QFormLayout(); lay.addLayout(aif)
+        # --- GINI AI ------------------------------------------------------ #
+        aif = _page(tabs, "GINI AI")
         self.llm_enabled = QCheckBox("Use a local LLM for open-ended questions")
         self.llm_enabled.setChecked(settings.llm_enabled)
         aif.addRow("", self.llm_enabled)
@@ -53,31 +77,29 @@ class SettingsDialog(QDialog):
         self.llm_model.setPlaceholderText("llama3.1 / gemma / qwen …")
         aif.addRow("Model", self.llm_model)
         # editing the server/model is a clear intent to use the LLM — auto-tick the box
-        # so filling these in isn't silently ignored
         self.llm_url.textEdited.connect(lambda *_: self.llm_enabled.setChecked(True))
         self.llm_model.textEdited.connect(lambda *_: self.llm_enabled.setChecked(True))
         self.llm_think = QCheckBox("Reasoning ('thinking') model")
         self.llm_think.setChecked(settings.llm_think)
         aif.addRow("", self.llm_think)
+        aif.addRow("", _note("Without an LLM, GINI still builds, explains, traces paths, "
+                            "and runs Wizard recipes."))
 
-        lay.addWidget(_head("Naming  ·  default prefixes"))
-        nf = QFormLayout(); lay.addLayout(nf)
+        # --- Naming ------------------------------------------------------- #
+        nf = _page(tabs, "Naming")
         from ..domain.devices import default_prefix
         self._prefix_edits = {}
         for key, label in (("host", "Machine"), ("router", "Router"), ("switch", "Switch"),
                            ("hub", "Hub"), ("instance", "Instance"), ("container", "Container")):
             cur = settings.name_prefixes.get(key, default_prefix(key))
-            edit = QLineEdit(cur)
-            edit.setPlaceholderText(default_prefix(key))
+            edit = QLineEdit(cur); edit.setPlaceholderText(default_prefix(key))
             self._prefix_edits[key] = edit
             nf.addRow(label, edit)
-        pnote = QLabel("e.g. set Machine to “Mach_” for Mach_1, Mach_2, …")
-        pnote.setObjectName("Faint"); pnote.setWordWrap(True)
-        lay.addWidget(pnote)
+        nf.addRow("", _note("e.g. set Machine to “Mach_” for Mach_1, Mach_2, …"))
 
-        lay.addWidget(_head("Pricing  ·  GINI $ per hour"))
+        # --- Pricing ------------------------------------------------------ #
         from ..domain.pricing import rate_of
-        prf = QFormLayout(); lay.addLayout(prf)
+        prf = _page(tabs, "Pricing")
         self._price_edits = {}
         for key, label in (("instance", "Instance (VM)"), ("container", "Container"),
                            ("host", "Machine"), ("router", "Router"), ("switch", "Switch"),
@@ -88,20 +110,41 @@ class SettingsDialog(QDialog):
             edit.setPlaceholderText(f"{rate_of(key):g}")
             self._price_edits[key] = edit
             prf.addRow(label, edit)
-        prnote = QLabel("Toy “cloud bill” shown live in the dashboard while a lab runs. "
-                        "Blank = use the default rate.")
-        prnote.setObjectName("Faint"); prnote.setWordWrap(True)
-        lay.addWidget(prnote)
+        prf.addRow("", _note("Toy “cloud bill” shown live in the dashboard while a lab runs. "
+                            "Blank = use the default rate."))
 
-        note = QLabel("Saved to ~/.gini/config.json. Without an LLM, GINI still builds, "
-                      "explains, traces paths, and runs Wizard recipes.")
-        note.setObjectName("Faint"); note.setWordWrap(True)
-        lay.addWidget(note)
+        # --- Teaching Center ---------------------------------------------- #
+        tcf = _page(tabs, "Teaching Center")
+        self.tc_url = QLineEdit(settings.tc_url)
+        self.tc_url.setPlaceholderText("http://localhost:8080")
+        tcf.addRow("Course server", self.tc_url)
+        self.tc_course = QLineEdit(settings.tc_course)
+        self.tc_course.setPlaceholderText("cs4480-fall26")
+        tcf.addRow("Course", self.tc_course)
+        self.tc_student = QLineEdit(settings.tc_student)
+        self.tc_student.setPlaceholderText("your student id")
+        tcf.addRow("Student id", self.tc_student)
+        self.tc_token = QLineEdit(settings.tc_token)
+        self.tc_token.setPlaceholderText("enrollment token")
+        self.tc_token.setEchoMode(QLineEdit.Password)
+        tcf.addRow("Enrollment token", self.tc_token)
+        tcf.addRow("", _note("Enrol in a course to receive your instructor's assigned missions. "
+                             "Leave the server blank to work offline — Missions then offers the "
+                             "local practice catalog. Results sync back when you're online; they "
+                             "queue when you're not."))
 
+        # --- Help & Tour -------------------------------------------------- #
+        hf = _page(tabs, "Help")
+        self.show_help = QCheckBox("Show the feature tour (Cue Cards) at launch")
+        self.show_help.setChecked(settings.show_help_on_launch)
+        hf.addRow("", self.show_help)
+        hf.addRow("", _note("Reopen the tour any time from Help → Feature Tour."))
+
+        root.addWidget(_note("Saved to ~/.gini/config.json."))
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        root.addWidget(bb)
 
     def values(self) -> dict:
         from ..domain.devices import default_prefix
@@ -131,10 +174,10 @@ class SettingsDialog(QDialog):
             "llm_model": self.llm_model.text().strip() or "llama3.1",
             "llm_think": self.llm_think.isChecked(),
             "name_prefixes": prefixes,
+            "prices": prices,                         # was computed but dropped -> KeyError
+            "show_help_on_launch": self.show_help.isChecked(),
+            "tc_url": self.tc_url.text().strip(),
+            "tc_course": self.tc_course.text().strip(),
+            "tc_student": self.tc_student.text().strip(),
+            "tc_token": self.tc_token.text().strip(),
         }
-
-
-def _head(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setObjectName("PanelHead")
-    return lbl

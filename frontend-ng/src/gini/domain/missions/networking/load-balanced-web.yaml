@@ -1,0 +1,29 @@
+id: load-balanced-web
+layer: core
+teaches: load-balancing
+spirit: incoming traffic is spread across several backend replicas via a load balancer.
+summary: Front two or more web replicas with a load balancer.
+parent: cloud/scaling
+provides:
+- load-distributor
+- public-entrypoint
+- web-endpoint
+- metrics-source
+objectives:
+- id: has-lb
+  say: Place a load balancer
+  check: exists(load_balancer)
+- id: enough-backs
+  say: Place at least two web backends
+  check: count(web_app) >= 2
+- id: fans-out
+  say: Wire the load balancer to the backends
+  check: path(load_balancer, web_app)
+- id: live-balances
+  say: 'Live: the load balancer really has 2+ live backends behind it (Run to check)'
+  kind: behavioral
+  probe: balances(load_balancer, >= 2)
+misconceptions:
+- A single backend behind the LB (nothing to balance).
+peers:
+- k8s-autoscale

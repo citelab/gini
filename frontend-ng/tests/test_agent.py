@@ -38,7 +38,9 @@ def test_summary_counts_categories():
     _, api = make()
     api.add_device("router")
     api.add_device("container")
+    api.add_device("pod")
     s = api.summary()
-    assert s["devices"] == 2
+    assert s["devices"] == 3
     assert "Networking" in s["by_category"]
-    assert "Containers & Kubernetes" in s["by_category"]
+    assert "Machines" in s["by_category"]                  # a Container is a machine you supply
+    assert "Containers & Kubernetes" in s["by_category"]   # …a Pod is a Kubernetes object

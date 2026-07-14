@@ -12,6 +12,7 @@ license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "GINI Toolkit" }]
 dependencies = [
     "PySide6-Essentials>=6.6",
+    "PyYAML>=6.0",          # reads authored Lesson packs (Missions / Teaching Center)
 ]
 
 [project.optional-dependencies]
@@ -34,6 +35,10 @@ gbuilder = "gini.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"gini.ui" = ["assets/*.png", "assets/*.ico", "assets/*.icns"]
+"gini.domain" = ["missions/**/*.yaml"]
 
 [tool.ruff]
 line-length = 100

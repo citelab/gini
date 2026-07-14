@@ -1,0 +1,19 @@
+id: send-request
+layer: exercise
+teaches: request-path
+spirit: the student sends a single request through the system and follows its path end to end — proving
+  the wiring actually carries traffic.
+summary: Send a request through the system and trace its path.
+parent: traffic
+step: Add a host, send a request toward the service, and follow the path it takes.
+provides:
+- request-client
+requires:
+- traffic-sink
+objectives:
+- id: has-caller
+  say: There is a client to send a request
+  check: exists(host)
+misconceptions:
+- Assuming a drawn link works without ever sending traffic over it.
+catalog: false

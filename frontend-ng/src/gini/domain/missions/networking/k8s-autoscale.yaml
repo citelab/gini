@@ -1,0 +1,27 @@
+id: k8s-autoscale
+layer: core
+teaches: kubernetes
+spirit: a pod runs inside a cluster with an autoscaler attached so it can scale on load.
+summary: Run a pod in a cluster with an autoscaler.
+parent: k8s
+provides:
+- orchestrated-compute
+- pod-workload
+- metrics-source
+objectives:
+- id: has-cluster
+  say: Place a Kubernetes cluster
+  check: exists(k8s_cluster)
+- id: has-pod
+  say: Place a pod
+  check: exists(pod)
+- id: has-hpa
+  say: Place a pod autoscaler
+  check: exists(instance_group)
+- id: pod-in-cluster
+  say: The pod lives in the cluster
+  check: link(k8s_cluster, pod) or contains_type(k8s_cluster, pod)
+misconceptions:
+- A pod outside any cluster — a pod must live in a cluster.
+peers:
+- load-balanced-web

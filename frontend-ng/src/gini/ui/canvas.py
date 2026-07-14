@@ -13,6 +13,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect, QGraphicsItem, QGraphicsObject, QGraphicsScene,
@@ -20,13 +21,16 @@ from PySide6.QtWidgets import (
 )
 
 from ..app import AppContext
-from ..domain import pricing
+from ..domain import grouping, pricing
 from ..domain.topology import DeviceInstance, Link
 from .theme import icons
 from .theme.tokens import Theme
 
 MIME = "application/x-gini-device"
 GRID = 22
+# how many pixels of "near enough" the connect gesture allows around a node. Aiming at a 40px icon
+# with a mouse is a fine-motor task; being 3px off should not silently cancel the mode.
+_HIT_SLACK = 10
 NODE_W, NODE_H = 138, 84
 SIZE_STEP = 30         # px the node grows taller per size tier above S (vertical scaling)
 CORNER_R = 13          # rounded-corner radius for bent connectors
@@ -104,6 +108,128 @@ def _rounded_path(pts: list[QPointF], r: float) -> QPainterPath:
     return path
 
 
+# default box sizes (px) per container type, and the minimum a box can be resized to.
+_GROUP_DEFAULTS = {"vpc": (380.0, 260.0), "cloud_subnet": (300.0, 170.0),
+                   "region": (480.0, 330.0)}
+GROUP_MIN_W, GROUP_MIN_H = 170.0, 120.0
+_GRIP = 16.0
+
+
+class GroupItem(QGraphicsObject):
+    """A resizable container box for grouping elements (VPC / Cloud Subnet / Region).
+
+    Drawn behind the nodes as a translucent labelled rectangle. Whatever sits inside it
+    (decided by geometry — see domain/grouping.py) becomes its child via parent_id, which
+    the compiler turns into a real isolated Docker network for a VPC. Move the box and its
+    contents travel with it; drag the bottom-right grip to resize."""
+
+    def __init__(self, scene: "CanvasScene", inst: DeviceInstance) -> None:
+        super().__init__()
+        self._scene = scene
+        self.inst = inst
+        dw, dh = _GROUP_DEFAULTS.get(inst.type_key, (320.0, 200.0))
+        if not inst.w or not inst.h:
+            inst.w, inst.h = dw, dh
+        self._resizing = False
+        self._last = QPointF(inst.x, inst.y)     # must exist before setPos fires itemChange
+        self.setFlags(
+            QGraphicsItem.ItemIsMovable
+            | QGraphicsItem.ItemIsSelectable
+            | QGraphicsItem.ItemSendsGeometryChanges
+        )
+        self.setPos(inst.x, inst.y)
+        self.setZValue(-5)                       # behind edges (z=1) and nodes (z=10)
+        self.setAcceptHoverEvents(True)
+
+    # geometry --------------------------------------------------------------- #
+    def box_rect(self) -> QRectF:
+        return QRectF(0, 0, float(self.inst.w), float(self.inst.h))
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-2, -2, float(self.inst.w) + 4, float(self.inst.h) + 4)
+
+    def _grip_rect(self) -> QRectF:
+        return QRectF(self.inst.w - _GRIP, self.inst.h - _GRIP, _GRIP, _GRIP)
+
+    # painting --------------------------------------------------------------- #
+    def paint(self, p: QPainter, *_):
+        t = self._scene.theme
+        dt = self.inst.type
+        accent = _qcolor(t.accent_for(dt.accent.value))
+        sel = self.isSelected()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        fill = QColor(accent); fill.setAlpha(40 if sel else 26)
+        p.setBrush(QBrush(fill))
+        pen = QPen(accent, 2.0 if sel else 1.4)
+        pen.setStyle(Qt.SolidLine if sel else Qt.DashLine)
+        p.setPen(pen)
+        p.drawRoundedRect(self.box_rect(), 14, 14)
+        # title + subtitle (the VPC's CIDR / subnet's tier)
+        p.setPen(accent)
+        f = QFont(); f.setBold(True); f.setPointSize(10); p.setFont(f)
+        p.drawText(QRectF(14, 7, self.inst.w - 28, 16), Qt.AlignVCenter,
+                   f"{dt.label}: {self.inst.name or dt.label}")
+        sub = self._subtitle()
+        if sub:
+            p.setPen(_qcolor(t.muted))
+            f2 = QFont(); f2.setPointSize(8); p.setFont(f2)
+            p.drawText(QRectF(14, 23, self.inst.w - 28, 13), Qt.AlignVCenter, sub)
+        # resize grip (three corner ticks)
+        g = self._grip_rect()
+        p.setPen(QPen(accent, 1.5))
+        for o in (3.0, 7.0, 11.0):
+            p.drawLine(QPointF(g.right() - o, g.bottom() - 2),
+                       QPointF(g.right() - 2, g.bottom() - o))
+
+    def _subtitle(self) -> str:
+        pr = self.inst.properties or {}
+        if self.inst.type_key == "vpc":
+            return pr.get("CIDR", "")
+        if self.inst.type_key == "cloud_subnet":
+            return " · ".join(x for x in (pr.get("CIDR", ""), pr.get("Tier", "")) if x)
+        if self.inst.type_key == "region":
+            return pr.get("Region", "") or pr.get("Zone", "")
+        return ""
+
+    # interaction ------------------------------------------------------------ #
+    def mousePressEvent(self, e):
+        if (e.button() == Qt.LeftButton
+                and self._grip_rect().adjusted(-5, -5, 4, 4).contains(e.pos())):
+            self._resizing = True
+            self.setSelected(True)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._resizing:
+            self.prepareGeometryChange()
+            self.inst.w = max(GROUP_MIN_W, e.pos().x())
+            self.inst.h = max(GROUP_MIN_H, e.pos().y())
+            self.update()
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        was_resizing = self._resizing
+        self._resizing = False
+        super().mouseReleaseEvent(e)
+        self._scene.recompute_membership()       # box moved/resized -> reassign contents
+        if was_resizing:
+            self._scene.ctx.bus.topology_changed.emit()
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            new = self.pos()
+            dx, dy = new.x() - self._last.x(), new.y() - self._last.y()
+            self._last = QPointF(new)
+            self.inst.x, self.inst.y = new.x(), new.y()
+            if dx or dy:                          # drag the box -> its contents follow
+                self._scene._move_children(self.inst.id, dx, dy)
+        return super().itemChange(change, value)
+
+
 class NodeItem(QGraphicsObject):
     """Visual card for one DeviceInstance."""
 
@@ -123,6 +249,7 @@ class NodeItem(QGraphicsObject):
         self._hover = 0.0
         self._spot = False        # tutor spotlight
         self._ring = False        # tutor highlight
+        self._xray = None         # X-ray: "target" (this node is being inspected) or None
         self._anim: QVariantAnimation | None = None
         self._shadow = QGraphicsDropShadowEffect()
         self.refresh_theme()
@@ -132,7 +259,7 @@ class NodeItem(QGraphicsObject):
         t = self._scene.theme
         self._shadow.setColor(_qcolor(t.shadow))
         self._shadow.setBlurRadius(t.elevation + 10 * self._hover)
-        self._shadow.setOffset(0, 3 + 2 * self._hover)
+        self._shadow.setOffset(0, 4 + 2 * self._hover)
 
     # size tier (resizable elements grow taller; others stay at the base height) ----- #
     def _resizable(self) -> bool:
@@ -150,6 +277,12 @@ class NodeItem(QGraphicsObject):
         return (QRectF(NODE_W - 46, y, 19, 19), QRectF(NODE_W - 24, y, 19, 19))
 
     def _bump_size(self, delta: int) -> None:
+        # xv6's CPU count is fixed at boot (-smp), so changing vCPUs requires a stop + rerun —
+        # block the stepper while the machine is running (other elements resize live).
+        if self.inst.type_key == "xv6" and getattr(self._scene, "running", False):
+            self._scene.ctx.log("Stop the topology to change the xv6 Machine's vCPUs, "
+                                "then Run again.", "info")
+            return
         new = pricing.size_level(self._size() + delta)
         if new == self._size():
             return
@@ -160,6 +293,13 @@ class NodeItem(QGraphicsObject):
         # resized -> live CPU update if running; rebill the dashboard; persist in .gini
         self._scene.ctx.bus.device_resized.emit(self.inst.id)
         self._scene.ctx.bus.topology_changed.emit()
+
+    def set_xray(self, state) -> None:
+        """Ring this element while it's being X-rayed ('target'), or None to clear."""
+        if state == self._xray:
+            return
+        self._xray = state
+        self.update()
 
     def boundingRect(self) -> QRectF:
         return QRectF(-3, -3, NODE_W + 6, self.node_h() + 6)
@@ -191,7 +331,7 @@ class NodeItem(QGraphicsObject):
     def _set_hover(self, v: float) -> None:
         self._hover = v
         self._shadow.setBlurRadius(self._scene.theme.elevation + 10 * v)
-        self._shadow.setOffset(0, 3 + 2 * v)
+        self._shadow.setOffset(0, 4 + 2 * v)
         self.update()
 
     def paint(self, p: QPainter, opt, widget=None) -> None:
@@ -219,7 +359,23 @@ class NodeItem(QGraphicsObject):
                 p.setPen(QPen(glow, 6))
                 p.drawRoundedRect(rect.adjusted(-5, -5, 5, 5), 14, 14)
 
-        p.setBrush(QBrush(_qcolor(t.panel2)))
+        # Mission: a reddish glow when the game master has flagged this element as off-task or
+        # wrongly wired (non-destructive — clears the instant the student fixes it)
+        if self._mission_flagged():
+            dgl = _qcolor(t.danger); dgl.setAlpha(70)
+            p.setBrush(Qt.NoBrush); p.setPen(QPen(dgl, 6))
+            p.drawRoundedRect(rect.adjusted(-5, -5, 5, 5), 14, 14)
+
+        # X-ray: ring the element currently being inspected (its ghosts float around it)
+        if self._xray == "target":
+            halo = QColor(accent); halo.setAlpha(60)
+            p.setBrush(Qt.NoBrush); p.setPen(QPen(halo, 6))
+            p.drawRoundedRect(rect.adjusted(-4, -4, 4, 4), 13, 13)
+            edge = QColor(accent); edge.setAlpha(220)
+            p.setPen(QPen(edge, 2.4))
+            p.drawRoundedRect(rect.adjusted(-1.5, -1.5, 1.5, 1.5), 11, 11)
+
+        p.setBrush(QBrush(_qcolor(t.node_fill())))
         border = accent if selected else _blend(_qcolor(t.line2), accent, hover)
         p.setPen(QPen(border, 2 if selected else 1.4))
         p.drawRoundedRect(rect, 10, 10)
@@ -274,8 +430,18 @@ class NodeItem(QGraphicsObject):
         if self._resizable():
             self._paint_size(p, t, accent, H)
 
+        # Mission: red error badge (top-right) when flagged off-task / wrongly wired
+        if self._mission_flagged():
+            bx, by = NODE_W - 24, 6
+            p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
+            p.drawEllipse(QRectF(bx, by, 18, 18))
+            p.setPen(QColor("#ffffff"))
+            fb = QFont(); fb.setPointSize(11); fb.setBold(True); p.setFont(fb)
+            p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "!")
+
         # advisory-lint warning badge (top-right) — clickable to ask GINI about it
-        if self.inst.name in self._scene.ctx.warnings:
+        if (self.inst.name in self._scene.ctx.warnings and not self._off_goal()
+                and not self._mission_flagged()):
             warn = _qcolor(t.warning)
             bx, by = NODE_W - 22, 8
             p.setBrush(warn); p.setPen(Qt.NoPen)
@@ -283,6 +449,15 @@ class NodeItem(QGraphicsObject):
             p.setPen(QColor("#1a1205"))
             fb = QFont(); fb.setPointSize(9); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by, 14, 14), Qt.AlignCenter, "!")
+
+        # Wizard: flag an element that isn't part of the active goal (click ✕ to remove)
+        if self._off_goal():
+            bx, by = NODE_W - 24, 6
+            p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
+            p.drawEllipse(QRectF(bx, by, 18, 18))
+            p.setPen(QColor("#ffffff"))
+            fb = QFont(); fb.setPointSize(10); fb.setBold(True); p.setFont(fb)
+            p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "✕")
 
     def _paint_size(self, p: QPainter, t, accent: QColor, H: float) -> None:
         level = self._size()
@@ -323,14 +498,30 @@ class NodeItem(QGraphicsObject):
 
     def _on_warning_badge(self, pos) -> bool:
         """True if `pos` (item coords) is on the lint warning badge."""
-        if self.inst.name not in self._scene.ctx.warnings:
+        if self.inst.name not in self._scene.ctx.warnings or self._off_goal():
             return False
         badge = QRectF(NODE_W - 24, 6, 18, 18)   # a touch larger than drawn, easier to hit
         return badge.contains(pos)
 
+    def _off_goal(self) -> bool:
+        """True if a Wizard objective is active and this element isn't part of it."""
+        m = getattr(self._scene.ctx, "mission", None)
+        return m is not None and not m.allows(self.inst.type_key)
+
+    def _mission_flagged(self) -> bool:
+        """True if a Mission has flagged this element (off-task or wrongly wired)."""
+        return self.inst.id in getattr(self._scene.ctx, "mission_flags", {})
+
+    def _on_offgoal_badge(self, pos) -> bool:
+        return self._off_goal() and QRectF(NODE_W - 26, 4, 22, 22).contains(pos)
+
     def mousePressEvent(self, e):
         # clicking the amber "!" badge asks GINI why it's flagged (and how to fix it),
         # rather than selecting/moving the node
+        if e.button() == Qt.LeftButton and self._on_offgoal_badge(e.pos()):
+            self._scene.ctx.bus.device_delete_requested.emit(self.inst.id)   # ✕ -> remove
+            e.accept()
+            return
         if e.button() == Qt.LeftButton and self._on_warning_badge(e.pos()):
             self._scene.ctx.bus.warning_explain_requested.emit(self.inst.id)
             e.accept()
@@ -344,8 +535,18 @@ class NodeItem(QGraphicsObject):
                 self._bump_size(+1); e.accept(); return
         super().mousePressEvent(e)
 
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        # dragging a node into / out of a VPC box reassigns its membership
+        self._scene.recompute_membership()
+
     def mouseDoubleClickEvent(self, e):
-        # double-click to "log in" — open a terminal/console for this device
+        # double-click to "log in" — open a terminal/console for this device. LEFT button only:
+        # a fast second RIGHT click arrives here too (Qt turns it into a DblClick), and opening a
+        # console because the student wired two elements in quick succession is nobody's intent.
+        if e.button() != Qt.LeftButton:
+            e.ignore()
+            return
         self._scene.ctx.bus.device_activated.emit(self.inst.id)
         super().mouseDoubleClickEvent(e)
 
@@ -353,17 +554,34 @@ class NodeItem(QGraphicsObject):
         self.popup_menu(e.screenPos())
         e.accept()
 
+    @staticmethod
+    def action_gates(running: bool, is_router: bool) -> dict:
+        """Which run-dependent menu actions are enabled. Console/logs need the lab up;
+        Log in does too, except a Router (its Router Lab opens offline)."""
+        return {"console": running, "logs": running, "login": running or is_router}
+
     def popup_menu(self, screen_pos) -> None:
         """Build + show this node's action menu. Reused by the view's right-click handler
         (a plain right-click shows this; a right-drag connects instead)."""
         from PySide6.QtWidgets import QMenu
+
+        from ..services.compiler import _role
         self.setSelected(True)
         menu = QMenu()
+        menu.setToolTipsVisible(True)
         a_console = menu.addAction("Open console")     # web dashboard (Grafana, MinIO, …)
         a_login = menu.addAction("Log in")
         a_logs = menu.addAction("View logs")
         menu.addSeparator()
         a_del = menu.addAction("Delete")
+        # these talk to live containers, so gate them on the lab being up. A Router is the
+        # exception for Log in — its Router Lab opens offline (with the local trace).
+        running = getattr(self._scene, "running", False)
+        gates = self.action_gates(running, _role(self.inst.type_key) == "router")
+        for act, key in ((a_console, "console"), (a_login, "login"), (a_logs, "logs")):
+            act.setEnabled(gates[key])
+            if not gates[key]:
+                act.setToolTip("Run the topology first")
         chosen = menu.exec(screen_pos)
         bus = self._scene.ctx.bus
         if chosen == a_console:
@@ -527,6 +745,8 @@ class CanvasScene(QGraphicsScene):
         self.theme = theme
         self.nodes: dict[str, NodeItem] = {}
         self.edges: dict[str, EdgeItem] = {}
+        self.groups: dict[str, GroupItem] = {}     # VPC/Subnet/Region container boxes
+        self.running = False                        # lab up? gates console/logs/login actions
         self.setSceneRect(-2000, -2000, 4000, 4000)
         self._cascade = 0
         self._callouts: list[CalloutItem] = []
@@ -539,6 +759,7 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.device_changed.connect(self._on_device_changed)
         ctx.bus.addressing_changed.connect(self._refresh_node_labels)
         ctx.bus.warnings_changed.connect(self._on_warnings)
+        ctx.bus.mission_flags_changed.connect(self._on_mission_flags)
         # tutor "present" channel
         ctx.bus.present_spotlight.connect(self._on_spotlight)
         ctx.bus.present_highlight.connect(self._on_highlight)
@@ -547,11 +768,17 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.present_clear.connect(self._on_clear_stage)
         ctx.bus.addressing_changed.connect(self._on_addressing)
         ctx.bus.edges_restyled.connect(self._on_restyle)
+        ctx.bus.mission_changed.connect(self._on_mission)
+
+    def _on_mission(self, _mission) -> None:
+        for n in self.nodes.values():                # show/hide off-goal ✕ badges
+            n.update()
 
     def _on_restyle(self) -> None:
         """Re-route every edge after the connector style (bent/straight) changes."""
         for edge in self.edges.values():
             edge.refresh()
+
 
     def _on_addressing(self) -> None:
         for n in self.nodes.values():
@@ -563,6 +790,8 @@ class CanvasScene(QGraphicsScene):
         for n in self.nodes.values():
             n.refresh_theme()
             n.update()
+        for g in self.groups.values():
+            g.update()
         for e in self.edges.values():
             e.update()
 
@@ -581,6 +810,28 @@ class CanvasScene(QGraphicsScene):
         while y < rect.bottom():
             painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
             y += GRID
+        self._draw_vignette(painter, rect)
+
+    def _draw_vignette(self, painter: QPainter, rect: QRectF) -> None:
+        """A soft radial shade toward the viewport edges so the board reads as a
+        lit surface with depth. Anchored in scene coords (consistent across the
+        partial redraws drawBackground receives)."""
+        views = self.views()
+        if not views:
+            return
+        vp = views[0].viewport().rect()
+        center = views[0].mapToScene(vp.center())
+        corner = views[0].mapToScene(vp.topLeft())
+        radius = math.hypot(corner.x() - center.x(), corner.y() - center.y())
+        if radius <= 0:
+            return
+        edge = QColor(0, 0, 0, 78) if self.theme.dark else QColor(22, 30, 46, 30)
+        clear = QColor(edge.red(), edge.green(), edge.blue(), 0)
+        grad = QRadialGradient(center, radius)
+        grad.setColorAt(0.0, clear)
+        grad.setColorAt(0.58, clear)
+        grad.setColorAt(1.0, edge)
+        painter.fillRect(rect, QBrush(grad))
 
     # -- model -> scene ----------------------------------------------------- #
     def _on_device_added(self, device_id: str) -> None:
@@ -589,20 +840,78 @@ class CanvasScene(QGraphicsScene):
             self._cascade += 1
             inst.x = -120 + (self._cascade % 6) * 150
             inst.y = -90 + (self._cascade % 4) * 110
-        node = NodeItem(self, inst)
-        self.nodes[device_id] = node
-        self.addItem(node)
+        if inst.type_key in grouping.BOX_TYPES:       # VPC / Subnet / Region -> a box
+            group = GroupItem(self, inst)
+            self.groups[device_id] = group
+            self.addItem(group)
+        else:
+            node = NodeItem(self, inst)
+            self.nodes[device_id] = node
+            self.addItem(node)
+        self.recompute_membership()                  # a new box may capture nodes, or vice versa
+        m = getattr(self.ctx, "mission", None)       # Wizard: flag an off-goal drop
+        if m is not None and not m.allows(inst.type_key):
+            self.ctx.bus.present_callout.emit(
+                device_id, f"Off-goal — not part of “{m.goal}”. Click the ✕ to remove it.")
 
     def _on_device_removed(self, device_id: str) -> None:
         node = self.nodes.pop(device_id, None)
         if node:
             self.removeItem(node)
+        group = self.groups.pop(device_id, None)
+        if group:
+            self.removeItem(group)
+            # children of a deleted box fall back to no VPC (the flat bridge)
+            for d in self.ctx.topology.devices.values():
+                if d.parent_id == device_id:
+                    d.parent_id = None
         for lid in [l.id for l in list(self.ctx.topology.links.values())]:
             pass  # links already pruned in model; clean orphan edges below
         for eid, edge in list(self.edges.items()):
             if eid not in self.ctx.topology.links:
                 self.removeItem(edge)
                 self.edges.pop(eid, None)
+        if group:
+            self.recompute_membership()
+
+    def _move_children(self, parent_id: str, dx: float, dy: float) -> None:
+        """Move every item that belongs to `parent_id` by (dx, dy) so a box's contents
+        travel with it (nested boxes recurse via their own itemChange)."""
+        for item in list(self.nodes.values()) + list(self.groups.values()):
+            if item.inst.parent_id == parent_id:
+                item.setPos(item.pos().x() + dx, item.pos().y() + dy)
+
+    def recompute_membership(self) -> None:
+        """Reassign every element's parent_id from where it now sits relative to the boxes.
+        Emits topology_changed (so the compiler re-reads VPC membership) only on a change."""
+        if not self.groups:
+            # no boxes: clear any stale memberships (e.g., last box just deleted)
+            changed = False
+            for d in self.ctx.topology.devices.values():
+                if d.parent_id is not None:
+                    d.parent_id = None
+                    changed = True
+            if changed:
+                self.ctx.bus.topology_changed.emit()
+            return
+        boxes = [(g.inst.id, g.pos().x(), g.pos().y(), float(g.inst.w), float(g.inst.h))
+                 for g in self.groups.values()]
+        centers: dict = {}
+        for n in self.nodes.values():
+            c = n.sceneBoundingRect().center()
+            centers[n.inst.id] = (c.x(), c.y())
+        for g in self.groups.values():
+            centers[g.inst.id] = (g.pos().x() + g.inst.w / 2.0,
+                                  g.pos().y() + g.inst.h / 2.0)
+        parent_of = {d.id: d.parent_id for d in self.ctx.topology.devices.values()}
+        changed = False
+        for did, pid in grouping.recompute(centers, boxes, parent_of).items():
+            dev = self.ctx.topology.devices.get(did)
+            if dev is not None and dev.parent_id != pid:
+                dev.parent_id = pid
+                changed = True
+        if changed:
+            self.ctx.bus.topology_changed.emit()
 
     def _on_link_added(self, link_id: str) -> None:
         link = self.ctx.topology.links[link_id]
@@ -617,6 +926,9 @@ class CanvasScene(QGraphicsScene):
             node.prepareGeometryChange()        # size tier may change the node height
             node.update()
             self.update_edges_for(device_id)
+        group = self.groups.get(device_id)
+        if group:
+            group.update()                      # repaint title/CIDR after an edit
 
     def _refresh_node_labels(self) -> None:
         for node in self.nodes.values():
@@ -628,6 +940,14 @@ class CanvasScene(QGraphicsScene):
             msgs = warns.get(node.inst.name)
             node.setToolTip("\n".join(msgs) if msgs else "")
             node.update()
+
+    def _on_mission_flags(self) -> None:
+        flags = getattr(self.ctx, "mission_flags", {})
+        for node in self.nodes.values():
+            reason = flags.get(node.inst.id)
+            if reason:
+                node.setToolTip(reason)
+            node.update()                       # repaint red badge/glow (or clear it)
 
     def update_edges_for(self, device_id: str) -> None:
         for edge in self.edges.values():
@@ -698,6 +1018,102 @@ class CanvasScene(QGraphicsScene):
         self._callouts = []
 
 
+class GhostItem(QGraphicsObject):
+    """A translucent preview of a placeable neighbour, drawn during X-ray. Tap it and the
+    view turns it into a real element wired to the long-pressed node. A ghost with
+    ``type_key is None`` is the non-actionable '+N more' chip."""
+    W, H = 156.0, 52.0
+
+    def __init__(self, view, target_id, type_key, why, required) -> None:
+        super().__init__()
+        self._view = view
+        self.target_id = target_id
+        self.type_key = type_key
+        self.why = why
+        self.required = required
+        self._hover = False
+        self.setAcceptHoverEvents(type_key is not None)
+        self.setOpacity(0.0)
+        self._fade_in()
+
+    def _fade_in(self) -> None:
+        if self._view.ctx.settings.reduced_motion:
+            self.setOpacity(0.95 if self.type_key else 0.7)
+            return
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(0.95 if self.type_key else 0.7)
+        anim.setDuration(160)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(lambda v: self.setOpacity(float(v)))
+        anim.start()
+        self._anim = anim
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0, 0, self.W, self.H)
+
+    def hoverEnterEvent(self, e):
+        self._hover = True; self.setOpacity(1.0); self.update()
+
+    def hoverLeaveEvent(self, e):
+        self._hover = False; self.setOpacity(0.95); self.update()
+
+    def paint(self, p: QPainter, opt, widget=None) -> None:
+        from ..domain.devices import REGISTRY
+        t = self._view.scene_.theme
+        p.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(1, 1, self.W - 2, self.H - 2)
+
+        if self.type_key is None:                # the "+N more" chip
+            p.setBrush(_qcolor(t.panel2))
+            p.setPen(QPen(_qcolor(t.line2), 1.4, Qt.DashLine))
+            p.drawRoundedRect(rect, 10, 10)
+            p.setPen(_qcolor(t.muted))
+            f = QFont(); f.setPointSize(10); f.setBold(True); p.setFont(f)
+            p.drawText(rect, Qt.AlignCenter, self.why)
+            return
+
+        dt = REGISTRY[self.type_key]
+        accent = _qcolor(t.accent_for(dt.accent.value))
+        p.setBrush(_qcolor(t.panel2 if not self._hover else t.panel))
+        pen = QPen(accent, 2.4 if self._hover else 1.6)
+        pen.setStyle(Qt.SolidLine if self._hover else Qt.DashLine)
+        p.setPen(pen)
+        p.drawRoundedRect(rect, 10, 10)
+
+        soft = QColor(accent); soft.setAlpha(40)
+        p.setBrush(soft); p.setPen(Qt.NoPen)
+        p.drawRoundedRect(QRectF(9, 11, 30, 30), 7, 7)
+        p.drawPixmap(14, 16, icons.render_pixmap(dt.icon, t.accent_for(dt.accent.value), size=20))
+
+        p.setPen(_qcolor(t.text))
+        f = QFont(); f.setPointSize(10); f.setWeight(QFont.DemiBold); p.setFont(f)
+        p.drawText(QRectF(46, 7, self.W - 52, 16), Qt.AlignVCenter, dt.label)
+
+        sub = QRectF(46, 26, self.W - 52, 16)
+        if self._hover:
+            p.setPen(accent)
+            fh = QFont(); fh.setPointSize(8); fh.setBold(True); p.setFont(fh)
+            p.drawText(sub, Qt.AlignVCenter, "＋  tap to add")
+        else:
+            p.setPen(_qcolor(t.faint))
+            fw = QFont(); fw.setPointSize(8); p.setFont(fw)
+            fm = p.fontMetrics()
+            txt = ("needed · " if self.required else "") + self.why
+            p.drawText(sub, Qt.AlignVCenter, fm.elidedText(txt, Qt.ElideRight, int(self.W - 54)))
+
+        if self.required:                        # a small accent dot = "this link is needed"
+            p.setBrush(accent); p.setPen(Qt.NoPen)
+            p.drawEllipse(QRectF(self.W - 16, 9, 7, 7))
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.type_key is not None:
+            self._view._activate_ghost(self)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+
 class CanvasView(QGraphicsView):
     def __init__(self, ctx: AppContext, theme: Theme) -> None:
         self.scene_ = CanvasScene(ctx, theme)
@@ -718,6 +1134,26 @@ class CanvasView(QGraphicsView):
         self._rc_moved = False
         self._rc_start = None
         self._rc_line = None
+        # connect mode accepts EITHER gesture from the same press: a drag (release on the target) or
+        # a click-click (press again on the target). Both are natural, students use both, and having
+        # only one of them work was the single most frustrating thing in the app.
+        self._cn_from: NodeItem | None = None
+        self._cn_start = None
+        self._cn_dragged = False
+
+        # X-ray: long-press a node to reveal what it can connect to
+        self._lp_node: NodeItem | None = None
+        self._lp_start = None
+        self._lp_timer = QTimer(self)
+        self._lp_timer.setSingleShot(True)
+        self._lp_timer.timeout.connect(self._fire_xray)
+        self._xray_on = False
+        self._xray_items: list = []             # ghost cards + connector lines on the scene
+        self._ghosts: list = []                 # the clickable ghost cards
+        self._xray_target: NodeItem | None = None
+        self._xray_timer = QTimer(self)         # auto-dismiss the overlay after a while
+        self._xray_timer.setSingleShot(True)
+        self._xray_timer.timeout.connect(self.clear_xray)
 
         # tutor narration banner (overlaid on the viewport)
         self._narration = QLabel(self)
@@ -728,7 +1164,12 @@ class CanvasView(QGraphicsView):
         self._narr_timer.setSingleShot(True)
         self._narr_timer.timeout.connect(self._narration.hide)
         ctx.bus.present_narrate.connect(self._show_narration)
+        ctx.bus.focus_requested.connect(self.focus_on_devices)   # e.g. a staged mission board
         ctx.bus.present_clear.connect(self._narration.hide)
+        # Wizard: the assistant resolves goal-relevant neighbours (LLM) and hands them back
+        ctx.bus.wizard_ghosts_requested.connect(self._on_wizard_requested)
+        ctx.bus.wizard_ghosts_ready.connect(self._on_wizard_ghosts)
+        ctx.bus.mission_changed.connect(lambda m: m is None and self.clear_xray())
 
     def _show_narration(self, text: str) -> None:
         th = self.scene_.theme
@@ -756,6 +1197,162 @@ class CanvasView(QGraphicsView):
         if self._narration.isVisible():
             self._position_narration()
 
+    # -- X-ray: long-press spawns ghost previews of the valid neighbours ----- #
+    MAX_GHOSTS = 8                               # cap the ring so it stays readable
+
+    def _fire_xray(self) -> None:
+        from ..domain import connection_rules as cr
+        node = self._lp_node
+        self._lp_node = None
+        if node is None or node.inst.id not in self.ctx.topology.devices:
+            return
+        if getattr(self.ctx, "mission", None) is not None:
+            # Wizard: the assistant resolves goal-relevant neighbours via the model (async)
+            self.ctx.bus.wizard_ghosts_requested.emit(node.inst.id)
+            return
+        partners = cr.partners_for(node.inst.type_key)
+        if not partners:
+            return
+        self.clear_xray()
+        self._xray_target = node
+        node.set_xray("target")                  # ring the pressed element
+        self._build_ghosts(node, partners)
+        self._xray_on = True
+        self._xray_timer.start(15000)
+
+    # -- Wizard X-ray: async, model-filtered ghosts --------------------------- #
+    def _on_wizard_requested(self, device_id: str) -> None:
+        node = self.scene_.nodes.get(device_id)
+        if node is None:
+            return
+        self.clear_xray()
+        self._xray_target = node
+        self._xray_on = True
+        node.set_xray("target")
+        self._show_thinking(node)                 # placeholder until the model answers
+        self._xray_timer.start(20000)
+
+    def _show_thinking(self, node) -> None:
+        import math
+        c = node.sceneBoundingRect().center()
+        g = GhostItem(self, node.inst.id, None, "thinking…", False)
+        g.setPos(c.x() - GhostItem.W / 2, c.y() - 215.0 - GhostItem.H / 2)
+        g.setZValue(20)
+        self.scene_.addItem(g)
+        self._xray_items.append(g)
+
+    def _on_wizard_ghosts(self, device_id: str, items) -> None:
+        if not self._xray_on or self._xray_target is None \
+                or self._xray_target.inst.id != device_id:
+            return
+        for it in self._xray_items:                # drop the "thinking…" chip (keep the ring)
+            self.scene_.removeItem(it)
+        self._xray_items.clear(); self._ghosts.clear()
+        self._build_ghosts_items(self._xray_target, list(items))
+
+    def _build_ghosts(self, node, partners) -> None:
+        import math
+        from PySide6.QtGui import QColor, QPen
+        from PySide6.QtWidgets import QGraphicsLineItem
+        shown = partners[: self.MAX_GHOSTS]
+        extra = len(partners) - len(shown)
+        slots = len(shown) + (1 if extra > 0 else 0)
+        c = node.sceneBoundingRect().center()
+        rx, ry = 215.0, 175.0                    # elliptical ring (wider than tall)
+        pen = QPen(QColor(self.scene_.theme.accent), 1.8, Qt.DashLine)
+        for i in range(slots):
+            ang = -math.pi / 2 + i * (2 * math.pi / slots)
+            gx, gy = c.x() + rx * math.cos(ang), c.y() + ry * math.sin(ang)
+            line = QGraphicsLineItem(c.x(), c.y(), gx, gy)
+            line.setPen(pen); line.setOpacity(0.5); line.setZValue(5)
+            self.scene_.addItem(line); self._xray_items.append(line)
+            if extra > 0 and i == slots - 1:
+                g = GhostItem(self, node.inst.id, None, f"+{extra} more", False)
+            else:
+                p = shown[i]
+                g = GhostItem(self, node.inst.id, p.type_key, p.why, p.required)
+            g.setPos(gx - GhostItem.W / 2, gy - GhostItem.H / 2)
+            g.setZValue(20)
+            self.scene_.addItem(g); self._xray_items.append(g)
+            if g.type_key is not None:
+                self._ghosts.append(g)
+
+    def _build_ghosts_items(self, node, items) -> None:
+        """Build the ghost ring from model-chosen (type_key, reason) pairs."""
+        import math
+        from PySide6.QtGui import QColor, QPen
+        from PySide6.QtWidgets import QGraphicsLineItem
+        if not items:
+            self._show_thinking(node)             # nothing relevant — leave a gentle note
+            self._xray_items[-1].why = "no goal-relevant options here"
+            self._xray_items[-1].update()
+            return
+        shown = items[: self.MAX_GHOSTS]
+        extra = len(items) - len(shown)
+        slots = len(shown) + (1 if extra > 0 else 0)
+        c = node.sceneBoundingRect().center()
+        rx, ry = 215.0, 175.0
+        pen = QPen(QColor(self.scene_.theme.accent), 1.8, Qt.DashLine)
+        for i in range(slots):
+            ang = -math.pi / 2 + i * (2 * math.pi / slots)
+            gx, gy = c.x() + rx * math.cos(ang), c.y() + ry * math.sin(ang)
+            line = QGraphicsLineItem(c.x(), c.y(), gx, gy)
+            line.setPen(pen); line.setOpacity(0.5); line.setZValue(5)
+            self.scene_.addItem(line); self._xray_items.append(line)
+            if extra > 0 and i == slots - 1:
+                g = GhostItem(self, node.inst.id, None, f"+{extra} more", False)
+            else:
+                type_key, reason = shown[i]
+                g = GhostItem(self, node.inst.id, type_key, reason, False)
+            g.setPos(gx - GhostItem.W / 2, gy - GhostItem.H / 2)
+            g.setZValue(20)
+            self.scene_.addItem(g); self._xray_items.append(g)
+            if g.type_key is not None:
+                self._ghosts.append(g)
+
+    def _ghost_at(self, view_pos):
+        item = self.itemAt(view_pos)
+        while item is not None and not isinstance(item, GhostItem):
+            item = item.parentItem()
+        return item if isinstance(item, GhostItem) else None
+
+    def _activate_ghost(self, ghost) -> None:
+        """Tap a ghost -> create that element where it sits, wired to the pressed node."""
+        if ghost.type_key is None:               # the "+N more" chip is not actionable
+            self.clear_xray()
+            return
+        pos, target_id, type_key = ghost.pos(), ghost.target_id, ghost.type_key
+        self.clear_xray()
+        if target_id not in self.ctx.topology.devices:
+            return
+        try:
+            inst = self.ctx.add_device(type_key, x=pos.x(), y=pos.y())
+            self.ctx.add_link(target_id, inst.id)
+            self.ctx.select(inst.id)
+        except Exception as ex:                  # noqa: BLE001
+            self.ctx.log(f"Couldn't add element: {ex}", "info")
+            return
+        if getattr(self.ctx, "mission", None) is not None:   # auto-walk: ghosts for the new one
+            self.ctx.bus.wizard_ghosts_requested.emit(inst.id)
+
+    def clear_xray(self) -> None:
+        self._xray_on = False
+        self._xray_timer.stop()
+        for it in self._xray_items:
+            self.scene_.removeItem(it)
+        self._xray_items.clear()
+        self._ghosts.clear()
+        if self._xray_target is not None:
+            self._xray_target.set_xray(None)
+            self._xray_target = None
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() == Qt.Key_Escape and self._xray_on:
+            self.clear_xray()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
     # zoom with Ctrl+wheel ------------------------------------------------- #
     def wheelEvent(self, e) -> None:
         if e.modifiers() & Qt.ControlModifier:
@@ -766,6 +1363,73 @@ class CanvasView(QGraphicsView):
                 self.scale(factor, factor)
         else:
             super().wheelEvent(e)
+
+    # -- finding things that are off-screen ---------------------------------- #
+    def visible_scene_rect(self) -> QRectF:
+        return self.mapToScene(self.viewport().rect()).boundingRect()
+
+    def focus_on_rect(self, rect: QRectF, *, margin: float = 70.0) -> None:
+        """Bring `rect` into view — zoom out to fit only if it doesn't already fit, else just pan."""
+        if rect.isNull() or rect.isEmpty():
+            return
+        r = rect.adjusted(-margin, -margin, margin, margin)
+        vis = self.visible_scene_rect()
+        if r.width() > vis.width() or r.height() > vis.height():
+            self.fitInView(r, Qt.KeepAspectRatio)
+            self._zoom = self.transform().m11()
+        else:
+            self.centerOn(r.center())
+
+    def focus_on_devices(self, ids=None) -> None:
+        """Frame the given devices (or everything, when ids is None). Used after a mission STAGES a
+        board — otherwise the pre-built elements can land off-screen and the student thinks the
+        mission placed nothing (they shouldn't have to hunt for it)."""
+        items = list(self.scene_.nodes.values()) + list(self.scene_.groups.values())
+        if ids:
+            want = set(ids)
+            items = [i for i in items if i.inst.id in want]
+        if not items:
+            return
+        rect = items[0].sceneBoundingRect()
+        for it in items[1:]:
+            rect = rect.united(it.sceneBoundingRect())
+        self.focus_on_rect(rect)
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        """Edge markers for elements that are OFF-SCREEN — a coloured dot pinned to the edge of the
+        viewport in the direction of each hidden element, so a student can always see that something
+        exists out there and which way to scroll."""
+        super().drawForeground(painter, rect)
+        scene = self.scene_
+        if scene is None:
+            return
+        vis = self.visible_scene_rect()
+        z = max(self._zoom, 0.05)
+        inset = 13.0 / z                       # keep the dot ~13px inside the edge, at any zoom
+        bounds = vis.adjusted(inset, inset, -inset, -inset)
+        if bounds.width() <= 0 or bounds.height() <= 0:
+            return
+        radius = 5.0 / z
+        theme = getattr(scene, "theme", None)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            for it in list(scene.nodes.values()) + list(scene.groups.values()):
+                b = it.sceneBoundingRect()
+                if vis.intersects(b):
+                    continue                   # visible — nothing to point at
+                c = b.center()
+                x = min(max(c.x(), bounds.left()), bounds.right())
+                y = min(max(c.y(), bounds.top()), bounds.bottom())
+                try:
+                    col = _qcolor(theme.accent_for(it.inst.type.accent.value))
+                except Exception:
+                    col = QColor(120, 140, 170)
+                painter.setBrush(QBrush(col))
+                painter.setPen(QPen(QColor(255, 255, 255, 200), 1.5 / z))
+                painter.drawEllipse(QPointF(x, y), radius, radius)
+        finally:
+            painter.restore()                  # never leave the painter unbalanced
 
     def zoom_by(self, factor: float) -> None:
         new = self._zoom * factor
@@ -780,19 +1444,71 @@ class CanvasView(QGraphicsView):
     # connect mode --------------------------------------------------------- #
     def set_connect_mode(self, on: bool) -> None:
         self._connect_mode = on
-        self._connect_first = None
+        self._end_connect_gesture()              # never leave a half-drawn wire behind
         self.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
         self.setDragMode(QGraphicsView.NoDrag if on else QGraphicsView.RubberBandDrag)
 
-    def _node_at(self, view_pos) -> "NodeItem | None":
-        item = self.itemAt(view_pos)
+    @staticmethod
+    def _as_node(item) -> "NodeItem | None":
+        """Climb from a graphics item to the NodeItem that owns it (an icon, a label and a badge are
+        all children of the node)."""
         while item is not None and not isinstance(item, NodeItem):
             item = item.parentItem()
         return item if isinstance(item, NodeItem) else None
 
+    def _node_at(self, view_pos, *, slack: int = 0) -> "NodeItem | None":
+        """The node under the cursor — the ONE hit test every gesture uses.
+
+        Two things it has to get right, both of which used to make wiring feel like a coin flip:
+
+        * Look THROUGH whatever is on top. `itemAt()` returns only the topmost item, so an edge
+          crossing the icon, a VPC box, or a callout would mask the node entirely: the press landed
+          on "empty canvas" even though the cursor was dead-centre on the element. That's why the
+          gesture worked on a fresh canvas and got flakier the more you drew — the failure rate was
+          really the odds of something overlapping the icon. We scan the whole stack, top to bottom,
+          and take the first NodeItem in it.
+
+        * `slack` widens the hit box by a few pixels, because a 3px miss on a 40px icon is a miss by
+          the user's standards but a hit by their intent. EVERY connect gesture passes slack now —
+          the right-drag path didn't, which was the other half of the coin flip.
+        """
+        for it in self.items(view_pos):              # the full stack under the cursor, topmost first
+            node = self._as_node(it)
+            if node is not None:
+                return node
+        if slack <= 0:
+            return None
+        from PySide6.QtCore import QRect
+        rect = QRect(view_pos.x() - slack, view_pos.y() - slack, slack * 2, slack * 2)
+        for it in self.items(rect):
+            node = self._as_node(it)
+            if node is not None:
+                return node
+        return None
+
     def mousePressEvent(self, e) -> None:
-        if self._connect_mode and e.button() == Qt.LeftButton:
+        if self._xray_on:
+            ghost = self._ghost_at(e.pos()) if e.button() == Qt.LeftButton else None
+            if ghost is not None:                # tap a ghost -> add it (already connected)
+                self._activate_ghost(ghost)
+                e.accept()
+                return
+            self.clear_xray()                    # click anywhere else dismisses the overlay
+        # a left-click on empty canvas exits sticky modes (connect / explain). Emit BEFORE
+        # the connect handling so the mode is off by the time we get there. In connect mode we
+        # allow a few px of slack, or a near-miss on an icon cancels the mode mid-gesture.
+        if e.button() == Qt.LeftButton and self._node_at(
+                e.pos(), slack=_HIT_SLACK if self._connect_mode else 0) is None:
+            self.ctx.bus.canvas_background_clicked.emit()
+        # arm the long-press X-ray on a plain left-press over a node (cancelled by drag)
+        if (e.button() == Qt.LeftButton and not self._connect_mode):
             node = self._node_at(e.pos())
+            if node is not None:
+                self._lp_node = node
+                self._lp_start = e.pos()
+                self._lp_timer.start(480)
+        if self._connect_mode and e.button() == Qt.LeftButton:
+            node = self._node_at(e.pos(), slack=_HIT_SLACK)
             if node is not None:
                 devices = self.ctx.topology.devices
                 # drop a stale first endpoint (its device was deleted, or the project was
@@ -800,18 +1516,28 @@ class CanvasView(QGraphicsView):
                 if self._connect_first is not None and self._connect_first not in devices:
                     self._connect_first = None
                 if self._connect_first is None:
+                    # ARM. This press may become either gesture — a drag (release on the target) or
+                    # a click-click (press again on the target). We commit to neither yet; both end
+                    # up in the same place, so the student can't pick "the wrong one".
                     self._connect_first = node.inst.id
+                    self._cn_from = node
+                    self._cn_start = e.pos()
+                    self._cn_dragged = False
                 elif self._connect_first != node.inst.id:
-                    try:
-                        self.ctx.add_link(self._connect_first, node.inst.id)
-                    except Exception as ex:          # noqa: BLE001
-                        self.ctx.log(f"Couldn't connect: {ex}", "info")
-                    self._connect_first = None
+                    self._link(self._connect_first, node.inst.id)
+                    self._end_connect_gesture()
+                e.accept()
                 return
         # right-button on a node: maybe a connect-drag, maybe the context menu (decided
-        # on release by whether the mouse moved)
+        # on release by whether the mouse moved). Same slack as connect mode — this path had none,
+        # so a 3px miss meant the press fell through and the drag simply never started.
         if e.button() == Qt.RightButton:
-            node = self._node_at(e.pos())
+            node = self._node_at(e.pos(), slack=_HIT_SLACK)
+            if node is not None:
+                self._trace(f"right-PRESS at {e.pos().x()},{e.pos().y()} → armed on {node.inst.name}")
+            else:
+                self._trace(f"right-PRESS at {e.pos().x()},{e.pos().y()} → NO NODE. "
+                            + self._miss_report(e.pos()))
             if node is not None:
                 self._rc_from = node
                 self._rc_start = e.pos()
@@ -820,23 +1546,118 @@ class CanvasView(QGraphicsView):
                 return
         super().mousePressEvent(e)
 
+    def _miss_report(self, view_pos) -> str:
+        """When a press finds no node, say exactly WHY — the two possible answers need different
+        fixes and 'sometimes it works' cannot distinguish them:
+
+          * items under the cursor are non-node things → something is MASKING the node (hit test);
+          * nothing under the cursor and the nearest node is N px away → the press really did land
+            on empty canvas, and the question becomes why the cursor was where the user didn't think
+            it was (coordinate-space bug: widget vs viewport vs scene).
+        """
+        under = [type(i).__name__ for i in self.items(view_pos)]
+        sp = self.mapToScene(view_pos)
+        best, best_d = None, 1e9
+        for n in self.scene_.nodes.values():
+            r = n.sceneBoundingRect()
+            dx = max(r.left() - sp.x(), 0, sp.x() - r.right())
+            dy = max(r.top() - sp.y(), 0, sp.y() - r.bottom())
+            d = (dx * dx + dy * dy) ** 0.5
+            if d < best_d:
+                best, best_d = n, d
+        near = (f"nearest node {best.inst.name} is {best_d:.0f}px away (scene)"
+                if best is not None else "no nodes on the canvas")
+        return (f"under cursor: {under or '[]'} · scene pt ({sp.x():.0f},{sp.y():.0f}) · "
+                f"{near} · zoom={self._zoom:.2f}")
+
+    def _trace(self, msg: str) -> None:
+        """Gesture tracing, off by default. Wiring bugs are reported as 'sometimes it works' — which
+        is unfalsifiable without knowing WHICH of the four steps dropped the gesture. Run with
+        GINI_TRACE_GESTURES=1 and every press/drag/release decision prints to the Console, so a bug
+        report becomes a transcript instead of a hunch."""
+        import os
+        if os.environ.get("GINI_TRACE_GESTURES"):
+            self.ctx.log(f"[gesture] {msg}", "info")
+
+    def mouseDoubleClickEvent(self, e) -> None:
+        """THE BUG behind "sometimes the press just doesn't happen".
+
+        Qt does not send a second Press for a rapid second click. The sequence is:
+
+            Press → Release → **DblClick** → Release
+
+        so the second press arrives as `mouseDoubleClickEvent` — a completely different handler,
+        which we never overrode. `mousePressEvent` was therefore never called, the gesture never
+        armed, and nothing was even logged (which is what made this so hard to see: the failure was
+        an ABSENCE). Wire elements slowly and everything works; wire them quickly, one after
+        another — exactly what you do hooking six machines to a router — and every other gesture
+        evaporates.
+
+        This is NOT a right-button problem. CONNECT MODE HAS IT TOO: a fast second left-drag is
+        swallowed identically. It only *seemed* reliable because aiming in connect mode is slower,
+        so you rarely beat the double-click interval. Removing the right-drag would have left the
+        bug in the gesture we kept.
+
+        A double-click is still a press. Treat it as one — for whichever button is mid-gesture.
+        Left double-click OUTSIDE connect mode keeps its real meaning: log in to the device."""
+        wiring = e.button() == Qt.RightButton or (self._connect_mode
+                                                  and e.button() == Qt.LeftButton)
+        if wiring:
+            btn = "right" if e.button() == Qt.RightButton else "left"
+            self._trace(f"{btn}-DOUBLECLICK (Qt sent DblClick instead of Press) → treating as press")
+            self.mousePressEvent(e)
+            return
+        super().mouseDoubleClickEvent(e)      # a plain left double-click still opens the console
+
     def mouseMoveEvent(self, e) -> None:
+        if self._lp_node is not None and self._lp_start is not None:
+            if (e.pos() - self._lp_start).manhattanLength() > 6:   # moving = a drag, not a hold
+                self._lp_timer.stop()
+                self._lp_node = None
+        # connect mode: once a first endpoint is armed, the wire FOLLOWS THE CURSOR — whether you're
+        # dragging or you clicked once and let go. Without this there is no feedback at all after the
+        # first click, which is why the mode felt broken rather than merely unfamiliar.
+        if self._connect_mode and self._cn_from is not None:
+            if not self._cn_dragged and (e.pos() - self._cn_start).manhattanLength() > 4:
+                self._cn_dragged = True
+            self._draw_wire(self._cn_from, e.pos())
+            e.accept()
+            return
         if self._rc_from is not None:
             if not self._rc_moved and (e.pos() - self._rc_start).manhattanLength() > 6:
                 self._rc_moved = True
             if self._rc_moved:
-                self._draw_rc_line(e.pos())
+                self._draw_wire(self._rc_from, e.pos())
             e.accept()
             return
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:
+        self._lp_timer.stop()                    # a hold that's released isn't a long-press
+        self._lp_node = None
+        # connect mode, left-release: if you DRAGGED, this release is the second endpoint. If you
+        # merely clicked, stay armed and keep the wire on the cursor for a second click.
+        if (self._connect_mode and self._cn_from is not None
+                and e.button() == Qt.LeftButton and self._cn_dragged):
+            target = self._node_at(e.pos(), slack=_HIT_SLACK)
+            if target is not None and target.inst.id != self._cn_from.inst.id:
+                self._link(self._cn_from.inst.id, target.inst.id)
+                self._end_connect_gesture()
+            else:
+                # dragged out to nowhere — abandon the whole gesture rather than leaving a hidden
+                # armed endpoint that would surprise the next click
+                self._end_connect_gesture()
+            e.accept()
+            return
         if self._rc_from is not None and e.button() == Qt.RightButton:
             self._clear_rc_line()
             src = self._rc_from
             self._rc_from = None
+            tgt = self._node_at(e.pos(), slack=_HIT_SLACK)
+            self._trace(f"right-RELEASE: moved={self._rc_moved} target="
+                        + (tgt.inst.name if tgt is not None else "NONE (dropped on empty canvas)"))
             if self._rc_moved:                       # right-DRAG -> connect to the target
-                target = self._node_at(e.pos())
+                target = self._node_at(e.pos(), slack=_HIT_SLACK)   # …and slack on the DROP too
                 if target is not None and target.inst.id != src.inst.id:
                     try:
                         self.ctx.add_link(src.inst.id, target.inst.id)
@@ -848,11 +1669,24 @@ class CanvasView(QGraphicsView):
             return
         super().mouseReleaseEvent(e)
 
-    def _draw_rc_line(self, view_pos) -> None:
+    # -- one implementation of "draw a wire from a node to the cursor" -------- #
+    def _link(self, src_id: str, dst_id: str) -> None:
+        try:
+            self.ctx.add_link(src_id, dst_id)
+        except Exception as ex:                  # noqa: BLE001 — grammar refusals land here
+            self.ctx.log(f"Couldn't connect: {ex}", "info")
+
+    def _end_connect_gesture(self) -> None:
+        self._connect_first = None
+        self._cn_from = None
+        self._cn_dragged = False
+        self._clear_rc_line()
+
+    def _draw_wire(self, from_node, view_pos) -> None:
         from PySide6.QtCore import QLineF
         from PySide6.QtGui import QColor, QPen
         from PySide6.QtWidgets import QGraphicsLineItem
-        p1 = self._rc_from.sceneBoundingRect().center()
+        p1 = from_node.sceneBoundingRect().center()
         p2 = self.mapToScene(view_pos)
         if self._rc_line is None:
             self._rc_line = QGraphicsLineItem()

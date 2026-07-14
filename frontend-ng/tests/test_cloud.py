@@ -239,9 +239,12 @@ def test_compose_emits_service_containers():
     t = Topology("cloud")
     t.add_device("object_store")
     t.add_device("queue")
+    from gini.services.cloud_catalog import CATALOG
     compose = _compose(RuntimeCompiler().compile(t))
-    assert "image: minio/minio:latest" in compose
-    assert "image: rabbitmq:3-management-alpine" in compose
+    # assert against the CATALOG, not a hardcoded tag — the tags are pinned and will be bumped,
+    # and a test that has to be edited on every version bump is a test that teaches nothing
+    assert f"image: {CATALOG['object_store'].image}" in compose
+    assert f"image: {CATALOG['queue'].image}" in compose
     assert "networks: [gini]" in compose
     # a published console port mapping is present (host:container)
     assert ":9001" in compose and ":15672" in compose

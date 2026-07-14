@@ -66,8 +66,8 @@ def test_explain_mode_is_interactive():
     assert spots[-1] == [r1]
     assert w.assistant.explain_mode
 
-    # exit only via the toggle
-    w.assistant._explain_btn.setChecked(False)
+    # exit by selecting another mode in the segmented control (Chat)
+    w.assistant._chat_btn.setChecked(True)
     assert not w.assistant.explain_mode
 
 
@@ -142,7 +142,17 @@ def test_palette_click_explains_element_in_explain_mode():
     assert any("Hub" in t for _r, t in posted)
 
 
-def test_streaming_types_answer_into_pane():
+def _drain(app, w, ready):
+    import time
+    for _ in range(150):
+        app.processEvents()
+        if w.assistant._messages and ready(w.assistant._messages[-1][1]):
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"answer never arrived; last={w.assistant._messages[-1:]}")
+
+
+def test_agent_answer_posts_cleanly():
     from gini.agent.llm.backend import Chunk
     from gini.agent.llm.fake import ScriptedBackend
     from gini.agent.loop import AgentLoop
@@ -152,20 +162,32 @@ def test_streaming_types_answer_into_pane():
     w.api.add_device("router")
     backend = ScriptedBackend([[Chunk(text="Hel"), Chunk(text="lo "), Chunk(text="R1.")]])
     w.assistant.set_loop(AgentLoop(backend, build_registry(w.api)))
+    assert w.assistant._show_device("R1") is None        # async
+    _drain(app, w, lambda m: m == "Hello R1.")
+    assert "Hello R1." in w.assistant.log.toPlainText()
+    assert w.assistant._messages[-1] == ("GINI", "Hello R1.", False, True)  # role,text,err,md
 
-    chunks = []
-    w.assistant.answer_chunk.connect(lambda d: chunks.append(d))
-    assert w.assistant._show_device("R1") is None      # async, streams in
 
-    import time
-    for _ in range(100):
-        app.processEvents()
-        if w.assistant._messages and w.assistant._messages[-1][1].startswith("Hello"):
-            break
-        time.sleep(0.02)
-    assert len(chunks) >= 2                              # arrived token-by-token
-    assert "Hello R1." in w.assistant.log.toPlainText() # typed live into the pane
-    assert w.assistant._messages[-1] == ("GINI", "Hello R1.")   # persisted for re-render
+def test_agent_strips_tool_json_from_chat():
+    # the model's tool-call JSON must NOT show in chat — only its prose / callout text
+    from gini.agent.llm.backend import Chunk
+    from gini.agent.llm.fake import ScriptedBackend
+    from gini.agent.loop import AgentLoop
+    from gini.agent.tools.registry import build_registry
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(app)
+    backend = ScriptedBackend([
+        [Chunk(text='<tool_call>{"tool":"callout","args":{"text":"Hi there."}}</tool_call>'
+                    '<tool_call>{"tool":"add","args":{"name":"S1","type":"switch"}}</tool_call>')],
+        [Chunk(text="All set.")],
+    ])
+    w.assistant.set_loop(AgentLoop(backend, build_registry(w.api)))
+    w.assistant._ask_async("build something", "")
+    _drain(app, w, lambda m: "Hi there." in m)
+    msg = w.assistant._messages[-1][1]
+    assert "Hi there." in msg and "All set." in msg
+    assert "{" not in msg and "tool" not in msg          # no raw tool syntax leaked
+    assert any(d.type_key == "switch" for d in w.ctx.topology.devices.values())  # tool ran
 
 
 def test_followup_chips_appear_after_explain_and_run():
