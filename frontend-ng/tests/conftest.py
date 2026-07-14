@@ -13,6 +13,22 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolated_gini_home(tmp_path, monkeypatch):
+    """Never let the DEVELOPER'S OWN GINI state decide whether the suite passes.
+
+    `MainWindow` loads `~/.gini/config.json` on construction. On a machine that is enrolled in a
+    course, that config carries `tc_url`/`tc_course`/`tc_student` — so the app connects to the
+    Teaching Center, pulls the released lessons, and the Missions picker correctly shows
+    "Assigned Missions (Mandatory)". Tests written for an un-enrolled student then fail, on a
+    perfectly healthy app: 'assert "practice" in "assigned missions (mandatory)"'.
+
+    Point GINI_HOME at a fresh temp dir for every test, so the suite always sees a brand-new,
+    un-enrolled, offline student — regardless of who is running it. (Tests that WANT a Center wire
+    one explicitly; see test_teaching_center.py.)"""
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path / "gini-home"))
+
+
+@pytest.fixture(autouse=True)
 def _ask_gini_offline(monkeypatch):
     try:
         from gini.ui.main_window import MainWindow

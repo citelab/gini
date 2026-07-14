@@ -72,6 +72,20 @@ def _cpus_for(device) -> float:
     return pricing.size_tier(pricing.size_level(getattr(device, "size", 1)))[1]
 
 
+def _toolkit_for(device) -> str:
+    """Which Machine image this host is built from — read off its `Toolkit` property.
+
+    LEAN is the default and the one to encourage: an Alpine host with the tools a student actually
+    types (ip/ping/tcpdump/dig/curl/nc/iperf3/nmap), an order of magnitude smaller than the Debian
+    image. A host only opts into FULL when its experiment genuinely needs the heavy services —
+    bind9 for the DNS chapter, postfix for mail, ettercap/dsniff for the spoofing labs.
+
+    Anything unrecognised means lean: a typo must not silently pull in the 10x image."""
+    props = getattr(device, "properties", None) or {}
+    want = str(props.get("Toolkit", "")).strip().lower()
+    return "full" if want == "full" else "lean"
+
+
 def _xv6_harts(device) -> int:
     """xv6 QEMU CPU count (-smp), capped at 2: S/M -> 1 hart, L/XL -> 2 harts. (xv6 SMP is kept
     to 1-2 for a clear, legible scheduler demo.)"""
@@ -172,6 +186,11 @@ class MachineSpec:
     fabric_default: bool = False   # send 0.0.0.0/0 INTO the fabric (egress via the gateway)
     fabric_gw: str | None = None   # for the gateway: the local router IP for the return path
     cpus: float = 0.0              # CPU limit from the size tier (0 = unset)
+    # Which image this host is built from: "lean" (Alpine, the default — small and fast to boot)
+    # or "full" (Debian + bind9/postfix/ettercap…, for the book's heavy experiments). This is a
+    # DIFFERENT axis from the size tier above: size = how much CPU it gets and what it costs;
+    # toolkit = what software is installed in it. A lean host with an XL cap is perfectly valid.
+    toolkit: str = "lean"
     # --- inline VNF (NFV service function) ----------------------------------- #
     forward: bool = False          # IP-forward between its interfaces (a transit node)
     nf: str = ""                   # the network function kind: firewall|block|ids|cache|shaper
@@ -369,7 +388,7 @@ class RuntimeConfig:
             "machines": [
                 {"name": _svc(m.name), "gw": m.gw,
                  "gateway": m.gateway, "fabric_default": m.fabric_default,
-                 "fabric_gw": m.fabric_gw, "cpus": m.cpus,
+                 "fabric_gw": m.fabric_gw, "cpus": m.cpus, "toolkit": m.toolkit,
                  "forward": m.forward, "nf": m.nf, "nf_rules": m.nf_rules,
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "tap": f"gini{idx}",
                              "port": i.ep.wiring(docker)}
@@ -742,7 +761,8 @@ class RuntimeCompiler:
                 cfg.machines.append(MachineSpec(
                     name=name[did], ifaces=m_ifaces[did], gw=m_gw.get(did),
                     fabric_default=have_internet and bool(m_gw.get(did)),
-                    cpus=_cpus_for(topo.devices[did])))   # size tier -> CPU limit
+                    cpus=_cpus_for(topo.devices[did]),    # size tier -> CPU limit
+                    toolkit=_toolkit_for(topo.devices[did])))   # lean (default) | full
 
         # inline VNFs: a forwarding container that applies a network function between its
         # segments (the Internet-element pattern, but fabric<->fabric + an NF instead of NAT).

@@ -59,19 +59,81 @@ def _merge_profiles(a: dict, b: dict) -> dict:
     return out
 
 
+def _course_api():
+    """The teacher console's API. Imported lazily so the student endpoints keep working even if the
+    GINI package isn't importable (e.g. a bare relay deployment)."""
+    import teacher
+    return teacher
+
+
 class Handler(BaseHTTPRequestHandler):
     def _authed(self) -> bool:
         return bool(self.headers.get("Authorization", "").removeprefix("Bearer ").strip())
 
-    def _send(self, status: int, obj=None, *, text: str | None = None) -> None:
+    def _send(self, status: int, obj=None, *, text: str | None = None,
+              ctype: str = "application/json") -> None:
         body = (text if text is not None else json.dumps(obj) if obj is not None else "").encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _body(self) -> dict:
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0)) or b"{}"
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+    # -- teacher console (UI + API). Auth is deliberately deferred: run it on your machine /
+    # behind your VPN for now; a real roster-backed login is the next security pass. ------------- #
+    def _teacher_routes(self) -> bool:
+        p = self.path.split("?")[0]
+        if p in ("/", "/teacher", "/teacher/"):
+            html = (Path(__file__).parent / "static" / "teacher.html").read_text()
+            self._send(200, text=html, ctype="text/html; charset=utf-8")
+            return True
+        if not p.startswith("/api/"):
+            return False
+        t = _course_api()
+        course = os.environ.get("COURSE", "cs4480-fall26")
+        C = t.Course(ROOT, course)
+        if self.command == "GET":
+            if p == "/api/fragments":
+                self._send(200, t.fragment_library())
+            elif p == "/api/lessons":
+                self._send(200, C.lessons())
+            elif p == "/api/roster":
+                self._send(200, C.roster())
+            elif p == "/api/progress":
+                self._send(200, C.progress())
+            elif p == "/api/insights":
+                self._send(200, C.insights())
+            else:
+                self._send(404)
+            return True
+        if self.command == "POST":
+            b = self._body()
+            if p == "/api/preview":
+                self._send(200, t.preview(b.get("spec") or {}))
+            elif p == "/api/lessons":
+                self._send(200, C.save_lesson(b.get("spec") or {}, release=b.get("release", ""),
+                                              due=b.get("due", ""), attempts=b.get("attempts", 3)))
+            elif p == "/api/lessons/delete":
+                self._send(200, C.delete_lesson(b.get("id", "")))
+            elif p == "/api/roster":
+                self._send(200, C.enrol(b.get("id", ""), b.get("name", "")))
+            elif p == "/api/roster/delete":
+                self._send(200, C.unenrol(b.get("id", "")))
+            else:
+                self._send(404)
+            return True
+        return False
+
     def do_GET(self):  # noqa: N802
+        if self._teacher_routes():
+            return
         if not self._authed():
             return self._send(401)
         m = _MANIFEST.match(self.path)
@@ -104,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(204)
 
     def do_POST(self):  # noqa: N802
+        if self._teacher_routes():
+            return
         if not self._authed():
             return self._send(401)
         m = _SUBMIT.match(self.path)

@@ -70,6 +70,12 @@ class ReasoningAgent:
         parts = [f"Mission goal: {it.goal}"] if it.goal else []
         if it.spirit:
             parts.append(f"What success means: {it.spirit}")
+        if it.misconceptions:
+            parts.append("Watch for these misconceptions: " + "; ".join(it.misconceptions))
+        # the instructor's own nuance, authored on the Teaching Center and interpreted HERE (this is
+        # why the course server needs no LLM — the teacher writes plain language, we reason over it)
+        if getattr(it, "notes", ""):
+            parts.append(f"Your instructor's guidance for this lab: {it.notes}")
         return "\n".join(parts)
 
     def _context(self) -> str:

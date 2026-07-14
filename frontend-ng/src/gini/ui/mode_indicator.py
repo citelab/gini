@@ -1,12 +1,17 @@
-"""Three toolbar pills for GINI: the current MODE, the AI MODEL, and the ACTIVITY.
+"""Four toolbar pills for GINI: the current MODE, the AI MODEL, the ACTIVITY, and YOU.
 
   * Mode pill     — which interaction mode is active (Chat / Explain / Wizard / Coach),
                     coloured per mode.
   * Model pill    — the connected local model's name + status (green = reachable, amber =
                     set but not responding, grey = none). Click it to open Settings → LLM.
   * Activity pill — a rotating spinner while the assistant is thinking, else a steady Idle.
+  * User pill     — your Teaching Center enrolment: who you're signed in as, whether the course
+                    server is reachable, and **how many assigned missions are still due** (0 is a
+                    perfectly good answer, and worth showing — "nothing due" is information).
+                    gBuilder is fully usable signed OUT, so the signed-out state is calm and grey,
+                    not an error. Click it to sign in (Settings) or to jump to your assigned work.
 
-One widget paints all three so the toolbar stays tidy; the Model pill emits `model_clicked`.
+One widget paints them all so the toolbar stays tidy; the Model and User pills are click targets.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ _GAP = 8
 
 class ModeIndicator(QWidget):
     model_clicked = Signal()          # the Model pill was clicked (open Settings → LLM)
+    user_clicked = Signal()           # the User pill was clicked (sign in, or go to my missions)
 
     def __init__(self, theme, parent=None) -> None:
         super().__init__(parent)
@@ -28,7 +34,9 @@ class ModeIndicator(QWidget):
         self._angle = 0
         self._model_name = ""         # "" = no model connected
         self._model_ok = False        # reachable?
-        self._model_range = (0.0, 0.0)
+        self._student = ""            # "" = not enrolled in any course
+        self._tc_ok = False           # course server reachable?
+        self._due = 0                 # assigned missions not yet completed
         self.setFixedHeight(26)
         self.setMouseTracking(True)
         self._timer = QTimer(self)
@@ -56,6 +64,42 @@ class ModeIndicator(QWidget):
                         "No local model — click to connect one (Settings → LLM). Explain and "
                         "build commands still work without it.")
         self.updateGeometry(); self.update()
+
+    def set_enrolment(self, student: str, online: bool, due: int = 0) -> None:
+        """student='' → signed out (grey, and that is FINE); signed in + reachable → green with the
+        count of missions still due; signed in + unreachable → amber (we still know what's due, from
+        the cached manifest — being offline doesn't erase your homework)."""
+        self._student = student or ""
+        self._tc_ok = bool(online)
+        self._due = max(0, int(due))
+        if not self._student:
+            tip = ("Not signed in to a course. gBuilder works fully without one — click to enrol "
+                   "in a Teaching Center (Settings → Teaching Center).")
+        elif not self._tc_ok:
+            tip = (f"Signed in as {self._student}, but the course server isn't reachable. "
+                   f"Showing your cached assignments; results will sync when it's back.")
+        elif self._due:
+            tip = (f"Signed in as {self._student} — {self._due} assigned mission"
+                   f"{'s' if self._due != 1 else ''} still to do. Click to open them.")
+        else:
+            tip = f"Signed in as {self._student} — nothing due. Click to browse missions."
+        self.setToolTip(tip)
+        self.updateGeometry(); self.update()
+
+    def _user_text(self) -> str:
+        if not self._student:
+            return "sign in"
+        if not self._tc_ok:
+            return f"{self._student} · offline"
+        return f"{self._student} · {self._due} due" if self._due else f"{self._student} · clear"
+
+    def _user_color(self) -> QColor:
+        t = self.theme.theme
+        if not self._student:
+            return QColor(t.muted)                       # signed out is not an error state
+        if not self._tc_ok:
+            return QColor(t.warning)
+        return QColor(t.accent) if self._due else QColor(t.success)
 
     def _spin(self) -> None:
         self._angle = (self._angle + 24) % 360
@@ -89,14 +133,26 @@ class ModeIndicator(QWidget):
         model_txt = self._model_name or "no model"
         act_txt = "Thinking…" if self._busy else "Idle"
         act_col = QColor(t.warning) if self._busy else QColor(t.muted)
+        user_txt = self._user_text()
         return [
             ("mode", self._mode, self._mode_color(), w(self._mode)),
             ("model", model_txt, self._model_color(), w(model_txt)),
             ("activity", act_txt, act_col, w(act_txt)),
+            ("user", user_txt, self._user_color(), w(user_txt)),
         ]
 
+    def _ranges(self) -> dict[str, tuple[float, float]]:
+        """Each pill's x-span. Derived from the layout, NOT recorded during paint — otherwise the
+        click targets don't exist until the widget has been painted once."""
+        out: dict[str, tuple[float, float]] = {}
+        x = 1.5
+        for kind, _t, _c, w in self._pills():
+            out[kind] = (x, x + w)
+            x += w + _GAP
+        return out
+
     def sizeHint(self) -> QSize:
-        total = sum(p[3] for p in self._pills()) + _GAP * 2 + 3
+        total = sum(p[3] for p in self._pills()) + _GAP * (len(self._pills()) - 1) + 3
         return QSize(int(total), 26)
 
     def minimumSizeHint(self) -> QSize:
@@ -120,26 +176,45 @@ class ModeIndicator(QWidget):
                 p.save(); p.translate(x + 13, h / 2.0); p.rotate(self._angle)
                 pen = QPen(col, 2.4); pen.setCapStyle(Qt.RoundCap); p.setPen(pen)
                 p.drawArc(QRectF(-6, -6, 12, 12), 0, 290 * 16); p.restore()
+            elif kind == "user":
+                self._person(p, x + 13, h / 2.0, col)     # a person, not a status dot
             else:
                 p.setBrush(col); p.setPen(Qt.NoPen)
                 p.drawEllipse(QRectF(x + 9, h / 2.0 - 4, 8, 8))
             p.setPen(col)
             p.drawText(QRectF(x + 22, 0, w - 20, h), Qt.AlignVCenter | Qt.AlignLeft, text)
-            if kind == "model":
-                self._model_range = (x, x + w)
             x += w + _GAP
         p.end()
 
-    # -- the Model pill is a click target ----------------------------------- #
+    def _person(self, p: QPainter, cx: float, cy: float, col: QColor) -> None:
+        """A little head-and-shoulders — the pill reads as YOU at a glance, not as another status
+        light. Hollow when signed out; filled once you're enrolled."""
+        p.save()
+        signed_in = bool(self._student)
+        p.setPen(QPen(col, 1.4))
+        p.setBrush(col if signed_in else Qt.NoBrush)
+        p.drawEllipse(QRectF(cx - 3.2, cy - 6.0, 6.4, 6.4))              # head
+        p.drawChord(QRectF(cx - 5.4, cy - 1.4, 10.8, 9.6), 0, 180 * 16)  # shoulders
+        p.restore()
+
+    # -- the Model and User pills are click targets -------------------------- #
+    def _hit(self, x: float) -> str:
+        for kind in ("model", "user"):
+            x0, x1 = self._ranges().get(kind, (0.0, 0.0))
+            if x0 <= x <= x1:
+                return kind
+        return ""
+
     def mousePressEvent(self, e) -> None:
-        x0, x1 = self._model_range
-        if x0 <= e.position().x() <= x1:
+        hit = self._hit(e.position().x())
+        if hit == "model":
             self.model_clicked.emit()
+        elif hit == "user":
+            self.user_clicked.emit()
         else:
             super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:
-        x0, x1 = self._model_range
-        self.setCursor(Qt.PointingHandCursor if x0 <= e.position().x() <= x1
+        self.setCursor(Qt.PointingHandCursor if self._hit(e.position().x())
                        else Qt.ArrowCursor)
         super().mouseMoveEvent(e)

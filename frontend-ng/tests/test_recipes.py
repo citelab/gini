@@ -63,8 +63,17 @@ def test_inspector_shows_what_each_element_runs():
     w = MainWindow(app)
     h = w.api.add_device("host")["id"]
     w.ctx.select(h)
+    # a NEW host is LEAN (Alpine) — that's the deliberate default, an order of magnitude smaller
+    # than the Debian image. The Inspector must tell the truth about THIS host's image…
     note = w.inspector.runs_lbl.text()
-    assert "tshark" in note and "Debian" in note          # batteries-included machine
+    assert "LEAN" in note and "Alpine" in note
+    assert "tcpdump" in note                              # the tools a student actually types
+    assert "'full'" in note                               # …and how to get the heavy servers
+
+    w.ctx.topology.devices[h].properties["Toolkit"] = "full"
+    w.ctx.select(None); w.ctx.select(h)                   # re-render the Inspector
+    full = w.inspector.runs_lbl.text()
+    assert "tshark" in full and "Debian" in full          # batteries-included machine
     s3 = w.api.add_device("object_store")["id"]
     w.ctx.select(s3)
     assert "minio" in w.inspector.runs_lbl.text().lower()  # services show their image

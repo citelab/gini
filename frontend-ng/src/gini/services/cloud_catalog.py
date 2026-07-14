@@ -34,7 +34,7 @@ class CloudService:
 # element type_key -> the container that backs it
 CATALOG: dict[str, CloudService] = {
     "object_store": CloudService(
-        image="minio/minio:latest",
+        image="minio/minio:RELEASE.2024-10-13T13-34-11Z",
         summary="MinIO — an S3-compatible object store. Use the AWS CLI or `mc`.",
         command=("server", "/data", "--console-address", ":9001"),
         env={"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
@@ -74,21 +74,21 @@ CATALOG: dict[str, CloudService] = {
                  "--metrics.prometheus=true"),   # exposes /metrics for the cloud fabric
         ports=(Port(8080, "dashboard", web=True, path="/dashboard/"), Port(80, "http"))),
     "web_app": CloudService(
-        image="nginxdemos/hello:latest",
+        image="nginxdemos/hello:plain-text",
         summary="A demo web backend that displays its hostname/IP — put several behind "
                 "a load balancer to see requests spread across them.",
         ports=(Port(80, "http", web=True),)),
 
     # --- streaming & messaging ---
     "stream": CloudService(
-        image="redpandadata/redpanda:latest",
+        image="redpandadata/redpanda:v24.2.7",
         summary="Redpanda — a Kafka-API event streaming log. Produce/consume with any "
                 "Kafka client against port 9092.",
         command=("redpanda", "start", "--mode", "dev-container", "--smp", "1",
                  "--advertise-kafka-addr", "{svc}"),
         ports=(Port(9092, "kafka"), Port(9644, "admin"))),
     "messaging": CloudService(
-        image="nats:latest",
+        image="nats:2.10-alpine",
         summary="NATS pub/sub messaging. Clients connect on 4222; monitoring on 8222.",
         command=("-m", "8222"),
         ports=(Port(8222, "monitor", web=True), Port(4222, "nats"))),
@@ -99,18 +99,18 @@ CATALOG: dict[str, CloudService] = {
         summary="Redis in-memory store. `redis-cli -h <name>` to set/get keys.",
         ports=(Port(6379, "redis"),)),
     "nosql": CloudService(
-        image="mongo:7",
+        image="mongo:7.0",
         summary="MongoDB document database (user/pass gini). Connect with mongosh.",
         env={"MONGO_INITDB_ROOT_USERNAME": "gini", "MONGO_INITDB_ROOT_PASSWORD": "gini"},
         ports=(Port(27017, "mongo"),)),
 
     # --- observability ---
     "metrics": CloudService(
-        image="prom/prometheus:latest",
+        image="prom/prometheus:v2.54.1",
         summary="Prometheus — scrapes and stores metrics; query them in PromQL.",
         ports=(Port(9090, "console", web=True),)),
     "dashboard": CloudService(
-        image="grafana/grafana:latest",
+        image="grafana/grafana:11.2.2",
         summary="Grafana dashboards — opens straight to a live view (no login in the lab).",
         # No-login teaching setup: anonymous Admin + skip the login form. The home-dashboard
         # path is set by the compiler's observability auto-wiring ONLY once the dashboard is
@@ -121,13 +121,13 @@ CATALOG: dict[str, CloudService] = {
              "GF_AUTH_DISABLE_LOGIN_FORM": "true"},
         ports=(Port(3000, "console", web=True),)),
     "tracing": CloudService(
-        image="jaegertracing/all-in-one:latest",
+        image="jaegertracing/all-in-one:1.62.0",
         summary="Jaeger — view distributed request traces across services.",
         ports=(Port(16686, "console", web=True),)),
 
     # --- workload & testing ---
     "load_generator": CloudService(
-        image="fortio/fortio:latest",
+        image="fortio/fortio:1.68.0",
         summary="Fortio load generator. Open the UI to fire HTTP/gRPC load at a target "
                 "and watch QPS and latency histograms.",
         command=("server",),

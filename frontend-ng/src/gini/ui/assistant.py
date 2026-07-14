@@ -736,6 +736,15 @@ class Assistant(QWidget):
             self.end_mission()
             self._hide_mission_picker()
 
+    def enter_missions(self) -> bool:
+        """Jump straight into Missions (used by the toolbar's User pill — "show me my homework").
+        Returns False if there's no model, since the mode is model-gated; the caller can say so."""
+        if not self._missions_btn.isEnabled():
+            self.ctx.log("Missions needs a local model — connect one in Settings → LLM.", "info")
+            return False
+        self._missions_btn.setChecked(True)     # toggled → _toggle_missions → the picker
+        return True
+
     def _assigned_missions(self) -> list:
         """Released, not-past-due missions from a connected Teaching Center (empty when no Center is
         wired — the code path is future-ready; today that means the practice state)."""
@@ -1021,11 +1030,14 @@ class Assistant(QWidget):
             make_runner=self._mission_runner,
             panel=_MissionPanelProxy(self._mission_panel, self.mission_ui_op.emit),
             profile=self._mission_profile,
+            submit=self._submit_to_center,      # report the result to the course server
             gm_factory=AgentGameMaster)         # reasoning runs through the multi-agent stack
         self._mission_busy = self._mission_dirty = False
         self._hide_mission_picker()         # drop the picker once we're playing
         self._mission_panel.setVisible(True)
-        self._apply_stage(lesson)               # M3: pre-build the board, if the lesson stages one
+        if not self._apply_stage(lesson):   # M3: pre-build the board, if the lesson stages one
+            self.end_mission()              # student kept their canvas — don't start on the wrong board
+            return False
         self._mission_world = self._snapshot_world()
         self._archive_chat()                    # focus the panel on the mission (restored on exit)
         ok = self._mission_ctrl.start(lesson)
@@ -1035,15 +1047,26 @@ class Assistant(QWidget):
             self._update_mission_flags()        # flag any off-task elements already on the canvas
         return ok
 
-    def _apply_stage(self, lesson) -> None:
-        """M3: build the lesson's pre-set board onto the canvas (scaffolded / fault-injection labs)."""
+    def _apply_stage(self, lesson) -> bool:
+        """M3: build the lesson's pre-set board onto the canvas (scaffolded / fault-injection labs).
+
+        A staged board is a *designed* board — the mission is graded against exactly it — so we
+        clear the canvas first rather than stacking the stage on top of whatever was lying around
+        (which used to let stale elements satisfy objectives, or collide with the injected fault).
+        Clearing is destructive, so if the student has work on the canvas we ask. Returns False if
+        they'd rather keep their board, in which case the mission does not start."""
         from ..domain import staging
         if not staging.is_staged(lesson):
-            return
+            return True
+        if staging.wants_reset(lesson) and self.ctx.topology.devices:
+            if not self._confirm_clear_board(lesson):
+                return False
+            self.ctx.clear_topology()
         try:
             placed = staging.apply(lesson.stage,
                                    add_device=lambda tk, x, y: self.ctx.add_device(tk, x, y),
-                                   add_link=lambda s, t: self.ctx.add_link(s, t))
+                                   add_link=lambda s, t: self.ctx.add_link(s, t),
+                                   topology=self.ctx.topology)
             # bring the pre-built board INTO VIEW — otherwise it can land off-screen and the student
             # thinks the mission placed nothing (they shouldn't have to go hunting for it).
             ids = [inst.id for inst in placed.values() if getattr(inst, "id", None)]
@@ -1051,6 +1074,22 @@ class Assistant(QWidget):
                 self.ctx.bus.focus_requested.emit(ids)
         except Exception:
             pass                                # a bad stage never blocks the mission from starting
+        return True
+
+    def _confirm_clear_board(self, lesson) -> bool:
+        """Ask before wiping the student's canvas. Never silently destroy their work."""
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Start the mission?")
+        box.setText(f"“{lesson.title}” sets up its own board.")
+        box.setInformativeText(
+            "Your current canvas will be cleared so the mission starts from the exact "
+            "setup it was designed around.\n\nSave your work first if you need it.")
+        clear = box.addButton("Clear && Start", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is clear
 
     def end_mission(self) -> None:
         self._mission_ctrl = None
@@ -1169,7 +1208,10 @@ class Assistant(QWidget):
         les = _lesson.from_archetype(archetype_id, catalog.demo_params(archetype_id),
                                      id=f"preview-{archetype_id}", title=arch.summary,
                                      brief=arch.summary, time_limit="20m")
-        self.start_mission(les)
+        if not self.start_mission(les):
+            # the only non-error way this happens: a staged mission needs the canvas and the
+            # student chose to keep their work. Say so, rather than failing silently.
+            return "Kept your board — the mission wasn't started. Save or clear the canvas, then pick it again."
         return None
 
     def _describe_mission(self, text: str) -> str | None:
@@ -1197,6 +1239,31 @@ class Assistant(QWidget):
             self.mission_ui_op.emit(("compose_start", les, note))
         threading.Thread(target=work, daemon=True).start()
         return None
+
+    def _submit_to_center(self, lesson_id: str, mission) -> None:
+        """A mission finished — report it to the Teaching Center and sync the profile. Runs on the
+        mission worker thread (never the UI thread). Offline is fine: the client queues the
+        submission and flushes it on the next successful connect."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None:
+            return                                  # not enrolled — local practice only
+        from ..domain import grader as _grader
+        sent = tc.submit(lesson_id, mission, snapshot=_grader.snapshot_of(self.ctx.topology))
+        if self._mission_profile is not None:
+            tc.checkin_profile(self._mission_profile)
+        self.mission_ui_op.emit(("say", (
+            f"Result sent to your instructor — {mission.score().band.upper()}." if sent else
+            "You're offline; your result is queued and will sync when the course server is reachable.")))
+        # finishing a mission changes what's DUE — tell the toolbar's User pill (we're already on a
+        # worker thread, and the pill listens on a queued signal, so this is safe from here)
+        try:
+            done = {lid for lid, rec in (self._mission_profile.lessons or {}).items()
+                    if rec.completed} if self._mission_profile is not None else set()
+            due = sum(1 for m in tc.available_lessons() if m.get("id") not in done)
+            self.ctx.bus.enrolment_changed.emit(
+                getattr(self.ctx.settings, "tc_student", ""), sent, due)
+        except Exception:                               # noqa: BLE001 — a stale badge is not fatal
+            pass
 
     def _mission_runner(self):
         """A behavioral probe runner from the live runtime, if one is reachable — else None so

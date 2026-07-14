@@ -83,4 +83,5 @@ PERSISTED_KEYS = (
     "auto_internet", "name_prefixes", "prices",
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
     "show_help_on_launch",
+    "tc_url", "tc_course", "tc_student", "tc_token",   # Teaching Center enrolment
 )

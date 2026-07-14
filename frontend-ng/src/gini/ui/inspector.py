@@ -571,12 +571,20 @@ class Inspector(QWidget):
         """A plain 'here's what this actually runs' line so users (and new ones!) don't
         have to guess the backing image or which tools are available."""
         from ..services.cloud_catalog import service_for
-        from ..services.compiler import _norm_image
-        from ..services.orchestrator import MACHINE_BASE, MACHINE_TOOLS_HUMAN
+        from ..services.compiler import _norm_image, _toolkit_for
+        from ..services.orchestrator import (MACHINE_BASE, MACHINE_TOOLS_HUMAN,
+                                             MACHINE_TOOLS_LEAN_HUMAN)
         key = d.type_key
         if key == "host":
-            return (f"Runs {MACHINE_BASE} with the GINI toolkit preinstalled — "
-                    f"{MACHINE_TOOLS_HUMAN}. (apt is available for anything else.)")
+            # tell the truth about THIS host's image — the two toolkits ship different tools, and a
+            # student reaching for `ettercap` on a lean host should learn that here, not at a shell
+            if _toolkit_for(d) == "full":
+                return (f"Runs the FULL toolkit — {MACHINE_BASE} with everything preinstalled: "
+                        f"{MACHINE_TOOLS_HUMAN}. Big image; use it only when an experiment needs "
+                        f"these servers. (apt is available for anything else.)")
+            return (f"Runs the LEAN toolkit — Alpine + {MACHINE_TOOLS_LEAN_HUMAN}. Small and quick "
+                    f"to boot. Need bind9/postfix/ettercap/haproxy? Set Toolkit to 'full'. "
+                    f"(apk is available for anything else.)")
         if key == "instance":
             img = _norm_image(d.properties.get("Image") or "ubuntu:22.04")
             return f"Runs {img} (a cloud VM). Change the Image property to use another."

@@ -27,7 +27,8 @@ from .mission import Mission
 
 class MissionController:
     def __init__(self, *, llm, post, get_topology=None, get_world=None, make_runner=None,
-                 panel=None, profile=None, now=None, gm_factory=None) -> None:
+                 panel=None, profile=None, now=None, gm_factory=None, submit=None) -> None:
+        self.submit = submit          # submit(lesson_id, mission) -> report to the Teaching Center
         self.get_topology = get_topology
         self._get_world = get_world             # optional: a snapshot world (thread-safe reasoning)
         self.llm = llm
@@ -195,7 +196,13 @@ class MissionController:
             self.post("GINI", move.text)
 
     def _finish(self) -> None:
-        if self._recorded or self.profile is None or self.mission is None:
+        if self._recorded or self.mission is None:
             return
-        self.profile.record(self.mission.lesson, self.mission)
+        if self.profile is not None:
+            self.profile.record(self.mission.lesson, self.mission)
         self._recorded = True
+        if self.submit is not None:                 # report the result to the Teaching Center
+            try:
+                self.submit(self.mission.lesson.id, self.mission)
+            except Exception:                       # noqa: BLE001 — never let a sync break the mission
+                pass

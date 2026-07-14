@@ -70,10 +70,50 @@ class DockerProbeRunner:
         return code == 0
 
     def backends(self, lb: str) -> int:
-        # A load balancer's live backend count is scheme-specific; Phase 2.x reads it from the
-        # LB's admin/stats endpoint. For now, report 0 so `balances(>= n)` stays conservative.
-        return 0
+        """How many backends the load balancer is REALLY serving from — i.e. upstreams it was
+        configured with that are actually accepting connections right now. A config listing two
+        servers proves nothing; this proves the fan-out has somewhere to go.
 
-    def flow(self, ovs: str, match: str) -> bool:
-        # Flow-table reads reuse the OVS Router-Lab OpenFlow parser (Phase 2.x). Conservative default.
-        return False
+        The LB compiles to nginx, so read its upstream block, then probe each target from inside the
+        LB container itself (that's the path traffic would take)."""
+        import re
+        svc = self._service(lb)
+        code, out = self._exec(svc, ["sh", "-c",
+                                     "cat /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf 2>/dev/null"])
+        if code != 0 or not out:
+            return 0
+        targets = re.findall(r"^\s*server\s+([A-Za-z0-9._-]+):(\d+)\s*;", out, re.M)
+        live = 0
+        for host, port in targets:
+            # try a few tools — the image is alpine-ish and may have any of them
+            probe = (f"nc -z -w2 {host} {port} 2>/dev/null || "
+                     f"wget -q -T2 -O /dev/null http://{host}:{port}/ 2>/dev/null || "
+                     f"curl -fsS -m2 -o /dev/null http://{host}:{port}/ 2>/dev/null")
+            c, _ = self._exec(svc, ["sh", "-c", probe])
+            if c == 0:
+                live += 1
+        return live
+
+    def flow(self, ovs: str, match: str = "") -> bool:
+        """Did the controller ACTUALLY install flows on this switch? Reads the live OpenFlow table
+        from the gRouter (the OVS runs in --openflow mode) over its control socket — the exact same
+        path the Router Lab's flow view uses — and reuses the shipped parser.
+
+        `match` empty (or 'any') = "any flow at all is installed", which is the honest test that the
+        control plane did something. A non-empty match is a substring test against the entries."""
+        from ..domain.flowtable import flows
+        svc = self._service(ovs)
+        code, out = self._exec(svc, ["python3", "/build/grouter-zig/grconsole.py",
+                                     f"/run/{svc}.ctl", "--once", "openflow entry all"])
+        if code != 0 or not out:
+            return False
+        try:
+            rows = flows(out)
+        except Exception:                            # noqa: BLE001 — a malformed dump is just "no proof"
+            return False
+        if not rows:
+            return False
+        if not match or match.lower() in ("any", "*"):
+            return True
+        needle = match.lower()
+        return any(needle in str(r).lower() for r in rows)

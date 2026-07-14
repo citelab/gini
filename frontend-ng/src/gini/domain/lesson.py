@@ -22,11 +22,17 @@ _KINDS = ("structural", "behavioral")
 
 @dataclass
 class Intent:
-    """Teacher intent — the game master reasons over this; it is NOT a checklist."""
+    """Teacher intent — the game master reasons over this; it is NOT a checklist.
+
+    `notes` is the teacher's free-text nuance ("stress that private doesn't mean unreachable —
+    the web tier still gets in"). It travels WITH the mission and is interpreted by the student's
+    game master at play time, so the course server never needs an LLM: the teacher writes plain
+    language, and the model that reads it is the one already running on the student's machine."""
     concept: str = ""
     goal: str = ""
     spirit: str = ""
     misconceptions: list[str] = field(default_factory=list)
+    notes: str = ""              # the teacher's nuance, reasoned over by the game master
 
 
 @dataclass
@@ -134,7 +140,8 @@ def from_dict(d: dict) -> Lesson:
     it = d.get("intent", {}) or {}
     intent = Intent(concept=it.get("concept", ""), goal=it.get("goal", ""),
                     spirit=it.get("spirit", ""),
-                    misconceptions=list(it.get("misconceptions", []) or []))
+                    misconceptions=list(it.get("misconceptions", []) or []),
+                    notes=it.get("notes", "") or d.get("notes", ""))
     objs = [_objective_from(o) for o in (d.get("objectives", []) or [])]
     steps = [Step(say=s.get("say", ""), advance=s.get("advance", "reply"), hint=s.get("hint", ""))
              for s in (d.get("steps", []) or [])]

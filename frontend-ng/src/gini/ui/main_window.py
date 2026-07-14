@@ -98,6 +98,10 @@ class MainWindow(QMainWindow):
         from ..services import GLoader
         self._gloader = GLoader(Path(_rt.__file__).parent)
         self.ctx.orchestrator = self._gloader.orchestrator   # behavioral probes exec through this
+        # NOTE: we deliberately do NOT sign in to the course at startup, even with saved credentials.
+        # Signing in is an act, not a side effect of launching an app: you might be demoing, or on a
+        # shared machine, or simply not want your instructor to see you're online. The User pill
+        # starts signed-out and you sign in from it.
         self._remote = None              # RemoteClient when connected to a GINI server, else None
         self._running = False
         self._stopping = False
@@ -121,6 +125,7 @@ class MainWindow(QMainWindow):
         self._k8s_poll.timeout.connect(self._poll_k8s)
         self.ctx.bus.k8s_metrics.connect(self._on_k8s_metrics)
         self.ctx.bus.llm_reachable.connect(self._on_llm_reachable)
+        self.ctx.bus.enrolment_changed.connect(self._on_enrolment)
         self.theme = ThemeManager(app, self.ctx.settings.theme)
         self.theme.apply()
 
@@ -172,6 +177,7 @@ class MainWindow(QMainWindow):
         self.assistant.status_changed.connect(self.mode_indicator.set_status)
         self.mode_indicator.set_status("Chat mode", False)   # initial
         self.mode_indicator.model_clicked.connect(self._open_settings)   # Model pill -> Settings
+        self.mode_indicator.user_clicked.connect(self._user_menu)   # User pill -> the user menu
         # Ask GINI messages live in the right-hand pane only; the Console is for
         # build/run logs, so we deliberately do NOT mirror chat into it.
         self._update_status()
@@ -199,15 +205,145 @@ class MainWindow(QMainWindow):
         # apply every value the dialog returned (a missing key must never abort the save)
         for k in ("theme", "reduced_motion", "auto_internet",
                   "llm_enabled", "llm_url", "llm_model", "llm_think",
-                  "name_prefixes", "prices", "show_help_on_launch"):
+                  "name_prefixes", "prices", "show_help_on_launch",
+                  "tc_url", "tc_course", "tc_student", "tc_token"):
             if k in v:
                 setattr(s, k, v[k])
         self.ctx.topology.prefix_overrides = dict(s.name_prefixes)   # apply to current topo
         self.theme.set_theme(v["theme"])               # live theme switch
         self._wire_llm()                               # re-create / clear the LLM loop
+        if getattr(self.ctx, "teaching_center", None) is not None:
+            self._connect_teaching_center()            # already signed in → pick up the new details
+        # …but saving Settings does NOT sign you in. Signing in stays an explicit act (the User pill).
         self._rebill()                                 # prices may have changed
         save_config({k: getattr(s, k) for k in PERSISTED_KEYS})
         self.ctx.log("Settings saved to ~/.gini/config.json.", "ok")
+
+    def _connect_teaching_center(self) -> None:
+        """Enrol in the course from Settings, and refresh the toolbar's User pill.
+
+        Everything here is NETWORK — `online()`, the manifest, the profile — so it runs OFF the GUI
+        thread. It used to block startup and every Settings save for as long as the course server
+        took to answer (or to time out, which is worse). The pill is updated via a bus signal, the
+        same way the LLM health probe reports back."""
+        tc = self.ctx.connect_teaching_center()
+        if tc is None:                                 # not enrolled — a perfectly normal state
+            self.ctx.bus.enrolment_changed.emit("", False, 0)
+            return
+        import threading
+        student = self.ctx.settings.tc_student
+
+        def probe():
+            try:
+                online = tc.online()
+            except Exception:                          # noqa: BLE001
+                online = False
+            due = 0
+            try:
+                lessons = tc.available_lessons()       # cached when offline — homework doesn't vanish
+                prof = tc.checkout_profile()
+                done = {lid for lid, rec in (prof.lessons or {}).items() if rec.completed}
+                due = sum(1 for m in lessons if m.get("id") not in done)
+                if online:
+                    tc.flush()                         # push anything queued while offline
+            except Exception:                          # noqa: BLE001
+                pass
+            self.ctx.bus.enrolment_changed.emit(student, online, due)
+        threading.Thread(target=probe, daemon=True).start()
+
+    def _on_enrolment(self, student: str, online: bool, due: int) -> None:
+        self.mode_indicator.set_enrolment(student, online, due)
+        if not student:
+            return
+        if online:
+            self.ctx.log(f"Teaching Center: signed in as {student} to "
+                         f"{self.ctx.settings.tc_course} — {due} mission"
+                         f"{'s' if due != 1 else ''} due.", "ok")
+        else:
+            self.ctx.log("Teaching Center: offline — using the cached course; "
+                         "results will sync when it's reachable.", "info")
+
+    # -- the User menu ------------------------------------------------------- #
+    def _sign_in(self) -> None:
+        """Sign in to the course — the explicit act. Networked, so it runs off the GUI thread and
+        the pill updates when it reports back."""
+        s = self.ctx.settings
+        if not (s.tc_url and s.tc_course and s.tc_student):
+            self.ctx.log("Teaching Center: set the course server, course and student id in "
+                         "Settings → Teaching Center first.", "info")
+            self._open_settings()
+            return
+        self.ctx.log(f"Teaching Center: signing in as {s.tc_student}…", "info")
+        self._connect_teaching_center()
+
+    def _sign_out(self) -> None:
+        """Go local. Your credentials stay in Settings; you're simply not connected. Missions falls
+        back to the practice catalog, and anything unsent stays queued for the next sign-in."""
+        self.ctx.teaching_center = None
+        self.ctx.bus.enrolment_changed.emit("", False, 0)
+        self.ctx.log("Teaching Center: signed out — Missions now offers the practice catalog.",
+                     "info")
+
+    def _user_menu(self) -> None:
+        """The User pill's menu: who you are, what you owe, what you've done."""
+        from PySide6.QtWidgets import QMenu
+        s = self.ctx.settings
+        tc = getattr(self.ctx, "teaching_center", None)
+        m = QMenu(self)
+
+        head = m.addAction(f"Signed in as {s.tc_student} · {s.tc_course}" if tc
+                           else "Not signed in")
+        head.setEnabled(False)
+        m.addSeparator()
+
+        if tc is None:
+            a = m.addAction(f"Sign in as {s.tc_student}…" if s.tc_student else "Sign in…")
+            a.triggered.connect(self._sign_in)
+        else:
+            self._add_mission_items(m, tc)
+            m.addSeparator()
+            m.addAction("Sync now").triggered.connect(self._connect_teaching_center)
+            m.addAction("Sign out").triggered.connect(self._sign_out)
+
+        m.addSeparator()
+        m.addAction("Teaching Center settings…").triggered.connect(self._open_settings)
+        m.exec(self.mode_indicator.mapToGlobal(
+            self.mode_indicator.rect().bottomRight()))
+
+    def _add_mission_items(self, menu, tc) -> None:
+        """Due missions (click to play) and what you've already finished, with the band you earned.
+        Read from the CACHED manifest + local profile, so the menu opens instantly and works offline
+        — it never blocks on the course server."""
+        try:
+            lessons = tc.available_lessons()
+            prof = tc.checkout_profile()
+            recs = prof.lessons or {}
+        except Exception:                                    # noqa: BLE001
+            menu.addAction("(couldn't read your course — try Sync now)").setEnabled(False)
+            return
+
+        done = {lid for lid, r in recs.items() if r.completed}
+        due = [x for x in lessons if x.get("id") not in done]
+
+        cap = menu.addAction(f"Due — {len(due)}" if due else "Nothing due — you're clear")
+        cap.setEnabled(False)
+        for x in due:
+            a = menu.addAction("   ▸  " + (x.get("title") or x["id"]))
+            a.triggered.connect(lambda _=False, lid=x["id"]: self._play_assigned(lid))
+
+        if done:
+            menu.addSeparator()
+            cap = menu.addAction(f"Completed — {len(done)}")
+            cap.setEnabled(False)
+            titles = {x["id"]: (x.get("title") or x["id"]) for x in lessons}
+            for lid in sorted(done):
+                band = (recs[lid].best_band or "").upper()
+                a = menu.addAction(f"   ✓  {titles.get(lid, lid)}   ·   {band}")
+                a.setEnabled(False)                          # history, not a launcher
+
+    def _play_assigned(self, lesson_id: str) -> None:
+        if self.assistant.enter_missions():
+            self.assistant._start_assigned_mission(lesson_id)
 
     def _persist_settings(self) -> None:
         """Save the current Settings to ~/.gini/config.json (used by the Cue Cards tour

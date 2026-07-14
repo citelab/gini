@@ -10,10 +10,15 @@ def _scripted(resp):
 
 
 def test_propose_emits_a_reference_composition():
-    spec = authoring.propose(
-        "teach them to build a switched LAN",
-        _scripted('{"primary":"basic-lan","secondary":"","genre":"experience","title":"Build a LAN","brief":"x"}'),
-        lesson_id="hw1")
+    # the model is called twice: pick the fragments, then DESCRIBE the mission that got assembled.
+    # Only the second call's prose is trusted, because only it can be checked against the objectives.
+    def llm(prompt):
+        if '"description"' in prompt:
+            return ('{"title":"Build a LAN","description":"You will wire two hosts to a switch and '
+                    'give them a router as their gateway. Done when the LAN routes off-subnet."}')
+        return '{"primary":"basic-lan","secondary":"","genre":"experience","title":"x","brief":"x"}'
+
+    spec = authoring.propose("teach them to build a switched LAN", llm, lesson_id="hw1")
     assert spec["id"] == "hw1"
     assert "basic-lan" in spec["fragments"]              # references a LOCAL fragment id
     assert all(isinstance(f, str) for f in spec["fragments"])

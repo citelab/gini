@@ -50,10 +50,17 @@ class TeachingCenterClient:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode()
-                return resp.status, (json.loads(raw) if raw else None)
+                if not raw:
+                    return resp.status, None
+                try:
+                    return resp.status, json.loads(raw)
+                except json.JSONDecodeError:
+                    # NOT every endpoint is JSON — a Lesson Pack is served as YAML *text*. Treating a
+                    # non-JSON body as a failure made every lesson fetch look like "offline".
+                    return resp.status, raw
         except urllib.error.HTTPError as e:
             return e.code, None
-        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        except (urllib.error.URLError, OSError):
             return 0, None                       # offline / unreachable
 
     def online(self) -> bool:

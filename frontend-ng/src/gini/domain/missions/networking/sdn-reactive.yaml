@@ -25,6 +25,10 @@ objectives:
 - id: hosts-on-ovs
   say: Wire the hosts to the switch
   check: link(host, ovs)
+- id: live-flows
+  say: 'Live: the controller actually installed flows on the switch (Run to check)'
+  kind: behavioral
+  probe: flow_installed(ovs, any)
 misconceptions:
 - Expecting an OVS to forward with no controller attached (it can't).
 peers:

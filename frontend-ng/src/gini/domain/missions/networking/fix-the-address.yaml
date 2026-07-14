@@ -1,0 +1,75 @@
+id: fix-the-address
+layer: core
+teaches: networking-basics
+spirit: everything is plugged in and the picture looks perfect, but one host was addressed into the
+  wrong subnet, so it is deaf to its neighbours. The student cannot see the bug — they must run the
+  network, observe the failure, read the addresses, and repair the one that does not belong. This is
+  the mis-configuration fault, where absence is visible but a wrong setting is not.
+summary: 'The silent host: three hosts share a switch, but one cannot talk to the others. Find the bad
+  address and fix it.'
+parent: lan/switched
+provides:
+- switched-segment
+objectives:
+# --- L1 / L2: the board is GIVEN — these start green, and say so out loud, because the lesson is
+# that a correct-looking picture is not a working network.
+- id: has-switch
+  say: A switch is on the board (pre-built — the wiring is not the problem)
+  check: exists(switch)
+- id: three-hosts
+  say: Three hosts are on the board (pre-built)
+  check: count(host) >= 3
+- id: hosts-on-switch
+  say: Every host is cabled to the switch (pre-built — look closer than the cables)
+  check: link(host, switch)
+# --- L4: only RUNNING it can reveal a wrong address ---------------------------
+- id: live-reach
+  say: 'Live: every host can actually reach every other host (Run to check)'
+  kind: behavioral
+  # `all` is load-bearing: with the default existential reading, the two HEALTHY hosts pinging each
+  # other would tick this green while the mis-addressed one stayed deaf — the mission would pass
+  # without the bug being fixed. Self-pairs are dropped, so a host can't ping itself into passing.
+  probe: reach(host -> host, all) == ok
+misconceptions:
+- Re-cabling the host. The cable is fine; the address is wrong — a wiring fix cannot repair a subnet
+  mistake.
+- Assuming a host that is plugged in is a host that can talk.
+- Reading the topology picture as proof of connectivity.
+peers:
+- basic-lan
+- fix-the-lan
+stage:
+  # manual addressing is essential: with auto-IP on, the compiler would quietly REPAIR the very
+  # fault we are injecting, and the mission would be unwinnable-by-being-already-won.
+  manual_addressing: true
+  devices:
+  - ref: s1
+    type: switch
+    x: 380
+    y: 260
+  - ref: h1
+    type: host
+    x: 180
+    y: 130
+    ips:
+      s1: 10.0.1.11
+  - ref: h2
+    type: host
+    x: 180
+    y: 290
+    ips:
+      s1: 10.0.1.12
+  - ref: h3
+    type: host
+    x: 180
+    y: 450
+    ips:
+      # THE FAULT — a perfectly valid address, on the wrong network. Nothing on the canvas shows it.
+      s1: 192.168.5.13
+  links:
+  - - h1
+    - s1
+  - - h2
+    - s1
+  - - h3
+    - s1

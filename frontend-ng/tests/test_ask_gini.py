@@ -17,9 +17,9 @@ def _app():
 
 
 # --- toolbar indicator ------------------------------------------------------ #
-def test_three_pills_mode_model_activity():
+def test_four_pills_mode_model_activity_user():
     tm = ThemeManager(_app(), "Dark")
-    assert [p[0] for p in ModeIndicator(tm)._pills()] == ["mode", "model", "activity"]
+    assert [p[0] for p in ModeIndicator(tm)._pills()] == ["mode", "model", "activity", "user"]
 
 
 def test_model_pill_shows_name_or_none():
@@ -32,22 +32,28 @@ def test_model_pill_shows_name_or_none():
 
 
 def test_clicking_the_model_pill_emits_only_there():
+    """Hit boxes come from the layout, so no paint is needed for the pills to be clickable."""
     tm = ThemeManager(_app(), "Dark")
     mi = ModeIndicator(tm); mi.set_status("Chat mode", False); mi.set_model("gemma", True)
+    mi.set_enrolment("mahesh", True, 2)
     mi.resize(mi.sizeHint().width(), 26)
-    img = QImage(mi.width(), 26, QImage.Format_ARGB32)
-    p = QPainter(img); mi.render(p, QPoint(0, 0)); p.end()      # computes the model pill range
-    fired = []
-    mi.model_clicked.connect(lambda: fired.append(1))
+    model_fired, user_fired = [], []
+    mi.model_clicked.connect(lambda: model_fired.append(1))
+    mi.user_clicked.connect(lambda: user_fired.append(1))
 
     def click(x):
         mi.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, QPointF(x, 13),
                                        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
-    x0, x1 = mi._model_range
-    click((x0 + x1) / 2)
-    assert fired == [1]                       # model pill -> opens Settings
-    click(2.0)                                # mode pill (far left) -> nothing
-    assert fired == [1]
+    def mid(kind):
+        x0, x1 = mi._ranges()[kind]
+        return (x0 + x1) / 2
+
+    click(mid("model"))
+    assert model_fired == [1] and user_fired == []      # model pill -> Settings
+    click(mid("user"))
+    assert user_fired == [1] and model_fired == [1]     # user pill -> sign in / my missions
+    click(2.0)                                          # mode pill (far left) -> nothing
+    assert model_fired == [1] and user_fired == [1]
 
 
 # --- assistant panel -------------------------------------------------------- #

@@ -53,7 +53,8 @@ class MissionPanel(QWidget):
         super().__init__(parent)
         self.theme = theme
         self._mission = None
-        self._toggled: dict[int, bool] = {}      # levels the student explicitly folded/unfolded
+        self._shown: int | None = None    # the level the student is actually ON
+        self._peek: int | None = None     # a level they clicked to look ahead at (read-only)
         # hard-cap the width so the HUD can never inflate the Ask GINI dock / the window
         self.setMaximumWidth(_PANEL_MAX_W)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -63,7 +64,7 @@ class MissionPanel(QWidget):
 
         header = QHBoxLayout()
         self._title = _fluid(QLabel("Mission"))
-        self._title.setStyleSheet("font-size:15px; font-weight:600;")
+        self._title.setStyleSheet("font-size:16px; font-weight:700;")
         header.addWidget(self._title, 1)
         self._clock = QLabel("—:—")
         self._clock.setStyleSheet("font-size:15px; font-weight:600;")
@@ -74,7 +75,13 @@ class MissionPanel(QWidget):
         lay.addLayout(header)
 
         self._brief = _fluid(QLabel(""))
+        self._brief.setStyleSheet("font-size:12px;")
         lay.addWidget(self._brief)
+
+        # the LEVEL RIBBON — the shape of the whole journey, always visible
+        self._ribbon = QHBoxLayout()
+        self._ribbon.setSpacing(4)
+        lay.addLayout(self._ribbon)
 
         # current beat (guided missions): "Step 2 of 5" + the instruction, shown prominently
         self._step_num = QLabel("")
@@ -123,7 +130,7 @@ class MissionPanel(QWidget):
     # -- API ---------------------------------------------------------------- #
     def set_mission(self, mission) -> None:
         self._mission = mission
-        self._toggled.clear()                 # a new mission starts with a fresh ladder
+        self._shown = self._peek = None        # a new mission starts back at Level 1
         les = mission.lesson
         self._title.setText(les.title or les.id)
         self._brief.setText(les.brief)
@@ -198,25 +205,57 @@ class MissionPanel(QWidget):
                 w.setParent(None)      # detach immediately (deleteLater is async → stale paint)
                 w.deleteLater()
 
-    def _is_open(self, level: int, active: int | None) -> bool:
-        """Which rungs are expanded: the one you're working on, unless you've toggled it yourself."""
-        if level in self._toggled:
-            return self._toggled[level]
-        return level == active
-
-    def _toggle_level(self, level: int, active: int | None) -> None:
-        self._toggled[level] = not self._is_open(level, active)
+    def _peek_level(self, level: int) -> None:
+        """Click a ribbon tile to look at another level. Read-only: it changes nothing, and the
+        moment the level you're actually on advances, the view snaps back to it."""
+        self._peek = None if level == self._shown else level
         self.render_current()
 
-    def _render_objectives(self, results) -> None:
-        """The objectives as a PROGRESSIVE LADDER that COLLAPSES AS YOU CLIMB IT.
+    def _clear_ribbon(self) -> None:
+        while self._ribbon.count():
+            item = self._ribbon.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
 
-        A task per basic action means a rich mission can run to a dozen-plus rows, which would crowd
-        out the chat. So: a finished level folds to one green summary line, the level you're working
-        on stays open, and later levels stay folded (with progress) — you keep the shape of the whole
-        journey without the clutter. Any header can be clicked to peek."""
+    def _tile(self, lv: int, state: str, done: int, total: int, selected: bool) -> QPushButton:
+        """One ribbon tile. `state` ∈ done | active | locked."""
+        face = {"done": self._c("met"), "active": self._c("accent"), "locked": self._c("muted")}[state]
+        mark = "✓" if state == "done" else str(lv)
+        short = _obj.LEVEL_NAME.get(lv, "").split("(")[0].strip()     # tiles stay narrow
+        b = QPushButton(f"{mark}  {short}")
+        b.setCursor(Qt.PointingHandCursor)
+        b.setToolTip({"done": f"Level {lv} — finished ({done}/{total})",
+                      "active": f"Level {lv} — you are here ({done}/{total})",
+                      "locked": f"Level {lv} — {total} task(s). Click to look ahead."}[state])
+        # the active tile is ILLUMINATED (filled); done tiles are solid-but-quiet; locked are outlines
+        if state == "active":
+            css = f"background:{face}; color:#0d0d10; border:1px solid {face};"
+        elif state == "done":
+            css = f"background:transparent; color:{face}; border:1px solid {face};"
+        else:
+            css = f"background:transparent; color:{face}; border:1px dashed {face};"
+        ring = f"outline:2px solid {self._c('text')};" if selected else ""
+        b.setStyleSheet(
+            f"QPushButton{{{css}{ring} border-radius:4px; padding:4px 8px; font-size:11px; "
+            f"font-weight:700;}}")
+        b.clicked.connect(lambda _=False, l=lv: self._peek_level(l))
+        return b
+
+    def _render_objectives(self, results) -> None:
+        """A RIBBON of levels + ONLY the level you're on.
+
+        Ten-plus rows of tasks would bury the chat and bury the *next move* among things you've
+        already done. So the panel shows one level at a time, in a readable size, and the ribbon
+        carries the shape of the whole journey: finished levels tick over, the level you're on is
+        lit, later ones sit dashed and unlit. Finish a level and the next simply comes to life.
+        Locked tiles can be clicked to look ahead (read-only) — knowing what's coming is motivating;
+        the view snaps back the moment you actually advance."""
         self._clear_objectives()
+        self._clear_ribbon()
         if not results:
+            self._shown = self._peek = None
             return
         # group into rungs, preserving the ladder order
         rungs: list[tuple[int, list]] = []
@@ -225,30 +264,38 @@ class MissionPanel(QWidget):
             if not rungs or rungs[-1][0] != lv:
                 rungs.append((lv, []))
             rungs[-1][1].append(r)
+
         # the ACTIVE rung is the first with anything still open — that's where the student is
         active = next((lv for lv, rs in rungs if not all(x.met for x in rs)), None)
+        if active != self._shown:
+            self._peek = None                 # you advanced (or the mission just started) → follow
+        self._shown = active
+        view = self._peek if self._peek is not None else active
+        if view is None:                       # everything done
+            view = rungs[-1][0]
 
         for lv, rs in rungs:
             done = sum(1 for x in rs if x.met)
-            complete = done == len(rs)
-            open_ = self._is_open(lv, active)
-            chev = "▾" if open_ else "▸"
-            tick = "✓ " if complete else ""
-            head = QPushButton(f"{chev}  {tick}Level {lv} · {_obj.LEVEL_NAME.get(lv, '')}"
-                               f"   ({done}/{len(rs)})")
-            head.setCursor(Qt.PointingHandCursor)
-            col = self._c("met") if complete else (self._c("accent") if lv == active
-                                                   else self._c("muted"))
-            head.setStyleSheet(
-                f"QPushButton{{border:none; background:transparent; text-align:left; padding:3px 0; "
-                f"color:{col}; font-size:11px; font-weight:700;}}")
-            head.clicked.connect(lambda _=False, l=lv, a=active: self._toggle_level(l, a))
-            self._obj_box.addWidget(head)
-            if not open_:
-                continue                                  # folded — its rows stay out of the way
-            for r in rs:
-                row = _fluid(QLabel(f"     {_GLYPH.get(r.status, '•')}  {r.say}"))
-                role = {"met": "met", "unmet": "unmet", "pending": "pending"}.get(r.status, "text")
-                weight = "600" if r.status == _obj.MET else "400"
-                row.setStyleSheet(f"color:{self._c(role)}; font-weight:{weight};")
-                self._obj_box.addWidget(row)
+            state = ("done" if done == len(rs) else
+                     "active" if lv == active else "locked")
+            self._ribbon.addWidget(self._tile(lv, state, done, len(rs), selected=(lv == view)))
+        self._ribbon.addStretch(1)
+
+        rows = next((rs for lv, rs in rungs if lv == view), [])
+        if self._peek is not None and self._peek != active:
+            way = "back at" if active is not None and view < active else "ahead at"
+            look = QLabel(f"Looking {way} Level {view} — you're on Level {active}.")
+            look.setStyleSheet(f"color:{self._c('pending')}; font-size:11px; font-weight:600;")
+            self._obj_box.addWidget(look)
+
+        head = QLabel(f"LEVEL {view} · {_obj.LEVEL_NAME.get(view, '').upper()}")
+        head.setStyleSheet(f"color:{self._c('muted')}; font-size:11px; font-weight:700; "
+                           f"letter-spacing:1px;")
+        self._obj_box.addWidget(head)
+        for r in rows:
+            row = _fluid(QLabel(f"{_GLYPH.get(r.status, '•')}   {r.say}"))
+            role = {"met": "met", "unmet": "unmet", "pending": "pending"}.get(r.status, "text")
+            weight = "600" if r.status == _obj.MET else "400"
+            # only ONE level is on screen, so the tasks can finally be a readable size
+            row.setStyleSheet(f"color:{self._c(role)}; font-weight:{weight}; font-size:13px;")
+            self._obj_box.addWidget(row)

@@ -220,12 +220,11 @@ def compose(intent_text: str, llm=None, *, lesson_id: str = "", persona: str = "
     else:
         primary = _catalog.get(primary_id) or cands[0]
 
-    # A mission must never MISREPRESENT itself. The model writes title/brief from ITS reading of the
-    # intent; if the deterministic pick overrode that reading, the model's narrative describes a game
-    # we did NOT assemble (a queue story wrapped around VPC-isolation objectives). Drop it and let the
-    # assembled fragments describe themselves.
-    if primary_id and primary_id != primary.id:
-        title = brief = ""
+    # A mission must never MISREPRESENT itself. The model wrote title/brief from ITS reading of the
+    # intent, BEFORE we knew which fragments would actually be assembled — so that narrative is only
+    # a guess about the mission. Throw it away unconditionally; we re-narrate below against the
+    # assembled objectives, which is the only text that can be checked for truth.
+    title = brief = ""
 
     core_ids = [primary.id]
     if secondary_id and secondary_id != primary.id and _catalog.get(secondary_id) is not None:
@@ -238,6 +237,16 @@ def compose(intent_text: str, llm=None, *, lesson_id: str = "", persona: str = "
 
     # feasibility: if a thing the student asked FOR still needs a thing they asked to leave OUT,
     # don't quietly build a mismatched mission — report the conflict back
+    # NOW the mission exists, so now it can be described truthfully. The model writes a short title
+    # and a real description FROM the assembled objectives, and `narrate` rejects any prose that
+    # claims an element nothing grades. If it can't tell the truth we keep the fragments' own
+    # summary — which is true by construction, just less personal.
+    if llm is not None:
+        from . import narration as _narr
+        t, d = _narr.narrate(lesson, intent_text, llm)
+        if t and d:
+            lesson.title, lesson.brief = t, d
+
     conflict = _con.objective_conflicts(lesson.objectives, excl)
     if conflict:
         want = ", ".join(conflict)

@@ -9,15 +9,26 @@ def _scripted(resp):
     return lambda _prompt: resp
 
 
+def _two_stage(select: str, narrate: str):
+    """compose() calls the model twice: once to PICK the fragments, once to DESCRIBE what was
+    actually assembled. The pick-call's title is deliberately ignored — at that moment the model is
+    only guessing which mission it'll get, so its story can't be checked against anything."""
+    return lambda prompt: narrate if '"description"' in prompt else select
+
+
 def test_compose_stays_lean_no_unasked_enrichment():
     prop = LR.compose(
         "I want to see how a load balancer spreads traffic",
-        _scripted('{"primary":"load-balanced-web","secondary":"","genre":"expedition",'
-                  '"title":"LB Lab","brief":"Watch an LB fan traffic out."}'),
+        _two_stage('{"primary":"load-balanced-web","secondary":"","genre":"expedition",'
+                   '"title":"LB Lab","brief":"Watch an LB fan traffic out."}',
+                   '{"title":"Spread the Load","description":"You will put a load balancer in '
+                   'front of two web app replicas. Traffic should fan out across both, not pile '
+                   'onto one. Done when the balancer really has two live backends behind it."}'),
     )
     assert prop is not None
     les = prop.lesson
-    assert les.title == "LB Lab"
+    assert les.title == "Spread the Load"          # the narration call owns the title…
+    assert len(les.brief) > len(les.title)         # …and the description is the LONGER of the two
     assert _lesson.is_valid(les)
     # a described mission is LEAN: just the core the student asked for — no auto-added load
     # generator / dashboard / metrics they never requested

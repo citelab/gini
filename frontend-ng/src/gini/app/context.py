@@ -24,6 +24,7 @@ class EventBus(QObject):
     selection_changed = Signal(object)  # device id or None
     canvas_background_clicked = Signal()  # left-click on empty canvas (exit sticky modes)
     llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
+    enrolment_changed = Signal(str, bool, int)  # (student, course-server online, missions due)
     theme_changed = Signal(str)       # theme name
     log = Signal(str, str)            # level, message
     assistant_message = Signal(str, str)  # role, text
@@ -87,6 +88,12 @@ class Settings:
     gini_server_host: str = ""           # the GINI server host (for "gini-server")
     gini_server_port: int = 10000
     gini_server_user: str = ""           # username; password is entered at connect, never stored
+    # Teaching Center (the course server): released lessons, profile sync, submissions.
+    # Empty url = not enrolled -> Missions falls back to the local practice catalog.
+    tc_url: str = ""                     # e.g. http://localhost:8080
+    tc_course: str = ""                  # e.g. cs4480-fall26
+    tc_student: str = ""                 # the student's id in the course
+    tc_token: str = ""                   # enrollment token (Bearer)
     # auto-internet: every container gets a default eth to the internet (Docker NAT).
     # Off = "faithful mode": no internet unless an Internet element is drawn + wired.
     auto_internet: bool = False
@@ -107,6 +114,8 @@ class AppContext:
         self.warnings: dict[str, list] = {}     # device name -> [lint messages]
         self.mission_flags: dict[str, str] = {}  # device id -> reason (Mission off-task / bad-link)
         self.mission = None                     # active Wizard objective (domain.missions.Mission)
+        self.teaching_center = None             # agent.teaching_center.TeachingCenterClient | None
+        self.orchestrator = None                # services.orchestrator.Orchestrator (probes exec here)
         # live xv6 kernel state per Machine (domain.machine_state.MachineState) — the bridge the
         # Machine Lab renders from and the Ask GINI agent reads for OS help. device_id -> state.
         self.machine_states: dict = {}
@@ -139,9 +148,48 @@ class AppContext:
         self.bus.device_removed.emit(device_id)
         self.bus.topology_changed.emit()
 
+    def clear_topology(self) -> int:
+        """Wipe the board (used by staged missions, which must start from an exactly-known canvas).
+        Goes through remove_device so every view tears its node down the normal way. Returns how
+        many devices were removed."""
+        ids = list(self.topology.devices)
+        for did in ids:
+            self.remove_device(did)
+        self.topology.manual_addressing = False     # a fresh board is auto-addressed again
+        self.addressing.clear()
+        self.warnings.clear()
+        self.mission_flags.clear()
+        return len(ids)
+
     def select(self, device_id: str | None) -> None:
         self.selected_id = device_id
         self.bus.selection_changed.emit(device_id)
+
+    # -- Teaching Center ----------------------------------------------------- #
+    def connect_teaching_center(self):
+        """(Re)build the Teaching Center client from Settings. Returns the client, or None when the
+        student isn't enrolled (no URL) — in which case Missions shows the local practice catalog.
+        Never raises: an unreachable Center degrades to the offline cache."""
+        s = self.settings
+        if not (s.tc_url and s.tc_course and s.tc_student):
+            self.teaching_center = None
+            # Half-configured is a trap (the Settings placeholders LOOK like values), so say which
+            # fields are actually missing instead of silently falling back to the local catalog.
+            given = any((s.tc_url, s.tc_course, s.tc_student, s.tc_token))
+            if given:
+                missing = [n for n, v in (("course server", s.tc_url), ("course", s.tc_course),
+                                          ("student id", s.tc_student)) if not v]
+                self.log("Teaching Center not connected — still missing: "
+                         + ", ".join(missing) + " (Settings → Teaching Center).", "info")
+            return None
+        try:
+            from ..agent.teaching_center import TeachingCenterClient
+            self.teaching_center = TeachingCenterClient(
+                s.tc_url, course=s.tc_course, student_id=s.tc_student, token=s.tc_token)
+        except Exception as e:                            # noqa: BLE001
+            self.log(f"Teaching Center: {e}", "info")
+            self.teaching_center = None
+        return self.teaching_center
 
     def set_mission(self, mission) -> None:
         """Set (or clear, with None) the Wizard objective and notify the canvas/palette."""

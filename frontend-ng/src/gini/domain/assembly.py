@@ -163,8 +163,17 @@ def assemble(core_ids, *, genre: str | None = None, level: int | None = None, le
                 misconceptions.append(m)
     steps = [_lesson.Step(say=f.step) for f in chosen if f.step] if guided else []
 
-    intent = _lesson.Intent(concept=primary.teaches, goal=title or primary.summary, spirit=spirit,
-                            misconceptions=misconceptions)
+    # A teacher's authored intent AUGMENTS the fragments' own: their goal/emphasis leads, but the
+    # fragment's spirit (what actually counts as success) is preserved and their misconceptions are
+    # added. `notes` is pure teacher nuance the game master reasons over at play time.
+    ti = overrides.get("intent") or {}
+    t_spirit = (ti.get("spirit") or "").strip()
+    intent = _lesson.Intent(
+        concept=ti.get("concept") or primary.teaches,
+        goal=ti.get("goal") or title or primary.summary,
+        spirit=(f"{t_spirit} {spirit}".strip() if t_spirit else spirit),
+        misconceptions=list(dict.fromkeys(list(ti.get("misconceptions") or []) + misconceptions)),
+        notes=ti.get("notes", ""))
     summary = brief or " ".join(f.summary for f in chosen if f.summary)
     quest_tag = f"[Quest L{level} · {genre}] "
 

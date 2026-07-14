@@ -35,7 +35,11 @@ def test_assemble_dedups_objectives_and_stays_gradable_now():
     les = A.assemble(["load-balanced-web"], lesson_id="lb2")
     ids = [o.id for o in les.objectives]
     assert len(ids) == len(set(ids))                    # unique ids after the merge
-    assert all(o.kind == "structural" and o.check for o in les.objectives)   # completable w/o Docker
+    # every objective is *gradable*: structural ones by a predicate, behavioral ones by a probe.
+    # (Not "all structural" — a load balancer whose fan-out is never exercised teaches nothing, so
+    # this fragment deliberately carries a live check. See test_m2_behavioral.)
+    assert all((o.check if o.kind == "structural" else o.probe) for o in les.objectives)
+    assert any(o.kind == "structural" for o in les.objectives)    # still playable up to the Run step
 
 
 def test_experience_pin_is_core_only_and_low_level():

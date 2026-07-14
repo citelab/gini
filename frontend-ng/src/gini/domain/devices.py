@@ -12,9 +12,21 @@ from enum import Enum
 
 
 class Category(str, Enum):
+    """Palette sections, in the order they appear.
+
+    MACHINES exists because the single most valuable comparison GINI can make was invisible: the
+    things that RUN YOUR CODE were scattered across three sections (Machine and Instance under
+    "Compute", Container under "Containers & Kubernetes", xv6 under "xv6"), so a student hunting
+    for "something to run this on" had to look in three places — and never saw that they were
+    looking at one family. They are: a container, a container with your image, a cloud VM, a real
+    microVM with its own kernel (Kata), and a real kernel on QEMU (xv6). Listed lightest-to-heaviest
+    (see PALETTE_RANK), the section itself teaches the isolation/weight tradeoff before the student
+    reads a word — and the startup-time stamp and cost meter then make it measurable.
+    """
     NETWORKING = "Networking"
     SDN = "Software-Defined Networking"
-    COMPUTE = "Compute"
+    MACHINES = "Machines"
+    XV6 = "xv6 Peripherals"           # attach only to an xv6 Machine (no networking)
     CONTAINERS = "Containers & Kubernetes"
     CLOUD_NETWORK = "Cloud Networking"
     STORAGE = "Storage & Data"
@@ -23,7 +35,17 @@ class Category(str, Enum):
     WORKLOAD = "Workload & Testing"
     SERVERLESS = "Serverless"
     EXTERNAL = "External"
-    XV6 = "xv6"                       # the OS-course family: the xv6 kernel + its peripherals
+
+
+# Within the Machines section, order is the ISOLATION LADDER — lightest first. This is the lesson:
+# they all run your code, and they differ in how much of a machine they actually are.
+PALETTE_RANK: dict[str, int] = {
+    "host": 1,          # a Linux container on the fabric
+    "container": 2,     # …the same, but you supply the image
+    "instance": 3,      # a cloud VM (as the cloud presents it)
+    "kinstance": 4,     # a REAL microVM — its own kernel (Kata)
+    "xv6": 5,           # a real teaching kernel on QEMU-RISC-V
+}
 
 
 # Color-category keys; the theme maps each to a concrete accent color per theme.
@@ -56,13 +78,23 @@ class DeviceType:
     property_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
     max_links: int | None = None             # None = unlimited
     hidden: bool = False                     # kept in the registry but off the palette
+    # Is this a CLOUD element (a managed service you rent) rather than a networking primitive you
+    # build? Stated explicitly, not inferred from the palette category — otherwise reorganising a UI
+    # section silently changes what the AI is told about an element, which is how a Message Queue
+    # ends up "not a cloud thing" because someone moved it next to Pub/Sub.
+    is_cloud: bool | None = None             # None = fall back to the category default
 
     @property
     def cloud(self) -> bool:
+        if self.is_cloud is not None:
+            return self.is_cloud
         return self.category in (
             Category.CONTAINERS,
             Category.CLOUD_NETWORK,
             Category.STORAGE,
+            Category.STREAMING,
+            Category.OBSERVABILITY,
+            Category.WORKLOAD,
             Category.SERVERLESS,
         )
 
@@ -92,13 +124,21 @@ _DEVICES: list[DeviceType] = [
         default_properties={"Name": ""},
     ),
     DeviceType(
-        "host", "Machine", Category.COMPUTE, "host", Accent.PURPLE,
+        "host", "Machine", Category.MACHINES, "host", Accent.PURPLE,
         "Virtual host / end machine — a Linux container on the fabric.",
         backend_kind="vm",
-        default_properties={"Name": "", "OS": "linux", "Interfaces": "1"},
+        # Toolkit = which image this host is built from. LEAN (Alpine) is the default and the one
+        # to prefer: it has everything a student actually types (ip, ping, traceroute, tcpdump,
+        # dig, curl, nc, socat, iperf3, nmap) and is ~10x smaller, so topologies build and boot
+        # far faster on a modest laptop. Switch to FULL only for the experiments that need the
+        # heavy servers — bind9 (DNS), postfix (mail), ettercap/dsniff (spoofing), haproxy.
+        # NOTE: unrelated to the element's SIZE tier, which sets CPU and cost, not contents.
+        default_properties={"Name": "", "OS": "linux", "Interfaces": "1", "Toolkit": "lean"},
+        property_choices={"Toolkit": ("lean", "full")},
+        is_cloud=False,   # stated, not inferred from the palette section
     ),
     DeviceType(
-        "xv6", "xv6 Machine", Category.XV6, "host", Accent.RED,
+        "xv6", "xv6 Machine", Category.MACHINES, "host", Accent.RED,
         "A real teaching kernel: xv6 (MIT 6.1810) running on QEMU-RISC-V. Not a container — a "
         "genuine OS you can watch and steer. Double-click it to open the Machine Lab: observe the "
         "scheduler, process table, CPU registers, memory and kernel stack live, and slow the "
@@ -107,6 +147,7 @@ _DEVICES: list[DeviceType] = [
         backend_kind="xv6",
         default_properties={"Name": "", "Timeslice": "1", "CPUs": "1"},
         property_choices={"Timeslice": ("1", "5", "10", "100")},
+        is_cloud=False,   # stated, not inferred from the palette section
     ),
     # --- xv6 peripherals (software devices attached to the xv6 Machine) -------
     DeviceType(
@@ -179,10 +220,11 @@ _DEVICES: list[DeviceType] = [
 
     # ---- Containers & Kubernetes --------------------------------------------
     DeviceType(
-        "container", "Container", Category.CONTAINERS, "container", Accent.CYAN,
+        "container", "Container", Category.MACHINES, "container", Accent.CYAN,
         "A single Docker/OCI container.",
         backend_kind="vm",
         default_properties={"Name": "", "Image": "alpine:latest", "Command": ""},
+        is_cloud=True,   # stated, not inferred from the palette section
     ),
     DeviceType(
         "pod", "Pod", Category.CONTAINERS, "pod", Accent.CYAN,
@@ -254,19 +296,21 @@ _DEVICES: list[DeviceType] = [
 
     # ---- Compute & autoscaling ----------------------------------------------
     DeviceType(
-        "instance", "Instance", Category.COMPUTE, "instance", Accent.PURPLE,
+        "instance", "Instance", Category.MACHINES, "instance", Accent.PURPLE,
         "Cloud compute instance (VM).",
         backend_kind="vm",
         default_properties={"Name": "", "Type": "t3.micro", "Image": "ubuntu-22.04"},
+        is_cloud=True,   # stated, not inferred from the palette section
     ),
     DeviceType(
-        "kinstance", "Kata Instance (VM)", Category.COMPUTE, "instance", Accent.PURPLE,
+        "kinstance", "Kata Instance (VM)", Category.MACHINES, "instance", Accent.PURPLE,
         "A VM-isolated workload (Kata Containers): your container runs inside a lightweight "
         "microVM with its own guest kernel — stronger isolation than a normal container, at "
         "the cost of boot time, memory and I/O overhead. Use it to compare VM-vs-container "
         "trade-offs. Needs a Kata-enabled GINI server backend (Settings - Backend).",
         backend_kind="vm",
         default_properties={"Name": "", "Image": "ubuntu:22.04", "Command": ""},
+        is_cloud=True,   # stated, not inferred from the palette section
     ),
     DeviceType(
         "instance_group", "Pod Autoscaler (HPA)", Category.CONTAINERS, "instance_group", Accent.CYAN,
@@ -277,7 +321,7 @@ _DEVICES: list[DeviceType] = [
         default_properties={"Name": "", "Min": "1", "Max": "5", "TargetCPU": "60"},
     ),
     DeviceType(
-        "region", "Region / Zone", Category.COMPUTE, "region", Accent.PURPLE,
+        "region", "Region / Zone", Category.CLOUD_NETWORK, "region", Accent.PURPLE,
         "A cloud region or availability zone boundary.",
         is_container=True,
         default_properties={"Name": "us-east-1", "Zones": "a,b,c"},
@@ -319,7 +363,7 @@ _DEVICES: list[DeviceType] = [
         default_properties={"Name": "", "Stage": "prod"},
     ),
     DeviceType(
-        "queue", "Message Queue", Category.SERVERLESS, "queue", Accent.PINK,
+        "queue", "Message Queue", Category.STREAMING, "queue", Accent.PINK,
         "Managed message queue / event bus.",
         default_properties={"Name": "", "Type": "fifo"},
     ),
@@ -331,7 +375,7 @@ _DEVICES: list[DeviceType] = [
         default_properties={"Name": "", "Dashboard": "on"},
     ),
     DeviceType(
-        "web_app", "Web App", Category.COMPUTE, "web_app", Accent.PURPLE,
+        "web_app", "Web App", Category.CONTAINERS, "web_app", Accent.PURPLE,
         "A small demo web backend that reports which instance served the request.",
         default_properties={"Name": ""},
     ),
@@ -434,9 +478,14 @@ def get(key: str) -> DeviceType:
 
 
 def by_category() -> dict[Category, list[DeviceType]]:
+    """The palette, section by section. Sections come out in Category order; within a section,
+    PALETTE_RANK wins (that's what puts Machines in the isolation ladder — container first, real
+    kernel last), and anything unranked keeps its registry order."""
     out: dict[Category, list[DeviceType]] = {c: [] for c in Category}
     for d in _DEVICES:
         if d.hidden:                         # retained in REGISTRY but kept off the palette
             continue
         out[d.category].append(d)
+    for items in out.values():
+        items.sort(key=lambda d: PALETTE_RANK.get(d.key, 99))    # stable: unranked keep their order
     return {c: items for c, items in out.items() if items}

@@ -19,6 +19,10 @@ objectives:
 - id: fans-out
   say: Wire the load balancer to the backends
   check: path(load_balancer, web_app)
+- id: live-balances
+  say: 'Live: the load balancer really has 2+ live backends behind it (Run to check)'
+  kind: behavioral
+  probe: balances(load_balancer, >= 2)
 misconceptions:
 - A single backend behind the LB (nothing to balance).
 peers:

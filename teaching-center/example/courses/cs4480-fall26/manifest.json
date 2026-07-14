@@ -1,18 +1,26 @@
 [
   {
     "id": "lab01-lan",
-    "title": "A basic switched LAN",
-    "release": "2026-09-07",
-    "due": "2026-09-14",
+    "title": "Lab 1 \u2014 Build a switched LAN",
+    "release": "2026-06-01",
+    "due": "2026-12-31",
     "attempts": 3,
-    "pack_hash": "b8bdcdcc4c9bdb433cde334a7e5f916a99456d6f19d5a9473a2d426dcc818275"
+    "pack_hash": "b38e255df7a8f75065b066770363aa35bff82d01488c4c806f414ed129a680a7"
+  },
+  {
+    "id": "lab05-firewall",
+    "title": "Lab 5 \u2014 Force traffic through the firewall",
+    "release": "2026-06-01",
+    "due": "2026-12-31",
+    "attempts": 3,
+    "pack_hash": "6ed6c635ddd2e5de15727a1990b3faf1cda528be834251729c7c8c48c09e8a05"
   },
   {
     "id": "lab03-private-db",
-    "title": "Private database, public web",
-    "release": "2026-09-14",
-    "due": "2026-09-21",
+    "title": "Lab 3 \u2014 Private database, public web",
+    "release": "2026-06-15",
+    "due": "2026-12-31",
     "attempts": 3,
-    "pack_hash": "ae56421bff5f899a82a239c9000f15f38b4af050bc31a9d1a1ffdb57a598fcd1"
+    "pack_hash": "0a11c94790580856854fb908f1817ad6247f39ca24525a9fc1989a43a00658e1"
   }
 ]

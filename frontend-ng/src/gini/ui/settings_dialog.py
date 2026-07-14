@@ -43,10 +43,15 @@ class SettingsDialog(QDialog):
         # --- Appearance --------------------------------------------------- #
         appf = _page(tabs, "Appearance")
         self.theme = QComboBox(); self.theme.addItems(_THEMES)
-        cur = (settings.theme or "Dark").lower()
-        self.theme.setCurrentIndex(
-            {"dark": 0, "light": 1, "gini brand": 2, "brand": 2, "high contrast": 3}
-            .get(cur, 0))
+        # Select the CURRENT theme by matching the list itself. This used to use a hand-written
+        # {name: index} map that only covered the first four themes — so Sand/Blue/Green fell through
+        # to index 0 and the dialog silently reported "Dark". Saving Settings for ANY reason (e.g.
+        # editing your Teaching Center credentials) then wrote Dark back and stole your theme.
+        # Deriving the index from _THEMES means the two can never drift apart again.
+        cur = (settings.theme or "Dark").strip().lower()
+        cur = {"brand": "gini brand"}.get(cur, cur)          # tolerate the old short alias
+        names = [t.lower() for t in _THEMES]
+        self.theme.setCurrentIndex(names.index(cur) if cur in names else 0)
         appf.addRow("Theme", self.theme)
         self.reduced = QCheckBox("Reduce motion / animations")
         self.reduced.setChecked(settings.reduced_motion)
@@ -108,6 +113,26 @@ class SettingsDialog(QDialog):
         prf.addRow("", _note("Toy “cloud bill” shown live in the dashboard while a lab runs. "
                             "Blank = use the default rate."))
 
+        # --- Teaching Center ---------------------------------------------- #
+        tcf = _page(tabs, "Teaching Center")
+        self.tc_url = QLineEdit(settings.tc_url)
+        self.tc_url.setPlaceholderText("http://localhost:8080")
+        tcf.addRow("Course server", self.tc_url)
+        self.tc_course = QLineEdit(settings.tc_course)
+        self.tc_course.setPlaceholderText("cs4480-fall26")
+        tcf.addRow("Course", self.tc_course)
+        self.tc_student = QLineEdit(settings.tc_student)
+        self.tc_student.setPlaceholderText("your student id")
+        tcf.addRow("Student id", self.tc_student)
+        self.tc_token = QLineEdit(settings.tc_token)
+        self.tc_token.setPlaceholderText("enrollment token")
+        self.tc_token.setEchoMode(QLineEdit.Password)
+        tcf.addRow("Enrollment token", self.tc_token)
+        tcf.addRow("", _note("Enrol in a course to receive your instructor's assigned missions. "
+                             "Leave the server blank to work offline — Missions then offers the "
+                             "local practice catalog. Results sync back when you're online; they "
+                             "queue when you're not."))
+
         # --- Help & Tour -------------------------------------------------- #
         hf = _page(tabs, "Help")
         self.show_help = QCheckBox("Show the feature tour (Cue Cards) at launch")
@@ -151,4 +176,8 @@ class SettingsDialog(QDialog):
             "name_prefixes": prefixes,
             "prices": prices,                         # was computed but dropped -> KeyError
             "show_help_on_launch": self.show_help.isChecked(),
+            "tc_url": self.tc_url.text().strip(),
+            "tc_course": self.tc_course.text().strip(),
+            "tc_student": self.tc_student.text().strip(),
+            "tc_token": self.tc_token.text().strip(),
         }

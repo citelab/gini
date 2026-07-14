@@ -56,10 +56,20 @@ def from_composition(spec: dict, *, lesson_id: str | None = None):
                 + " — update GINI or ask your instructor for a compatible version.")
         over = {k: spec[k] for k in ("time_limit", "attempts", "help", "persona", "complete_when")
                 if k in spec}
+        # the teacher's plain-language nuance rides along with the mission and is interpreted by the
+        # student's game master — so the course server never needs a model of its own
+        intent = dict(spec.get("intent") or {})
+        if spec.get("notes"):
+            intent.setdefault("notes", spec["notes"])
+        if intent:
+            over["intent"] = intent
+        # A teacher's composition is LITERAL: the student gets exactly the fragments referenced —
+        # never auto-filled exercise/observe layers they didn't ask for. (Want a load generator?
+        # Reference `drive-load`.) Opt in explicitly with `fill: true`.
         return _assembly.assemble(
             list(spec["fragments"]), genre=spec.get("genre"), level=spec.get("level"),
             lesson_id=lid, title=spec.get("title", ""), brief=spec.get("brief", ""),
-            persona=spec.get("persona", "coach"), **over)
+            persona=spec.get("persona", "coach"), fill=bool(spec.get("fill", False)), **over)
 
     # escape hatch: a self-contained lesson (inline objectives), still bounded by the local oracle
     if spec.get("objectives"):

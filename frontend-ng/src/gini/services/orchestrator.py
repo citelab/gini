@@ -117,8 +117,45 @@ def simulate(config: RuntimeConfig) -> Sim:
 # --------------------------------------------------------------------------- #
 # Docker project emission
 # --------------------------------------------------------------------------- #
-# The Machine image ships "batteries included" — the common networking/diagnostic tools
-# the GINI book experiments use — so students rarely need to `apt install` anything.
+# --------------------------------------------------------------------------- #
+# Machine images: two TOOLKITS, and lean is the default.
+#
+# A Host is the most replicated container in GINI — a ten-node topology is ten of them — so its
+# image size is multiplied by ten while a Grafana is multiplied by one. It was also, historically,
+# our FATTEST image: python:3.12-slim plus bind9, postfix, ettercap, tshark, nmap, haproxy… every
+# host carried a mail server and a DNS server it would never run. On a lab machine slimmer than a
+# developer's, that is where "GINI is slow" comes from.
+#
+# So a Machine now picks a toolkit:
+#   lean (DEFAULT) — Alpine + python3 + the tools a student actually types: ip, ping, traceroute,
+#                    tcpdump, curl, dig, nc, socat, iperf3, nmap. ~10x smaller.
+#   full           — the old Debian image, for the book experiments that genuinely need the heavy
+#                    services (DNS with bind9, mail with postfix, ARP/DNS spoofing with ettercap).
+#                    Those tools are Debian-shaped; this is not worth porting to musl.
+#
+# NOTE this is a different axis from the element's SIZE (S/M/L/XL), which sets the CPU cap and the
+# cost multiplier. A lean host with an XL CPU cap is a perfectly sensible thing to want, so the two
+# must not be conflated: size = how much it gets, toolkit = what's installed in it.
+# --------------------------------------------------------------------------- #
+MACHINE_LEAN, MACHINE_FULL = "lean", "full"
+MACHINE_TOOLKIT_DEFAULT = MACHINE_LEAN
+
+# Alpine package names (musl). Deliberately NOT: bind9, postfix, ettercap, haproxy, dsniff, lynx,
+# telnetd — those are what made the old image huge, and they belong to the `full` toolkit.
+_MACHINE_TOOLS_LEAN = (
+    "python3 iproute2 iputils busybox-extras tcpdump curl wget bind-tools "
+    "netcat-openbsd socat iperf3 nmap ethtool traceroute mtr bridge-utils iptables"
+)
+
+_DOCKERFILE_MACHINE_LEAN = f"""FROM alpine:3.20
+RUN apk add --no-cache {_MACHINE_TOOLS_LEAN}
+WORKDIR /app
+COPY dataplane/ /app/dataplane/
+CMD ["python3", "-m", "dataplane.shuttle"]
+"""
+
+# The FULL image ships "batteries included" — the heavy services the GINI book experiments stand
+# up — so a student running those chapters never needs to `apt install` inside a container.
 MACHINE_BASE = "Debian (python:3.12-slim)"
 _MACHINE_TOOLS = (
     "iproute2 net-tools iputils-ping iputils-tracepath iputils-arping traceroute "
@@ -130,12 +167,20 @@ _MACHINE_TOOLS = (
     # DHCP: isc-dhcp-client (dhclient) to exercise the gRouter's control-plane DHCP server.
     "bind9 postfix mailutils haproxy dsniff ettercap-text-only lynx isc-dhcp-client"
 )
-# human-readable list for the inspector / GINI (the commands students actually type)
+# human-readable lists for the inspector / GINI (the commands students actually type)
+MACHINE_TOOLS_LEAN_HUMAN = ("ip, ifconfig, ping, traceroute, mtr, arping, dig/nslookup/host, "
+                            "tcpdump, nmap, nc, socat, curl, wget, iperf3, ethtool, brctl, "
+                            "iptables")
 MACHINE_TOOLS_HUMAN = ("ip, ifconfig, ping, traceroute, mtr, tracepath, arping, "
                        "dig/nslookup/host, tcpdump, tshark, nmap, nc, socat, curl, wget, "
                        "iperf3, ethtool, brctl, telnet/telnetd, hping3, iptables; "
                        "plus experiment servers: named (bind9), postfix+mail, haproxy, "
                        "arpspoof/dnsspoof (dsniff), ettercap, lynx, dhclient (isc-dhcp-client)")
+
+
+def machine_tools(toolkit: str) -> str:
+    return MACHINE_TOOLS_HUMAN if toolkit == MACHINE_FULL else MACHINE_TOOLS_LEAN_HUMAN
+
 
 _DOCKERFILE_MACHINE = f"""FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
@@ -469,6 +514,7 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     for py in Path(runtime_dir).glob("*.py"):
         shutil.copy(py, work / "dataplane" / py.name)
     (work / "docker" / "Dockerfile.machine").write_text(_DOCKERFILE_MACHINE)
+    (work / "docker" / "Dockerfile.machine-lean").write_text(_DOCKERFILE_MACHINE_LEAN)
     (work / "docker" / "Dockerfile.fabric").write_text(_DOCKERFILE_FABRIC)
     (work / "docker" / "Dockerfile.cloudfabric").write_text(_DOCKERFILE_CLOUDFABRIC)
     (work / "docker" / "Dockerfile.faas").write_text(_DOCKERFILE_FAAS)
@@ -682,9 +728,15 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         m["cut_default"] = (not auto_internet and not m.get("fabric_default")
                             and not m.get("gateway") and not m.get("nf"))  # VNFs are transit
         nets = f"[gini, {WAN_NET}]" if m.get("gateway") else "[gini]"
+        # Which toolkit this host was built with. `image:` is given EXPLICITLY so that ten hosts
+        # sharing a toolkit resolve to ONE image and compose builds it once — without it, compose
+        # tags a separate <project>-<service> image per host and walks the build for each.
+        lean = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT) != MACHINE_FULL
+        dockerfile = "docker/Dockerfile.machine-lean" if lean else "docker/Dockerfile.machine"
         lines += [
             f"  {m['name']}:",
-            "    build: { context: ., dockerfile: docker/Dockerfile.machine }",
+            f"    image: {'gini-machine-lean' if lean else 'gini-machine-full'}",
+            f"    build: {{ context: ., dockerfile: {dockerfile} }}",
             "    cap_add: [NET_ADMIN]",
             '    devices: ["/dev/net/tun:/dev/net/tun"]',
             f"    networks: {nets}",

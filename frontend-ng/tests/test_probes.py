@@ -81,3 +81,41 @@ def test_mission_check_runs_behavioral_to_gold():
     m = Mission(_behavioral(), now=lambda: 0.0); m.start()
     sc = m.check(O.TopologyWorld(_named_vpc()), runner)
     assert sc.band == "gold" and m.complete
+
+
+# -- same-type probes: the two ways they can lie ---------------------------- #
+def test_a_host_cannot_ping_ITSELF_into_passing():
+    """`reach(host -> host)` must never resolve a device against itself: loopback always answers, so
+    the self-pair would make the objective vacuously true on a board with ONE host and no network."""
+    t = Topology()
+    t.add_device("host", name="H1")
+    always_yes = P.FakeRunner({}, default=True)      # even a runner that says yes to everything…
+    tr = P.TypeRunner(always_yes, lambda: t)
+    assert tr.reach("host", "host") is False         # …can't help: there is no valid pair
+    assert tr.reach_all("host", "host") is False     # and "all" over an empty set is NOT vacuous
+
+
+def test_all_quantifier_is_not_satisfied_by_one_healthy_pair():
+    """The repair-mission bug this exists to prevent: two working hosts must not mask a broken third.
+    `any` (the default) passes on one good pair; `all` demands every pair."""
+    t = Topology()
+    for n in ("H1", "H2", "H3"):
+        t.add_device("host", name=n)
+    # H1<->H2 talk; H3 is deaf (mis-addressed)
+    facts = {("reach", a, b, None): {"H3"}.isdisjoint((a, b))
+             for a in ("H1", "H2", "H3") for b in ("H1", "H2", "H3")}
+    tr = P.TypeRunner(P.FakeRunner(facts), lambda: t)
+
+    assert P.evaluate("reach(host -> host) == ok", tr) is True         # existential: masked!
+    assert P.evaluate("reach(host -> host, all) == ok", tr) is False   # universal: caught
+
+    for a in ("H1", "H2", "H3"):                                       # now repair H3
+        for b in ("H1", "H2", "H3"):
+            facts[("reach", a, b, None)] = True
+    assert P.evaluate("reach(host -> host, all) == ok", tr) is True
+
+
+def test_all_quantifier_parses_and_defaults_to_any():
+    assert P.parse("reach(host -> host, all) == ok").quant == "all"
+    assert P.parse("reach(host -> host) == ok").quant == "any"
+    assert P.parse("http(web_app -> database:8080, all) == ok").quant == "all"

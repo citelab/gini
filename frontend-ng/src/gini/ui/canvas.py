@@ -28,6 +28,9 @@ from .theme.tokens import Theme
 
 MIME = "application/x-gini-device"
 GRID = 22
+# how many pixels of "near enough" the connect gesture allows around a node. Aiming at a 40px icon
+# with a mouse is a fine-motor task; being 3px off should not silently cancel the mode.
+_HIT_SLACK = 10
 NODE_W, NODE_H = 138, 84
 SIZE_STEP = 30         # px the node grows taller per size tier above S (vertical scaling)
 CORNER_R = 13          # rounded-corner radius for bent connectors
@@ -538,7 +541,12 @@ class NodeItem(QGraphicsObject):
         self._scene.recompute_membership()
 
     def mouseDoubleClickEvent(self, e):
-        # double-click to "log in" — open a terminal/console for this device
+        # double-click to "log in" — open a terminal/console for this device. LEFT button only:
+        # a fast second RIGHT click arrives here too (Qt turns it into a DblClick), and opening a
+        # console because the student wired two elements in quick succession is nobody's intent.
+        if e.button() != Qt.LeftButton:
+            e.ignore()
+            return
         self._scene.ctx.bus.device_activated.emit(self.inst.id)
         super().mouseDoubleClickEvent(e)
 
@@ -1126,6 +1134,12 @@ class CanvasView(QGraphicsView):
         self._rc_moved = False
         self._rc_start = None
         self._rc_line = None
+        # connect mode accepts EITHER gesture from the same press: a drag (release on the target) or
+        # a click-click (press again on the target). Both are natural, students use both, and having
+        # only one of them work was the single most frustrating thing in the app.
+        self._cn_from: NodeItem | None = None
+        self._cn_start = None
+        self._cn_dragged = False
 
         # X-ray: long-press a node to reveal what it can connect to
         self._lp_node: NodeItem | None = None
@@ -1430,15 +1444,47 @@ class CanvasView(QGraphicsView):
     # connect mode --------------------------------------------------------- #
     def set_connect_mode(self, on: bool) -> None:
         self._connect_mode = on
-        self._connect_first = None
+        self._end_connect_gesture()              # never leave a half-drawn wire behind
         self.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
         self.setDragMode(QGraphicsView.NoDrag if on else QGraphicsView.RubberBandDrag)
 
-    def _node_at(self, view_pos) -> "NodeItem | None":
-        item = self.itemAt(view_pos)
+    @staticmethod
+    def _as_node(item) -> "NodeItem | None":
+        """Climb from a graphics item to the NodeItem that owns it (an icon, a label and a badge are
+        all children of the node)."""
         while item is not None and not isinstance(item, NodeItem):
             item = item.parentItem()
         return item if isinstance(item, NodeItem) else None
+
+    def _node_at(self, view_pos, *, slack: int = 0) -> "NodeItem | None":
+        """The node under the cursor — the ONE hit test every gesture uses.
+
+        Two things it has to get right, both of which used to make wiring feel like a coin flip:
+
+        * Look THROUGH whatever is on top. `itemAt()` returns only the topmost item, so an edge
+          crossing the icon, a VPC box, or a callout would mask the node entirely: the press landed
+          on "empty canvas" even though the cursor was dead-centre on the element. That's why the
+          gesture worked on a fresh canvas and got flakier the more you drew — the failure rate was
+          really the odds of something overlapping the icon. We scan the whole stack, top to bottom,
+          and take the first NodeItem in it.
+
+        * `slack` widens the hit box by a few pixels, because a 3px miss on a 40px icon is a miss by
+          the user's standards but a hit by their intent. EVERY connect gesture passes slack now —
+          the right-drag path didn't, which was the other half of the coin flip.
+        """
+        for it in self.items(view_pos):              # the full stack under the cursor, topmost first
+            node = self._as_node(it)
+            if node is not None:
+                return node
+        if slack <= 0:
+            return None
+        from PySide6.QtCore import QRect
+        rect = QRect(view_pos.x() - slack, view_pos.y() - slack, slack * 2, slack * 2)
+        for it in self.items(rect):
+            node = self._as_node(it)
+            if node is not None:
+                return node
+        return None
 
     def mousePressEvent(self, e) -> None:
         if self._xray_on:
@@ -1449,8 +1495,10 @@ class CanvasView(QGraphicsView):
                 return
             self.clear_xray()                    # click anywhere else dismisses the overlay
         # a left-click on empty canvas exits sticky modes (connect / explain). Emit BEFORE
-        # the connect handling so the mode is off by the time we get there.
-        if e.button() == Qt.LeftButton and self._node_at(e.pos()) is None:
+        # the connect handling so the mode is off by the time we get there. In connect mode we
+        # allow a few px of slack, or a near-miss on an icon cancels the mode mid-gesture.
+        if e.button() == Qt.LeftButton and self._node_at(
+                e.pos(), slack=_HIT_SLACK if self._connect_mode else 0) is None:
             self.ctx.bus.canvas_background_clicked.emit()
         # arm the long-press X-ray on a plain left-press over a node (cancelled by drag)
         if (e.button() == Qt.LeftButton and not self._connect_mode):
@@ -1460,7 +1508,7 @@ class CanvasView(QGraphicsView):
                 self._lp_start = e.pos()
                 self._lp_timer.start(480)
         if self._connect_mode and e.button() == Qt.LeftButton:
-            node = self._node_at(e.pos())
+            node = self._node_at(e.pos(), slack=_HIT_SLACK)
             if node is not None:
                 devices = self.ctx.topology.devices
                 # drop a stale first endpoint (its device was deleted, or the project was
@@ -1468,18 +1516,28 @@ class CanvasView(QGraphicsView):
                 if self._connect_first is not None and self._connect_first not in devices:
                     self._connect_first = None
                 if self._connect_first is None:
+                    # ARM. This press may become either gesture — a drag (release on the target) or
+                    # a click-click (press again on the target). We commit to neither yet; both end
+                    # up in the same place, so the student can't pick "the wrong one".
                     self._connect_first = node.inst.id
+                    self._cn_from = node
+                    self._cn_start = e.pos()
+                    self._cn_dragged = False
                 elif self._connect_first != node.inst.id:
-                    try:
-                        self.ctx.add_link(self._connect_first, node.inst.id)
-                    except Exception as ex:          # noqa: BLE001
-                        self.ctx.log(f"Couldn't connect: {ex}", "info")
-                    self._connect_first = None
+                    self._link(self._connect_first, node.inst.id)
+                    self._end_connect_gesture()
+                e.accept()
                 return
         # right-button on a node: maybe a connect-drag, maybe the context menu (decided
-        # on release by whether the mouse moved)
+        # on release by whether the mouse moved). Same slack as connect mode — this path had none,
+        # so a 3px miss meant the press fell through and the drag simply never started.
         if e.button() == Qt.RightButton:
-            node = self._node_at(e.pos())
+            node = self._node_at(e.pos(), slack=_HIT_SLACK)
+            if node is not None:
+                self._trace(f"right-PRESS at {e.pos().x()},{e.pos().y()} → armed on {node.inst.name}")
+            else:
+                self._trace(f"right-PRESS at {e.pos().x()},{e.pos().y()} → NO NODE. "
+                            + self._miss_report(e.pos()))
             if node is not None:
                 self._rc_from = node
                 self._rc_start = e.pos()
@@ -1488,16 +1546,88 @@ class CanvasView(QGraphicsView):
                 return
         super().mousePressEvent(e)
 
+    def _miss_report(self, view_pos) -> str:
+        """When a press finds no node, say exactly WHY — the two possible answers need different
+        fixes and 'sometimes it works' cannot distinguish them:
+
+          * items under the cursor are non-node things → something is MASKING the node (hit test);
+          * nothing under the cursor and the nearest node is N px away → the press really did land
+            on empty canvas, and the question becomes why the cursor was where the user didn't think
+            it was (coordinate-space bug: widget vs viewport vs scene).
+        """
+        under = [type(i).__name__ for i in self.items(view_pos)]
+        sp = self.mapToScene(view_pos)
+        best, best_d = None, 1e9
+        for n in self.scene_.nodes.values():
+            r = n.sceneBoundingRect()
+            dx = max(r.left() - sp.x(), 0, sp.x() - r.right())
+            dy = max(r.top() - sp.y(), 0, sp.y() - r.bottom())
+            d = (dx * dx + dy * dy) ** 0.5
+            if d < best_d:
+                best, best_d = n, d
+        near = (f"nearest node {best.inst.name} is {best_d:.0f}px away (scene)"
+                if best is not None else "no nodes on the canvas")
+        return (f"under cursor: {under or '[]'} · scene pt ({sp.x():.0f},{sp.y():.0f}) · "
+                f"{near} · zoom={self._zoom:.2f}")
+
+    def _trace(self, msg: str) -> None:
+        """Gesture tracing, off by default. Wiring bugs are reported as 'sometimes it works' — which
+        is unfalsifiable without knowing WHICH of the four steps dropped the gesture. Run with
+        GINI_TRACE_GESTURES=1 and every press/drag/release decision prints to the Console, so a bug
+        report becomes a transcript instead of a hunch."""
+        import os
+        if os.environ.get("GINI_TRACE_GESTURES"):
+            self.ctx.log(f"[gesture] {msg}", "info")
+
+    def mouseDoubleClickEvent(self, e) -> None:
+        """THE BUG behind "sometimes the press just doesn't happen".
+
+        Qt does not send a second Press for a rapid second click. The sequence is:
+
+            Press → Release → **DblClick** → Release
+
+        so the second press arrives as `mouseDoubleClickEvent` — a completely different handler,
+        which we never overrode. `mousePressEvent` was therefore never called, the gesture never
+        armed, and nothing was even logged (which is what made this so hard to see: the failure was
+        an ABSENCE). Wire elements slowly and everything works; wire them quickly, one after
+        another — exactly what you do hooking six machines to a router — and every other gesture
+        evaporates.
+
+        This is NOT a right-button problem. CONNECT MODE HAS IT TOO: a fast second left-drag is
+        swallowed identically. It only *seemed* reliable because aiming in connect mode is slower,
+        so you rarely beat the double-click interval. Removing the right-drag would have left the
+        bug in the gesture we kept.
+
+        A double-click is still a press. Treat it as one — for whichever button is mid-gesture.
+        Left double-click OUTSIDE connect mode keeps its real meaning: log in to the device."""
+        wiring = e.button() == Qt.RightButton or (self._connect_mode
+                                                  and e.button() == Qt.LeftButton)
+        if wiring:
+            btn = "right" if e.button() == Qt.RightButton else "left"
+            self._trace(f"{btn}-DOUBLECLICK (Qt sent DblClick instead of Press) → treating as press")
+            self.mousePressEvent(e)
+            return
+        super().mouseDoubleClickEvent(e)      # a plain left double-click still opens the console
+
     def mouseMoveEvent(self, e) -> None:
         if self._lp_node is not None and self._lp_start is not None:
             if (e.pos() - self._lp_start).manhattanLength() > 6:   # moving = a drag, not a hold
                 self._lp_timer.stop()
                 self._lp_node = None
+        # connect mode: once a first endpoint is armed, the wire FOLLOWS THE CURSOR — whether you're
+        # dragging or you clicked once and let go. Without this there is no feedback at all after the
+        # first click, which is why the mode felt broken rather than merely unfamiliar.
+        if self._connect_mode and self._cn_from is not None:
+            if not self._cn_dragged and (e.pos() - self._cn_start).manhattanLength() > 4:
+                self._cn_dragged = True
+            self._draw_wire(self._cn_from, e.pos())
+            e.accept()
+            return
         if self._rc_from is not None:
             if not self._rc_moved and (e.pos() - self._rc_start).manhattanLength() > 6:
                 self._rc_moved = True
             if self._rc_moved:
-                self._draw_rc_line(e.pos())
+                self._draw_wire(self._rc_from, e.pos())
             e.accept()
             return
         super().mouseMoveEvent(e)
@@ -1505,12 +1635,29 @@ class CanvasView(QGraphicsView):
     def mouseReleaseEvent(self, e) -> None:
         self._lp_timer.stop()                    # a hold that's released isn't a long-press
         self._lp_node = None
+        # connect mode, left-release: if you DRAGGED, this release is the second endpoint. If you
+        # merely clicked, stay armed and keep the wire on the cursor for a second click.
+        if (self._connect_mode and self._cn_from is not None
+                and e.button() == Qt.LeftButton and self._cn_dragged):
+            target = self._node_at(e.pos(), slack=_HIT_SLACK)
+            if target is not None and target.inst.id != self._cn_from.inst.id:
+                self._link(self._cn_from.inst.id, target.inst.id)
+                self._end_connect_gesture()
+            else:
+                # dragged out to nowhere — abandon the whole gesture rather than leaving a hidden
+                # armed endpoint that would surprise the next click
+                self._end_connect_gesture()
+            e.accept()
+            return
         if self._rc_from is not None and e.button() == Qt.RightButton:
             self._clear_rc_line()
             src = self._rc_from
             self._rc_from = None
+            tgt = self._node_at(e.pos(), slack=_HIT_SLACK)
+            self._trace(f"right-RELEASE: moved={self._rc_moved} target="
+                        + (tgt.inst.name if tgt is not None else "NONE (dropped on empty canvas)"))
             if self._rc_moved:                       # right-DRAG -> connect to the target
-                target = self._node_at(e.pos())
+                target = self._node_at(e.pos(), slack=_HIT_SLACK)   # …and slack on the DROP too
                 if target is not None and target.inst.id != src.inst.id:
                     try:
                         self.ctx.add_link(src.inst.id, target.inst.id)
@@ -1522,11 +1669,24 @@ class CanvasView(QGraphicsView):
             return
         super().mouseReleaseEvent(e)
 
-    def _draw_rc_line(self, view_pos) -> None:
+    # -- one implementation of "draw a wire from a node to the cursor" -------- #
+    def _link(self, src_id: str, dst_id: str) -> None:
+        try:
+            self.ctx.add_link(src_id, dst_id)
+        except Exception as ex:                  # noqa: BLE001 — grammar refusals land here
+            self.ctx.log(f"Couldn't connect: {ex}", "info")
+
+    def _end_connect_gesture(self) -> None:
+        self._connect_first = None
+        self._cn_from = None
+        self._cn_dragged = False
+        self._clear_rc_line()
+
+    def _draw_wire(self, from_node, view_pos) -> None:
         from PySide6.QtCore import QLineF
         from PySide6.QtGui import QColor, QPen
         from PySide6.QtWidgets import QGraphicsLineItem
-        p1 = self._rc_from.sceneBoundingRect().center()
+        p1 = from_node.sceneBoundingRect().center()
         p2 = self.mapToScene(view_pos)
         if self._rc_line is None:
             self._rc_line = QGraphicsLineItem()
