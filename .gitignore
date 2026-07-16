@@ -8,11 +8,12 @@ pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 
-# --- C / Zig router build ---
+# --- C router build ---
 *.o
+*.zigobj.o
 config.log
 backend/build/
-backend/.zig-cache/
+backend/.zig-cache/    # legacy: Zig removed; kept so any stray cache never re-enters git
 bin/
 build/
 lib/
