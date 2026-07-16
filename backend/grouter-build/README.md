@@ -9,13 +9,13 @@ router.
 > with **Lua** for student-written modules and **Python** for the app. Rationale: xv6 anchors C as
 > GINI's systems-teaching language, Lua is the student extension tier, and `zig cc`'s cross-compile
 > value was never used here (the router always builds inside a Linux Docker image). This directory
-> keeps the name `grouter-zig/` only because its path is referenced from the frontend's image layout;
+> keeps the name `grouter-build/` only because its path is referenced from the frontend's image layout;
 > a rename is a separate, coordinated change.
 
 ## Files
 
 ```
-backend/grouter-zig/
+backend/grouter-build/
   build.sh                        # plain C build (clang/gcc) — used by Docker
   Dockerfile                      # Linux image: libslack + readline + the C-built grouter
   run_grouter.py                  # entrypoint: ROUTER_CONFIG -> ifconfig/route -> grouter
@@ -29,9 +29,9 @@ backend/grouter-zig/
 ## Build & test
 
 ```
-cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
+cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .
 docker run --rm -e GROUTER_BIN=/usr/local/bin/grouter gini-grouter \
-    python3 /build/grouter-zig/tests/forward_test.py
+    python3 /build/grouter-build/tests/forward_test.py
 ```
 
 The e2e tests (`forward`, `multihop`, `multirouter`, `test_rctl`) are the regression guardrail for

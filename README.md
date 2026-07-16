@@ -73,7 +73,7 @@ and **SDN controller** images are built locally:
 
 ```bash
 # the real C gRouter (used by Router and OpenVSwitch elements)
-cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
+cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .
 
 # the POX OpenFlow controller (used by the OpenFlow Controller element)
 cd backend/sdn && docker build -t gini-pox .
@@ -178,7 +178,7 @@ so a program inside them reaches services by name (`psql -h database1`,
 frontend-ng/        gBuilder 6.0 — PySide6 app (domain · ui · agent · runtime · services)
 backend/
   src/grouter/      the real C gRouter (~20k lines) incl. OpenFlow/SDN mode
-  grouter-zig/      zig-cc build + Dockerfile (gini-grouter) + e2e forwarding tests
+  grouter-build/      C build + Dockerfile (gini-grouter) + e2e forwarding tests
   sdn/              POX (gar) controller + Dockerfile (gini-pox)
 legacy/             the original Python 2.7 / PyQt4 GINI, kept for reference
 ARCHITECTURE.md     what's active vs legacy, and how it fits together
@@ -197,7 +197,7 @@ pytest                                   # ~95 tests
 QT_QPA_PLATFORM=offscreen pytest
 ```
 
-The gRouter has end-to-end forwarding proofs under `backend/grouter-zig/tests/`
+The gRouter has end-to-end forwarding proofs under `backend/grouter-build/tests/`
 (`forward_test.py`, `multihop_test.py`, …), runnable against a built `grouter` binary.
 
 ---

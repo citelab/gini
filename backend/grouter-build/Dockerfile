@@ -1,10 +1,10 @@
 # Build the REAL GINI gRouter (C) and run it in the fabric.
-# Build context MUST be the backend/ directory (so include/, src/grouter/, grouter-zig/
+# Build context MUST be the backend/ directory (so include/, src/grouter/, grouter-build/
 # sit at the context root, where the COPYs below expect them).
 #
-#   cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
+#   cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .
 #
-# (The grouter-zig/ directory keeps its name for now — its path is referenced from the frontend's
+# (The grouter-build/ directory keeps its name for now — its path is referenced from the frontend's
 #  image layout; a rename is a separate, coordinated change. Zig itself is gone: the router is C.)
 #
 # TWO STAGES, deliberately. The router is a compiled C binary, so the compiler is a BUILD
@@ -38,11 +38,11 @@ RUN wget -q http://libslack.org/download/libslack-0.6.tar.gz \
 WORKDIR /build
 COPY include/      ./include/
 COPY src/grouter/  ./src/grouter/
-COPY grouter-zig/  ./grouter-zig/
+COPY grouter-build/  ./grouter-build/
 
 # build the real gRouter with the C compiler (gcc). invoke via bash so it doesn't depend on the
 # copied file keeping its executable bit.
-RUN CC=gcc OUT=/usr/local/bin/grouter bash ./grouter-zig/build.sh
+RUN CC=gcc OUT=/usr/local/bin/grouter bash ./grouter-build/build.sh
 
 # --------------------------------------------------------------------------------------------- #
 # RUNTIME: the binary + the shared libraries it links against + python3 for the entrypoint +
@@ -60,10 +60,10 @@ COPY --from=build /usr/local/bin/grouter /usr/local/bin/grouter
 # the entrypoint + console scripts the RUNNING router needs. grconsole.py in particular is exec'd
 # from outside (the Router Lab's flow-table view, the mission `flow()` probe, probe_doctor), so it
 # has to exist in the runtime image — not just in the builder.
-COPY --from=build /build/grouter-zig/ /build/grouter-zig/
+COPY --from=build /build/grouter-build/ /build/grouter-build/
 
 WORKDIR /run
 ENV GINI_HOME=/run
 # entrypoint turns a ROUTER_CONFIG env (our fabric wiring) into the gRouter's
 # native config (ifconfig add tun…, route add…) and launches it.
-CMD ["python3", "/build/grouter-zig/run_grouter.py"]
+CMD ["python3", "/build/grouter-build/run_grouter.py"]

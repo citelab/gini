@@ -8,7 +8,7 @@
 #
 #   CC=clang ./build.sh          # or CC=gcc ./build.sh   (default: cc)
 #
-# (This directory is still named grouter-zig/ for now — its path is referenced from the
+# (This directory is still named grouter-build/ for now — its path is referenced from the
 #  frontend's image layout; a rename is a separate, coordinated change.)
 set -euo pipefail
 
