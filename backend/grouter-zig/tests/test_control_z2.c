@@ -31,7 +31,7 @@ int main(void)
     gr_control("trace 10.0.9.9", out, sizeof out);
     if (!strstr(out, "base forwarding")) fail = 1;
 
-    /* native module written in Zig (gr_mod_block), added through the registry */
+    /* native module written in C (gr_mod_block), added through the registry */
     run("clear");
     run("add block 10.0.5.5");
     gr_control("list", out, sizeof out);

@@ -1,7 +1,7 @@
 /*
  * gr_cp_hello.c  —  the B2 control-plane "hello" demo module.
  *
- * This is to the control plane what gr_mod_block.zig is to the data plane: the smallest
+ * This is to the control plane what gr_mod_block.c is to the data plane: the smallest
  * thing that exercises the whole new path end to end. On a timer it sends a tiny "hello"
  * packet (IP protocol 253, the RFC 3692 experimental number), and it logs every hello it
  * receives. It proves the three new capabilities at once — timers, origination, and reception

@@ -1,26 +1,23 @@
-# Z0 — build the REAL GINI gRouter with Zig and run it in the fabric.
+# Build the REAL GINI gRouter (C) and run it in the fabric.
 # Build context MUST be the backend/ directory (so include/, src/grouter/, grouter-zig/
 # sit at the context root, where the COPYs below expect them).
 #
 #   cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
 #
+# (The grouter-zig/ directory keeps its name for now — its path is referenced from the frontend's
+#  image layout; a rename is a separate, coordinated change. Zig itself is gone: the router is C.)
+#
 # TWO STAGES, deliberately. The router is a compiled C binary, so the compiler is a BUILD
-# dependency, not a runtime one — but this image used to be single-stage, which meant every Router
-# and every OVS in every student's topology carried the whole Zig/LLVM toolchain, gcc, pip and the
-# libslack source tree. That is hundreds of megabytes of compiler shipped in order to run a binary
-# that was already built. The runtime stage copies out the one artifact that matters (the grouter
-# binary) plus what the entrypoint actually needs, and nothing else.
+# dependency, not a runtime one. The runtime stage copies out the one artifact that matters (the
+# grouter binary) plus what the entrypoint needs, and nothing else — no compiler shipped to every
+# student's Router/OVS container.
 # --------------------------------------------------------------------------------------------- #
 FROM debian:bookworm-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget ca-certificates make gcc libc6-dev \
         libreadline-dev libncurses-dev liblua5.4-dev \
-        python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-# Zig toolchain (bundled clang) via the pip 'ziglang' package
-RUN pip3 install --break-system-packages ziglang
 
 # libslack from source (the one external dep that isn't packaged). Build it with
 # the same legacy-hardening-off flags as the router (CCFLAGS is libslack's knob):
@@ -43,13 +40,13 @@ COPY include/      ./include/
 COPY src/grouter/  ./src/grouter/
 COPY grouter-zig/  ./grouter-zig/
 
-# build the real gRouter with zig cc (invoke via bash so it doesn't depend on the
-# copied file keeping its executable bit)
-RUN ZIG="python3 -m ziglang" OUT=/usr/local/bin/grouter bash ./grouter-zig/build.sh
+# build the real gRouter with the C compiler (gcc). invoke via bash so it doesn't depend on the
+# copied file keeping its executable bit.
+RUN CC=gcc OUT=/usr/local/bin/grouter bash ./grouter-zig/build.sh
 
 # --------------------------------------------------------------------------------------------- #
 # RUNTIME: the binary + the shared libraries it links against + python3 for the entrypoint +
-# iproute2 for the tun setup. NOT the compiler, not pip, not the source tree.
+# iproute2 for the tun setup. NOT the compiler, not the source tree.
 FROM debian:bookworm-slim
 
 # runtime shared libs only (libreadline8 / libncurses6 / liblua5.4-0 — the -dev packages above
