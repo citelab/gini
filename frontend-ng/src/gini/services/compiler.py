@@ -16,12 +16,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..domain import devices as _dev
 from ..domain.topology import Topology
 from .cloud_catalog import is_service, service_for
 
 ROUTERS = {"router", "firewall"}
 SWITCHES = {"switch", "hub"}        # plain L2 — live in the shared `fabric` container
 GROUPS = {"vpc", "cloud_subnet", "region"}
+# Sources/Sinks: instruments that run INSIDE a donor container — they get no runtime node
+# of their own, and their (attach) edges are never wired.
+RIDERS = {k for k, dt in _dev.REGISTRY.items() if getattr(dt, "rider", False)}
 K8S_ROLES = {"k8s_cluster": "k8scluster", "pod": "k8sworkload",
              "instance_group": "hpa", "k8s_node": "k8snode"}
 
@@ -57,6 +61,8 @@ def _role(type_key: str) -> str:
         return "xv6"
     if type_key in ("terminal", "storage_volume"):   # xv6 peripherals: pure UI, no
         return "peripheral"                          # container; never emitted/addressed
+    if type_key in RIDERS:             # Sources/Sinks: run on a donor, no container of their own
+        return "rider"
     if type_key in GROUPS:
         return "group"
     return "machine"                   # host = a node on the simulated tun fabric
@@ -64,6 +70,14 @@ def _role(type_key: str) -> str:
 
 def _svc(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower()) or "node"
+
+
+def _hostname(name: str) -> str:
+    """The hostname to set inside the machine container — the user's element name (e.g.
+    'toronto.on') made into a valid hostname, so `hostname` at the shell matches the label on
+    the canvas and the student needs no mental mapping. Falls back to the service name."""
+    h = re.sub(r"[^a-zA-Z0-9.-]", "-", (name or "").strip()).strip(".-")
+    return h or _svc(name)
 
 
 def _cpus_for(device) -> float:
@@ -83,7 +97,7 @@ def _toolkit_for(device) -> str:
     Anything unrecognised means lean: a typo must not silently pull in the 10x image."""
     props = getattr(device, "properties", None) or {}
     want = str(props.get("Toolkit", "")).strip().lower()
-    return "full" if want == "full" else "lean"
+    return want if want in ("full", "security") else "lean"
 
 
 def _xv6_harts(device) -> int:
@@ -386,7 +400,7 @@ class RuntimeConfig:
     def to_runtime(self, docker: bool) -> dict:
         return {
             "machines": [
-                {"name": _svc(m.name), "gw": m.gw,
+                {"name": _svc(m.name), "hostname": _hostname(m.name), "gw": m.gw,
                  "gateway": m.gateway, "fabric_default": m.fabric_default,
                  "fabric_gw": m.fabric_gw, "cpus": m.cpus, "toolkit": m.toolkit,
                  "forward": m.forward, "nf": m.nf, "nf_rules": m.nf_rules,
@@ -588,7 +602,11 @@ class RuntimeCompiler:
         ctrl_switches: dict[str, list[str]] = {}   # controller did -> [ovs did]
         for l in topo.links.values():
             rs, rt = role.get(l.source_id), role.get(l.target_id)
-            if rs == "group" or rt == "group":
+            if getattr(l, "kind", "link") == "attach" or rs == "rider" or rt == "rider":
+                # a Source/Sink mount: the rider runs inside the donor, so this is not a cable.
+                cfg.notes.append(f"skipped rider attach: "
+                                 f"{name.get(l.source_id)}–{name.get(l.target_id)}")
+            elif rs == "group" or rt == "group":
                 cfg.notes.append(f"skipped link touching grouping: "
                                  f"{name.get(l.source_id)}–{name.get(l.target_id)}")
             elif rs in K8S_ROLES.values() or rt in K8S_ROLES.values():
@@ -1493,4 +1511,18 @@ def address_map(topo: Topology) -> dict[str, dict]:
     for s in cfg.switches:
         out[s.name] = {"role": "switch", "ports": len(s.eps), "interfaces": [],
                        "peers": [e.peer.device for e in s.eps]}
+    return out
+
+
+def overlay_hosts(addressing: dict) -> dict:
+    """device name -> its primary overlay (gini0) IP, from `address_map` output. GINI writes these
+    into each machine's /etc/hosts so names resolve over the DRAWN network (gini0) instead of the
+    Docker bridge — which is what makes DNS/getent/ping/reach ride the overlay."""
+    out: dict[str, str] = {}
+    for name, info in (addressing or {}).items():
+        for itf in info.get("interfaces", []):
+            ip = str(itf.get("ip", "")).split("/")[0].strip()
+            if ip:
+                out[name] = ip
+                break
     return out

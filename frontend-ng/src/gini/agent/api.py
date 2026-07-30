@@ -47,7 +47,9 @@ class GiniAPI:
 
     def connect(self, a: str, b: str, label: str = "") -> dict:
         da, db = self._resolve(a), self._resolve(b)
-        link = self.ctx.add_link(da.id, db.id, label)
+        # ctx.connect auto-attaches Source/Sink riders (dotted edge) and links everything else —
+        # same behaviour as the canvas, so agent/recipe wiring matches what a teacher would draw.
+        link = self.ctx.connect(da.id, db.id, label)
         return {"id": link.id, "source": da.name, "target": db.name, "label": label}
 
     def remove_device(self, ref: str) -> None:

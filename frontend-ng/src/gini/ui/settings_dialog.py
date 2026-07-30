@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 _THEMES = ("Dark", "Light", "GINI Brand", "High Contrast", "Sand", "Blue", "Green")
+_TEXT_SIZES = ("Normal", "Large", "Extra Large")
 
 
 def _page(tabs: QTabWidget, title: str) -> QFormLayout:
@@ -53,6 +54,13 @@ class SettingsDialog(QDialog):
         names = [t.lower() for t in _THEMES]
         self.theme.setCurrentIndex(names.index(cur) if cur in names else 0)
         appf.addRow("Theme", self.theme)
+        self.text_size = QComboBox(); self.text_size.addItems(_TEXT_SIZES)
+        cur_sz = (getattr(settings, "text_size", "Normal") or "Normal").strip().lower()
+        sizes = [s.lower() for s in _TEXT_SIZES]
+        self.text_size.setCurrentIndex(sizes.index(cur_sz) if cur_sz in sizes else 0)
+        appf.addRow("Text size", self.text_size)
+        appf.addRow("", _note("Scales the whole interface — handy on large or high-resolution "
+                              "displays. Applies instantly."))
         self.reduced = QCheckBox("Reduce motion / animations")
         self.reduced.setChecked(settings.reduced_motion)
         appf.addRow("", self.reduced)
@@ -122,16 +130,22 @@ class SettingsDialog(QDialog):
         self.tc_course.setPlaceholderText("cs4480-fall26")
         tcf.addRow("Course", self.tc_course)
         self.tc_student = QLineEdit(settings.tc_student)
-        self.tc_student.setPlaceholderText("your student id")
-        tcf.addRow("Student id", self.tc_student)
+        self.tc_student.setPlaceholderText("your username — e.g. ravi")
+        tcf.addRow("Username", self.tc_student)
         self.tc_token = QLineEdit(settings.tc_token)
-        self.tc_token.setPlaceholderText("enrollment token")
+        self.tc_token.setPlaceholderText("one-time token from your instructor")
         self.tc_token.setEchoMode(QLineEdit.Password)
-        tcf.addRow("Enrollment token", self.tc_token)
-        tcf.addRow("", _note("Enrol in a course to receive your instructor's assigned missions. "
-                             "Leave the server blank to work offline — Missions then offers the "
-                             "local practice catalog. Results sync back when you're online; they "
-                             "queue when you're not."))
+        tcf.addRow("Enrolment token", self.tc_token)
+        self.tc_insecure = QCheckBox("Allow insecure (plain HTTP) connection")
+        self.tc_insecure.setChecked(bool(getattr(settings, "tc_allow_insecure", False)))
+        tcf.addRow("", self.tc_insecure)
+        tcf.addRow("", _note("Your password is never stored — signing in exchanges it for a session. "
+                             "The enrolment token is used ONCE, to claim your account.\n\n"
+                             "GINI refuses to send a password over plain HTTP to a remote server: on "
+                             "shared wifi anyone could read it. Tick the box above only for a demo on "
+                             "a network you trust (localhost is always allowed).\n\n"
+                             "Leave the server blank to work offline — Missions then offers the local "
+                             "practice catalog."))
 
         # --- Help & Tour -------------------------------------------------- #
         hf = _page(tabs, "Help")
@@ -167,6 +181,7 @@ class SettingsDialog(QDialog):
                 prices[key] = val
         return {
             "theme": self.theme.currentText(),
+            "text_size": self.text_size.currentText(),
             "reduced_motion": self.reduced.isChecked(),
             "auto_internet": self.auto_internet.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),
@@ -180,4 +195,5 @@ class SettingsDialog(QDialog):
             "tc_course": self.tc_course.text().strip(),
             "tc_student": self.tc_student.text().strip(),
             "tc_token": self.tc_token.text().strip(),
+            "tc_allow_insecure": self.tc_insecure.isChecked(),
         }

@@ -181,6 +181,9 @@ typedef struct {
 static const gr_modreg_t REGISTRY[] = {
     { "acl",     gr_mod_acl,   1 },
     { "nat",     gr_mod_nat,   1 },
+    { "rate",     gr_mod_rate,     1 },   /* native (C): token-bucket policer */
+    { "classify", gr_mod_classify, 1 },   /* native (C): DSCP marker */
+    { "tap",      gr_mod_tap,      1 },   /* native (C): pcap capture */
     { "counter", ctor_counter, 0 },
 #ifdef GR_LEGACY_MODULES
     { "filter",  ctor_filter,  0 },

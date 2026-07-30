@@ -64,11 +64,50 @@ def build_palette(t: Theme) -> QPalette:
     return p
 
 
-def build_qss(t: Theme) -> str:
+# UI text-size presets (Settings → Appearance). A single scale factor multiplies the base font
+# sizes in the stylesheet, so the whole UI grows/shrinks together.
+FONT_SCALES = {"Normal": 1.0, "Large": 1.16, "Extra Large": 1.32}
+
+
+def scale_for(label: str) -> float:
+    return FONT_SCALES.get((label or "Normal").strip(), 1.0)
+
+
+# The active UI text scale, published module-wide so custom-painted widgets (canvas cards, the
+# dashboard, palette headers, toolbar pills) that set their own point sizes can honour the setting.
+_ACTIVE_SCALE = 1.0
+
+
+def ui_scale() -> float:
+    return _ACTIVE_SCALE
+
+
+def sp(base_pt: float) -> int:
+    """A point size scaled by the active UI text-size setting (never below 1)."""
+    return max(1, round(base_pt * _ACTIVE_SCALE))
+
+
+import re as _re
+
+_FS_RE = _re.compile(r"(font-size:\s*)(\d+)px")
+
+
+def scale_css(css: str) -> str:
+    """Scale every `font-size: Npx` in a stylesheet by the active UI text size, leaving all other
+    px (padding, borders, radii) untouched. Lets widgets that set their own stylesheet honour the
+    Settings → Text size choice without hand-editing each size."""
+    if abs(_ACTIVE_SCALE - 1.0) < 1e-3:
+        return css
+    return _FS_RE.sub(lambda m: f"{m.group(1)}{max(1, round(int(m.group(2)) * _ACTIVE_SCALE))}px", css)
+
+
+def build_qss(t: Theme, scale: float = 1.0) -> str:
+    base = round(13 * scale)          # the app-wide default size
+    small = round(11 * scale)         # the smaller section-header size
     return f"""
 * {{
     font-family: {_ui_font_stack()};
-    font-size: 13px;
+    font-size: {base}px;
     color: {t.text};
     outline: none;
 }}
@@ -86,6 +125,7 @@ QToolBar::separator {{ background: {t.line}; width: 1px; margin: 6px 8px; border
 QToolButton, QPushButton {{
     background: transparent; color: {t.muted};
     border: 1px solid transparent; border-radius: 8px; padding: 7px 10px;
+    font-size: {base}px;                 /* explicit so buttons follow the text-size setting */
 }}
 QToolButton:hover, QPushButton:hover {{ background: {t.bg3}; color: {t.text}; border-color: {t.line2}; }}
 QToolButton:pressed, QPushButton:pressed {{ background: {t.bg2}; }}
@@ -122,7 +162,7 @@ QPushButton#Accent {{ background: {t.accent}; color: #ffffff; border: none; font
 QPushButton#ModeBtn {{
     background: {t.bg3}; color: {t.muted};
     border: 1px solid {t.line}; border-radius: 13px;
-    padding: 5px 12px; font-weight: 500;
+    padding: 5px 12px; font-weight: 500; font-size: {base}px;
 }}
 QPushButton#ModeBtn:hover {{ color: {t.text}; border-color: {t.accent}; }}
 QPushButton#ModeBtn:checked {{
@@ -137,7 +177,7 @@ QPushButton#WizardBtn:checked {{
 QPushButton#Chip {{
     background: {t.bg3}; color: {t.muted};
     border: 1px solid {t.line}; border-radius: 12px;
-    padding: 4px 11px; font-weight: 500;
+    padding: 4px 11px; font-weight: 500; font-size: {base}px;
 }}
 QPushButton#Chip:hover {{ color: {t.text}; border-color: {t.accent}; }}
 QPushButton#Chip:checked {{
@@ -158,7 +198,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus {{ border-color: {t.accent}; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
 
-QLabel#PanelHead {{ color: {t.faint}; font-size: 11px; font-weight: 600;
+QLabel#PanelHead {{ color: {t.faint}; font-size: {small}px; font-weight: 600;
                     letter-spacing: 1px; text-transform: uppercase; }}
 QLabel#Muted {{ color: {t.muted}; }}
 QLabel#Faint {{ color: {t.faint}; }}
@@ -215,19 +255,37 @@ QSplitter::handle {{ background: {t.line}; }}
 class ThemeManager(QObject):
     themeChanged = Signal(str)
 
-    def __init__(self, app: QApplication, name: str = "dark") -> None:
+    def __init__(self, app: QApplication, name: str = "dark", font_scale: float = 1.0) -> None:
         super().__init__()
         self._app = app
         self.theme: Theme = get_theme(name)
+        self.font_scale = font_scale or 1.0
         # Fusion respects QPalette + QSS identically on macOS/Linux/Windows, so the
         # dark theme reaches every widget (the native macOS style does not).
         self._app.setStyle("Fusion")
 
     def apply(self) -> None:
+        global _ACTIVE_SCALE
+        _ACTIVE_SCALE = self.font_scale          # publish for custom-painted widgets (canvas, etc.)
+        # Scale the app font too, so widgets that read the application font (and any not pinned by
+        # the stylesheet) grow with the setting, not just the QSS-styled ones.
+        f = self._app.font()
+        f.setPointSizeF(10.0 * self.font_scale)
+        self._app.setFont(f)
         self._app.setPalette(build_palette(self.theme))
-        self._app.setStyleSheet(build_qss(self.theme))
+        self._app.setStyleSheet(build_qss(self.theme, self.font_scale))
 
     def set_theme(self, name: str) -> None:
         self.theme = get_theme(name)
         self.apply()
+        self.themeChanged.emit(self.theme.name)
+
+    def set_font_scale(self, scale: float) -> None:
+        """Change the UI text size live (Settings → Appearance)."""
+        if abs((scale or 1.0) - self.font_scale) < 1e-3:
+            return
+        self.font_scale = scale or 1.0
+        self.apply()
+        # nudge every theme-aware widget to re-render at the new size (palette headers, dashboard,
+        # canvas cards, pills all re-style / repaint on this signal).
         self.themeChanged.emit(self.theme.name)

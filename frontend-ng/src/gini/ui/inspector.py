@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from ..agent.api import GiniAPI
 from ..app import AppContext
 from .theme import ThemeManager, icons
+from .theme.manager import scale_css as _scss
 
 
 _FUNCTION_STARTER = (
@@ -71,7 +72,7 @@ class Inspector(QWidget):
         top.addWidget(self.login_btn)
         hl.addLayout(top)
         self.name_lbl = QLabel("No selection")
-        self.name_lbl.setStyleSheet("font-size:15px; font-weight:600;")
+        self.name_lbl.setStyleSheet(_scss("font-size:15px; font-weight:600;"))
         self.type_lbl = QLabel("Select a device to edit it")
         self.type_lbl.setObjectName("Faint")
         hl.addWidget(self.name_lbl)
@@ -131,6 +132,7 @@ class Inspector(QWidget):
         ctx.bus.device_changed.connect(self._on_changed)
         ctx.bus.addressing_changed.connect(self._rebuild)
         ctx.bus.function_invoke_result.connect(self._on_invoke_result)
+        ctx.bus.rider_ran.connect(self._on_rider_ran)
         self._invoke_result = None               # the Function Invoke panel's result widget
         self._invoke_btn = None                  # the Invoke button (enabled only while running)
         self._deploy_btn = None                  # the Deploy button (enabled only while running)
@@ -202,6 +204,7 @@ class Inspector(QWidget):
         self._invoke_result = None               # cleared widgets must not be touched
         self._invoke_btn = None
         self._deploy_btn = None
+        self._rider_btn = None
         t = self.theme.theme
         if not self._device_id or self._device_id not in self.ctx.topology.devices:
             self.name_lbl.setText("No selection")
@@ -283,6 +286,9 @@ class Inspector(QWidget):
 
         if dt.key == "function":               # serverless: code editor + Invoke (Test) panel
             self._build_function_panel(d, accent)
+
+        if getattr(dt, "rider", False):        # Source/Sink: a Run button; output shows in Live tab
+            self._build_rider_panel(d, accent)
 
         self._build_interfaces(d, accent)
         self.routes.setText(self._render_routes(d.name))
@@ -427,6 +433,62 @@ class Inspector(QWidget):
                 return _svc(od.name)
         return _svc(d.name)
 
+    # -- Sources / Sinks: a Run button + output rendered in the Live tab ----- #
+    def _build_rider_panel(self, d, accent: str) -> None:
+        donor = self.ctx.topology.donor_of(d.id)
+        row = QWidget(); rl = QHBoxLayout(row); rl.setContentsMargins(0, 0, 0, 0)
+        self._rider_btn = QPushButton("Stop" if self.ctx.is_rider_running(d.id) else "Start")
+        self._rider_btn.setToolTip("Start/stop this on its donor — output streams to the Live tab")
+        self._rider_btn.clicked.connect(lambda: self._toggle_rider(d.id))
+        rl.addWidget(self._rider_btn)
+        rl.addWidget(QLabel(f"on {donor.name}" if donor else "not attached to a donor"))
+        rl.addStretch(1)
+        self.props_form.addRow("Runs", row)
+        self._show_rider_live(d)                 # reflect its last run (or a hint) in the Live tab
+
+    def _toggle_rider(self, device_id: str) -> None:
+        import threading
+        threading.Thread(target=lambda: self.ctx.toggle_rider(device_id), daemon=True).start()
+
+    def _on_rider_ran(self, device_id: str, result) -> None:
+        if device_id != self._device_id:
+            return
+        d = self.ctx.topology.devices.get(device_id)
+        if d is None:
+            return
+        if getattr(self, "_rider_btn", None) is not None:
+            self._rider_btn.setText("Stop" if (result or {}).get("running") else "Start")
+        self._show_rider_live(d)
+        self._refresh_kpis()
+        if self.tabs.currentWidget() is not self._live_host:   # pop the Live tab once, then leave it
+            self.tabs.setCurrentWidget(self._live_host)
+
+    def _show_rider_live(self, d) -> None:
+        res = self.ctx.rider_results.get(d.id)
+        if res and (res.get("raw") or res.get("error")):
+            self.live.setPlainText(res.get("raw") or res.get("error"))
+        elif res:
+            self.live.setPlainText("(ran, no output)")
+        else:
+            self.live.setPlainText("Double-click this element, or press Run, to execute it on its "
+                                   "donor — its output appears here.")
+
+    def _rider_kpis(self, type_key: str, m: dict) -> list:
+        if type_key == "ping_probe":
+            out = [{"label": "loss", "value": m.get("loss_pct", "—"), "unit": "%"}]
+            if "rtt_avg_ms" in m:
+                out.append({"label": "avg rtt", "value": m["rtt_avg_ms"], "unit": "ms"})
+            return out
+        if type_key == "http_probe":
+            out = [{"label": "2xx", "value": m.get("ok_pct", "—"), "unit": "%"},
+                   {"label": "reqs", "value": m.get("requests", 0), "unit": ""}]
+            if "avg_ms" in m:
+                out.append({"label": "avg", "value": m["avg_ms"], "unit": "ms"})
+            return out
+        if type_key == "packet_view":
+            return [{"label": "packets", "value": m.get("packets", 0), "unit": ""}]
+        return []
+
     def _update_live_mode(self) -> None:
         from ..services.compiler import _svc
         from .live_metrics import CLOUD_LAYOUT, K8S_LAYOUT
@@ -492,6 +554,11 @@ class Inspector(QWidget):
             else:                                   # cloud service -> fabric KPIs
                 s = (self._fabric.get("services") or {}).get(_svc(d.name))
                 kpis = s.get("kpis") if s else None
+        if not kpis and d and getattr(d.type, "rider", False):   # Source/Sink -> its measurement
+            res = self.ctx.rider_results.get(d.id)
+            m = res.get("measurement") if res else None
+            if m and m.get("ok"):
+                kpis = self._rider_kpis(d.type_key, m)
         if not kpis:
             self.kpis_lbl.setVisible(False)
             return
@@ -555,9 +622,9 @@ class Inspector(QWidget):
 
         def work():
             if role == "router":
-                out = ("interfaces:\n" + self.query_fn(d.name, "interfaces")
-                       + "\n\nroutes:\n" + self.query_fn(d.name, "routes")
-                       + "\n\narp cache:\n" + self.query_fn(d.name, "arp"))
+                out = ("interfaces:\n" + self.query_fn(d.name, "ifconfig show")
+                       + "\n\nroutes:\n" + self.query_fn(d.name, "route show")
+                       + "\n\narp cache:\n" + self.query_fn(d.name, "arp show"))
             elif role == "switch":
                 out = ("ports: " + self.query_fn(d.name, "ports")
                        + "\n\nmac table:\n" + self.query_fn(d.name, "mactable"))
@@ -573,18 +640,24 @@ class Inspector(QWidget):
         from ..services.cloud_catalog import service_for
         from ..services.compiler import _norm_image, _toolkit_for
         from ..services.orchestrator import (MACHINE_BASE, MACHINE_TOOLS_HUMAN,
-                                             MACHINE_TOOLS_LEAN_HUMAN)
+                                             MACHINE_TOOLS_LEAN_HUMAN,
+                                             MACHINE_TOOLS_SECURITY_HUMAN)
         key = d.type_key
         if key == "host":
-            # tell the truth about THIS host's image — the two toolkits ship different tools, and a
+            # tell the truth about THIS host's image — the toolkits ship different tools, and a
             # student reaching for `ettercap` on a lean host should learn that here, not at a shell
-            if _toolkit_for(d) == "full":
+            tk = _toolkit_for(d)
+            if tk == "security":
+                return (f"Runs the SECURITY toolkit — {MACHINE_BASE}, the full toolkit plus the "
+                        f"Part VI security engines: {MACHINE_TOOLS_SECURITY_HUMAN}. Biggest image; "
+                        f"use it for the crypto, VPN, and intrusion-detection labs.")
+            if tk == "full":
                 return (f"Runs the FULL toolkit — {MACHINE_BASE} with everything preinstalled: "
                         f"{MACHINE_TOOLS_HUMAN}. Big image; use it only when an experiment needs "
                         f"these servers. (apt is available for anything else.)")
             return (f"Runs the LEAN toolkit — Alpine + {MACHINE_TOOLS_LEAN_HUMAN}. Small and quick "
-                    f"to boot. Need bind9/postfix/ettercap/haproxy? Set Toolkit to 'full'. "
-                    f"(apk is available for anything else.)")
+                    f"to boot. Need bind9/postfix/ettercap/haproxy? Set Toolkit to 'full', or "
+                    f"'security' for the security engines. (apk is available for anything else.)")
         if key == "instance":
             img = _norm_image(d.properties.get("Image") or "ubuntu:22.04")
             return f"Runs {img} (a cloud VM). Change the Image property to use another."
@@ -625,7 +698,7 @@ class Inspector(QWidget):
         if (d.properties.get("Handler") or "echo") == "custom":
             lay.addWidget(self._faint("Handler code — Python 3.12 · standard library"))
             editor = QPlainTextEdit(d.properties.get("Code") or _FUNCTION_STARTER)
-            editor.setStyleSheet("font-family:monospace; font-size:12px")
+            editor.setStyleSheet(_scss("font-family:monospace; font-size:12px"))
             editor.setMinimumHeight(150)
             lay.addWidget(editor)
             save = QPushButton("Save code")
@@ -664,7 +737,7 @@ class Inspector(QWidget):
         lay.addWidget(row)
 
         result = QPlainTextEdit(); result.setReadOnly(True); result.setMinimumHeight(96)
-        result.setStyleSheet("font-family:monospace; font-size:12px")
+        result.setStyleSheet(_scss("font-family:monospace; font-size:12px"))
         result.setPlainText("Invoke to see the response." if self._live_running
                             else "Run the topology, then Invoke to see the response.")
         lay.addWidget(result)

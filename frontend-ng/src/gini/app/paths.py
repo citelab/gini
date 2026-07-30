@@ -23,12 +23,29 @@ def projects_dir() -> Path:
     return gini_home() / "projects"
 
 
+def captures_dir() -> Path:
+    """Host directory for packet captures. Bind-mounted into each gRouter container at
+    ``/captures``, so a ``tap`` inline VNF's ``.pcap`` lands here on the host machine and
+    opens directly in Wireshark. Survives topology teardown (the compose workdir does not)."""
+    return gini_home() / "captures"
+
+
+def scripts_dir() -> Path:
+    """Host directory for student-written router modules. Bind-mounted (read-only) into each
+    gRouter container at ``/scripts``, so a Lua data-plane VNF edited on the host machine loads
+    with ``gpipe add lua /scripts/<name>.lua`` from the router console (Chapter on designing and
+    implementing protocols). Survives topology teardown."""
+    return gini_home() / "scripts"
+
+
 def config_path() -> Path:
     return gini_home() / "config.json"
 
 
 def ensure_dirs() -> None:
     projects_dir().mkdir(parents=True, exist_ok=True)
+    captures_dir().mkdir(parents=True, exist_ok=True)
+    scripts_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_config() -> dict:
@@ -78,10 +95,11 @@ def remember_project(path: str, *, limit: int = 8) -> None:
 
 # settings fields that are persisted to / loaded from config.json
 PERSISTED_KEYS = (
-    "theme", "reduced_motion",
+    "theme", "reduced_motion", "text_size",
     "llm_enabled", "llm_url", "llm_model", "llm_think",
     "auto_internet", "name_prefixes", "prices",
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
     "show_help_on_launch",
     "tc_url", "tc_course", "tc_student", "tc_token",   # Teaching Center enrolment
+    "tc_allow_insecure",                              # the conscious plaintext-password override
 )

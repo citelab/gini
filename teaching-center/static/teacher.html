@@ -44,6 +44,30 @@
   .note{color:var(--muted);font-size:12px} .err{color:var(--warn);font-weight:600}
   .pill{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:2px 8px}
 </style>
+<!-- SIGN-IN GATE. The console serves the class's enrolment tokens; it is not a public page. -->
+<section id="gate" hidden style="max-width:420px;margin:12vh auto;padding:0 20px">
+  <h1 style="margin:0 0 4px">GINI Teaching Center</h1>
+  <div class="note" style="margin-bottom:18px">Instructor sign-in.</div>
+  <div class="card">
+    <label>Teacher id</label>
+    <input id="g-id" value="teacher" style="width:100%;margin-bottom:10px">
+    <label>Password</label>
+    <input id="g-pw" type="password" style="width:100%;margin-bottom:10px"
+           onkeydown="if(event.key==='Enter')signIn()">
+    <label>Setup token <span class="note">— first time only</span></label>
+    <input id="g-setup" placeholder="printed in the server console at first boot"
+           style="width:100%;margin-bottom:12px">
+    <button onclick="signIn()">Sign in</button>
+    <div id="g-err" class="err" style="margin-top:10px"></div>
+    <div class="note" style="margin-top:12px">
+      No teacher account yet? The server prints a one-time setup token when it first starts —
+      paste it above and choose a password. (Or set TEACHER_ID / TEACHER_PASSWORD in its
+      environment.)
+    </div>
+  </div>
+</section>
+
+<div id="app" hidden>
 <header>
   <h1>GINI Teaching Center</h1>
   <nav>
@@ -52,8 +76,11 @@
     <button data-t="roster">Roster</button>
     <button data-t="progress">Progress</button>
     <button data-t="insights">Insights</button>
+    <button data-t="inbox">Inbox <span id="inbox-badge" class="pill"></span></button>
+    <button data-t="profai">ProfAI</button>
   </nav>
   <span class="sp"></span><span class="pill" id="course"></span>
+  <button onclick="signOut()" style="margin-left:10px">Sign out</button>
 </header>
 <main>
   <!-- AUTHOR ------------------------------------------------------------- -->
@@ -109,13 +136,20 @@
   <section id="roster" hidden>
     <div class="card">
       <div class="row" style="align-items:flex-end">
-        <div class="col"><label>Student id</label><input id="sid" placeholder="a1234567"></div>
-        <div class="col"><label>Name</label><input id="sname" placeholder="Ada Lovelace"></div>
+        <div class="col"><label>Username <b>(they sign in with this)</b></label>
+          <input id="sid" placeholder="e.g. ravi"></div>
+        <div class="col"><label>School ID <span class="note">(internal)</span></label>
+          <input id="ssis" placeholder="e.g. 2511"></div>
+        <div class="col"><label>Full name <span class="note">(optional)</span></label>
+          <input id="sname" placeholder="Ravi Kumar"></div>
         <div><button class="act" id="enrol">Enrol</button></div>
       </div>
-      <div class="note">Each student gets an enrollment token — they paste it into
-        gBuilder → Settings → Teaching Center.</div>
-      <table id="roster-t" style="margin-top:14px"></table>
+      <div class="note"><b>The username is the login</b> — pick a friendly handle (ravi, surya…);
+        it just has to be unique. The <b>School ID</b> is your registrar's number, kept for records
+        only — it is never used to sign in. Each student also gets an enrolment token (below) to
+        claim their account the first time.</div>
+      <div id="roster-hdr" style="margin-top:14px"></div>
+      <table id="roster-t"></table>
     </div>
   </section>
   <section id="progress" hidden><div class="card"><div id="prog-sum" class="note"></div>
@@ -129,18 +163,111 @@
       <div class="note">Weakest concepts first.</div>
       <table id="con-t" style="margin-top:10px"></table></div>
   </section>
+  <!-- INBOX: a Gmail-style mailbox — folders on the left, a thread on the right -------------- -->
+  <section id="inbox" hidden>
+    <div id="digest-card" class="card" style="margin-bottom:12px">
+      <b>Situation report</b>
+      <div class="note">Not a transcript — ProfAI reads the group channels and tells you where the
+        class is. Computed by the server; the model only phrases it, so it works even when the model
+        is down.</div>
+      <div id="digest-prose" style="margin-top:8px;font-size:15px"></div>
+      <table id="digest-t" style="margin-top:8px"></table>
+    </div>
+
+    <div class="row" style="gap:0;align-items:stretch;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+      <div id="folders" style="width:180px;border-right:1px solid var(--line);padding:8px"></div>
+      <div style="flex:2;border-right:1px solid var(--line);min-width:260px">
+        <div id="threadlist" style="max-height:60vh;overflow:auto"></div>
+      </div>
+      <div style="flex:3;min-width:320px;display:flex;flex-direction:column">
+        <div id="reading" style="padding:14px;flex:1;overflow:auto">
+          <div class="note">Pick a conversation.</div>
+        </div>
+        <div id="composer" style="border-top:1px solid var(--line);padding:10px" hidden>
+          <textarea id="reply-box" rows="3" style="width:100%"
+            placeholder="Reply as Prof…"></textarea>
+          <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+            <button onclick="sendReply()">Send as Prof</button>
+            <label id="promote-wrap" class="note" hidden>
+              <input type="checkbox" id="promote-box" checked> also save as a standing answer</label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROFAI: the persona ------------------------------------------------------------------ -->
+  <section id="profai" hidden>
+    <div class="card">
+      <b>The ProfAI persona</b>
+      <div class="note">One persona, on the server — so there's one thing to audit and one place to
+        fix a bad answer. Deadlines, exam content, grades and policy are refused before the model
+        ever sees them; that's a mechanism, not an instruction, and you can't turn it off.</div>
+
+      <label style="display:block;margin-top:12px">Name shown to students</label>
+      <input id="pa-name" style="width:100%">
+
+      <label style="display:block;margin-top:10px">Voice</label>
+      <textarea id="pa-voice" rows="4" style="width:100%"></textarea>
+
+      <label style="display:block;margin-top:10px">Course context (authoritative — syllabus, notes)</label>
+      <textarea id="pa-context" rows="8" style="width:100%"></textarea>
+
+      <div style="margin-top:10px">
+        <label><input type="checkbox" id="pa-auto"> Answer students when I'm away</label><br>
+        <label><input type="checkbox" id="pa-present"> …even when I'm online
+          <span class="note">(off by default: a present human should never be pre-empted by their
+          own proxy)</span></label>
+      </div>
+      <div style="margin-top:12px">
+        <button onclick="savePersona()">Save persona</button>
+        <span class="note" id="pa-ver"></span>
+      </div>
+      <div id="pa-standing" style="margin-top:14px"></div>
+    </div>
+  </section>
 </main>
 <script>
 const $ = s => document.querySelector(s);
-const api = (p, body) => fetch(p, body ? {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body)} : {}).then(r => r.json());
+
+// --- sign-in ---------------------------------------------------------------
+// The console's API is the master key: /api/roster serves every student's enrolment token. It used
+// to be open to anyone who could reach the port. Now every call carries a TEACHER session.
+let TOKEN = localStorage.getItem('gini_teacher_session') || '';
+
+const api = async (p, body) => {
+  const opt = {headers: {'Authorization': 'Bearer ' + TOKEN}};
+  if (body) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json';
+              opt.body = JSON.stringify(body); }
+  const r = await fetch(p, opt);
+  if (r.status === 401) { signOut(); throw new Error('signed out'); }
+  return r.json();
+};
+
+function gate(show){ $('#gate').hidden = !show; $('#app').hidden = show; }
+function signOut(){ TOKEN=''; localStorage.removeItem('gini_teacher_session'); gate(true); }
+
+async function signIn(){
+  const id = $('#g-id').value.trim(), pw = $('#g-pw').value;
+  const setup = $('#g-setup').value.trim();
+  const path = setup ? '/auth/claim-teacher' : '/auth/login';
+  const body = setup ? {id, setup_token: setup, password: pw} : {id, password: pw};
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(body)}).then(x => x.json());
+  if (!r.ok) { $('#g-err').textContent = r.error || 'Sign-in failed.'; return; }
+  TOKEN = r.session;
+  localStorage.setItem('gini_teacher_session', TOKEN);
+  gate(false); boot();
+}
+
 let FRAGS = [], SEL = [];
 
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
-  ['author','lessons','roster','progress','insights'].forEach(t =>
+  ['author','lessons','roster','progress','insights','inbox','profai'].forEach(t =>
       $('#'+t).hidden = (t !== b.dataset.t));
-  ({lessons:loadLessons, roster:loadRoster, progress:loadProgress, insights:loadInsights}[b.dataset.t]||(()=>{}))();
+  ({lessons:loadLessons, roster:loadRoster, progress:loadProgress, insights:loadInsights,
+    inbox:loadInbox, profai:loadPersona}[b.dataset.t]||(()=>{}))();
 });
 
 function spec(){
@@ -170,48 +297,117 @@ async function refreshPreview(){
 
 async function loadFrags(){
   FRAGS = await api('/api/fragments');
-  $('#frags').innerHTML = FRAGS.map(f => `
-    <div class="frag" data-id="${f.id}">
-      <b>${f.id}</b>${f.layer!=='core'?`<span class="tag">${f.layer}</span>`:''}${f.has_live?'<span class="tag">live</span>':''}
-      <small>${f.summary||''}</small></div>`).join('');
-  document.querySelectorAll('.frag').forEach(el => el.onclick = () => {
+  $('#frags').innerHTML = FRAGS.map(f => {
+    const badges = (f.authored?'<span class="tag">authored</span>':'<span class="tag" style="opacity:.6">built-in</span>')
+      + (f.certified?'<span class="tag" style="background:#3fb950;color:#fff">certified</span>':'')
+      + (f.has_live?'<span class="tag">live</span>':'');
+    const del = f.authored?`<button class="ghost fdel" data-id="${esc(f.id)}" title="Remove from the course library"
+      style="float:right;padding:1px 7px">✕</button>`:'';
+    return `<div class="frag" data-id="${esc(f.id)}">${del}
+      <b>${esc(f.id)}</b>${badges}
+      <small>${esc(f.summary||'')}</small></div>`;
+  }).join('');
+  document.querySelectorAll('.frag').forEach(el => el.onclick = (e) => {
+    if (e.target.classList.contains('fdel')) return;   // the ✕ has its own handler
     const id = el.dataset.id;
     SEL = SEL.includes(id) ? SEL.filter(x=>x!==id) : [...SEL, id];
     el.classList.toggle('sel', SEL.includes(id));
     refreshPreview();
+  });
+  document.querySelectorAll('.fdel').forEach(b => b.onclick = async (e) => {
+    e.stopPropagation();
+    const id = b.dataset.id;
+    if (!confirm(`Delete fragment "${id}" from the course library?\n\nThis removes it from what you `
+      + `can compose with, and it will stop syncing to students. Lessons already built from it are `
+      + `unaffected.`)) return;
+    const r = await api('/api/fragments/delete', {id});
+    if (r && r.ok){ SEL = SEL.filter(x=>x!==id); await loadFrags(); refreshPreview(); }
+    else alert('Could not delete: ' + ((r&&r.error)||'unknown error'));
   });
 }
 ['#lid','#title','#brief','#genre','#tl','#goal','#notes','#misc'].forEach(s =>
     $(s).addEventListener('input', refreshPreview));
 
 $('#release').onclick = async () => {
+  // saves a DRAFT — the approval gate. Playtest it in gBuilder, then Approve in the Lessons tab.
   const r = await api('/api/lessons', {spec: spec(), release: $('#rel').value,
                                        due: $('#due').value, attempts: +$('#att').value});
-  $('#saved').textContent = r.ok ? `Released "${r.lesson}" to the class.`
-                                 : 'Could not release: ' + (r.problems||[]).join('; ');
+  $('#saved').textContent = r.ok
+    ? `Saved "${r.lesson}" as a DRAFT. Playtest it in gBuilder (Teacher tools → Playtest an `
+      + `experiment), then Approve it in the Lessons tab to release it to the class.`
+    : 'Could not save: ' + (r.problems||[]).join('; ');
 };
 
 async function loadLessons(){
   const rows = await api('/api/lessons');
-  $('#lessons-t').innerHTML = '<tr><th>Lesson</th><th>Built from</th><th>Genre</th><th>Release</th><th>Due</th><th></th></tr>'
-    + rows.map(r=>`<tr><td><b>${r.title||r.id}</b><br><span class="note">${r.id}</span></td>
-      <td>${(r.fragments||[]).join(', ')}</td><td>${r.genre||''}</td><td>${r.release||''}</td>
-      <td>${r.due||''}</td><td><button class="ghost" onclick="delLesson('${r.id}')">Unrelease</button></td></tr>`).join('');
+  $('#lessons-t').innerHTML = '<tr><th>Experiment</th><th>Built from</th><th>Status</th>'
+    + '<th>Release</th><th>Due</th><th></th></tr>'
+    + rows.map(r=>{
+      const draft = (r.status||'released')==='draft';
+      const badge = draft ? '<span class="pill" style="background:#d0932a;color:#fff">draft</span>'
+                          : '<span class="pill" style="background:#3fb950;color:#fff">released</span>';
+      const act = draft
+        ? `<button onclick="approveLesson('${r.id}')">Approve &amp; release</button>`
+        : `<button class="ghost" onclick="unreleaseLesson('${r.id}')">Unrelease</button>`;
+      return `<tr><td><b>${esc(r.title||r.id)}</b><br><span class="note">${esc(r.id)}</span></td>
+        <td>${(r.fragments||[]).join(', ')}</td><td>${badge}</td>
+        <td>${r.release||''}</td><td>${r.due||''}</td>
+        <td>${act} <button class="ghost" onclick="delLesson('${r.id}')">Delete</button></td></tr>`;
+    }).join('');
 }
+async function approveLesson(id){ await api('/api/lessons/approve', {id}); loadLessons(); }
+async function unreleaseLesson(id){ await api('/api/lessons/unrelease', {id}); loadLessons(); }
 async function delLesson(id){ await api('/api/lessons/delete', {id}); loadLessons(); }
 
+let ROSTER_TIMER = null;
 async function loadRoster(){
   const rows = await api('/api/roster');
-  $('#roster-t').innerHTML = '<tr><th>Student</th><th>Name</th><th>Enrollment token</th><th></th></tr>'
-    + rows.map(r=>`<tr><td><b>${r.id}</b></td><td>${r.name||''}</td>
-      <td><code>${r.token||''}</code></td>
-      <td><button class="ghost" onclick="unenrol('${r.id}')">Remove</button></td></tr>`).join('');
+  const online = rows.filter(r=>r.online).length;
+  const hdr = `<div style="margin-bottom:8px" class="note">${online} of ${rows.length} online now
+     · <span style="cursor:pointer;text-decoration:underline" onclick="loadRoster()">refresh</span></div>`;
+  const table =
+      '<tr><th></th><th>Username</th><th>Name</th><th>School ID</th><th>Status</th><th>Group</th>'
+    + '<th>Enrolment token</th>'
+    + '<th title="Host this student\'s AI proxy on the server (capacity is yours to give)">Hosted AI</th>'
+    + '<th></th></tr>'
+    + rows.map(r=>{
+      const pr = r.progress||{};
+      const where = pr.level ? `on <b>${esc(pr.title||'a mission')}</b> · Level ${pr.level}` : '';
+      const dot = r.online ? '<span style="color:#3fb950">●</span> online'
+                : (r.claimed ? '<span class="note">○ offline</span>' : '<span class="note">not set up</span>');
+      return `<tr>
+      <td>${avatar(r.photo, r.name||r.id, 34)}</td>
+      <td><b>${esc(r.id)}</b><div class="note">the login</div></td>
+      <td>${esc(r.name||'')}</td>
+      <td class="note">${esc(r.sis_id||'—')}</td>
+      <td>${dot}<div class="note">${where}</div></td>
+      <td><input value="${esc(r.group||'')}" style="width:76px"
+           onchange="setGroup('${esc(r.id)}', this.value)" placeholder="—"></td>
+      <td><code>${esc(r.token||'')}</code></td>
+      <td><input type="checkbox" ${r.ai_hosted?'checked':''}
+           onchange="setAI('${esc(r.id)}', this.checked)"></td>
+      <td><button class="ghost" onclick="resetAcct('${esc(r.id)}')">Reset</button>
+          <button class="ghost" onclick="unenrol('${esc(r.id)}')">Remove</button></td></tr>`;
+    }).join('');
+  $('#roster-hdr').innerHTML = hdr;
+  $('#roster-t').innerHTML = table;
+  clearTimeout(ROSTER_TIMER);
+  ROSTER_TIMER = setTimeout(()=>{ if(!$('#roster').hidden) loadRoster(); }, 15000);  // live-ish refresh
 }
 $('#enrol').onclick = async () => {
-  await api('/api/roster', {id: $('#sid').value.trim(), name: $('#sname').value.trim()});
-  $('#sid').value=''; $('#sname').value=''; loadRoster();
+  const id = $('#sid').value.trim();
+  if (!id) return;
+  await api('/api/roster', {id, name: $('#sname').value.trim(), sis_id: $('#ssis').value.trim()});
+  $('#sid').value=''; $('#sname').value=''; $('#ssis').value=''; loadRoster();
 };
 async function unenrol(id){ await api('/api/roster/delete', {id}); loadRoster(); }
+async function setGroup(id, group){ await api('/api/roster/group', {id, group}); loadRoster(); }
+async function setAI(id, on){ await api('/api/roster/ai', {id, on}); loadRoster(); }
+async function resetAcct(id){
+  if (!confirm(`Reset ${id}'s password? They'll claim their account again with their enrolment `
+             + `token, and their current session will be killed.`)) return;
+  await api('/api/roster/reset', {id}); loadRoster();
+}
 
 async function loadProgress(){
   const p = await api('/api/progress');
@@ -239,5 +435,201 @@ async function loadInsights(){
       : '<tr><td class="note">No profiles yet.</td></tr>');
 }
 
-loadFrags().then(refreshPreview);
+// --- Inbox: digest + review queue + reports --------------------------------
+const esc = s => String(s||'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+// A Gmail-style mailbox. Folders on the left; a conversation list; a reading pane that can reply as
+// Prof or correct a ProfAI draft (which posts as Prof AND can be promoted into the persona).
+let MAIL = {msgs:[], review:[], reports:[], folder:'inbox', open:null};
+
+function initials(name){ return (name||'?').split(/\s+/).map(w=>w[0]).join('').slice(0,2).toUpperCase(); }
+function avatar(photo, name, sz){
+  sz = sz||28;
+  if (photo) return `<img src="${photo}" style="width:${sz}px;height:${sz}px;border-radius:50%;object-fit:cover">`;
+  const hue = ([...(name||'?')].reduce((a,c)=>a+c.charCodeAt(0),0))%360;
+  return `<span style="width:${sz}px;height:${sz}px;border-radius:50%;display:inline-flex;`
+       + `align-items:center;justify-content:center;background:hsl(${hue},45%,55%);color:#fff;`
+       + `font-size:${sz*0.4}px;font-weight:700">${initials(name)}</span>`;
+}
+
+function threadKey(m){ return m.channel; }   // group by conversation
+
+async function loadInbox(){
+  const [d, msgs, review, reports] = await Promise.all(
+    [api('/api/digest'), api('/api/messages'), api('/api/review'), api('/api/reports')]);
+  MAIL.msgs = msgs; MAIL.review = review; MAIL.reports = reports;
+
+  $('#digest-prose').textContent = d.summary || '';
+  const f = d.facts || {stuck:[], unanswered:[]};
+  const rows = [];
+  f.stuck.forEach(s => rows.push(`<tr><td>Group ${esc(s.group)}</td>
+      <td>stuck on <b>${esc(s.mission||'the mission')}</b> at Level ${s.level}
+      ${s.asked_for_help ? '' : '<span class="note">— nobody has asked for help</span>'}</td></tr>`));
+  f.unanswered.forEach(u => rows.push(`<tr><td>${esc(u.student)}</td>
+      <td>waiting <b>${u.waiting_minutes} min</b>: “${esc(u.question)}”</td></tr>`));
+  $('#digest-t').innerHTML = rows.length ? rows.join('')
+      : '<tr><td class="note">Nothing needs you right now.</td></tr>';
+  $('#inbox-badge').textContent = review.length ? review.length : '';
+  renderFolders(); renderThreadList();
+}
+
+const FOLDERS = [
+  ['inbox','Inbox'], ['review','Needs review'], ['sent','Sent'],
+  ['reported','Reported'], ['trash','Trash']];
+
+function folderCount(id){
+  if (id==='review') return MAIL.review.length;
+  if (id==='reported') return MAIL.reports.length;
+  if (id==='trash') return MAIL.msgs.filter(m=>m.deleted).length;
+  if (id==='sent') return MAIL.msgs.filter(m=>!m.deleted && (m.from==='Prof'||m.from==='ProfAI')).length;
+  return MAIL.msgs.filter(m=>!m.deleted && m.from!=='Prof' && m.from!=='ProfAI').length;
+}
+function renderFolders(){
+  $('#folders').innerHTML = FOLDERS.map(([id,label])=>{
+    const n = folderCount(id), on = MAIL.folder===id;
+    return `<div onclick="pickFolder('${id}')" style="padding:8px 10px;border-radius:8px;cursor:pointer;
+       ${on?'background:var(--line);font-weight:700':''}">${label}
+       ${n?`<span class="pill" style="float:right">${n}</span>`:''}</div>`;
+  }).join('');
+}
+function pickFolder(id){ MAIL.folder=id; MAIL.open=null; renderFolders(); renderThreadList(); renderReading(); }
+
+function threadsFor(folder){
+  // group the flat message list into conversations, filtered by folder
+  let msgs = MAIL.msgs;
+  if (folder==='trash') msgs = msgs.filter(m=>m.deleted);
+  else msgs = msgs.filter(m=>!m.deleted);
+  if (folder==='sent') msgs = msgs.filter(m=>m.from==='Prof'||m.from==='ProfAI');
+  if (folder==='inbox') msgs = msgs.filter(m=>m.from!=='Prof'&&m.from!=='ProfAI');
+  const by = {};
+  msgs.forEach(m=>{ (by[threadKey(m)] = by[threadKey(m)]||[]).push(m); });
+  return Object.entries(by).map(([ch,ms])=>{
+    ms.sort((a,b)=>a.ts-b.ts); const last = ms[ms.length-1];
+    const who = ch.startsWith('group:') ? ch.replace('group:','Group ') : ch.replace('teacher:','');
+    return {ch, who, last, count:ms.length, msgs:ms};
+  }).sort((a,b)=>b.last.ts-a.last.ts);
+}
+
+function renderThreadList(){
+  if (MAIL.folder==='review') return renderReviewList();
+  if (MAIL.folder==='reported') return renderReported();
+  const threads = threadsFor(MAIL.folder);
+  $('#threadlist').innerHTML = threads.length ? threads.map(t=>`
+    <div onclick="openThread('${t.ch}')" style="padding:10px;border-bottom:1px solid var(--line);
+      cursor:pointer;display:flex;gap:8px;${MAIL.open===t.ch?'background:var(--line)':''}">
+      ${avatar('', t.who, 30)}
+      <div style="min-width:0;flex:1"><b>${esc(t.who)}</b>
+        <div class="note" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          ${t.last.from==='ProfAI'?'ProfAI: ':(t.last.from==='Prof'?'You: ':'')}${esc(t.last.body)}</div>
+      </div></div>`).join('') : '<div class="note" style="padding:12px">Nothing here.</div>';
+}
+
+function openThread(ch){ MAIL.open=ch; renderThreadList(); renderReading(); }
+
+function renderReading(){
+  const wrap = $('#reading'), comp = $('#composer');
+  $('#promote-wrap').hidden = true;
+  if (!MAIL.open){ wrap.innerHTML='<div class="note">Pick a conversation.</div>'; comp.hidden=true; return; }
+  const ms = MAIL.msgs.filter(m=>m.channel===MAIL.open).sort((a,b)=>a.ts-b.ts);
+  const who = MAIL.open.replace('teacher:','').replace('group:','Group ');
+  wrap.innerHTML = `<div style="font-weight:700;margin-bottom:8px">${esc(who)}</div>` + ms.map(m=>{
+    const ai = m.kind==='ai';
+    const mine = m.from==='Prof'||ai;
+    return `<div style="margin:8px 0;padding:8px 10px;border-radius:8px;background:${mine?'var(--line)':'transparent'}">
+       <div class="note">${esc(m.from)}${ai?' · AI':''} · ${new Date(m.ts*1000).toLocaleString()}
+         ${m.deleted?'· <i>in trash</i>':''}
+         <span style="float:right;cursor:pointer" onclick="toggleDelete('${m.id}',${m.deleted?0:1})">
+           ${m.deleted?'restore':'🗑'}</span></div>
+       <div>${esc(m.body)}</div></div>`;
+  }).join('');
+  comp.hidden = MAIL.open.startsWith('teacher:') ? false : false;   // reply allowed to student & group
+}
+
+async function sendReply(){
+  const body = $('#reply-box').value.trim(); if (!body || !MAIL.open) return;
+  await api('/api/reply', {to: MAIL.open, body});
+  $('#reply-box').value=''; await loadInbox(); MAIL.folder='inbox'; openThread(MAIL.open);
+}
+async function toggleDelete(id, del){ await api('/api/messages/delete', {message_id:id, deleted:!!del}); await loadInbox(); renderReading(); }
+
+function renderReviewList(){
+  const q = MAIL.review;
+  $('#threadlist').innerHTML = q.length ? q.map((r,i)=>`
+    <div onclick="openReview(${i})" style="padding:10px;border-bottom:1px solid var(--line);cursor:pointer">
+      <b>${esc(r.student)}</b> ${r.escalate?'<span class="pill" style="background:#d9534f;color:#fff">escalated</span>':''}
+      <div class="note" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.question)}</div>
+    </div>`).join('') : '<div class="note" style="padding:12px">Nothing to review.</div>';
+}
+function openReview(i){
+  const r = MAIL.review[i];
+  $('#composer').hidden = true;
+  $('#reading').innerHTML = `
+    <div class="note">${new Date(r.ts*1000).toLocaleString()} · ${esc(r.student)} · persona v${esc(r.persona_version)}</div>
+    <div style="margin-top:8px"><b>Q:</b> ${esc(r.question)}</div>
+    <div style="margin-top:6px;color:var(--muted)"><b>ProfAI drafted:</b> ${esc(r.answer)}</div>
+    <textarea id="fix" rows="4" style="width:100%;margin-top:10px"
+      placeholder="Your answer — the student gets this from Prof, not ProfAI.">${esc(r.answer)}</textarea>
+    <label class="note"><input type="checkbox" id="promote" checked> also save as a standing answer,
+      so the next student who asks gets your words</label>
+    <div style="margin-top:8px"><button onclick='correct(${JSON.stringify(r).replace(/'/g,"&#39;")})'>Send as Prof</button></div>`;
+}
+async function correct(r){
+  const correction = $('#fix').value.trim(); if (!correction) return;
+  await api('/api/review/correct', {student:r.student, message_id:r.message_id,
+      question:r.question, correction, promote:$('#promote').checked});
+  await loadInbox(); MAIL.folder='review'; renderThreadList();
+  $('#reading').innerHTML='<div class="note">Sent. The student has your answer.</div>';
+}
+function renderReported(){
+  const reps = MAIL.reports;
+  $('#threadlist').innerHTML = reps.length ? reps.map((r,i)=>`
+    <div onclick="openReport(${i})" style="padding:10px;border-bottom:1px solid var(--line);cursor:pointer">
+      <b>${esc(r.by)}</b> reported<div class="note">${esc(r.message.body)}</div></div>`).join('')
+    : '<div class="note" style="padding:12px">Nothing reported. Student DMs stay private unless a student shows you.</div>';
+}
+function openReport(i){
+  const r = MAIL.reports[i]; $('#composer').hidden = true;
+  $('#reading').innerHTML = `<div class="note">${esc(r.by)} chose to show you this — ${new Date(r.ts*1000).toLocaleString()}</div>
+    <div style="margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:8px">
+      <div class="note">${esc(r.message.from)}</div><div>${esc(r.message.body)}</div></div>
+    ${r.note?`<div class="note" style="margin-top:8px">Their note: ${esc(r.note)}</div>`:''}`;
+}
+
+// --- ProfAI persona ---------------------------------------------------------
+async function loadPersona(){
+  const p = await api('/api/persona');
+  $('#pa-name').value = p.name || '';
+  $('#pa-voice').value = p.voice || '';
+  $('#pa-context').value = p.context || '';
+  $('#pa-auto').checked = !!p.auto_answer;
+  $('#pa-present').checked = !!p.answer_when_present;
+  $('#pa-ver').textContent = 'version ' + p.version;
+  const sa = p.standing_answers || [];
+  $('#pa-standing').innerHTML = '<b>Your standing answers</b><div class="note">Promoted from your '
+    + 'corrections. ProfAI prefers these over anything it would generate.</div>'
+    + (sa.length ? '<table style="margin-top:8px">' + sa.map(x =>
+        `<tr><td style="width:35%">${esc(x.q)}</td><td>${esc(x.a)}</td></tr>`).join('') + '</table>'
+      : '<div class="note" style="margin-top:8px">None yet — correct a ProfAI answer to create one.</div>');
+}
+
+async function savePersona(){
+  const p = await api('/api/persona', {name: $('#pa-name').value, voice: $('#pa-voice').value,
+      context: $('#pa-context').value, auto_answer: $('#pa-auto').checked,
+      answer_when_present: $('#pa-present').checked});
+  $('#pa-ver').textContent = 'saved — version ' + p.version;
+}
+
+function boot(){ loadFrags().then(refreshPreview); loadInbox(); }
+
+// A stored session might be stale (expired, or the server was wiped). Ask the server who we are
+// before showing the console — a UI that renders and THEN 401s on every panel is worse than a gate.
+(async () => {
+  if (!TOKEN) { gate(true); return; }
+  const r = await fetch('/auth/whoami', {headers: {'Authorization': 'Bearer ' + TOKEN}});
+  const me = r.ok ? await r.json() : null;
+  if (!me || me.role !== 'teacher') { signOut(); return; }
+  gate(false);
+  boot();
+})();
 </script>
+</div>

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .theme import ThemeManager
+from .theme.manager import scale_css as _scss
 
 # terminal-side built-ins (handled here, not sent to xv6 sh) and the common real xv6 programs the
 # `help` text advertises — so students know what they can actually run.
@@ -57,7 +58,7 @@ class TerminalView(QDialog):
         row = QHBoxLayout()
         row.setSpacing(6)
         prompt = QLabel("$")
-        prompt.setStyleSheet(f"color:{t.accent};font-family:monospace;font-size:13px;")
+        prompt.setStyleSheet(_scss(f"color:{t.accent};font-family:monospace;font-size:13px;"))
         row.addWidget(prompt)
         self.input = QLineEdit()
         self.input.setPlaceholderText("type a command — e.g.  spin 10 &   ·   ls   ·   help")
@@ -88,7 +89,7 @@ class TerminalView(QDialog):
         v.addLayout(row)
         hint = QLabel("Programs take arguments (spin 10 & runs 10s in the background); ↑ recalls "
                       "history; type help to see what you can run.")
-        hint.setStyleSheet(f"color:{t.faint};font-size:11px;")
+        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
         v.addWidget(hint)
         self._streaming = hasattr(provider, "console_since")
         self.delta_ready.connect(self._append_stream)

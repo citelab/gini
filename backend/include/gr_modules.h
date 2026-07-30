@@ -24,6 +24,17 @@ gr_module_t *gr_mod_filter(void);
 gr_module_t *gr_mod_counter(void);
 long         gr_mod_counter_value(gr_module_t *m);
 
+/* Rate limit: token-bucket policer — DROP packets over <pps>[/<burst>], else CONTINUE. */
+gr_module_t *gr_mod_rate(const char *spec);
+long         gr_mod_rate_drops(gr_module_t *m);
+
+/* QoS classifier: mark matching packets with a DSCP ("<cidr>:<dscp>" or "<dscp>"); CONTINUE. */
+gr_module_t *gr_mod_classify(const char *spec);
+
+/* Tap / capture: mirror matching packets to a .pcap file ("<path>[@<cidr>]"); CONTINUE. */
+gr_module_t *gr_mod_tap(const char *spec);
+long         gr_mod_tap_count(gr_module_t *m);
+
 /* Lua scripting module (friendly tier) — only built with -Dlua=true (links liblua). */
 gr_module_t *gr_mod_lua(const char *script);
 

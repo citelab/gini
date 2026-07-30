@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..domain.xv6_vm import DemoVm, region_for
 from .theme import ThemeManager, icons
+from .theme.manager import scale_css as _scss
 
 _REGION_ACCENT = {"text": "blue", "data": "green", "heap": "cyan", "guard": "slate",
                   "stack": "amber", "trapframe": "purple", "trampoline": "red"}
@@ -113,25 +114,25 @@ class MemoryLab(QDialog):
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("layout", t.accent_for("purple"), 22))
         title = QLabel(f"  Virtual memory — {getattr(self.device, 'name', 'xv6')}")
-        title.setStyleSheet(f"color:{t.text};font-size:16px;font-weight:600;")
+        title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         self._satp = QLabel(); self._satp.setStyleSheet(
-            f"color:{t.muted};font-family:monospace;font-size:11px;")
+            _scss(f"color:{t.muted};font-family:monospace;font-size:11px;"))
         head.addWidget(self._satp)
         root.addLayout(head)
         hint = QLabel("The process address space, its leaf page-table mappings (VA→PA with "
                       "R/W/X/U), and the physical allocator. Simulate a fault to watch demand "
                       "paging grow the stack.")
-        hint.setWordWrap(True); hint.setStyleSheet(f"color:{t.muted};font-size:11px;")
+        hint.setWordWrap(True); hint.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
         root.addWidget(hint)
 
     def _panel(self, title, inner, fill=False) -> QFrame:
         t = self.theme.theme
         f = QFrame(); f.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         h = QLabel(title); h.setStyleSheet(
-            f"color:{t.muted};font-size:11px;font-weight:600;border:none;")
+            _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         v.addWidget(h)
         inner.setStyleSheet((inner.styleSheet() or "") + "border:none;")
         v.addWidget(inner, 1 if fill else 0)
@@ -158,7 +159,7 @@ class MemoryLab(QDialog):
         self._phys_bar = PhysBar(self.theme)
         v.addWidget(self._phys_bar)
         self._phys_lbl = QLabel(); self._phys_lbl.setStyleSheet(
-            f"color:{t.text};font-size:12px;border:none;")
+            _scss(f"color:{t.text};font-size:12px;border:none;"))
         v.addWidget(self._phys_lbl)
         v.addStretch(1)
         return f
@@ -184,10 +185,10 @@ class MemoryLab(QDialog):
     def _framed(self, title) -> tuple[QFrame, QVBoxLayout]:
         t = self.theme.theme
         f = QFrame(); f.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         h = QLabel(title); h.setStyleSheet(
-            f"color:{t.muted};font-size:11px;font-weight:600;border:none;")
+            _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         v.addWidget(h)
         return f, v
 

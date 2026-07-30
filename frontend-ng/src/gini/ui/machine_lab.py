@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from ..domain.machine_state import MachineState
 from ..domain.xv6 import DemoScheduler
 from .theme import ThemeManager, icons
+from .theme.manager import scale_css as _scss
 
 # long-running programs the launcher offers (must match the agent's PROGRAMS list)
 _LAUNCHABLE = ["spin", "busy", "alloc", "writer", "grind", "forktest"]
@@ -133,7 +134,7 @@ class MachineLab(QDialog):
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("host", t.accent_for("red"), 24))
         title = QLabel(f"  xv6 Scheduler — {self.device.name}")
-        title.setStyleSheet(f"color:{t.text};font-size:16px;font-weight:600;")
+        title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         mode = QLabel("live (GDB)" if self.live else "offline demo")
         mode.setStyleSheet(
@@ -165,7 +166,7 @@ class MachineLab(QDialog):
         hint = QLabel("Watch the kernel move the CPU between processes. Slow the time-slice or "
                       "Step one context switch at a time to see it happen.")
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color:{t.muted};font-size:11px;")
+        hint.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
         root.addWidget(hint)
 
     def _open_memory_lab(self) -> None:
@@ -204,10 +205,10 @@ class MachineLab(QDialog):
     def _build_controls(self, root) -> None:
         t = self.theme.theme
         bar = QFrame(); bar.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         lay = QHBoxLayout(bar); lay.setContentsMargins(12, 8, 12, 8)
 
-        lbl = QLabel("Time-slice"); lbl.setStyleSheet(f"color:{t.muted};font-size:12px;")
+        lbl = QLabel("Time-slice"); lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
         lay.addWidget(lbl)
         self._slice = QSlider(Qt.Horizontal)
         # quantum in timer ticks (~0.5s each) -> 1..10 ticks = 0.5..5s slices.
@@ -220,7 +221,7 @@ class MachineLab(QDialog):
         self._slice.sliderReleased.connect(self._apply_slice)
         lay.addWidget(self._slice)
         self._slice_lbl = QLabel(); self._slice_lbl.setStyleSheet(
-            f"color:{t.text};font-size:12px;min-width:64px;")
+            _scss(f"color:{t.text};font-size:12px;min-width:64px;"))
         lay.addWidget(self._slice_lbl)
         lay.addStretch(1)
 
@@ -237,7 +238,7 @@ class MachineLab(QDialog):
         lay.addWidget(self._run_btn)
 
         self._switch_lbl = QLabel("0 switches")
-        self._switch_lbl.setStyleSheet(f"color:{t.muted};font-size:12px;min-width:88px;")
+        self._switch_lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;min-width:88px;"))
         lay.addWidget(self._switch_lbl)
         root.addWidget(bar)
         self._update_slice_lbl()
@@ -270,9 +271,9 @@ class MachineLab(QDialog):
     def _build_launcher(self, root) -> None:
         t = self.theme.theme
         bar = QFrame(); bar.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         lay = QHBoxLayout(bar); lay.setContentsMargins(12, 6, 12, 6)
-        lbl = QLabel("Launch a program"); lbl.setStyleSheet(f"color:{t.muted};font-size:12px;")
+        lbl = QLabel("Launch a program"); lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
         lay.addWidget(lbl)
         self._prog_combo = QComboBox()
         self._prog_combo.addItems(_LAUNCHABLE)
@@ -287,7 +288,7 @@ class MachineLab(QDialog):
         lay.addWidget(launch)
         hint = QLabel("spin = CPU loop · alloc = grows memory · writer = file writes. "
                       "Use ✕ in the table to kill one.")
-        hint.setStyleSheet(f"color:{t.faint};font-size:11px;")
+        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
         lay.addWidget(hint); lay.addStretch(1)
         root.addWidget(bar)
 
@@ -312,7 +313,7 @@ class MachineLab(QDialog):
         self._stack_lbl = QLabel(); self._stack_lbl.setAlignment(Qt.AlignTop)
         self._stack_lbl.setTextFormat(Qt.RichText)
         t = self.theme.theme
-        self._stack_lbl.setStyleSheet(f"color:{t.text};font-family:monospace;font-size:12px;")
+        self._stack_lbl.setStyleSheet(_scss(f"color:{t.text};font-family:monospace;font-size:12px;"))
         grid.addWidget(self._panel("Kernel stack  ·  bt (Step)", self._stack_lbl), 1, 1)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         root.addLayout(grid, 1)
@@ -334,10 +335,10 @@ class MachineLab(QDialog):
     def _panel(self, title, inner, fill=False) -> QFrame:
         t = self.theme.theme
         f = QFrame(); f.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         h = QLabel(title); h.setStyleSheet(
-            f"color:{t.muted};font-size:11px;font-weight:600;border:none;")
+            _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         v.addWidget(h)
         inner.setStyleSheet((inner.styleSheet() or "") + "border:none;")
         v.addWidget(inner, 1 if fill else 0)
@@ -366,9 +367,9 @@ class MachineLab(QDialog):
         w = QWidget(); g = QGridLayout(w); g.setContentsMargins(0, 4, 0, 0); g.setSpacing(4)
         fields = {}
         for i, k in enumerate(keys):
-            kl = QLabel(k); kl.setStyleSheet(f"color:{t.muted};font-size:11px;border:none;")
+            kl = QLabel(k); kl.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;border:none;"))
             vl = QLabel("—"); vl.setStyleSheet(
-                f"color:{t.text};font-family:monospace;font-size:12px;border:none;")
+                _scss(f"color:{t.text};font-family:monospace;font-size:12px;border:none;"))
             vl.setTextInteractionFlags(Qt.TextSelectableByMouse)
             g.addWidget(kl, i, 0); g.addWidget(vl, i, 1)
             fields[k] = vl
@@ -601,7 +602,7 @@ class Xv6Console(QDialog):
         row.addWidget(pbtn)
         v.addLayout(row)
         hint = QLabel("xv6 has no `ps` — use ⌃P (above) to list processes.")
-        hint.setStyleSheet(f"color:{t.faint};font-size:11px;")
+        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
         v.addWidget(hint)
         self.tail_ready.connect(self._show)
         self._poll = QTimer(self); self._poll.timeout.connect(self._refresh)

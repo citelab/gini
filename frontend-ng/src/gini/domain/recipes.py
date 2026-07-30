@@ -501,6 +501,83 @@ RECIPES: tuple[Recipe, ...] = (
         ),
         links=(),
     ),
+    # ---- Sources / Sinks (riders: instruments that run inside a donor) ---- #
+    Recipe(
+        id="ping_capture", name="Ping and capture it",
+        summary="Ping one machine from another and watch the ICMP packets arrive on the receiver.",
+        intent=("ping", "icmp", "capture", "tcpdump", "packet", "rtt", "latency", "reachability",
+                "sniff", "packet view", "loss"),
+        teaches="how to inject ICMP traffic from a Source and observe it arrive with a Sink capture",
+        elements=(
+            _e("m1", "host", "The sender.", col=0, row=0),
+            _e("s1", "switch", "LAN switch.", col=1, row=0),
+            _e("m2", "host", "The receiver.", col=2, row=0),
+            _e("ping", "ping_probe", "Rides the sender — pings the receiver.", col=0, row=1),
+            _e("pcap", "packet_view", "Rides the receiver — watch the pings arrive.", col=2, row=1),
+        ),
+        links=(("m1", "s1"), ("m2", "s1"), ("m1", "ping"), ("m2", "pcap")),
+    ),
+    Recipe(
+        id="http_check", name="Probe a web service",
+        summary="Fire HTTP requests at a web app from a machine and read the success rate + latency.",
+        intent=("http", "curl", "web", "request", "probe", "2xx", "latency", "service"),
+        teaches="how an HTTP Source proves a service answers, reporting success rate and latency",
+        elements=(
+            _e("m1", "host", "The client machine.", col=0, row=0),
+            _e("web", "web_app", "The web service, reached by name (set it as the probe's Target).",
+               col=1, row=0),
+            _e("http", "http_probe", "Rides the client — requests the web app by name.",
+               col=0, row=1),
+        ),
+        links=(("m1", "http"),),
+    ),
+    Recipe(
+        id="throughput_test", name="Measure throughput (iPerf)",
+        summary="Drive iPerf traffic between two machines across a switch and read the bandwidth.",
+        intent=("iperf", "throughput", "bandwidth", "mbps", "congestion", "speed", "capacity"),
+        teaches="how to measure link throughput with an iPerf Client Source and Server Sink",
+        elements=(
+            _e("m1", "host", "The client.", col=0, row=0),
+            _e("s1", "switch", "Links the two machines.", col=1, row=0),
+            _e("m2", "host", "The server.", col=2, row=0),
+            _e("cli", "iperf_client", "Rides the client — drives traffic at the server.", col=0, row=1),
+            _e("srv", "iperf_server", "Rides the server — reports received throughput.", col=2, row=1),
+        ),
+        links=(("m1", "s1"), ("m2", "s1"), ("m1", "cli"), ("m2", "srv")),
+    ),
+    Recipe(
+        id="net_diagnostics", name="Diagnose a path (DNS · traceroute · counters)",
+        summary="Resolve a name, trace the path to the edge, and watch interface counters — the "
+                "classic diagnostic Sources and Sinks on one machine.",
+        intent=("dns", "dig", "resolve", "traceroute", "path", "hops", "interface", "counters",
+                "diagnostics", "iface"),
+        teaches="how DNS, traceroute and interface counters reveal what a machine sees on the network",
+        elements=(
+            _e("m1", "host", "The machine you diagnose from.", col=0, row=0),
+            _e("r1", "router", "The gateway to the edge.", col=1, row=0),
+            _e("net", "cloud", "The Internet.", col=2, row=0),
+            _e("dns", "dns_probe", "Rides the machine — resolves a name.", col=0, row=1),
+            _e("trace", "traceroute_probe", "Rides the machine — traces the path.", col=0, row=2),
+            _e("ifs", "iface_stats", "Rides the machine — streams rx/tx counters.", col=0, row=3),
+        ),
+        links=(("m1", "r1"), ("r1", "net"), ("m1", "dns"), ("m1", "trace"), ("m1", "ifs")),
+    ),
+    Recipe(
+        id="xv6_drive", name="Drive an xv6 kernel (shell + workload)",
+        summary="Run a custom command and spawn a scheduler workload on an xv6 Machine, over its "
+                "console.",
+        intent=("xv6", "shell", "command", "workload", "spin", "forktest", "scheduler", "process",
+                "os", "syscall"),
+        teaches="how to drive an xv6 kernel with a Shell Probe (a command) and a Workload (a process)",
+        concept="os-scheduling",
+        elements=(
+            _e("k", "xv6", "The xv6 Machine — open the Machine Lab to watch it react.", col=0, row=0),
+            _e("sh", "xv6_shell", "Rides the kernel — types a command into the console.", col=0, row=1),
+            _e("wl", "xv6_workload", "Rides the kernel — spawns a process to drive the scheduler.",
+               col=0, row=2),
+        ),
+        links=(("k", "sh"), ("k", "wl")),
+    ),
 )
 
 _BY_ID = {r.id: r for r in RECIPES}

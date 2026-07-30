@@ -14,6 +14,7 @@ from collections import deque
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
+from .theme.manager import sp as _sp
 
 # a layout = list of chart boxes; each box = up to two (key, label, unit, color-token)
 # series. Colors resolve against the theme (accent / accent2 / success / warning).
@@ -85,17 +86,17 @@ class LiveMetrics(QWidget):
             cur = vals[-1] if vals else None
             align = Qt.AlignLeft if i == 0 else Qt.AlignRight
             p.setPen(QColor(t.faint))
-            f = QFont(); f.setPointSize(9); f.setBold(True); p.setFont(f)
+            f = QFont(); f.setPointSize(_sp(9)); f.setBold(True); p.setFont(f)
             p.drawText(rect.adjusted(11, 7, -11, 0), Qt.AlignTop | align, label.upper())
             p.setPen(col)
-            fb = QFont(); fb.setPointSize(13); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(13)); fb.setBold(True); p.setFont(fb)
             txt = f"{cur:,.1f}{unit}" if cur is not None else "—"
             p.drawText(rect.adjusted(11, 22, -11, 0), Qt.AlignTop | align, txt)
 
         plot = rect.adjusted(11, 44, -11, -10)
         if all(len([v for v in data if v is not None]) < 2 for _, _, data, _ in series):
             p.setPen(QColor(t.faint))
-            fs = QFont(); fs.setPointSize(9); p.setFont(fs)
+            fs = QFont(); fs.setPointSize(_sp(9)); p.setFont(fs)
             p.drawText(plot, Qt.AlignCenter, "sampling…")
             return
         for _label, _unit, data, col in series:

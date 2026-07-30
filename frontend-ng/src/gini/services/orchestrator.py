@@ -20,7 +20,7 @@ from ..runtime import HostSim, Router, make_switch
 from .compiler import RuntimeConfig
 
 # The real C gRouter runs as its own container from this prebuilt image
-# (built once: `cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .`).
+# (built once: `cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .`).
 # Override with GINI_GROUTER_IMAGE.
 GROUTER_IMAGE = os.environ.get("GINI_GROUTER_IMAGE", "gini-grouter")
 # The POX (Python 3) SDN controller image
@@ -137,7 +137,7 @@ def simulate(config: RuntimeConfig) -> Sim:
 # cost multiplier. A lean host with an XL CPU cap is a perfectly sensible thing to want, so the two
 # must not be conflated: size = how much it gets, toolkit = what's installed in it.
 # --------------------------------------------------------------------------- #
-MACHINE_LEAN, MACHINE_FULL = "lean", "full"
+MACHINE_LEAN, MACHINE_FULL, MACHINE_SECURITY = "lean", "full", "security"
 MACHINE_TOOLKIT_DEFAULT = MACHINE_LEAN
 
 # Alpine package names (musl). Deliberately NOT: bind9, postfix, ettercap, haproxy, dsniff, lynx,
@@ -163,9 +163,18 @@ _MACHINE_TOOLS = (
     "ethtool bridge-utils telnet telnetd hping3 iptables procps nano less ca-certificates "
     # services + tools the GINI book experiments stand up, so a topology runs them offline
     # (no in-container apt). DNS: bind9 (named). Mail: postfix + mailutils (the `mail` MUA).
-    # Load balancing: haproxy. Security: dsniff (arpspoof/dnsspoof), ettercap, lynx.
+    # Web caching: squid (forward proxy). Load balancing: haproxy. Security: dsniff
+    # (arpspoof/dnsspoof), ettercap, lynx.
     # DHCP: isc-dhcp-client (dhclient) to exercise the gRouter's control-plane DHCP server.
-    "bind9 postfix mailutils haproxy dsniff ettercap-text-only lynx isc-dhcp-client"
+    "bind9 postfix mailutils squid haproxy dsniff ettercap-text-only lynx isc-dhcp-client"
+)
+# The SECURITY tier = the FULL toolkit PLUS the heavy security engines the Security part (Part VI)
+# stands up: openssl (TLS/PKI), wireguard-tools (encrypted tunnels), isc-dhcp-server (rogue-DHCP
+# lab), suricata (IDS), tcpreplay (replay captures into the IDS). Opt-in per host, so ordinary hosts
+# never carry it. WireGuard needs the in-kernel module (present in modern Docker Desktop kernels) or
+# a userspace fallback; the VPN lab notes this.
+_MACHINE_TOOLS_SECURITY = _MACHINE_TOOLS + (
+    " openssl wireguard-tools isc-dhcp-server suricata tcpreplay"
 )
 # human-readable lists for the inspector / GINI (the commands students actually type)
 MACHINE_TOOLS_LEAN_HUMAN = ("ip, ifconfig, ping, traceroute, mtr, arping, dig/nslookup/host, "
@@ -174,11 +183,16 @@ MACHINE_TOOLS_LEAN_HUMAN = ("ip, ifconfig, ping, traceroute, mtr, arping, dig/ns
 MACHINE_TOOLS_HUMAN = ("ip, ifconfig, ping, traceroute, mtr, tracepath, arping, "
                        "dig/nslookup/host, tcpdump, tshark, nmap, nc, socat, curl, wget, "
                        "iperf3, ethtool, brctl, telnet/telnetd, hping3, iptables; "
-                       "plus experiment servers: named (bind9), postfix+mail, haproxy, "
-                       "arpspoof/dnsspoof (dsniff), ettercap, lynx, dhclient (isc-dhcp-client)")
+                       "plus experiment servers: named (bind9), postfix+mail, squid (web cache), "
+                       "haproxy, arpspoof/dnsspoof (dsniff), ettercap, lynx, dhclient (isc-dhcp-client)")
+MACHINE_TOOLS_SECURITY_HUMAN = (MACHINE_TOOLS_HUMAN +
+                       "; plus security engines: openssl (TLS/PKI), wg (WireGuard VPN), "
+                       "suricata (IDS), isc-dhcp-server, tcpreplay")
 
 
 def machine_tools(toolkit: str) -> str:
+    if toolkit == MACHINE_SECURITY:
+        return MACHINE_TOOLS_SECURITY_HUMAN
     return MACHINE_TOOLS_HUMAN if toolkit == MACHINE_FULL else MACHINE_TOOLS_LEAN_HUMAN
 
 
@@ -193,6 +207,26 @@ WORKDIR /app
 COPY dataplane/ /app/dataplane/
 CMD ["python", "-m", "dataplane.shuttle"]
 """
+
+_DOCKERFILE_MACHINE_SECURITY = f"""FROM python:3.12-slim
+ENV DEBIAN_FRONTEND=noninteractive
+RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
+        | debconf-set-selections \\
+ && apt-get update && apt-get install -y --no-install-recommends \\
+        {_MACHINE_TOOLS_SECURITY} \\
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY dataplane/ /app/dataplane/
+CMD ["python", "-m", "dataplane.shuttle"]
+"""
+
+# toolkit -> (compose image name, dockerfile path). Explicit image names so N hosts of one tier
+# resolve to ONE image and compose builds it once.
+_MACHINE_IMAGE = {
+    MACHINE_LEAN:     ("gini-machine-lean",     "docker/Dockerfile.machine-lean"),
+    MACHINE_FULL:     ("gini-machine-full",     "docker/Dockerfile.machine"),
+    MACHINE_SECURITY: ("gini-machine-security", "docker/Dockerfile.machine-security"),
+}
 
 _DOCKERFILE_FABRIC = """FROM python:3.12-slim
 WORKDIR /app
@@ -507,6 +541,9 @@ while True:
 def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str | Path,
                   auto_internet: bool = True) -> Path:
     """Write a self-contained Docker project that runs this topology."""
+    from ..app.paths import captures_dir, scripts_dir
+    captures_dir().mkdir(parents=True, exist_ok=True)   # host dir bind-mounted for tap .pcaps
+    scripts_dir().mkdir(parents=True, exist_ok=True)    # host dir bind-mounted for Lua VNFs
     work = Path(workdir)
     (work / "dataplane").mkdir(parents=True, exist_ok=True)
     (work / "docker").mkdir(exist_ok=True)
@@ -515,6 +552,7 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
         shutil.copy(py, work / "dataplane" / py.name)
     (work / "docker" / "Dockerfile.machine").write_text(_DOCKERFILE_MACHINE)
     (work / "docker" / "Dockerfile.machine-lean").write_text(_DOCKERFILE_MACHINE_LEAN)
+    (work / "docker" / "Dockerfile.machine-security").write_text(_DOCKERFILE_MACHINE_SECURITY)
     (work / "docker" / "Dockerfile.fabric").write_text(_DOCKERFILE_FABRIC)
     (work / "docker" / "Dockerfile.cloudfabric").write_text(_DOCKERFILE_CLOUDFABRIC)
     (work / "docker" / "Dockerfile.faas").write_text(_DOCKERFILE_FAAS)
@@ -541,6 +579,9 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
 
 
 def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
+    from ..app.paths import captures_dir, scripts_dir
+    cap_host = str(captures_dir())          # host path bind-mounted into routers at /captures
+    scr_host = str(scripts_dir())           # student Lua modules, mounted read-only at /scripts
     rt = config.to_runtime(docker=True)
     # The `gini` bridge is a normal (non-internal) network so the HOST can reach
     # published web consoles (Grafana/MinIO/…). "Faithful mode" (auto_internet off) does
@@ -588,6 +629,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             f"    image: {GROUTER_IMAGE}",
             "    pull_policy: never",       # the image is built locally, never from a registry
             "    networks: [gini]",
+            "    volumes:",
+            f'      - "{cap_host}:/captures"',   # tap VNF .pcap files land on the host here
+            f'      - "{scr_host}:/scripts:ro"', # student Lua modules: `gpipe add lua /scripts/x.lua`
             "    environment:",
             f"      ROUTER_CONFIG: '{json.dumps(r)}'",
         ]
@@ -619,6 +663,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             f"    image: {GROUTER_IMAGE}",
             "    pull_policy: never",
             "    networks: [gini]",
+            "    volumes:",
+            f'      - "{cap_host}:/captures"',   # tap VNF .pcap files land on the host here
+            f'      - "{scr_host}:/scripts:ro"', # student Lua modules: `gpipe add lua /scripts/x.lua`
             *depends,
             *env,
         ]
@@ -731,11 +778,12 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
         # Which toolkit this host was built with. `image:` is given EXPLICITLY so that ten hosts
         # sharing a toolkit resolve to ONE image and compose builds it once — without it, compose
         # tags a separate <project>-<service> image per host and walks the build for each.
-        lean = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT) != MACHINE_FULL
-        dockerfile = "docker/Dockerfile.machine-lean" if lean else "docker/Dockerfile.machine"
+        tk = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT)
+        image, dockerfile = _MACHINE_IMAGE.get(tk, _MACHINE_IMAGE[MACHINE_LEAN])
         lines += [
             f"  {m['name']}:",
-            f"    image: {'gini-machine-lean' if lean else 'gini-machine-full'}",
+            f"    hostname: {m.get('hostname', m['name'])}",   # `hostname` = the canvas label
+            f"    image: {image}",
             f"    build: {{ context: ., dockerfile: {dockerfile} }}",
             "    cap_add: [NET_ADMIN]",
             '    devices: ["/dev/net/tun:/dev/net/tun"]',
@@ -743,6 +791,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
         ]
+        if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
+            from ..app.paths import captures_dir
+            lines += ['    volumes:', f'      - "{str(captures_dir())}:/captures"']
         lines += _cpu_limit_lines(m.get("cpus"))
     return "\n".join(lines) + "\n"
 
@@ -841,8 +892,8 @@ class Orchestrator:
             return True, "image present"
         # locate the backend (repo_root/backend) relative to this file
         backend = Path(__file__).resolve().parents[4] / "backend"
-        dockerfile = backend / "grouter-zig" / "Dockerfile"
-        build_cmd = (f"cd {backend} && docker build -f grouter-zig/Dockerfile "
+        dockerfile = backend / "grouter-build" / "Dockerfile"
+        build_cmd = (f"cd {backend} && docker build -f grouter-build/Dockerfile "
                      f"-t {GROUTER_IMAGE} .")
         if not dockerfile.exists():
             return False, (f"The real gRouter image '{GROUTER_IMAGE}' isn't built yet, and "
@@ -853,7 +904,7 @@ class Orchestrator:
                            f"…then press Run again. (Set GINI_AUTOBUILD_GROUTER=1 to let the "
                            f"app build it automatically.)")
         # opt-in auto-build
-        b = subprocess.run(["docker", "build", "-f", "grouter-zig/Dockerfile",
+        b = subprocess.run(["docker", "build", "-f", "grouter-build/Dockerfile",
                             "-t", GROUTER_IMAGE, "."], cwd=str(backend),
                            capture_output=True, text=True, timeout=1800)
         if b.returncode != 0:

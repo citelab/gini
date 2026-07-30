@@ -219,6 +219,44 @@ GUIDE: dict[str, str] = {
         "A Load Generator (Fortio) fires controlled traffic at a target and reports QPS and "
         "latency histograms. Use it to run experiments — push a service until it slows or "
         "an autoscaler reacts, and watch the metrics/dashboards respond."),
+    # --- Sources / Sinks (riders: run inside a donor, no container of their own) --------- #
+    "ping_probe": (
+        "A Ping Probe is a Source: attach it to a Machine/Router and it runs `ping` INSIDE that "
+        "donor, streaming live RTT and loss. Double-click to start/stop. Count 0 pings until you "
+        "stop it; Count N sends N. It has no container — it rides its donor over a dotted edge."),
+    "http_probe": (
+        "An HTTP Probe is a Source: it runs `curl` inside its donor at a Target/Path and reports "
+        "2xx success rate and latency. Continuous (Count 0) or a fixed number (Count N). Lighter "
+        "than the Load Generator — use it to prove a service answers, not to stress it."),
+    "packet_view": (
+        "A Packet View is a Sink: it runs `tcpdump` inside its donor and streams the packets it "
+        "sees. Attach it to the RECEIVER and run a Source on the sender to watch traffic arrive. "
+        "Count 0 captures until stopped; Count N stops after N packets."),
+    "dns_probe": (
+        "A DNS Probe is a Source: it resolves the hostname in Target from inside its donor and "
+        "reports whether (and to what) it resolved. It uses the system resolver over the drawn "
+        "gini0 network (GINI writes peer names into /etc/hosts), so it returns the topology address "
+        "— not Docker's. (Target is the name to look up; Name is just this element's label.)"),
+    "traceroute_probe": (
+        "A Traceroute is a Source: it runs `traceroute` inside its donor to a Target and reports "
+        "the hop path. Pair it with a Packet View to watch each hop, or use it to see routing."),
+    "iperf_client": (
+        "An iPerf Client is a Source: it drives `iperf3 -c` at a Target running an iPerf Server "
+        "and reports measured throughput (Mbit/s). Use it to teach bandwidth and congestion."),
+    "iperf_server": (
+        "An iPerf Server is a Sink: it runs `iperf3 -s` inside its donor and reports the "
+        "throughput it receives from an iPerf Client. Pair the two across a link to measure it."),
+    "iface_stats": (
+        "Interface Stats is a Sink: it reads /proc/net/dev inside its donor and streams rx/tx "
+        "packet and byte counts, so you can watch traffic volume rise and fall on an interface."),
+    "xv6_shell": (
+        "A Shell Probe is a Source for the xv6 Machine: type a Command (e.g. `ls`, `cat README`) "
+        "and it types it into the kernel's console and streams the output back — the OS-course "
+        "counterpart of the HTTP Probe."),
+    "xv6_workload": (
+        "A Workload is a Source for the xv6 Machine: it spawns a Program (`spin`, `forktest`, "
+        "`usertests`) to drive the scheduler. Run it in the background so several compete, and "
+        "watch the effect in the Machine Lab — the OS-course load generator."),
 }
 
 

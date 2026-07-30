@@ -43,7 +43,7 @@ if [ "$LUA" = "1" ]; then
         if [ -z "$LUA_INC" ]; then
             echo "build.sh: lua.h not found — building WITHOUT the Lua module "
             echo "          (install liblua5.4-dev, or run with LUA=0 to silence this)." >&2
-            SRCS=$(ls "$SRC"/*.c | grep -v '/gr_mod_lua\.c$')
+            SRCS=$(ls "$SRC"/*.c | grep -vE '/gr_mod_lua\.c$|/gr_cp_lua\.c$')
             LUA_FLAGS=""; LUA_LIBS=""
         else
             LUA_FLAGS="$LUA_FLAGS $LUA_INC"
@@ -51,7 +51,7 @@ if [ "$LUA" = "1" ]; then
         fi
     fi
 else
-    SRCS=$(ls "$SRC"/*.c | grep -v '/gr_mod_lua\.c$')
+    SRCS=$(ls "$SRC"/*.c | grep -vE '/gr_mod_lua\.c$|/gr_cp_lua\.c$')
     LUA_FLAGS=""
     LUA_LIBS=""
 fi

@@ -10,7 +10,8 @@ _DIR = os.path.join(os.path.dirname(F.__file__), "missions", "networking")
 
 
 def test_all_packs_load_and_validate():
-    loaded = FY.load_dir(_DIR)
+    loaded, warnings = FY.load_dir(_DIR)                  # (fragments, warnings) — system layer
+    assert not warnings
     assert len(loaded) >= 15                              # the seed library (grows as we add packs)
     for frag in loaded.values():
         assert FY.validate(frag) == []

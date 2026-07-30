@@ -118,6 +118,9 @@ FREE = frozenset({
     "vpc", "cloud_subnet", "region",              # grouping boundaries
     "security_group", "gateway", "block_volume",  # not-yet-real placeholders
     "terminal", "storage_volume",                 # xv6 peripherals (software devices, no cost)
+    # Sources / Sinks (riders) — instruments that run inside a donor, no container of their own
+    "ping_probe", "http_probe", "packet_view", "dns_probe", "traceroute_probe",
+    "iperf_client", "iperf_server", "iface_stats", "xv6_shell", "xv6_workload",
 })
 
 

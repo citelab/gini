@@ -46,8 +46,13 @@ def test_every_recipe_link_is_grammar_valid():
         types = {el.ref: el.type_key for el in r.elements}
         for a, b in r.links:
             assert a in types and b in types, f"{r.id}: link ref not found"
-            assert cr.can_connect(types[a], types[b]) is not None, \
-                f"{r.id}: {types[a]}<->{types[b]} is not a grammar-valid connection"
+            ta, tb = types[a], types[b]
+            # a recipe edge is valid if it's a grammar-valid network LINK, OR a valid rider→donor
+            # ATTACH (either order — ctx.connect figures out which end is the Source/Sink).
+            valid = (cr.can_connect(ta, tb) is not None
+                     or cr.attach_blocked(ta, tb) is None
+                     or cr.attach_blocked(tb, ta) is None)
+            assert valid, f"{r.id}: {ta}<->{tb} is not a valid connection or attachment"
 
 
 def test_recipe_parents_reference_box_elements():

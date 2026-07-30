@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -20,7 +20,6 @@ from .theme import ThemeManager, icons
 
 
 class RouterLab(QDialog):
-    live_ready = Signal(str)   # real-router trace output (from a worker thread)
     flows_ready = Signal(list)  # parsed FlowEntry rows (from a worker thread)
     tablestats_ready = Signal(object)  # OpenFlow table-level stats dict
     routes_ready = Signal(list)  # parsed RouteEntry rows (from a worker thread)
@@ -43,7 +42,6 @@ class RouterLab(QDialog):
         self._trace: list[str] = []
         self._step_idx = -1
         self._stage_widgets: list[QFrame] = []
-        self.live_ready.connect(self._show_live)
         self.flows_ready.connect(self._on_flows)
         self.tablestats_ready.connect(self._on_table_stats)
         self.routes_ready.connect(self._on_routes)
@@ -70,13 +68,15 @@ class RouterLab(QDialog):
         title = QLabel(f"  {kind} — {device.name}")
         title.setStyleSheet("font-size:15px; font-weight:600;")
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
+        # The datapath mode is a PROPERTY of the element, not a user toggle: a Router/Firewall is a
+        # legacy L3 forwarder; an OVS is an OpenFlow (SDN) switch. Show it as a static label rather
+        # than offering an OpenFlow toggle a plain router can't actually be in.
         head.addWidget(QLabel("mode:"))
-        self.mode_legacy = QPushButton("Legacy"); self.mode_legacy.setCheckable(True)
-        self.mode_of = QPushButton("OpenFlow"); self.mode_of.setCheckable(True)
-        grp = QButtonGroup(self); grp.addButton(self.mode_legacy); grp.addButton(self.mode_of)
-        self.mode_legacy.clicked.connect(lambda: self._set_mode("legacy"))
-        self.mode_of.clicked.connect(lambda: self._set_mode("openflow"))
-        head.addWidget(self.mode_legacy); head.addWidget(self.mode_of)
+        mode_text = "OpenFlow · SDN" if self.face == "ovs" else "Legacy L3"
+        mode_lbl = QLabel(mode_text)
+        mode_lbl.setStyleSheet(
+            f"font-weight:600; color:{t.accent_for('teal' if self.face == 'ovs' else 'blue')};")
+        head.addWidget(mode_lbl)
         if on_console:
             con = QPushButton("  Console")
             con.setIcon(icons.icon("link", t.muted, 14))
@@ -137,30 +137,42 @@ class RouterLab(QDialog):
     # palette ---------------------------------------------------------------
     def _build_palette(self) -> QWidget:
         t = self.theme.theme
-        w = QWidget(); w.setObjectName("Sidebar"); w.setFixedWidth(196)
+        w = QWidget(); w.setObjectName("Sidebar"); w.setFixedWidth(214)
         lay = QVBoxLayout(w); lay.setContentsMargins(10, 10, 10, 10); lay.setSpacing(5)
 
         def header(text: str) -> QLabel:
             label = QLabel(text); label.setObjectName("PanelHead"); return label
 
         def pal_btn(mt, locked: bool) -> QPushButton:
-            b = QPushButton(f"  {mt.label}")
+            # An inline VNF is either a REAL gRouter data-plane function (deploys via the chain) or
+            # an illustrative stub shown for learning. Mark previews honestly rather than pretending.
+            preview = (not locked) and not mt.real
+            suffix = "   · preview" if preview else ""
+            b = QPushButton(f"  {mt.label}{suffix}")
             b.setIcon(icons.icon(mt.icon, t.accent_for(mt.accent), 18))
-            b.setStyleSheet("text-align:left;")
-            b.setToolTip(mt.description)
+            b.setStyleSheet("text-align:left;" + (f"color:{t.faint};" if preview else ""))
             if locked:
+                b.setToolTip(f"{mt.description}\n\nAlways in the pipeline — the router's fixed base.")
                 b.setEnabled(False)
+            elif preview:
+                b.setToolTip(f"{mt.description}\n\nIllustrative — shown in the pipeline to learn the "
+                             "shape of a VNF; not yet a deployable data-plane function.")
+                b.clicked.connect(lambda _=False, k=mt.key: self._add(k))
             else:
+                b.setToolTip(f"{mt.description}\n\nReal native function — deploys into the running "
+                             "gRouter via the service chain.")
                 b.clicked.connect(lambda _=False, k=mt.key: self._add(k))
             return b
 
         lay.addWidget(header("Base · required"))
         for mt in BASE:
             lay.addWidget(pal_btn(mt, locked=True))
-        lay.addWidget(header("Service functions (VNFs) · click to add"))
+        # Inline VNFs = the gRouter's in-datapath service functions. Two flavours: built-in NATIVE
+        # functions, and ones YOU write (Lua script or a native module).
+        lay.addWidget(header("Inline VNFs · native (built-in)"))
         for mt in INLINE:
             lay.addWidget(pal_btn(mt, locked=False))
-        lay.addWidget(header("Custom VNF · you write"))
+        lay.addWidget(header("Inline VNFs · you write (Lua / native)"))
         for mt in CUSTOM:
             lay.addWidget(pal_btn(mt, locked=False))
         lay.addStretch(1)
@@ -192,8 +204,20 @@ class RouterLab(QDialog):
             if i < len(stages) - 1:
                 arrow = QLabel("▼"); arrow.setObjectName("Faint")
                 self.pipe_layout.addWidget(arrow, 0, Qt.AlignHCenter)
-        self.mode_legacy.setChecked(self.program.mode == "legacy")
-        self.mode_of.setChecked(self.program.mode == "openflow")
+
+    # Friendly label for each editable parameter, keyed by (module type, param key).
+    _PARAM_LABEL = {
+        ("acl", "deny"):      "deny CIDR",
+        ("nat", "ip"):        "source IP",
+        ("block", "ip"):      "target IP",
+        ("rate", "spec"):     "pps / burst",
+        ("classify", "spec"): "match  cidr:dscp",
+        ("tap", "path"):      "pcap path",
+    }
+
+    def _set_param(self, inst, key: str, text: str) -> None:
+        """Live-edit a dropped VNF's parameter; the deploy path and offline trace read it back."""
+        inst.params[key] = text.strip()
 
     def _stage_row(self, st) -> QFrame:
         t = self.theme.theme
@@ -202,7 +226,9 @@ class RouterLab(QDialog):
         f._accent = accent
         f.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
                         f"border-radius:10px;}}")
-        hl = QHBoxLayout(f); hl.setContentsMargins(11, 8, 8, 8); hl.setSpacing(8)
+        outer = QVBoxLayout(f); outer.setContentsMargins(11, 8, 8, 8); outer.setSpacing(6)
+
+        top = QHBoxLayout(); top.setSpacing(8)
         iname = {"ingress": "chevron_right", "egress": "chevron_right",
                  "mode": "controller"}.get(st.kind)
         if iname is None:
@@ -211,14 +237,32 @@ class RouterLab(QDialog):
         name = QLabel(st.label); name.setStyleSheet("font-weight:500;")
         tag = QLabel(st.kind if not st.locked else f"{st.kind} · locked")
         tag.setObjectName("Faint")
-        hl.addWidget(icon); hl.addWidget(name); hl.addStretch(1); hl.addWidget(tag)
+        top.addWidget(icon); top.addWidget(name); top.addStretch(1); top.addWidget(tag)
         if st.kind == "inline" and st.index is not None:
             for sym, fn in (("▲", lambda i=st.index: self._move(i, -1)),
                             ("▼", lambda i=st.index: self._move(i, 1)),
                             ("✕", lambda i=st.index: self._remove(i))):
                 btn = QPushButton(sym); btn.setFixedWidth(26)
-                btn.clicked.connect(lambda _=False, f=fn: f())
-                hl.addWidget(btn)
+                btn.clicked.connect(lambda _=False, fn=fn: fn())
+                top.addWidget(btn)
+        outer.addLayout(top)
+
+        # Editable parameters for an inline VNF: one field per param, written straight into
+        # inst.params (deploy_commands() and the offline trace read them back). Editing here
+        # is why dropping an ACL and then typing a CIDR actually re-points the filter.
+        if st.kind == "inline" and st.index is not None:
+            inst = self.program.inline[st.index]
+            if inst.params:
+                pr = QHBoxLayout(); pr.setSpacing(6); pr.setContentsMargins(24, 0, 0, 0)
+                for key in inst.params:
+                    lbl = QLabel(self._PARAM_LABEL.get((inst.type_key, key), key) + ":")
+                    lbl.setObjectName("Faint")
+                    edit = QLineEdit(str(inst.params[key])); edit.setMinimumWidth(150)
+                    edit.textChanged.connect(
+                        lambda text, i=inst, k=key: self._set_param(i, k, text))
+                    pr.addWidget(lbl); pr.addWidget(edit)
+                pr.addStretch(1)
+                outer.addLayout(pr)
         return f
 
     def _highlight(self, idx: int) -> None:
@@ -241,42 +285,14 @@ class RouterLab(QDialog):
     def _move(self, i: int, d: int) -> None:
         self.program.move(i, d); self._reset(); self._rebuild()
 
-    def _set_mode(self, mode: str) -> None:
-        self.program.set_mode(mode); self._reset(); self._rebuild()
-
-    def _inject(self) -> None:
-        if self.command_fn is not None:
-            self._inject_live()          # drive the REAL running router via gpipe
-            return
-        self._trace = self.program.trace()
+    def _inject(self, dst: str = "10.0.2.10") -> None:
+        # Walk a test packet through the composed pipeline using the offline model: the
+        # current stage lights up and reports its verdict, Step advances one stage, Reset
+        # clears. This is the dependable teaching path and works whether or not a topology
+        # is running; the live router is programmed separately via Deploy chain.
+        self._trace = self.program.trace(dst)
         self._step_idx = 0
         self._show_step()
-
-    def _inject_live(self, dst: str = "10.0.2.10") -> None:
-        import threading
-        self._highlight(-1)
-        self.trace_lbl.setText("running on the live router…")
-        prog = self.program
-
-        def work():
-            try:
-                self.command_fn("clear")
-                for inst in prog.inline:
-                    k = inst.type_key
-                    if k == "acl":
-                        self.command_fn(f"add acl {inst.params.get('deny', '10.0.3.0/24')}")
-                    elif k == "nat":
-                        self.command_fn("add nat 203.0.113.1")
-                    elif k in ("rate", "classify", "tap"):
-                        self.command_fn("add counter")   # stand-in on the router
-                resp = self.command_fn(f"trace {dst}")
-            except Exception as e:
-                resp = f"(router query failed: {e})"
-            self.live_ready.emit(resp)
-        threading.Thread(target=work, daemon=True).start()
-
-    def _show_live(self, text: str) -> None:
-        self.trace_lbl.setText("live router:  " + text.replace("\n", "   "))
 
     # SDN flow table (OVS) --------------------------------------------------
     def _table(self, cols, stretch_col, min_h=150) -> QTableWidget:
@@ -436,7 +452,7 @@ class RouterLab(QDialog):
             from ..domain.routetable import parse_routes
             rows, chain = [], ""
             try:
-                rows = parse_routes(qf("route"))
+                rows = parse_routes(qf("route show"))
                 chain = qf("gpipe list")     # the live deployed service chain
             except Exception:
                 pass
@@ -536,7 +552,7 @@ class RouterLab(QDialog):
                         f"border-radius:10px;}}")
         lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 8); lay.setSpacing(5)
         top = QHBoxLayout()
-        title = QLabel("Service Function Chain")
+        title = QLabel("Inline VNF chain")
         title.setStyleSheet("font-size:13px; font-weight:600;")
         top.addWidget(title)
         top.addSpacing(12)

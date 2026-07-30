@@ -1,12 +1,34 @@
 [
   {
-    "id": "a1001",
-    "name": "Ada",
-    "token": "8fGsDq9fHdkuV8Z_"
+    "id": "mahesh",
+    "name": "Mahesh Babu",
+    "sis_id": "2512",
+    "token": "-g2oZ57ejLoW3cv-",
+    "group": "group1",
+    "ai_hosted": true
   },
   {
-    "id": "b2002",
-    "name": "Bob",
-    "token": "QkAEZ4lmn5Z9-PJ_"
+    "id": "ravi",
+    "name": "Ravi Kumar",
+    "sis_id": "2511",
+    "token": "leTeZ1oCRxHdQBQM",
+    "group": "group1",
+    "ai_hosted": true
+  },
+  {
+    "id": "surya",
+    "name": "Surya Yadav",
+    "sis_id": "3000",
+    "token": "zftcGh_bcElmQ4QP",
+    "group": "group2",
+    "ai_hosted": true
+  },
+  {
+    "id": "vikram",
+    "name": "Vikram Vadi",
+    "sis_id": "3001",
+    "token": "OX2PW3KnRYFc36sx",
+    "group": "group2",
+    "ai_hosted": true
   }
 ]

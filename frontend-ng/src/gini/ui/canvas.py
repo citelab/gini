@@ -24,6 +24,7 @@ from ..app import AppContext
 from ..domain import grouping, pricing
 from ..domain.topology import DeviceInstance, Link
 from .theme import icons
+from .theme.manager import sp as _sp, ui_scale as _uiscale   # scale text + node cards by the UI setting
 from .theme.tokens import Theme
 
 MIME = "application/x-gini-device"
@@ -58,11 +59,13 @@ def _ortho_waypoints(a: "NodeItem", b: "NodeItem") -> list[QPointF]:
     Exits perpendicular to the nearer face and turns at the midline, giving a tidy
     two-bend 'Z' that the rounded-path builder softens into smooth elbows.
     """
+    s = _uiscale()                               # cards are drawn at this scale — use scaled extents
+    nw = NODE_W * s
     ax, ay = a.pos().x(), a.pos().y()
     bx, by = b.pos().x(), b.pos().y()
-    ah, bh = a.node_h(), b.node_h()              # per-node heights (size tiers differ)
-    ca = QPointF(ax + NODE_W / 2, ay + ah / 2)
-    cb = QPointF(bx + NODE_W / 2, by + bh / 2)
+    ah, bh = a.node_h() * s, b.node_h() * s      # per-node heights (size tiers differ) × card scale
+    ca = QPointF(ax + nw / 2, ay + ah / 2)
+    cb = QPointF(bx + nw / 2, by + bh / 2)
     dx, dy = cb.x() - ca.x(), cb.y() - ca.y()
     if abs(dy) >= abs(dx):                       # stacked-ish -> exit top/bottom
         if dy >= 0:
@@ -73,9 +76,9 @@ def _ortho_waypoints(a: "NodeItem", b: "NodeItem") -> list[QPointF]:
         return [ex, QPointF(ex.x(), mid), QPointF(en.x(), mid), en]
     else:                                        # side-by-side -> exit left/right
         if dx >= 0:
-            ex, en = QPointF(ax + NODE_W, ca.y()), QPointF(bx, cb.y())
+            ex, en = QPointF(ax + nw, ca.y()), QPointF(bx, cb.y())
         else:
-            ex, en = QPointF(ax, ca.y()), QPointF(bx + NODE_W, cb.y())
+            ex, en = QPointF(ax, ca.y()), QPointF(bx + nw, cb.y())
         mid = (ex.x() + en.x()) / 2
         return [ex, QPointF(mid, ex.y()), QPointF(mid, en.y()), en]
 
@@ -166,13 +169,13 @@ class GroupItem(QGraphicsObject):
         p.drawRoundedRect(self.box_rect(), 14, 14)
         # title + subtitle (the VPC's CIDR / subnet's tier)
         p.setPen(accent)
-        f = QFont(); f.setBold(True); f.setPointSize(10); p.setFont(f)
+        f = QFont(); f.setBold(True); f.setPointSize(_sp(10)); p.setFont(f)
         p.drawText(QRectF(14, 7, self.inst.w - 28, 16), Qt.AlignVCenter,
                    f"{dt.label}: {self.inst.name or dt.label}")
         sub = self._subtitle()
         if sub:
             p.setPen(_qcolor(t.muted))
-            f2 = QFont(); f2.setPointSize(8); p.setFont(f2)
+            f2 = QFont(); f2.setPointSize(_sp(8)); p.setFont(f2)
             p.drawText(QRectF(14, 23, self.inst.w - 28, 13), Qt.AlignVCenter, sub)
         # resize grip (three corner ticks)
         g = self._grip_rect()
@@ -244,6 +247,7 @@ class NodeItem(QGraphicsObject):
             | QGraphicsItem.ItemSendsGeometryChanges
         )
         self.setPos(inst.x, inst.y)
+        self.setScale(_uiscale())          # the whole card (art + text) grows with the text-size setting
         self.setZValue(10)
         self.setAcceptHoverEvents(True)
         self._hover = 0.0
@@ -391,10 +395,10 @@ class NodeItem(QGraphicsObject):
 
         # name + type
         p.setPen(_qcolor(t.text))
-        f = QFont(); f.setPointSize(11); f.setWeight(QFont.DemiBold); p.setFont(f)
+        f = QFont(); f.setPointSize(_sp(11)); f.setWeight(QFont.DemiBold); p.setFont(f)
         p.drawText(QRectF(48, 10, NODE_W - 56, 18), Qt.AlignVCenter, self.inst.name)
         p.setPen(_qcolor(t.faint))
-        f2 = QFont(); f2.setPointSize(8); p.setFont(f2)
+        f2 = QFont(); f2.setPointSize(_sp(8)); p.setFont(f2)
         p.drawText(QRectF(48, 27, NODE_W - 56, 14), Qt.AlignVCenter, dt.label)
 
         # primary IP (once compiled) — at-a-glance addressing on the node
@@ -405,7 +409,7 @@ class NodeItem(QGraphicsObject):
             if len(ifaces) > 1:
                 ip += f"  +{len(ifaces) - 1}"
             p.setPen(_qcolor(t.accent))
-            fip = QFont(); fip.setStyleHint(QFont.Monospace); fip.setPointSize(8)
+            fip = QFont(); fip.setStyleHint(QFont.Monospace); fip.setPointSize(_sp(8))
             p.setFont(fip)
             p.drawText(QRectF(48, 41, NODE_W - 56, 13), Qt.AlignVCenter, ip)
 
@@ -415,6 +419,7 @@ class NodeItem(QGraphicsObject):
             "booting": (_qcolor(t.warning), "booting"),
             "stopping": (_qcolor(t.warning), "stopping"),
             "error": (_qcolor(t.danger), "error"),
+            "ready": (_qcolor(t.accent), "ready"),      # a rider whose donor is up — runnable
         }.get(self.status, (_qcolor(t.muted), "idle"))
         chip_bg = QColor(chip_col); chip_bg.setAlpha(38)
         cr = QRectF(12, H - 24, 58, 16)
@@ -423,7 +428,7 @@ class NodeItem(QGraphicsObject):
         p.setBrush(chip_col)
         p.drawEllipse(QRectF(cr.left() + 7, cr.center().y() - 3, 6, 6))
         p.setPen(chip_col)
-        f3 = QFont(); f3.setPointSize(8); p.setFont(f3)
+        f3 = QFont(); f3.setPointSize(_sp(8)); p.setFont(f3)
         p.drawText(cr.adjusted(20, 0, -2, 0), Qt.AlignVCenter, label)
 
         # size tier: capacity gauge + label in the grown body, and a + / - stepper
@@ -436,7 +441,7 @@ class NodeItem(QGraphicsObject):
             p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(bx, by, 18, 18))
             p.setPen(QColor("#ffffff"))
-            fb = QFont(); fb.setPointSize(11); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(11)); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "!")
 
         # advisory-lint warning badge (top-right) — clickable to ask GINI about it
@@ -447,7 +452,7 @@ class NodeItem(QGraphicsObject):
             p.setBrush(warn); p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(bx, by, 14, 14))
             p.setPen(QColor("#1a1205"))
-            fb = QFont(); fb.setPointSize(9); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(9)); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by, 14, 14), Qt.AlignCenter, "!")
 
         # Wizard: flag an element that isn't part of the active goal (click ✕ to remove)
@@ -456,7 +461,7 @@ class NodeItem(QGraphicsObject):
             p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(bx, by, 18, 18))
             p.setPen(QColor("#ffffff"))
-            fb = QFont(); fb.setPointSize(10); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(10)); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "✕")
 
     def _paint_size(self, p: QPainter, t, accent: QColor, H: float) -> None:
@@ -472,14 +477,14 @@ class NodeItem(QGraphicsObject):
             p.setPen(QPen(accent if on else _qcolor(t.line2), 1.2))
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 5, 5)
             p.setPen(accent if on else _qcolor(t.faint))
-            fs = QFont(); fs.setPointSize(12); fs.setBold(True); p.setFont(fs)
+            fs = QFont(); fs.setPointSize(_sp(12)); fs.setBold(True); p.setFont(fs)
             p.drawText(r, Qt.AlignCenter, glyph)
 
         # capacity caption + vertical gauge in the body the taller node opens up
         body_top, body_bot = 58.0, H - 30
         if body_bot - body_top >= 16:
             p.setPen(_qcolor(t.muted))
-            fc = QFont(); fc.setPointSize(8); fc.setBold(True); p.setFont(fc)
+            fc = QFont(); fc.setPointSize(_sp(8)); fc.setBold(True); p.setFont(fc)
             p.drawText(QRectF(14, body_top, NODE_W - 30, 14),
                        Qt.AlignVCenter | Qt.AlignLeft, f"{label} · {vcpu:g} vCPU")
             gx, gw, gtop, gbot = NODE_W - 16.0, 6.0, body_top + 16, body_bot
@@ -618,8 +623,18 @@ class EdgeItem(QGraphicsObject):
         self._flow_anim: QVariantAnimation | None = None
         self.refresh()
 
+    def _is_attach(self) -> bool:
+        return getattr(self.link, "kind", "link") == "attach"
+
+    def _rider_role(self) -> str:
+        """'source' | 'sink' | '' — read from the rider end (source_id) of an attach edge."""
+        dev = self._scene.ctx.topology.devices.get(self.link.source_id)
+        return getattr(dev.type, "role", "") if dev is not None else ""
+
     def flow(self, color: str | None = None, duration: int = 900) -> None:
         """Animate a packet dot travelling along the edge (tutor + 'alive' feedback)."""
+        if self._is_attach():
+            return                                   # attach edges carry no traffic — never animate
         self._packet_color = _qcolor(color) if color else None
         if self._scene.ctx.settings.reduced_motion:
             return
@@ -647,8 +662,9 @@ class EdgeItem(QGraphicsObject):
         self.prepareGeometryChange()
         style = getattr(self._scene.ctx.settings, "connector_style", "orthogonal")
         if style == "straight":
-            ca = a.pos() + QPointF(NODE_W / 2, a.node_h() / 2)
-            cb = b.pos() + QPointF(NODE_W / 2, b.node_h() / 2)
+            s = _uiscale()
+            ca = a.pos() + QPointF(NODE_W * s / 2, a.node_h() * s / 2)
+            cb = b.pos() + QPointF(NODE_W * s / 2, b.node_h() * s / 2)
             path = QPainterPath(ca)
             path.lineTo(cb)
             self._path = path
@@ -667,6 +683,9 @@ class EdgeItem(QGraphicsObject):
         t = self._scene.theme
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setBrush(Qt.NoBrush)                    # open path: stroke only, never fill
+        if self._is_attach():
+            self._paint_attach(p, t)
+            return
         p.setPen(QPen(_qcolor(t.line2), 2))
         p.drawPath(self._path)
         if self._packet_t is not None:
@@ -675,6 +694,43 @@ class EdgeItem(QGraphicsObject):
             p.setBrush(col)
             p.setPen(Qt.NoPen)
             p.drawEllipse(pt, 5, 5)
+
+    def _paint_attach(self, p: QPainter, t) -> None:
+        """A rider mount: a DOTTED tether with a bold, accent-coloured polarity glyph at the MIDPOINT
+        (always on the visible line, whatever the length) — a big arrowhead pointing toward the donor
+        for a source (it injects INTO it), a diamond for a sink (it observes). Reads as an annotation
+        ('runs on'), never a cable."""
+        import math
+        dev = self._scene.ctx.topology.devices.get(self.link.source_id)
+        role = getattr(dev.type, "role", "") if dev is not None else ""
+        gcol = _qcolor(t.line)                   # match the dotted tether — big shape, subtle colour
+
+        pen = QPen(_qcolor(t.line), 2.4)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setDashPattern([1.4, 2.4])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(self._path)
+
+        c = self._path.pointAtPercent(0.5)                   # glyph at the midpoint of the tether
+        a0 = self._path.pointAtPercent(0.42)
+        a1 = self._path.pointAtPercent(0.58)
+        ang = math.atan2(a1.y() - a0.y(), a1.x() - a0.x())   # tangent, pointing toward the donor
+        dx, dy = math.cos(ang), math.sin(ang)
+        px, py = -math.sin(ang), math.cos(ang)               # perpendicular
+        p.setPen(QPen(_qcolor(t.bg), 1.4))                   # thin bg halo so it reads on any node
+        p.setBrush(gcol)
+        if role == "sink":                                   # a bold diamond (observer)
+            r = 8.0
+            p.drawPolygon(QPolygonF([
+                QPointF(c.x() + r * dx, c.y() + r * dy), QPointF(c.x() + r * px, c.y() + r * py),
+                QPointF(c.x() - r * dx, c.y() - r * dy), QPointF(c.x() - r * px, c.y() - r * py)]))
+        else:                                                # a big arrowhead into the donor
+            L, W = 16.0, 9.0
+            tip = QPointF(c.x() + (L / 2) * dx, c.y() + (L / 2) * dy)
+            bx, by = c.x() - (L / 2) * dx, c.y() - (L / 2) * dy
+            p.drawPolygon(QPolygonF([tip, QPointF(bx + W * px, by + W * py),
+                                     QPointF(bx - W * px, by - W * py)]))
 
 
 class CalloutItem(QGraphicsObject):
@@ -687,7 +743,7 @@ class CalloutItem(QGraphicsObject):
         self.text = text
         self.setZValue(60)
         self._font = QFont()
-        self._font.setPointSize(10)
+        self._font.setPointSize(_sp(10))
         fm = QFontMetrics(self._font)
         self._pad = 11
         self._w = 200
@@ -787,12 +843,15 @@ class CanvasScene(QGraphicsScene):
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme
         self.update()
+        scale = _uiscale()
         for n in self.nodes.values():
             n.refresh_theme()
+            n.setScale(scale)              # follow the current text-size setting (card grows with text)
             n.update()
         for g in self.groups.values():
             g.update()
         for e in self.edges.values():
+            e.refresh()                    # re-route: node extents changed with the scale
             e.update()
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
@@ -1069,7 +1128,7 @@ class GhostItem(QGraphicsObject):
             p.setPen(QPen(_qcolor(t.line2), 1.4, Qt.DashLine))
             p.drawRoundedRect(rect, 10, 10)
             p.setPen(_qcolor(t.muted))
-            f = QFont(); f.setPointSize(10); f.setBold(True); p.setFont(f)
+            f = QFont(); f.setPointSize(_sp(10)); f.setBold(True); p.setFont(f)
             p.drawText(rect, Qt.AlignCenter, self.why)
             return
 
@@ -1087,17 +1146,17 @@ class GhostItem(QGraphicsObject):
         p.drawPixmap(14, 16, icons.render_pixmap(dt.icon, t.accent_for(dt.accent.value), size=20))
 
         p.setPen(_qcolor(t.text))
-        f = QFont(); f.setPointSize(10); f.setWeight(QFont.DemiBold); p.setFont(f)
+        f = QFont(); f.setPointSize(_sp(10)); f.setWeight(QFont.DemiBold); p.setFont(f)
         p.drawText(QRectF(46, 7, self.W - 52, 16), Qt.AlignVCenter, dt.label)
 
         sub = QRectF(46, 26, self.W - 52, 16)
         if self._hover:
             p.setPen(accent)
-            fh = QFont(); fh.setPointSize(8); fh.setBold(True); p.setFont(fh)
+            fh = QFont(); fh.setPointSize(_sp(8)); fh.setBold(True); p.setFont(fh)
             p.drawText(sub, Qt.AlignVCenter, "＋  tap to add")
         else:
             p.setPen(_qcolor(t.faint))
-            fw = QFont(); fw.setPointSize(8); p.setFont(fw)
+            fw = QFont(); fw.setPointSize(_sp(8)); p.setFont(fw)
             fm = p.fontMetrics()
             txt = ("needed · " if self.required else "") + self.why
             p.drawText(sub, Qt.AlignVCenter, fm.elidedText(txt, Qt.ElideRight, int(self.W - 54)))
@@ -1327,7 +1386,7 @@ class CanvasView(QGraphicsView):
             return
         try:
             inst = self.ctx.add_device(type_key, x=pos.x(), y=pos.y())
-            self.ctx.add_link(target_id, inst.id)
+            self.ctx.connect(target_id, inst.id)
             self.ctx.select(inst.id)
         except Exception as ex:                  # noqa: BLE001
             self.ctx.log(f"Couldn't add element: {ex}", "info")
@@ -1660,7 +1719,7 @@ class CanvasView(QGraphicsView):
                 target = self._node_at(e.pos(), slack=_HIT_SLACK)   # …and slack on the DROP too
                 if target is not None and target.inst.id != src.inst.id:
                     try:
-                        self.ctx.add_link(src.inst.id, target.inst.id)
+                        self.ctx.connect(src.inst.id, target.inst.id)
                     except Exception as ex:          # noqa: BLE001
                         self.ctx.log(f"Couldn't connect: {ex}", "info")
             else:                                    # plain right-click -> context menu
@@ -1672,7 +1731,7 @@ class CanvasView(QGraphicsView):
     # -- one implementation of "draw a wire from a node to the cursor" -------- #
     def _link(self, src_id: str, dst_id: str) -> None:
         try:
-            self.ctx.add_link(src_id, dst_id)
+            self.ctx.connect(src_id, dst_id)
         except Exception as ex:                  # noqa: BLE001 — grammar refusals land here
             self.ctx.log(f"Couldn't connect: {ex}", "info")
 

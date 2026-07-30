@@ -33,6 +33,8 @@ class Category(str, Enum):
     STREAMING = "Streaming & Messaging"
     OBSERVABILITY = "Observability"
     WORKLOAD = "Workload & Testing"
+    SOURCE = "Sources"                # stimulus riders — inject inputs into a donor element
+    SINK = "Sinks"                    # observer riders — read outputs off a donor element
     SERVERLESS = "Serverless"
     EXTERNAL = "External"
 
@@ -83,6 +85,14 @@ class DeviceType:
     # section silently changes what the AI is told about an element, which is how a Message Queue
     # ends up "not a cloud thing" because someone moved it next to Pub/Sub.
     is_cloud: bool | None = None             # None = fall back to the category default
+    # --- rider elements (Sources / Sinks) ------------------------------------ #
+    # A rider has NO container of its own: it runs as a process INSIDE a donor element (a Machine,
+    # Router, OVS…) via the donor's runtime. On the canvas it hangs off its donor by a dotted
+    # *attach* edge, not a network cable. `role` is stated, not inferred from the palette section.
+    rider: bool = False                      # True = runs on a donor, spawns no container
+    role: str = ""                           # "source" (injects input) | "sink" (reads output)
+    attaches_to: tuple[str, ...] = ()        # donor type_keys this rider may ride
+    driver: str = ""                         # how it runs: "docker-exec" | "grouter-cli" | "qemu-serial"
 
     @property
     def cloud(self) -> bool:
@@ -134,7 +144,7 @@ _DEVICES: list[DeviceType] = [
         # heavy servers — bind9 (DNS), postfix (mail), ettercap/dsniff (spoofing), haproxy.
         # NOTE: unrelated to the element's SIZE tier, which sets CPU and cost, not contents.
         default_properties={"Name": "", "OS": "linux", "Interfaces": "1", "Toolkit": "lean"},
-        property_choices={"Toolkit": ("lean", "full")},
+        property_choices={"Toolkit": ("lean", "full", "security")},
         is_cloud=False,   # stated, not inferred from the palette section
     ),
     DeviceType(
@@ -405,27 +415,140 @@ _DEVICES: list[DeviceType] = [
     ),
 
     # ---- Observability ------------------------------------------------------
+    # Observability elements are SINKS (they observe outputs) — they live in the Sinks section now,
+    # but unlike the rider sinks they are real services with their own container (rider=False).
     DeviceType(
-        "metrics", "Metrics", Category.OBSERVABILITY, "metrics", Accent.ORANGE,
-        "Prometheus metrics collection + PromQL query UI.",
+        "metrics", "Metrics", Category.SINK, "metrics", Accent.ORANGE,
+        "Prometheus metrics collection + PromQL query UI. A Sink: it scrapes and stores the numbers "
+        "your services emit. Its own container (not a rider) — wire it to the targets it scrapes.",
+        role="sink", is_cloud=True,
         default_properties={"Name": ""},
     ),
     DeviceType(
-        "dashboard", "Dashboards", Category.OBSERVABILITY, "dashboard", Accent.ORANGE,
-        "Grafana dashboards over metrics and logs.",
+        "dashboard", "Dashboards", Category.SINK, "dashboard", Accent.ORANGE,
+        "Grafana dashboards over metrics and logs. A Sink that visualizes what Metrics collected — "
+        "wire it to a Metrics source. Its own container (not a rider).",
+        role="sink", is_cloud=True,
         default_properties={"Name": ""},
     ),
     DeviceType(
-        "tracing", "Tracing", Category.OBSERVABILITY, "tracing", Accent.ORANGE,
-        "Jaeger distributed tracing (request timelines across services).",
+        "tracing", "Tracing", Category.SINK, "tracing", Accent.ORANGE,
+        "Jaeger distributed tracing (request timelines across services). A Sink: it observes request "
+        "flow across services. Its own container (not a rider).",
+        role="sink", is_cloud=True,
         default_properties={"Name": ""},
     ),
 
-    # ---- Workload & testing -------------------------------------------------
+    # ---- Load generation (a heavyweight Source: its own container) ----------
     DeviceType(
-        "load_generator", "Load Generator", Category.WORKLOAD, "load_generator", Accent.RED,
-        "Fortio HTTP/gRPC load generator with a web UI to launch experiments.",
+        "load_generator", "Load Generator", Category.SOURCE, "load_generator", Accent.RED,
+        "Fortio HTTP/gRPC load generator with a web UI to launch experiments. A Source that injects "
+        "sustained traffic — heavier than the HTTP Probe rider, with its own container. Wire it to "
+        "the backend/gateway you want to load.",
+        role="source", is_cloud=True,
         default_properties={"Name": "", "QPS": "100", "Connections": "8"},
+    ),
+
+    # ---- Sources (stimulus riders — run ON a donor, no container of their own) ----
+    DeviceType(
+        "ping_probe", "Ping Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "A ping (ICMP) stimulus. Attach it to a Machine or Router — its donor — and give it a "
+        "Target; double-click to start pinging INSIDE the donor (live RTT / loss in its Live tab), "
+        "double-click again to stop. It rides the donor (dotted attach edge, not a cable). "
+        "Count 0 = ping continuously until stopped; Count N = send N and stop.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Count": "0"},
+    ),
+    DeviceType(
+        "http_probe", "HTTP Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "An HTTP request stimulus (curl). Attach it to a Machine / Router donor and give it a "
+        "Target and Path; double-click to start requesting from inside the donor (live 2xx + "
+        "latency), double-click again to stop. Count 0 = request continuously; Count N = do N. "
+        "Rides the donor — no container of its own. For heavy sustained load use the Load Generator.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Path": "/", "Count": "0"},
+    ),
+
+    # ---- Sinks (observer riders — run ON a donor, render its output) ----
+    DeviceType(
+        "packet_view", "Packet View", Category.SINK, "tracing", Accent.ORANGE,
+        "A live packet capture (tcpdump). Attach it to a Machine or Router — its donor; double-click "
+        "to start sniffing the donor's interface (live packet stream in its Live tab), double-click "
+        "again to stop. Count 0 = capture until stopped; Count N = stop after N packets. Captures "
+        "the GINI overlay (gini0) by default — set Interface to eth0/any for the Docker bridge. "
+        "Rides the donor — no container of its own.",
+        rider=True, role="sink", driver="docker-exec",
+        attaches_to=("host", "router", "ovs", "instance", "container"),
+        default_properties={"Name": "", "Interface": "gini0", "Filter": "", "Count": "0"},
+    ),
+    DeviceType(
+        "dns_probe", "DNS Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "A name-resolution stimulus. Attach it to a Machine/Router donor, put the hostname to "
+        "resolve in Target (e.g. 'M2' or 'web'), and double-click to start; it resolves the name "
+        "from inside the donor — over the DRAWN network (gini0), because GINI writes peer names into "
+        "/etc/hosts — and reports the answer + resolve rate. Count 0 = query continuously; Count N = "
+        "do N. Rides the donor.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Count": "0"},
+    ),
+    DeviceType(
+        "traceroute_probe", "Traceroute", Category.SOURCE, "load_generator", Accent.RED,
+        "A path-discovery stimulus (traceroute). Attach it to a Machine/Router donor and give it a "
+        "Target; it traces the hops to the target from inside the donor and reports the hop count. "
+        "Rides the donor — a good pair with a Packet View to watch each hop.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": ""},
+    ),
+    DeviceType(
+        "iperf_client", "iPerf Client", Category.SOURCE, "load_generator", Accent.RED,
+        "A throughput generator (iperf3 -c). Attach it to a Machine donor and point Target at a "
+        "donor running an iPerf Server; it drives traffic and reports the measured bandwidth. "
+        "Seconds sets the test length; Bitrate caps the rate (e.g. 100M) so it doesn't saturate the "
+        "software fabric — set '0' for unlimited. Rides the donor.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Seconds": "10", "Bitrate": "100M"},
+    ),
+    DeviceType(
+        "iperf_server", "iPerf Server", Category.SINK, "tracing", Accent.ORANGE,
+        "A throughput endpoint (iperf3 -s). Attach it to a Machine donor; it listens for an iPerf "
+        "Client and reports the bandwidth it receives. Runs until stopped. Rides the donor.",
+        rider=True, role="sink", driver="docker-exec",
+        attaches_to=("host", "instance", "container"),
+        default_properties={"Name": ""},
+    ),
+    DeviceType(
+        "iface_stats", "Interface Stats", Category.SINK, "metrics", Accent.ORANGE,
+        "A live interface counter (reads /proc/net/dev). Attach it to a Machine/Router donor; it "
+        "streams rx/tx packet and byte counts so you can watch traffic volume. Rides the donor.",
+        rider=True, role="sink", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": ""},
+    ),
+
+    # ---- xv6 Sources (OS course) — ride the xv6 Machine over its console -----
+    DeviceType(
+        "xv6_shell", "Shell Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "Launch a custom command into an xv6 Machine. Attach it to an xv6 Machine, put the command "
+        "in Command (e.g. 'ls', 'echo hi', 'cat README'); it types the command into the kernel's "
+        "console and streams the output back. The OS-course counterpart of the HTTP Probe.",
+        rider=True, role="source", driver="qemu-serial",
+        attaches_to=("xv6",),
+        default_properties={"Name": "", "Command": ""},
+    ),
+    DeviceType(
+        "xv6_workload", "Workload", Category.SOURCE, "load_generator", Accent.RED,
+        "Spawn a program on an xv6 Machine to drive the scheduler (the OS-course load generator). "
+        "Attach it to an xv6 Machine; set Program (e.g. 'spin', 'forktest', 'usertests') and Args. "
+        "Background = run with '&' so several can compete. Watch the effect in the Machine Lab.",
+        rider=True, role="source", driver="qemu-serial",
+        attaches_to=("xv6",),
+        default_properties={"Name": "", "Program": "spin", "Args": "", "Background": "true"},
+        property_choices={"Background": ("true", "false")},
     ),
 ]
 
@@ -457,6 +580,11 @@ DEFAULT_PREFIXES: dict[str, str] = {
     "metrics": "PROM", "dashboard": "GRAF", "tracing": "JGR",
     # workload / serverless
     "load_generator": "LG", "function": "FN", "api_gateway": "AGW",
+    # sources / sinks (riders)
+    "ping_probe": "PING", "http_probe": "HTTP", "packet_view": "PCAP",
+    "dns_probe": "DNS", "traceroute_probe": "TRACE", "iperf_client": "IPERFC",
+    "iperf_server": "IPERFS", "iface_stats": "IFSTAT",
+    "xv6_shell": "SH", "xv6_workload": "WL",
 }
 
 

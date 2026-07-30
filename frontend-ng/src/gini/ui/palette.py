@@ -78,7 +78,8 @@ class Palette(QWidget):
         for cat, items in by_category().items():
             top = QTreeWidgetItem([cat.value])
             top.setFlags(Qt.ItemIsEnabled)
-            f = top.font(0); f.setPointSize(10); f.setBold(True); top.setFont(0, f)
+            from .theme.manager import sp
+            f = top.font(0); f.setPointSize(sp(10)); f.setBold(True); top.setFont(0, f)
             self.tree.addTopLevelItem(top)
             top.setExpanded(True)
             for d in items:

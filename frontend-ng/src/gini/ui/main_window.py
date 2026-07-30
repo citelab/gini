@@ -82,6 +82,29 @@ _FAAS_INVOKE = (
 )
 
 
+def _photo_data_url(path: str, size: int = 128) -> str:
+    """Load an image, centre-crop to a square, downscale to a face-sized thumbnail, and encode it as
+    a PNG data-URL. QImage (not QPixmap) so it's CPU-only — safe off the GUI thread and headless.
+    Downscaling on the client keeps the DB tiny and means the original never leaves the machine.
+    Returns '' if the file isn't a readable image."""
+    import base64
+
+    from PySide6.QtCore import QBuffer, QByteArray, Qt
+    from PySide6.QtGui import QImage
+    img = QImage(path)
+    if img.isNull():
+        return ""
+    side = min(img.width(), img.height())
+    img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+    img = img.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    ba = QByteArray()                    # MUST outlive the buffer — a temporary here crashes PySide
+    buf = QBuffer(ba)
+    buf.open(QBuffer.WriteOnly)
+    img.save(buf, "PNG")
+    buf.close()
+    return "data:image/png;base64," + base64.b64encode(bytes(ba)).decode()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, app) -> None:
         super().__init__()
@@ -126,7 +149,15 @@ class MainWindow(QMainWindow):
         self.ctx.bus.k8s_metrics.connect(self._on_k8s_metrics)
         self.ctx.bus.llm_reachable.connect(self._on_llm_reachable)
         self.ctx.bus.enrolment_changed.connect(self._on_enrolment)
-        self.theme = ThemeManager(app, self.ctx.settings.theme)
+        self._chat_dock = None
+        self._force_new_signin = False             # one-shot: force the sign-in dialog (switch user)
+        self._beat = QTimer(self)                  # presence + group progress, while signed in
+        self._beat.setInterval(30_000)
+        self._beat.timeout.connect(self._heartbeat)
+        self._beat.start()
+        from .theme.manager import scale_for
+        self.theme = ThemeManager(app, self.ctx.settings.theme,
+                                  scale_for(getattr(self.ctx.settings, "text_size", "Normal")))
         self.theme.apply()
 
         self.setWindowTitle("gBuilder 6.0 — networks + cloud")
@@ -171,6 +202,11 @@ class MainWindow(QMainWindow):
         self.ctx.bus.device_console_requested.connect(self._open_console)
         self.ctx.bus.function_invoke_requested.connect(self._on_function_invoke)
         self.ctx.bus.function_deploy_requested.connect(self._on_function_deploy)
+        self.ctx.bus.rider_ran.connect(self._on_rider_state)
+        # xv6 riders run over the console (not docker); register the serial-path hooks
+        self._xv6_rider_sessions: dict = {}
+        self.ctx.xv6_rider_toggle = self._toggle_xv6_rider
+        self.ctx.xv6_rider_running = lambda rid: rid in self._xv6_rider_sessions
         self.ctx.bus.selection_changed.connect(self._on_selection_explain)
         self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self.palette.element_selected.connect(self._on_palette_explain)
@@ -203,13 +239,15 @@ class MainWindow(QMainWindow):
         v = dlg.values()
         s = self.ctx.settings
         # apply every value the dialog returned (a missing key must never abort the save)
-        for k in ("theme", "reduced_motion", "auto_internet",
+        for k in ("theme", "text_size", "reduced_motion", "auto_internet",
                   "llm_enabled", "llm_url", "llm_model", "llm_think",
                   "name_prefixes", "prices", "show_help_on_launch",
-                  "tc_url", "tc_course", "tc_student", "tc_token"):
+                  "tc_url", "tc_course", "tc_student", "tc_token", "tc_allow_insecure"):
             if k in v:
                 setattr(s, k, v[k])
         self.ctx.topology.prefix_overrides = dict(s.name_prefixes)   # apply to current topo
+        from .theme.manager import scale_for
+        self.theme.set_font_scale(scale_for(v.get("text_size", "Normal")))   # live text-size switch
         self.theme.set_theme(v["theme"])               # live theme switch
         self._wire_llm()                               # re-create / clear the LLM loop
         if getattr(self.ctx, "teaching_center", None) is not None:
@@ -227,7 +265,7 @@ class MainWindow(QMainWindow):
         took to answer (or to time out, which is worse). The pill is updated via a bus signal, the
         same way the LLM health probe reports back."""
         tc = self.ctx.connect_teaching_center()
-        if tc is None:                                 # not enrolled — a perfectly normal state
+        if tc is None or not tc.signed_in():           # not signed in — a perfectly normal state
             self.ctx.bus.enrolment_changed.emit("", False, 0)
             return
         import threading
@@ -236,8 +274,34 @@ class MainWindow(QMainWindow):
         def probe():
             try:
                 online = tc.online()
+                if not online and tc.session_expired():
+                    # the server ANSWERED and rejected us. Say "sign in again", not "you're offline"
+                    self.ctx.log("Teaching Center: your session expired — sign in again from the "
+                                 "user menu.", "info")
+                    self.ctx.bus.enrolment_changed.emit("", False, 0)
+                    return
             except Exception:                          # noqa: BLE001
                 online = False
+            # OTA: pull any teacher-authored fragments into the local content layer, so assigned
+            # experiments that reference them actually load. Version-gated on this end; a pack a newer
+            # engine authored is skipped-with-reason, never bricks the client.
+            if online:
+                try:
+                    res = tc.pull_content()
+                    if res["installed"] or res["skipped"] or res.get("removed"):
+                        note = f"Content synced: {len(res['installed'])} fragment(s)"
+                        if res.get("removed"):
+                            note += f", {len(res['removed'])} removed"
+                        if res["skipped"]:
+                            note += f", {len(res['skipped'])} skipped (needs a newer gBuilder)"
+                        self.ctx.log(note, "info")
+                except Exception:                      # noqa: BLE001 — a content pull never blocks sign-in
+                    pass
+            # a TEACHER has no "assignments due" — that's a student notion. Emit -1 as the sentinel;
+            # the pill renders it as the teacher role, not a count.
+            if tc.is_teacher():
+                self.ctx.bus.enrolment_changed.emit(student, online, -1)
+                return
             due = 0
             try:
                 lessons = tc.available_lessons()       # cached when offline — homework doesn't vanish
@@ -255,7 +319,10 @@ class MainWindow(QMainWindow):
         self.mode_indicator.set_enrolment(student, online, due)
         if not student:
             return
-        if online:
+        if due < 0:                                    # teacher
+            self.ctx.log(f"Teaching Center: signed in as {student} (teacher) to "
+                         f"{self.ctx.settings.tc_course}.", "ok")
+        elif online:
             self.ctx.log(f"Teaching Center: signed in as {student} to "
                          f"{self.ctx.settings.tc_course} — {due} mission"
                          f"{'s' if due != 1 else ''} due.", "ok")
@@ -265,20 +332,92 @@ class MainWindow(QMainWindow):
 
     # -- the User menu ------------------------------------------------------- #
     def _sign_in(self) -> None:
-        """Sign in to the course — the explicit act. Networked, so it runs off the GUI thread and
-        the pill updates when it reports back."""
+        """Sign in to the course — the explicit act.
+
+        A cached session means we can go straight through. Otherwise ask for a password (and, the
+        first time, the enrolment token that proves the account is yours to claim). The password is
+        exchanged for a session and never stored."""
+        from PySide6.QtWidgets import QMessageBox
+        from .signin_dialog import SignInDialog
+        from ..agent.teaching_center import InsecureTransport
+
+        force = self._force_new_signin           # one-shot: force the dialog (sign in as someone else)
+        self._force_new_signin = False
         s = self.ctx.settings
-        if not (s.tc_url and s.tc_course and s.tc_student):
-            self.ctx.log("Teaching Center: set the course server, course and student id in "
-                         "Settings → Teaching Center first.", "info")
+        if not (s.tc_url and s.tc_course):
+            self.ctx.log("Teaching Center: set the course server and course in Settings first.",
+                         "info")
             self._open_settings()
             return
-        self.ctx.log(f"Teaching Center: signing in as {s.tc_student}…", "info")
-        self._connect_teaching_center()
+        if not s.tc_student and not force:
+            self._open_settings()
+            return
+
+        tc = self.ctx.connect_teaching_center()
+        if tc is None:
+            return
+        if not self._force_new_signin and tc.signed_in():   # a live session — nothing to ask
+            self.ctx.log(f"Teaching Center: resuming your session as {s.tc_student}…", "info")
+            self._connect_teaching_center()
+            return
+
+        dlg = SignInDialog(self, s, first_time=bool(s.tc_token))
+        if not dlg.exec():
+            self.ctx.teaching_center = None
+            return
+        v = dlg.values()
+        s.tc_student = v["student"]
+        tc = self.ctx.connect_teaching_center()   # rebuild with the (possibly edited) student id
+        if tc is None:
+            return
+        try:
+            res = (tc.claim(v["password"], v["enrolment_token"]) if v["claim"]
+                   else tc.login(v["password"]))
+        except InsecureTransport as e:
+            self.ctx.teaching_center = None
+            QMessageBox.warning(self, "Unencrypted connection", str(e))
+            return
+        if not res.get("ok"):
+            self.ctx.teaching_center = None
+            QMessageBox.warning(self, "Sign-in failed",
+                                res.get("error") or "The course server rejected the sign-in.")
+            self.ctx.log(f"Teaching Center: sign-in failed — {res.get('error', '')}", "error")
+            return
+        if v["claim"]:
+            s.tc_token = ""                       # the enrolment token is spent; don't keep it around
+            self._persist_settings()
+        self.ctx.log(f"Teaching Center: signed in as {s.tc_student}.", "ok")
+        self._connect_teaching_center()           # pull the manifest / profile, update the pill
+
+    def _sign_in_as(self) -> None:
+        """Sign in as a DIFFERENT user without editing Settings first — type a username here.
+
+        Used to switch between accounts on one machine (e.g. a student account and the teacher
+        account). Forces the sign-in dialog (bypassing any cached session) so you always get to enter
+        the username + password of whoever you want to become."""
+        from PySide6.QtWidgets import QInputDialog
+        who, ok = QInputDialog.getText(self, "Sign in as another user",
+                                       "Username:", text="")
+        if not ok or not who.strip():
+            return
+        # switching identity: drop the current session and start fresh as the typed username
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is not None:
+            import threading
+            threading.Thread(target=tc.logout, daemon=True).start()
+        self.ctx.teaching_center = None
+        self.ctx.settings.tc_student = who.strip()
+        self.ctx.settings.tc_token = ""          # a different account's enrolment token isn't this one's
+        self._force_new_signin = True
+        self._sign_in()
 
     def _sign_out(self) -> None:
-        """Go local. Your credentials stay in Settings; you're simply not connected. Missions falls
-        back to the practice catalog, and anything unsent stays queued for the next sign-in."""
+        """Go local: drop the session (server-side too, so a shared machine doesn't stay signed in).
+        Your student id stays in Settings; anything unsent stays queued for the next sign-in."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is not None:
+            import threading
+            threading.Thread(target=tc.logout, daemon=True).start()   # network — never on the GUI thread
         self.ctx.teaching_center = None
         self.ctx.bus.enrolment_changed.emit("", False, 0)
         self.ctx.log("Teaching Center: signed out — Missions now offers the practice catalog.",
@@ -297,16 +436,25 @@ class MainWindow(QMainWindow):
         m.addSeparator()
 
         if tc is None:
-            a = m.addAction(f"Sign in as {s.tc_student}…" if s.tc_student else "Sign in…")
-            a.triggered.connect(self._sign_in)
+            self._add_signin_items(m)
         else:
-            self._add_mission_items(m, tc)
+            teacher = tc.is_teacher()
+            if not teacher:                            # 'Due / Completed' is a student view
+                self._add_mission_items(m, tc)
+                m.addSeparator()
+            self._add_teacher_items(m, tc)
+            m.addAction("Messages…").triggered.connect(self._open_messages)
+            m.addAction("Set my photo…").triggered.connect(self._set_photo)
+            if not teacher:                            # groups + AI-proxy are student notions
+                self._add_group_items(m, tc)
+                m.addAction("AI may answer for me…").triggered.connect(self._ai_proxy_consent)
             m.addSeparator()
             m.addAction("Sync now").triggered.connect(self._connect_teaching_center)
+            m.addAction("Sign in as another user…").triggered.connect(self._sign_in_as)
             m.addAction("Sign out").triggered.connect(self._sign_out)
 
         m.addSeparator()
-        m.addAction("Teaching Center settings…").triggered.connect(self._open_settings)
+        m.addAction("Settings…").triggered.connect(self._open_settings)
         m.exec(self.mode_indicator.mapToGlobal(
             self.mode_indicator.rect().bottomRight()))
 
@@ -344,6 +492,173 @@ class MainWindow(QMainWindow):
     def _play_assigned(self, lesson_id: str) -> None:
         if self.assistant.enter_missions():
             self.assistant._start_assigned_mission(lesson_id)
+
+    # -- groups, messages, AI consent (Phases B–E) ---------------------------- #
+    def _add_group_items(self, menu, tc) -> None:
+        """Your team, and where they are on the mission. A class with no groups simply has no group
+        section — absence, not an error."""
+        try:
+            g = tc.my_group()
+        except Exception:                                    # noqa: BLE001
+            return
+        if not g.get("group"):
+            return
+        cap = menu.addAction(f"Group {g['group']}")
+        cap.setEnabled(False)
+        gid = f"group:{g['group']}"
+        menu.addAction("   Open group chat").triggered.connect(
+            lambda _=False, c=gid: self.assistant.open_conversation(c))
+        for m in g.get("members", []):
+            pr = m.get("progress") or {}
+            where = (f"Level {pr['level']}" if pr.get("level") else "—")
+            dot = "●" if m.get("online") else "○"
+            label = f"   {dot}  {m['name']}" + ("  (you)" if m.get("me") else f"   ·   {where}")
+            act = menu.addAction(label)
+            if m.get("me"):
+                act.setEnabled(False)
+            else:                              # click a teammate → open the DM
+                peer = m["id"]
+                act.triggered.connect(
+                    lambda _=False, p=peer: self.assistant.open_conversation(
+                        "dm:" + "|".join(sorted((self.ctx.settings.tc_student, p)))))
+
+    def _open_messages(self) -> None:
+        """Messages live IN the Ask GINI panel now — one conversation surface, GINI and people
+        together. Jump to the instructor thread."""
+        student = self.ctx.settings.tc_student
+        self.assistant.open_conversation(f"teacher:{student}")
+
+    def _set_photo(self) -> None:
+        """Pick an image → downscale to a small square → upload as a data-URL. Downscaling on the
+        client keeps the DB tiny (a phone photo is megabytes; the roster needs a thumbnail), and it
+        means we never ship the original off the machine."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a profile photo", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp)")
+        if not path:
+            return
+        data_url = _photo_data_url(path)
+        if not data_url:
+            QMessageBox.warning(self, "Couldn't read that", "That file isn't an image I can read.")
+            return
+
+        import threading
+        def work():
+            res = tc.set_photo(data_url)
+            self.ctx.log("Photo updated — your instructor will see it." if res.get("ok")
+                         else f"Couldn't set photo: {res.get('error', 'unknown error')}",
+                         "ok" if res.get("ok") else "error")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _add_signin_items(self, menu) -> None:
+        """The signed-out user menu: sign in as the saved user, or type a different username."""
+        s = self.ctx.settings
+        if s.tc_student:
+            menu.addAction(f"Sign in as {s.tc_student}…").triggered.connect(self._sign_in)
+        menu.addAction("Sign in as another user…").triggered.connect(self._sign_in_as)
+
+    def _add_teacher_items(self, menu, tc) -> None:
+        """TEACHER MODE — author fragments. Unlocked only when signed in as a teacher; students never
+        see it. The TC session's role is the single source of truth."""
+        if not tc.is_teacher():
+            return
+        cap = menu.addAction("Teacher tools")
+        cap.setEnabled(False)
+        menu.addAction("Fragment Manager…").triggered.connect(self._fragment_manager)
+        menu.addAction("Playtest an experiment…").triggered.connect(self._playtest_experiment)
+        menu.addSeparator()
+
+    def _playtest_experiment(self) -> None:
+        """Teacher: play a DRAFT experiment before approving it — the approval gate's playtest half.
+        Lists all experiments (draft + released); playing one drops into it as a mission so the
+        teacher proves the whole composition is winnable against the real engine."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None or not tc.is_teacher():
+            return
+        lessons = tc.list_lessons()
+        if not lessons:
+            QMessageBox.information(self, "Playtest", "No experiments yet — compose one in the "
+                                                     "Teaching Center console first.")
+            return
+        labels = [f"{le.get('title', le['id'])}  ·  {le.get('status', 'released')}" for le in lessons]
+        pick, ok = QInputDialog.getItem(self, "Playtest an experiment",
+                                        "Draft experiments are only visible to you until approved:",
+                                        labels, 0, False)
+        if not ok:
+            return
+        lid = lessons[labels.index(pick)]["id"]
+        if self.assistant.enter_missions():
+            self.assistant._start_assigned_mission(lid)
+
+    def _fragment_manager(self) -> None:
+        """Open the Fragment Manager (teacher mode): list / create / edit / delete fragments, with a
+        recording editor that reads objectives off the live canvas.
+
+        Shown NON-MODALLY (show(), not exec()) — recording needs the canvas to stay interactive, and a
+        modal dialog would swallow every drag-and-drop into the board. Kept on `self` so it isn't
+        garbage-collected while it floats."""
+        from .fragment_manager import FragmentManager
+        existing = getattr(self, "_frag_mgr", None)
+        if existing is not None:
+            existing.raise_(); existing.activateWindow()
+            return
+        self._frag_mgr = FragmentManager(self, self.ctx, author=self.ctx.settings.tc_student)
+        self._frag_mgr.destroyed.connect(lambda *_: setattr(self, "_frag_mgr", None))
+        self._frag_mgr.show()
+        self._frag_mgr.raise_()
+
+    def _ai_proxy_consent(self) -> None:
+        """'May an AI answer on my behalf when I'm away?' — the student's own call, and only if the
+        instructor granted hosting. Either one alone is not consent."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None:
+            return
+        choice, ok = QInputDialog.getItem(
+            self, "AI may answer for me",
+            "When you're away, may an AI answer your groupmates on your behalf?\n"
+            "(It is always labelled as an AI. It never speaks for you about anything personal,\n"
+            "and it refuses deadlines, exams and grades.)",
+            ["No — my messages just wait for me", "Yes — let it answer about coursework"], 0, False)
+        if not ok:
+            return
+        on = choice.startswith("Yes")
+        blurb = ""
+        if on:
+            blurb, _ = QInputDialog.getText(
+                self, "Anything it should know?",
+                "One line about what you're working on (optional):")
+        res = tc.set_ai_proxy(on, blurb or "")
+        if not res.get("ok"):
+            QMessageBox.information(self, "Not available",
+                                    res.get("error", "Your instructor hasn't enabled this."))
+            return
+        self.ctx.log(f"AI proxy {'enabled' if on else 'disabled'}.", "ok")
+
+    def _heartbeat(self) -> None:
+        """Tell the course server we're here, and where we are on the current mission — that's what
+        makes a group view worth opening. Off the GUI thread; a failed beat is a non-event."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None or not tc.signed_in():
+            return
+        progress = {}
+        try:
+            ctrl = getattr(self.assistant, "_mission_ctrl", None)
+            m = getattr(ctrl, "mission", None) if ctrl else None
+            if m is not None:
+                sc = m.score()
+                res = m.last_results or []
+                level = next((r.level for r in res if r.status != "met"), 4)
+                progress = {"lesson_id": m.lesson.id, "title": m.lesson.title, "level": level,
+                            "met": sc.met, "total": sc.total, "band": sc.band}
+        except Exception:                                    # noqa: BLE001
+            progress = {}
+        import threading
+        threading.Thread(target=lambda: tc.heartbeat(progress), daemon=True).start()
 
     def _persist_settings(self) -> None:
         """Save the current Settings to ~/.gini/config.json (used by the Cue Cards tour
@@ -1259,6 +1574,7 @@ class MainWindow(QMainWindow):
             self._poll.start()                  # reconcile with real container state
             self.ctx.log("Topology running on Docker.", "ok")
             self._wire_xv6_providers()          # attach live GDB bridges to any xv6 kernels
+            self._populate_overlay_hosts()      # names resolve over gini0, not the Docker bridge
             grafana = None
             for s in getattr(self, "_last_services", []):   # surface web consoles
                 for p in s.ports:
@@ -1298,6 +1614,7 @@ class MainWindow(QMainWindow):
         self._update_status()
 
         def worker():
+            self.ctx.stop_all_riders()             # kill rider processes while the stack is still up
             ok, msg = self._remote.stop() if self._remote is not None else self._gloader.down()
             if not ok:
                 self.ctx.log(f"Stop issue: {msg}", "error")
@@ -1374,6 +1691,15 @@ class MainWindow(QMainWindow):
                 xid = self._xv6_for_peripheral(node.inst.id)
                 st = states.get(_svc(self.ctx.topology.devices[xid].name)) if xid else None
                 node.set_status("running" if st == "running" else "idle")
+            elif role == "rider":                   # Source/Sink: 'ready' when its donor is up
+                donor = self.ctx.topology.donor_of(node.inst.id)
+                if donor is None:
+                    node.set_status("idle")
+                else:
+                    dst = fabric if _role(donor.type_key) == "switch" \
+                        else states.get(_svc(donor.name))
+                    node.set_status("ready" if dst == "running"
+                                    else "error" if dst else "idle")
 
     def _set_runtime_status(self, status: str) -> None:
         from ..services.compiler import _role
@@ -1390,6 +1716,44 @@ class MainWindow(QMainWindow):
         self._recompute_addressing()
         self._revalidate()
         self._rebill()
+
+    def _populate_overlay_hosts(self) -> None:
+        """Write peer name→overlay-IP lines into each machine's /etc/hosts, so name resolution
+        (getent/DNS Probe) and ping/reach ride the DRAWN gini0 network instead of Docker's bridge.
+        Off the GUI thread — it's a docker exec per machine. Containers are fresh each run, so no
+        accumulation. This is the 'small Phase-2.x': it makes reachability follow the topology."""
+        import shlex
+        import subprocess
+        import threading
+        from ..services.compiler import _role, _svc, overlay_hosts
+        orch = getattr(self.ctx, "orchestrator", None)
+        if orch is None:
+            return
+        hosts = overlay_hosts(getattr(self.ctx, "addressing", {}) or {})
+        if len(hosts) < 2:
+            return
+        dc = list(getattr(orch, "_dc", ["docker", "compose"]))
+        wd = getattr(orch, "workdir", None)
+        devs = [d for d in self.ctx.topology.devices.values()
+                if _role(d.type_key) in ("machine", "router", "compute")]
+
+        # include SELF, and PREPEND — Docker puts the container's own name→bridge line at the TOP of
+        # /etc/hosts, so a getent/ping for the machine's own name would hit the bridge unless our
+        # overlay line comes first. `> /etc/hosts` truncates-in-place (works on the bind mount; `mv`
+        # wouldn't). Docker's original lines stay below, so nothing that needs the bridge id breaks.
+        block = "\n".join(f"{ip}\t{nm}" for nm, ip in hosts.items())
+
+        def work():
+            for dev in devs:
+                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc",
+                       "{ printf '%%s\\n' %s; cat /etc/hosts; } > /tmp/gini_hosts && "
+                       "cat /tmp/gini_hosts > /etc/hosts" % shlex.quote(block)]
+                try:
+                    subprocess.run(cmd, cwd=str(wd) if wd else None,
+                                   capture_output=True, timeout=8)
+                except Exception:                # noqa: BLE001 — best-effort; a slow box just misses
+                    pass
+        threading.Thread(target=work, daemon=True).start()
 
     def _recompute_addressing(self) -> None:
         from ..services.compiler import address_map
@@ -1712,7 +2076,7 @@ class MainWindow(QMainWindow):
             if is_router:
                 # the real C gRouter: run one CLI command over its control socket
                 cmd = ["docker", "compose", "exec", "-T", svc, "python3",
-                       "/build/grouter-zig/grconsole.py", f"/run/{svc}.ctl",
+                       "/build/grouter-build/grconsole.py", f"/run/{svc}.ctl",
                        "--once", command]
             else:
                 cmd = ["docker", "compose", "exec", "-T", "fabric",
@@ -1808,6 +2172,9 @@ class MainWindow(QMainWindow):
         if dev.type_key in ("terminal", "storage_volume"):
             self._open_peripheral(device_id)     # Terminal / disk view on its xv6
             return
+        if getattr(dev.type, "rider", False):    # a Source/Sink -> toggle it on/off on its donor
+            self._toggle_rider(device_id)
+            return
         # a running service with a web dashboard -> open it (Grafana, MinIO, …)
         if self._running and _role(dev.type_key) == "service":
             svc = _svc(dev.name)
@@ -1817,6 +2184,88 @@ class MainWindow(QMainWindow):
                 self._open_console(device_id)
                 return
         self._open_terminal(device_id)
+
+    def _toggle_rider(self, device_id: str) -> None:
+        """Double-click a Source/Sink → start it (runs continuously, output streams to its Live tab)
+        or stop it. Off the GUI thread since the start/kill exec can block briefly."""
+        import threading
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        threading.Thread(target=lambda: self.ctx.toggle_rider(device_id), daemon=True).start()
+
+    def _toggle_xv6_rider(self, rider_id: str) -> dict:
+        """Start/stop an xv6 rider (Shell Probe / Workload) over the machine's console. Called by
+        ctx.toggle_rider for qemu-serial riders, so double-click and the inspector both reach here."""
+        import threading
+        dev = self.ctx.topology.devices.get(rider_id)
+        if dev is None:
+            return {"ok": False}
+        if rider_id in self._xv6_rider_sessions:              # running -> stop
+            self._xv6_rider_sessions[rider_id]["stop"] = True
+            return {"ok": True, "running": False}
+        donor = self.ctx.topology.donor_of(rider_id)
+        provider = getattr(self, "_xv6_providers", {}).get(donor.id) if donor else None
+        if provider is None:
+            self.ctx.log(f"{dev.name}: run the xv6 Machine first (press Run).", "info")
+            self.ctx.bus.rider_ran.emit(rider_id, {"ok": False, "running": False})
+            return {"ok": False, "error": "xv6 not running"}
+        from ..domain import riders as R
+        try:
+            cmd = R.xv6_command(dev.type_key, dev.properties)
+        except R.RiderError as e:
+            self.ctx.log(f"{dev.name}: {e}", "info")
+            self.ctx.bus.rider_ran.emit(rider_id, {"ok": False, "running": False})
+            return {"ok": False, "error": str(e)}
+        sess = self._xv6_rider_sessions[rider_id] = {"stop": False}
+        self.ctx.log(f"{dev.name} → xv6: {cmd}", "info")
+        threading.Thread(target=self._xv6_reader, args=(rider_id, provider, cmd, sess),
+                         daemon=True).start()
+        return {"ok": True, "running": True}
+
+    def _xv6_reader(self, rider_id: str, provider, cmd: str, sess: dict) -> None:
+        """Type the command into the xv6 console and stream the new output back as rider snapshots
+        (reusing the same rider_ran path the inspector Live tab renders)."""
+        import time
+        lines: list[str] = []
+
+        def emit(running: bool) -> None:
+            raw = "\n".join(lines[-300:])
+            snap = {"ok": True, "running": running, "raw": raw,
+                    "measurement": {"ok": bool(raw), "lines": len(lines)},
+                    "summary": f"{len(lines)} lines"}
+            self.ctx.rider_results[rider_id] = snap
+            self.ctx.bus.rider_ran.emit(rider_id, snap)
+
+        try:
+            _, cur = provider.console_since(0)               # start after the current console tail
+            provider.send_input(cmd + "\n")
+            emit(True)
+            deadline = time.time() + 12                      # stream a while, or until stopped
+            while not sess.get("stop") and time.time() < deadline:
+                try:
+                    text, cur = provider.console_since(cur)
+                except Exception:                            # noqa: BLE001 — bridge dropped
+                    break
+                if text:
+                    lines.extend(text.split("\n"))
+                    emit(True)
+                time.sleep(0.3)
+        except Exception as e:                               # noqa: BLE001
+            self.ctx.log(f"xv6 rider error: {e}", "info")
+        self._xv6_rider_sessions.pop(rider_id, None)
+        emit(False)
+
+    def _on_rider_state(self, rider_id: str, snap) -> None:
+        """Reflect a rider's live state on its node chip: green 'running' while it streams, back to
+        'ready' (donor up) or 'idle' (topology down) when it stops."""
+        node = self.canvas.scene_.nodes.get(rider_id)
+        if node is None:
+            return
+        if snap and snap.get("running"):
+            node.set_status("running")
+        else:
+            node.set_status("ready" if self._running else "idle")
 
     def _open_router_lab(self, device_id: str) -> None:
         from ..domain.router_modules import RouterProgram
@@ -2042,7 +2491,7 @@ class MainWindow(QMainWindow):
             kind = "shell"
         elif role in ("router", "ovs"):   # real C gRouter CLI over its control socket
             cmd = (f"docker compose exec {svc} python3 "
-                   f"/build/grouter-zig/grconsole.py /run/{svc}.ctl")
+                   f"/build/grouter-build/grconsole.py /run/{svc}.ctl")
             kind = "OpenFlow switch console" if role == "ovs" else "router console"
         elif role == "controller":   # POX container — a shell to inspect it / tail logs
             cmd = f"docker compose exec {svc} sh"
@@ -2157,6 +2606,9 @@ class MainWindow(QMainWindow):
         self._persist_settings()
         self.canvas.scene_.set_theme(self.theme.theme)
         self._refresh_icons()
+        # the pill widget paints its own font — nudge it to re-measure/repaint at the new text size
+        if getattr(self, "mode_indicator", None) is not None:
+            self.mode_indicator.updateGeometry(); self.mode_indicator.update()
         self._update_status()
 
     def _on_log(self, level: str, message: str) -> None:
