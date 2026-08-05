@@ -35,6 +35,10 @@ K8S_ROLES = {"k8s_cluster": "k8scluster", "pod": "k8sworkload",
 DEFAULT_OF_PORT = 6633
 DEFAULT_OF_APP = "gini.samples.switch"
 
+# GINI32: every real board is served by one shared relay container, so a board's fabric
+# endpoint lives at this service name. (The board itself is out on the physical LAN.)
+GBRIDGE_SVC = "gbridge"
+
 
 def _role(type_key: str) -> str:
     if type_key in ROUTERS:
@@ -59,6 +63,9 @@ def _role(type_key: str) -> str:
         return "vnf"
     if type_key == "xv6":              # standalone teaching kernel (QEMU-RISC-V) — no fabric
         return "xv6"
+    if type_key == "gini32":           # a REAL ESP32 board: addressed on the fabric like a
+        return "gini32"                # host, but reached through the gbridge relay, not a
+                                       # container of its own — see _build_gbridge().
     if type_key in ("terminal", "storage_volume"):   # xv6 peripherals: pure UI, no
         return "peripheral"                          # container; never emitted/addressed
     if type_key in RIDERS:             # Sources/Sinks: run on a donor, no container of their own
@@ -381,8 +388,36 @@ class NetworkSpec:
 
 
 @dataclass
+class GBridgeSpec:
+    """One drawn GINI32 element: a real board's end of a fabric link.
+
+    Unlike every other spec this does NOT become a container. The `gbridge` relay
+    owns `ep` (the fabric-side UDP endpoint) and forwards frames over the physical
+    LAN to whichever address the board checked in from. Everything here except
+    `board_id` is handed to the board in the relay's HELLO_ACK, so the canvas stays
+    the single source of truth for the board's fabric identity.
+    """
+    name: str
+    board_id: str                  # must match the id flashed on the board
+    ip: str                        # fabric address assigned from its segment
+    mask: str
+    gw: str                        # its gateway (the router on that segment)
+    mac: str
+    ep: Endpoint
+    mode: str = "nat"              # nat = devices hidden behind `ip`; routed = own subnet
+    physical_subnet: str = ""      # the subnet behind the radio (always allocated)
+    mtu: int = 1400
+    seg: int = -1                  # the segment it sits on (routed-mode route emission)
+    # The hotspot the board raises for real devices. Assigned here, not baked into
+    # firmware, so two boards never collide and a lab can be renamed without a reflash.
+    ap_ssid: str = ""
+    ap_pass: str = ""
+
+
+@dataclass
 class RuntimeConfig:
     machines: list[MachineSpec] = field(default_factory=list)
+    gbridge: list[GBridgeSpec] = field(default_factory=list)   # real GINI32 boards
     switches: list[SwitchSpec] = field(default_factory=list)
     routers: list[RouterSpec] = field(default_factory=list)
     ovs_switches: list[OvsSpec] = field(default_factory=list)
@@ -461,6 +496,17 @@ class RuntimeConfig:
                           "region": n.region, "internal": n.internal} for n in self.networks],
             # security groups -> per-member iptables (a sidecar in each member's netns).
             "firewalls": self.firewalls,
+            # Real GINI32 boards. One `gbridge` relay container serves all of them:
+            # `fabric` is its end of the link to the board's router, and the rest is
+            # the identity it hands the board when the board announces itself.
+            "gbridge": [
+                {"board_id": b.board_id, "name": _svc(b.name), "label": b.name,
+                 "ip": b.ip, "mask": b.mask, "gw": b.gw, "mac": b.mac, "mtu": b.mtu,
+                 "mode": b.mode, "physical_subnet": b.physical_subnet,
+                 "ap_ssid": b.ap_ssid, "ap_pass": b.ap_pass,
+                 "fabric": b.ep.wiring(docker)}
+                for b in self.gbridge
+            ],
         }
 
 
@@ -661,7 +707,15 @@ class RuntimeCompiler:
             # their own `gini-grouter` container (the real C gRouter), so a router's
             # location is its own service name. Machines are their own containers too.
             # This makes every router link a symmetric cross-container UDP link.
-            loc = "fabric" if role[device_id] == "switch" else _svc(name[device_id])
+            #
+            # A GINI32 board is the one endpoint that is NOT a container: it is real
+            # hardware on the physical LAN. Its location is the shared `gbridge` relay,
+            # which owns this end of the link and forwards to the board over the LAN.
+            # The gRouter on the far side therefore needs no notion of hardware at all.
+            r = role[device_id]
+            loc = ("fabric" if r == "switch"
+                   else GBRIDGE_SVC if r == "gini32"
+                   else _svc(name[device_id]))
             return Endpoint(device=name[device_id], location=loc)
 
         port = 5000
@@ -685,7 +739,10 @@ class RuntimeCompiler:
         # forwarding node in the path, so it's addressed like a router and becomes the
         # gateway on its point-to-point segments — neighbours then route THROUGH it.
         ordered = sorted(kept, key=lambda l: 0)
-        for did_role in ("router", "vnf", "machine"):
+        # A GINI32 board is addressed exactly like a host on its segment (it presents one
+        # fabric address, behind which its real devices are NATed), so it shares the
+        # machine numbering pass.
+        for did_role in ("router", "vnf", "machine", "gini32"):
             for l in kept:
                 seg = seg_ids[seg_of_link[l.id]]
                 base = f"10.0.{seg + 1}."
@@ -781,6 +838,75 @@ class RuntimeCompiler:
                     fabric_default=have_internet and bool(m_gw.get(did)),
                     cpus=_cpus_for(topo.devices[did]),    # size tier -> CPU limit
                     toolkit=_toolkit_for(topo.devices[did])))   # lean (default) | full
+
+        # GINI32 boards: real hardware on the fabric. No container is emitted — the shared
+        # `gbridge` relay holds this end of the link and carries frames to the board over
+        # the physical LAN. We only need to hand it the identity the canvas assigned.
+        for l in kept:
+            seg = seg_ids[seg_of_link[l.id]]
+            for end in (l.source_id, l.target_id):
+                if role[end] != "gini32":
+                    continue
+                key = (l.id, end)
+                if key not in iface_ip:
+                    continue
+                midx += 1
+                dev = topo.devices[end]
+                props = getattr(dev, "properties", None) or {}
+                # Blank BoardID falls back to the element's own name. That id will not
+                # match any real board — but it is UNIQUE per element, which is the
+                # point: the earlier shared default made a second board vanish from the
+                # relay's table silently. Emitting nothing instead would be worse still,
+                # because the relay is what collects announcing boards for the Inspector
+                # to offer: no entry means no relay means an empty picker and no way to
+                # fix the very problem. So the element compiles, validate() flags it on
+                # the canvas, and the Inspector names the boards that ARE on the air.
+                board_id = str(props.get("BoardID", "")).strip() or _svc(name[end])
+                mode = str(props.get("Mode", "routed")).strip().lower()
+                if mode not in ("nat", "routed"):
+                    mode = "routed"
+
+                # The subnet behind this board's radio. Blank means "allocate me one":
+                # every board needs a DISTINCT one, or routers end up with two routes
+                # to the same network via different next hops and neither works. We
+                # skip any third octet the topology's own segments already use.
+                phys = str(props.get("PhysicalSubnet", "")).strip()
+                if not phys:
+                    used = {int(c.split(".")[2]) for c in cfg.subnets.values()}
+                    used |= {int(b.physical_subnet.split(".")[2])
+                             for b in cfg.gbridge if b.physical_subnet}
+                    oct3 = 9
+                    while oct3 in used:
+                        oct3 += 1
+                    phys = f"10.0.{oct3}.0/24"
+                elif not _valid_cidr(phys):
+                    cfg.notes.append(
+                        f"{name[end]}: PhysicalSubnet {phys!r} is not a valid CIDR — "
+                        f"allocating one automatically")
+                    phys = ""
+                    used = {int(c.split(".")[2]) for c in cfg.subnets.values()}
+                    used |= {int(b.physical_subnet.split(".")[2])
+                             for b in cfg.gbridge if b.physical_subnet}
+                    oct3 = 9
+                    while oct3 in used:
+                        oct3 += 1
+                    phys = f"10.0.{oct3}.0/24"
+
+                # The hotspot real devices join. Named after the element unless the
+                # user overrode it, so two boards are distinguishable on a phone.
+                ap_ssid = str(props.get("ApSSID", "")).strip()
+                if not ap_ssid:
+                    ap_ssid = f"GINI32-{re.sub(r'[^A-Za-z0-9-]', '', name[end]) or 'board'}"
+                ap_pass = str(props.get("ApPassword", "")).strip()
+                cfg.gbridge.append(GBridgeSpec(
+                    name=name[end], board_id=board_id,
+                    ip=iface_ip[key], mask="255.255.255.0",
+                    gw=seg_gateway.get(seg, ""), mac=mac(seg, 4, midx),
+                    ep=eps[key], mode=mode,
+                    # The board always serves this subnet; `mode` only decides whether
+                    # the emulated side gets a ROUTE to it or the devices are hidden.
+                    physical_subnet=phys, seg=seg,
+                    ap_ssid=ap_ssid, ap_pass=ap_pass))
 
         # inline VNFs: a forwarding container that applies a network function between its
         # segments (the Internet-element pattern, but fabric<->fabric + an NF instead of NAT).
@@ -974,14 +1100,22 @@ class RuntimeCompiler:
         # static inter-router routes: each router needs a route to every subnet it is
         # NOT directly on, via the neighbouring router on the shortest path. (There is no
         # routing protocol between the C routers, so we compute the static routes here.)
+        # A routed-mode GINI32 board fronts a real subnet behind its radio, which no
+        # router knows about. Feed those in as extra destinations reached via the board.
+        extra = [(b.physical_subnet, b.seg, b.ip)
+                 for b in cfg.gbridge if b.mode == "routed" and b.physical_subnet
+                 and b.seg >= 0]
         self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                                gw_seg, gw_ip)
+                                gw_seg, gw_ip, extra)
 
         return cfg
 
     @staticmethod
     def _add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                           gw_seg=None, gw_ip=None) -> None:
+                           gw_seg=None, gw_ip=None, extra_nets=None) -> None:
+        """extra_nets: [(cidr, seg, via_ip)] — destinations that are not GINI subnets but
+        hang off a node ON `seg` (a routed-mode GINI32 board's physical subnet). Routers on
+        that segment route to them via `via_ip`; others hop toward a router that is."""
         import ipaddress
         from collections import deque
 
@@ -1025,6 +1159,29 @@ class RuntimeCompiler:
                                "mask": str(net.netmask),
                                "gw": rtr_seg_ip[(nh, shared)],
                                "dev": rtr_seg_dev[(did, shared)]})
+
+            # subnets living behind a routed-mode GINI32 board (real devices on its radio)
+            for cidr, bseg, via_ip in (extra_nets or []):
+                try:
+                    net = ipaddress.ip_network(cidr, strict=False)
+                except ValueError:
+                    continue
+                if bseg in my_segs:                            # board is on my segment
+                    routes.append({"net": str(net.network_address),
+                                   "mask": str(net.netmask), "gw": via_ip,
+                                   "dev": rtr_seg_dev[(did, bseg)]})
+                else:                                          # hop toward its router
+                    cand = [c for c in seg_routers.get(bseg, []) if c in dist and c != did]
+                    if not cand:
+                        continue
+                    nh = firsthop[min(cand, key=lambda c: dist[c])]
+                    if nh is None:
+                        continue
+                    shared = adj[did][nh]
+                    routes.append({"net": str(net.network_address),
+                                   "mask": str(net.netmask),
+                                   "gw": rtr_seg_ip[(nh, shared)],
+                                   "dev": rtr_seg_dev[(did, shared)]})
 
             # default route (0.0.0.0/0) toward the Internet/NAT gateway, so internet-
             # bound traffic leaves the lab through the drawn Internet element.
@@ -1422,6 +1579,44 @@ def validate(topo: Topology) -> list[dict]:
     for l in topo.links.values():
         nbrs[l.source_id].append(l.target_id)
         nbrs[l.target_id].append(l.source_id)
+
+    # 0. GINI32 boards name real hardware. A missing or duplicated BoardID does not
+    #    fail loudly at run time — the relay keys its table by that id, so a duplicate
+    #    makes one board silently disappear. Say so on the canvas instead.
+    boards = [d for d in topo.devices.values() if d.type_key == "gini32"]
+    seen_ids: dict[str, str] = {}
+    for d in boards:
+        bid = str((d.properties or {}).get("BoardID", "")).strip()
+        if not bid:
+            issues.append({"level": "warn", "device": d.name,
+                           "message": "No BoardID set — put the id from the board's "
+                                      "label here (see `gini32 provision --id`), or no "
+                                      "hardware will attach to this element."})
+        elif bid in seen_ids:
+            issues.append({"level": "warn", "device": d.name,
+                           "message": f"BoardID {bid!r} is also used by "
+                                      f"{seen_ids[bid]} — two elements cannot share one "
+                                      f"physical board; one of them will never connect."})
+        else:
+            seen_ids[bid] = d.name
+    # overlapping physical subnets => routers get two routes to one network
+    import ipaddress as _ipa
+    nets: list[tuple] = []
+    for d in boards:
+        raw = str((d.properties or {}).get("PhysicalSubnet", "")).strip()
+        if not raw:
+            continue                      # blank is fine: allocated automatically
+        try:
+            net = _ipa.ip_network(raw, strict=False)
+        except ValueError:
+            continue                      # the compiler already notes and replaces it
+        for other, onet in nets:
+            if net.overlaps(onet):
+                issues.append({"level": "warn", "device": d.name,
+                               "message": f"PhysicalSubnet {raw} overlaps {other}'s — "
+                                          f"give each board its own, or leave both blank "
+                                          f"to have them allocated."})
+        nets.append((d.name, net))
 
     # 1. isolated devices (degree 0) — not part of any network. xv6 runs standalone (it
     #    has no networking), and its peripherals are optional, so none of them are "islands".

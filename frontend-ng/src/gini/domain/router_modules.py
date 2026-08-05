@@ -41,8 +41,13 @@ BASE: list[ModuleType] = [
     ModuleType("rewrite", "Rewrite", "send", "blue", "base", "Dec TTL, checksum, next-hop MAC"),
 ]
 
-# Inline VNFs (service functions). `gpipe` marks the ones with a REAL gRouter data-plane
-# backend (acl/nat/counter/block); classify/tap are illustrative until a backend exists.
+# Inline VNFs (service functions). `gpipe` names the gRouter data-plane function that
+# actually runs, so a module carrying one is REAL — it is programmed into the router and
+# moves packets. Every inline VNF now qualifies: classify and tap were the last two
+# illustrative entries, and the QoS and Tap work gave both a backend.
+#
+# The illustrative modules are now the CUSTOM ones below: a Lua or native VNF is real
+# only once you have written and compiled it, which is the point of that tier.
 INLINE: list[ModuleType] = [
     ModuleType("acl", "ACL / Firewall", "firewall", "amber", "inline",
                "Stateless packet filter (drop a CIDR)", {"deny": "10.0.3.0/24"},

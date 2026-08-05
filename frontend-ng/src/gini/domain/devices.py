@@ -78,6 +78,10 @@ class DeviceType:
     default_properties: dict[str, str] = field(default_factory=dict)
     # properties that should render as a dropdown in the inspector: name -> choices
     property_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Properties the element REPORTS rather than accepts: shown in the inspector but
+    # not editable, because the value is observed from the real world (e.g. a GINI32
+    # board's radio channel, which APSTA forces to match the uplink).
+    readonly_properties: tuple[str, ...] = ()
     max_links: int | None = None             # None = unlimited
     hidden: bool = False                     # kept in the registry but off the palette
     # Is this a CLOUD element (a managed service you rent) rather than a networking primitive you
@@ -203,6 +207,31 @@ _DEVICES: list[DeviceType] = [
         "cloud", "Internet", Category.EXTERNAL, "cloud", Accent.SLATE,
         "External network / the Internet.",
         default_properties={"Name": "Internet"},
+    ),
+    # A real ESP32 board (GINI32) running the gBridge firmware: the one element on
+    # the palette that is not emulated at all. It stands for a physical radio on
+    # your desk that carries real devices — a phone, a Raspberry Pi, a sensor —
+    # into the drawn topology. The board finds the lab through the `gbridge` relay
+    # and is handed its fabric address from here, so the canvas stays the source of
+    # truth. BoardID must match the id flashed into the board (serial: `set id`).
+    DeviceType(
+        "gini32", "GINI32 Board", Category.EXTERNAL, "gini32", Accent.GREEN,
+        "A real ESP32 gateway board: carries physical devices into the emulated "
+        "topology over Wi-Fi (Ethernet-in-UDP via the gbridge relay).",
+        # BoardID names a PHYSICAL object, so it is never auto-generated: it is the
+        # sticker on the board (`gini32 provision --id gini-5`). Empty by default so
+        # two boards cannot silently collide on a shared default — an unset id is a
+        # visible error rather than one board vanishing from the relay's table.
+        # Everything else is per-RUN and assigned by the canvas: blank PhysicalSubnet
+        # and ApSSID mean "allocate me one". Channel is REPORTED, not set — in APSTA
+        # the hotspot is forced onto the uplink's channel.
+        default_properties={"Name": "", "BoardID": "", "Mode": "routed",
+                            "ApSSID": "", "ApPassword": "gini12345",
+                            "PhysicalSubnet": "", "Channel": ""},
+        property_choices={"Mode": ("routed", "nat")},
+        readonly_properties=("Channel",),
+        max_links=1,
+        is_cloud=False,
     ),
 
     # ---- Software-defined networking ----------------------------------------
@@ -561,7 +590,7 @@ REGISTRY: dict[str, DeviceType] = {d.key: d for d in _DEVICES}
 DEFAULT_PREFIXES: dict[str, str] = {
     # networking
     "router": "R", "switch": "S", "hub": "H", "host": "M", "firewall": "FW",
-    "wap": "AP", "cloud": "NET", "vnf": "VNF",
+    "wap": "AP", "cloud": "NET", "vnf": "VNF", "gini32": "GB",
     # sdn
     "ovs": "OVS", "controller": "OFC",
     # compute / containers

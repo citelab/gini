@@ -49,6 +49,12 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("router", "firewall", "Filter traffic between trust zones with a firewall.", ()),
     ("firewall", "cloud", "Guard the boundary between the LAN and the Internet.", ()),
 
+    # ---- real hardware in the loop (GINI32) ------------------------------- #
+    # The board is a gateway for the physical devices behind its radio, so it wires
+    # into the topology exactly where a router or a LAN does.
+    ("gini32", "router", "Bring real devices behind the board into this router's subnet.", ()),
+    ("gini32", "switch", "Put the board's real devices on this LAN.", ()),
+
     # ---- NFV / service function chaining --------------------------------- #
     # A VNF is an inline network function: it sits BETWEEN two elements in the path, so it
     # wires to hosts, switches, routers, the OVS, the Internet, and other VNFs (a chain).

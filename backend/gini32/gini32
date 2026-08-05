@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+#
+# gini32 — build, flash and provision GINI32 boards.
+#
+# The important idea: the firmware is built ONCE and is identical on every board.
+# What makes a board "gini-5" is a few hundred bytes of NVS written separately, so
+# provisioning a device takes seconds and never risks flashing the wrong build.
+#
+#   ./gini32 build                                   # compile once
+#   ./gini32 flash    -p /dev/cu.usbserial-120       # firmware only
+#   ./gini32 provision -p /dev/cu.usbserial-120 --id gini-5 \
+#                      --ssid lab-wifi --pass hunter2
+#   ./gini32 setup    -p /dev/cu.usbserial-120 --id gini-5 \
+#                      --ssid lab-wifi --pass hunter2   # build+flash+provision
+#   ./gini32 monitor  -p /dev/cu.usbserial-120
+#   ./gini32 show     -p /dev/cu.usbserial-120       # read back what a board holds
+#   ./gini32 unpair   -p /dev/cu.usbserial-120       # release it for another laptop
+#
+# Only three things live on the board: its id, and the credentials for the lab
+# Wi-Fi it must join to reach gBuilder. Those are bootstrap — they cannot be
+# delivered over the link they are needed to establish. EVERYTHING else (hotspot
+# SSID/password, addresses, mode) comes from the canvas at run time.
+#
+# Write the --id on a sticker and put it on the board.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJ="$HERE/gbridge"
+TARGET="${GINI32_TARGET:-esp32s3}"     # esp32 | esp32s2 | esp32s3 | esp32c3 | esp32c6
+NVS_OFFSET="${GINI32_NVS_OFFSET:-0x9000}"
+NVS_SIZE="${GINI32_NVS_SIZE:-0x6000}"
+GB_SCRATCH=""                          # temp dir for the NVS blob; removed on exit
+
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m ok\033[0m %s\n' "$*"; }
+
+need_idf() {
+    [ -n "${IDF_PATH:-}" ] || die "ESP-IDF not active. Run:  . \$HOME/esp/esp-idf/export.sh"
+    command -v idf.py >/dev/null || die "idf.py not on PATH — is export.sh sourced?"
+}
+
+# Guess the serial port when the user did not say. Prefers a UART bridge, because
+# the console this firmware talks to is on UART0 (the native-USB port flashes fine
+# but shows nothing).
+guess_port() {
+    local p
+    for p in /dev/cu.usbserial-* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART \
+             /dev/ttyUSB* /dev/ttyACM* /dev/cu.usbmodem*; do
+        [ -e "$p" ] && { echo "$p"; return; }
+    done
+    return 1
+}
+
+PORT=""; ID=""; SSID=""; PASS=""; SERVER=""
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -p|--port)   PORT="$2";   shift 2 ;;
+            --id)        ID="$2";     shift 2 ;;
+            --ssid)      SSID="$2";   shift 2 ;;
+            --pass)      PASS="$2";   shift 2 ;;
+            --server)    SERVER="$2"; shift 2 ;;   # optional; default is mDNS "auto"
+            --target)    TARGET="$2"; shift 2 ;;
+            -h|--help)   usage; exit 0 ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+}
+
+# Only the subcommands that talk to a board need one.
+require_port() {
+    if [ -z "$PORT" ]; then
+        PORT="$(guess_port)" || die "no serial port found — pass -p /dev/cu.usbserial-XXXX
+       (on a board with native USB, use the port labelled UART: the console is on UART0)"
+        info "using port $PORT (guessed)"
+    fi
+}
+
+usage() {
+    sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    echo
+    echo "targets: esp32 esp32s2 esp32s3 esp32c3 esp32c6   (default: $TARGET)"
+    echo "         ESP32-H2 and ESP32-P4 have no Wi-Fi and cannot run gBridge."
+}
+
+cmd_build() {
+    need_idf
+    cd "$PROJ"
+    [ -f sdkconfig ] || { info "setting target to $TARGET"; idf.py set-target "$TARGET"; }
+    info "building gBridge"
+    idf.py build
+    ok "firmware built — the same binary goes on every board"
+}
+
+cmd_flash() {
+    require_port
+    need_idf
+    cd "$PROJ"
+    info "flashing firmware to $PORT"
+    idf.py -p "$PORT" flash
+    ok "firmware flashed"
+}
+
+# Write ONLY the per-board identity, as a fresh NVS partition. No rebuild.
+cmd_provision() {
+    require_port
+    need_idf
+    [ -n "$ID" ] || die "--id is required (e.g. --id gini-5) — put it on a sticker"
+    [ -n "$SSID" ] || die "--ssid is required (the lab Wi-Fi the board joins)"
+
+    # The NVS blob is generated from a CSV, so a comma in a credential would silently
+    # shift every following field. Refuse rather than provision a board that then fails
+    # to join with a wrong-password error nobody can explain.
+    case "$SSID$PASS$ID" in
+        *,*) die "commas are not allowed in --id/--ssid/--pass (the NVS blob is CSV)" ;;
+    esac
+
+    local gen csv bin
+    gen="$IDF_PATH/components/nvs_flash/nvs_partition_generator/nvs_partition_gen.py"
+    [ -f "$gen" ] || die "nvs_partition_gen.py not found under IDF_PATH"
+
+    # A private directory, and a trap over a GLOBAL: `trap` bodies are evaluated when
+    # EXIT fires, by which time this function's locals are long gone — naming one here
+    # would abort under `set -u` and leak the file holding the Wi-Fi password.
+    # Explicit XXXXXX template: BSD mktemp fills a bare `-t prefix` in, GNU refuses it.
+    GB_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/gini32nvs.XXXXXX")"
+    trap 'rm -rf "${GB_SCRATCH:-}"' EXIT
+    csv="$GB_SCRATCH/nvs.csv"
+    bin="$GB_SCRATCH/nvs.bin"
+
+    {
+        echo "key,type,encoding,value"
+        echo "gbridge,namespace,,"
+        echo "id,data,string,$ID"
+        echo "ssid,data,string,$SSID"
+        echo "pass,data,string,$PASS"
+        # "auto" = find the lab by mDNS. A literal address pins the board to one machine.
+        echo "server,data,string,${SERVER:-auto}"
+    } > "$csv"
+
+    info "generating NVS blob for board '$ID' (uplink '$SSID')"
+    python "$gen" generate "$csv" "$bin" "$NVS_SIZE" >/dev/null
+
+    info "writing NVS at $NVS_OFFSET on $PORT"
+    esptool.py --chip "$TARGET" --port "$PORT" write_flash "$NVS_OFFSET" "$bin"
+
+    ok "board provisioned as '$ID'"
+    printf '\n   \033[1mLabel this board: %s\033[0m\n' "$ID"
+    echo "   Put the same id in the GINI32 element's BoardID on the canvas."
+    echo "   Hotspot SSID/password and addresses come from the canvas — not from here."
+}
+
+cmd_setup()   { cmd_build; cmd_flash; cmd_provision; }
+
+# Free a board so another laptop can claim it. Physical possession is the authority:
+# whoever can plug in USB can release the board. There is deliberately no timeout —
+# a board must never re-open itself while its owner is away from the bench.
+cmd_unpair() {
+    require_port
+    need_idf
+    info "open the console and type 'unpair' (then Ctrl-] to exit)"
+    cd "$PROJ"; idf.py -p "$PORT" monitor
+}
+cmd_monitor() { require_port; need_idf; cd "$PROJ"; idf.py -p "$PORT" monitor; }
+
+# Read back what a board is actually holding, without guessing from the log.
+cmd_show() {
+    require_port
+    info "asking the board on $PORT (Ctrl-] to exit)"
+    echo "   type 'show' then 'status' at the gini> prompt"
+    need_idf; cd "$PROJ"; idf.py -p "$PORT" monitor
+}
+
+main() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in
+        build)     parse_args "$@"; cmd_build ;;
+        flash)     parse_args "$@"; cmd_flash ;;
+        provision) parse_args "$@"; cmd_provision ;;
+        setup)     parse_args "$@"; cmd_setup ;;
+        monitor)   parse_args "$@"; cmd_monitor ;;
+        unpair)    parse_args "$@"; cmd_unpair ;;
+        show)      parse_args "$@"; cmd_show ;;
+        ""|-h|--help) usage ;;
+        *) die "unknown command: $sub (try --help)" ;;
+    esac
+}
+main "$@"

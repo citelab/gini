@@ -1,0 +1,6 @@
+## Managed components. `mdns` moved out of ESP-IDF core into the component registry
+## in v5.x, so it is pulled in here; `idf.py build` fetches it automatically.
+dependencies:
+  espressif/mdns: "^1.2.0"
+  idf:
+    version: ">=5.0"

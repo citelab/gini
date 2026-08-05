@@ -52,6 +52,11 @@ class Inspector(QWidget):
         self.theme = theme
         self._device_id: str | None = None
         self.query_fn = None        # set by MainWindow: (device_name, command) -> str
+        # set by MainWindow: () -> the relay's view of every real GINI32 board.
+        # A board has no container to exec into, so its Live tab is served from here.
+        self.board_status_fn = None
+        # set by MainWindow: (action, board_name) -> bool. claim/release/blink.
+        self.board_action_fn = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -176,11 +181,32 @@ class Inspector(QWidget):
 
     def _login_allowed(self) -> bool:
         """Log in needs the lab running — except a Router, whose Router Lab opens offline."""
-        if self._live_running:
-            return True
         from ..services.compiler import _role
         d = self.ctx.topology.devices.get(self._device_id)
+        # A GINI32 is a board on a desk, not a container: there is no shell to open.
+        # Offering one would promise something that cannot exist.
+        if d is not None and d.type_key == "gini32":
+            return False
+        if self._live_running:
+            return True
         return d is not None and _role(d.type_key) == "router"
+
+    def _login_hint(self) -> str:
+        if self._login_allowed():
+            return ""
+        d = self.ctx.topology.devices.get(self._device_id)
+        if d is not None and d.type_key == "gini32":
+            return ("This is a real board, not a container — there is no shell to open.\n"
+                    "Use its serial console (`gini32 monitor`), or the Live tab here.")
+        return "Run the topology first"
+
+    def _hide_container_tabs(self, d) -> None:
+        """Interfaces and Routes describe an emulated node's stack. A GINI32 has
+        neither — its addressing lives in the Live tab, reported by the hardware."""
+        board = d is not None and d.type_key == "gini32"
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) in ("Interfaces", "Routes"):
+                self.tabs.setTabVisible(i, not board)
 
     # selection ------------------------------------------------------------- #
     def _on_select(self, device_id) -> None:
@@ -224,7 +250,8 @@ class Inspector(QWidget):
                                   ("vpc", "cloud_subnet", "region",
                                    "k8s_cluster", "instance_group", "pod"))
         self.login_btn.setEnabled(self._login_allowed())   # needs the lab up (Router excepted)
-        self.login_btn.setToolTip("" if self._login_allowed() else "Run the topology first")
+        self.login_btn.setToolTip(self._login_hint())
+        self._hide_container_tabs(d)      # a board has no stack of ours to show
         note = self._runtime_note(d)
         self.runs_lbl.setText(note)
         self.runs_lbl.setVisible(bool(note))
@@ -278,11 +305,27 @@ class Inspector(QWidget):
                 combo.setCurrentText(str(value))
                 combo.currentTextChanged.connect(lambda t, k=key: self._commit(k, t))
                 self.props_form.addRow(key, combo)
+            elif key in getattr(dt, "readonly_properties", ()):
+                # Observed, not requested: the element reports this from the real
+                # world, so showing an editable box would promise control we do not
+                # have (a GINI32's channel is forced by the uplink it joins).
+                lbl = QLabel(str(value) if str(value) else "—")
+                lbl.setStyleSheet("color: %s;" % self.theme.theme.muted)
+                lbl.setToolTip("Reported by the device — not settable here.")
+                self.props_form.addRow(key, lbl)
             else:
                 edit = QLineEdit(str(value))
+                if not str(value) and key in ("BoardID", "ApSSID", "PhysicalSubnet"):
+                    edit.setPlaceholderText(
+                        {"BoardID": "the id on the board's label, e.g. gini-5",
+                         "ApSSID": "blank = named after this element",
+                         "PhysicalSubnet": "blank = allocated automatically"}[key])
                 edit.editingFinished.connect(
                     lambda e=edit, k=key: self._commit(k, e.text()))
                 self.props_form.addRow(key, edit)
+
+        if dt.key == "gini32":                 # real hardware: claim a board to this element
+            self._build_board_panel(d, accent)
 
         if dt.key == "function":               # serverless: code editor + Invoke (Test) panel
             self._build_function_panel(d, accent)
@@ -609,12 +652,194 @@ class Inspector(QWidget):
             h["lat"].append(lat)
         self.metrics.update()                        # repaint the selected element's chart
 
+    @staticmethod
+    def _signal_word(rssi: int) -> str:
+        """A bare dBm number means nothing to a student; say what it implies."""
+        if not rssi:
+            return ""
+        if rssi >= -55:
+            return "strong"
+        if rssi >= -67:
+            return "good"
+        if rssi >= -75:
+            return "fair"
+        return "weak — move the board closer"
+
+    def _board_live_text(self, d) -> str:
+        """Everything we know about a real board. No shell, no container — this IS the
+        view for a GINI32, because there is nothing to log in to."""
+        st = self.board_status_fn() if self.board_status_fn else None
+        bid = str((d.properties or {}).get("BoardID", "")).strip()
+        if not bid:
+            return ("No BoardID set.\n\n"
+                    "This element is not bound to any physical board, so nothing will\n"
+                    "ever attach to it. Put the id from the board's label here — the one\n"
+                    "written by `gini32 provision --id`.")
+        if not st:
+            return ("Live state is available once the topology is running.\n\n"
+                    f"Waiting for board {bid!r} to check in.")
+        b = next((x for x in st.get("boards", []) if x.get("board_id") == bid), None)
+        if b is None:
+            return f"The running lab has no board called {bid!r}.\nPress Run again after changing the BoardID."
+        if not b.get("online"):
+            return (f"{bid} — OFFLINE (never checked in, or gone quiet)\n\n"
+                    "Most likely, in order:\n"
+                    "  1. the board is on a different network from this Mac\n"
+                    "  2. the id flashed on the board differs from BoardID here\n"
+                    "  3. this Wi-Fi blocks multicast, so discovery finds nothing\n"
+                    "     (fix: `gini32 provision --server <this Mac's IP>`)\n\n"
+                    "The board's own serial console says which of these it is.")
+
+        import time as _t
+        age = max(0, int(_t.time() - (b.get("last_seen") or 0)))
+        sig = self._signal_word(b.get("rssi") or 0)
+        rows = [
+            f"{bid} — connected · last heard {age}s ago",
+            "",
+            f"  server      {b.get('addr') or '?'}",
+            f"  fabric      {b.get('ip') or '?'}   mode {b.get('mode') or '?'}",
+            f"  hotspot     {b.get('ap_ssid') or '?'} on {b.get('physical_subnet') or '?'}",
+            f"  uplink      {b.get('uplink') or '?'}   ch {b.get('channel') or '?'}"
+            + (f"   RSSI {b.get('rssi')} dBm ({sig})" if b.get("rssi") else ""),
+            f"  counters    rx {b.get('rx', 0)}   tx {b.get('tx', 0)}   "
+            f"dropped {b.get('dropped', 0)}",
+            "",
+        ]
+        clients = b.get("clients") or []
+        if clients:
+            rows.append(f"devices on the radio ({len(clients)})")
+            for c in clients:
+                rows.append(f"  {c.get('mac','?'):<20} {c.get('ip','?')}")
+            rows.append("")
+            rows.append("These are real devices. They appear on the canvas while they are")
+            rows.append("associated and are never saved with the topology.")
+        else:
+            rows.append("No devices on the radio yet — join the hotspot "
+                        f"{b.get('ap_ssid') or ''} from a phone.")
+        return "\n".join(rows)
+
+    def _build_board_panel(self, d, accent: str) -> None:
+        """Pick which physical board plays this element, and claim it.
+
+        Claiming is what stops a room of students taking each other's hardware: a
+        claimed board answers only its owner and is invisible to every other gBuilder.
+        So this list only ever shows boards that are unclaimed, or already ours.
+        """
+        st = self.board_status_fn() if self.board_status_fn else None
+        if st is None:
+            lbl = QLabel("Run the topology to see boards on the network.")
+            lbl.setStyleSheet("color: %s;" % self.theme.theme.muted)
+            lbl.setWordWrap(True)
+            self.props_form.addRow("Boards", lbl)
+            return
+
+        avail = st.get("available") or []
+        mine = str((d.properties or {}).get("BoardID", "")).strip()
+
+        row = QHBoxLayout()
+        combo = QComboBox()
+        combo.setEditable(True)          # a known id can still be typed before it appears
+        combo.addItem("")
+        for b in avail:
+            tag = "yours" if b.get("claimed") else "free"
+            state = "online" if b.get("online") else "quiet"
+            combo.addItem(f"{b['name']}  ·  {tag}, {state}  ·  {b.get('mac', '')}",
+                          b["name"])
+        # keep whatever is already set, even if that board is not on the air right now
+        if mine and mine not in [b["name"] for b in avail]:
+            combo.addItem(f"{mine}  ·  not seen", mine)
+        idx = next((i for i in range(combo.count()) if combo.itemData(i) == mine), 0)
+        combo.setCurrentIndex(idx)
+
+        def pick(_i: int) -> None:
+            name = combo.currentData() or combo.currentText().split("  ·  ")[0].strip()
+            self._commit("BoardID", name)
+        combo.activated.connect(pick)
+        row.addWidget(combo, 1)
+        self.props_form.addRow("Board", self._wrap_row(row))
+
+        if not avail:
+            # A board claimed by another laptop is filtered out before it ever reaches
+            # this list, so "nothing is announcing" would be flatly untrue when one is
+            # sitting on the bench announcing steadily. Say which case this is: they
+            # look identical from here but have completely different fixes.
+            foreign = st.get("foreign") or []
+            if foreign:
+                names = ", ".join(f["board_id"] for f in foreign[:3])
+                hint = QLabel(
+                    f"<b>{names}</b> is on the network but claimed by another laptop, "
+                    f"so it will not answer this one.<br><br>If that is your board, its "
+                    f"claim outlived the install that made it. Free it over USB:<br>"
+                    f"<tt>./gini32 unpair -p &lt;port&gt;</tt> then type <tt>unpair</tt>.")
+                hint.setStyleSheet("color: %s;" % self.theme.theme.warning)
+            else:
+                hint = QLabel("No boards are announcing themselves. A board appears "
+                              "here once it joins the lab Wi-Fi — and only if it is "
+                              "unclaimed, or already claimed by this laptop.")
+                hint.setStyleSheet("color: %s;" % self.theme.theme.muted)
+            hint.setWordWrap(True)
+            self.props_form.addRow("", hint)
+            return
+
+        sel = next((b for b in avail if b["name"] == mine), None)
+
+        # The mismatch case, said plainly. Hardware is on the air, but not under the id
+        # this element is asking for — so the relay turns it away and the board simply
+        # keeps searching. Neither end can detect this alone: the board does not know
+        # what the canvas wants, and the canvas does not know the board exists. A quiet
+        # "not seen" suffix in the dropdown is not enough; name the boards that ARE here.
+        if mine and sel is None:
+            others = ", ".join(b["name"] for b in avail[:4])
+            warn = QLabel(f"No board called <b>{mine}</b> is on the network, but these "
+                          f"are: <b>{others}</b>.<br>Pick one above — the id must match "
+                          f"the board's label exactly.")
+            warn.setStyleSheet("color: %s;" % self.theme.theme.warning)
+            warn.setWordWrap(True)
+            self.props_form.addRow("", warn)
+
+        btns = QHBoxLayout()
+        blink = QPushButton("Blink")
+        blink.setToolTip("Flash this board's LED, so you can tell which one it is "
+                         "on the bench.")
+        blink.setEnabled(sel is not None)
+        blink.clicked.connect(lambda: self.board_action_fn and
+                              self.board_action_fn("blink", mine))
+        btns.addWidget(blink)
+
+        if sel is not None and not sel.get("claimed"):
+            claim = QPushButton("Claim this board")
+            claim.setToolTip("Bind it to this laptop. It will then ignore every other "
+                             "gBuilder, so nobody else can take it.")
+            claim.clicked.connect(lambda: self.board_action_fn and
+                                  self.board_action_fn("claim", mine))
+            btns.addWidget(claim, 1)
+        elif sel is not None:
+            rel = QPushButton("Release")
+            rel.setToolTip("Give the board up so another laptop can claim it. You can "
+                           "also do this on the board itself with `unpair`.")
+            rel.clicked.connect(lambda: self.board_action_fn and
+                                self.board_action_fn("release", mine))
+            btns.addWidget(rel, 1)
+        self.props_form.addRow("", self._wrap_row(btns))
+
+    @staticmethod
+    def _wrap_row(layout) -> QWidget:
+        w = QWidget()
+        layout.setContentsMargins(0, 0, 0, 0)
+        w.setLayout(layout)
+        return w
+
     def _refresh_live(self) -> None:
         if not self._device_id:
             return
         d = self.ctx.topology.devices[self._device_id]
         from ..services.compiler import _role
         role = _role(d.type_key)
+        if role == "gini32":
+            # Real hardware: no container to query, so this is served from the relay's
+            # view rather than by exec'ing into anything.
+            self.live.setPlainText(self._board_live_text(d))
+            return
         if self.query_fn is None:
             self.live.setPlainText("Live state is available once the topology is running.")
             return

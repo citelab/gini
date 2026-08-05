@@ -48,6 +48,19 @@ GUIDE: dict[str, str] = {
         "The Internet element represents the outside world / upstream network. Connect it "
         "to a router or gateway to model traffic leaving your topology toward the public "
         "Internet."),
+    "gini32": (
+        "A GINI32 Board is a REAL ESP32 on your desk running the gBridge firmware — the "
+        "only element that is not emulated. It raises its own Wi-Fi network; phones, "
+        "Raspberry Pis and sensors that join it become hosts inside the drawn topology, "
+        "their traffic carried as Ethernet-in-UDP to the emulated core. Wire it to a "
+        "router or switch and set BoardID to the id on the board's LABEL (written by "
+        "`gini32 provision --id`); everything else — address, hotspot name, subnet — is "
+        "handed to the board from the canvas when it checks in. Mode 'routed' (the "
+        "default) gives the physical subnet its own route so traffic flows BOTH ways; "
+        "'nat' hides the real devices behind the board's single address, which is the "
+        "asymmetry the book asks you to discover. Channel is REPORTED by the board, not "
+        "set — one radio serves both faces, so the hotspot follows the uplink's channel. "
+        "Devices that join the hotspot appear on the canvas by themselves."),
 
     # --- software-defined networking -------------------------------------- #
     "ovs": (

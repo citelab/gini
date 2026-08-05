@@ -34,7 +34,10 @@ def test_project_folder_round_trip(tmp_path):
     save_project_dir(d, topo, name="Lab1", brief="Build a VPC", ai_state=ai)
 
     assert is_project_dir(d)
-    assert (d / "topology.gini").exists() and (d / "project.json").exists() and (d / "ai.json").exists()
+    # v2 layout: topologies live in experiments/, while the brief + AI conversation are
+    # project-level (one per project, shared by every experiment in it).
+    assert (d / "project.json").exists() and (d / "ai.json").exists()
+    assert (d / "experiments").is_dir() and list((d / "experiments").glob("*.gini"))
     got = load_project_dir(d)
     assert got["name"] == "Lab1" and got["brief"] == "Build a VPC"
     assert got["ai_state"]["messages"][0][1] == "hi"

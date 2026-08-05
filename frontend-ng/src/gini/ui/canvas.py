@@ -421,8 +421,17 @@ class NodeItem(QGraphicsObject):
             "error": (_qcolor(t.danger), "error"),
             "ready": (_qcolor(t.accent), "ready"),      # a rider whose donor is up — runnable
         }.get(self.status, (_qcolor(t.muted), "idle"))
+        # Real hardware does not "run" — it is either there or it is not. Saying
+        # "running" about a board on someone's desk invites the wrong mental model,
+        # and "idle" reads as "fine, just quiet" when it actually means "absent".
+        if self.inst.type_key == "gini32":
+            chip_col, label = {
+                "running":  (_qcolor(t.success), "connected"),
+                "searching": (_qcolor(t.warning), "searching"),
+                "error":    (_qcolor(t.danger), "no board"),
+            }.get(self.status, (_qcolor(t.muted), "offline"))
         chip_bg = QColor(chip_col); chip_bg.setAlpha(38)
-        cr = QRectF(12, H - 24, 58, 16)
+        cr = QRectF(12, H - 24, 62, 16)
         p.setBrush(chip_bg); p.setPen(Qt.NoPen)
         p.drawRoundedRect(cr, 8, 8)
         p.setBrush(chip_col)
@@ -1077,6 +1086,74 @@ class CanvasScene(QGraphicsScene):
         self._callouts = []
 
 
+class LiveClientItem(QGraphicsObject):
+    """A real device sitting on a GINI32 board's radio, right now.
+
+    This is the one thing on the canvas that nobody drew. It is OBSERVED: the board
+    reports which devices are associated to its hotspot, and each becomes one of
+    these, hanging off the board. It is never part of the topology, never saved, and
+    cannot be selected or moved — because the person holding the phone owns it, not
+    the person editing the diagram. It vanishes when the device walks away.
+    """
+    W, H = 118.0, 40.0
+
+    def __init__(self, theme, mac: str, ip: str) -> None:
+        super().__init__()
+        self._theme = theme
+        self.mac = mac
+        self.ip = ip
+        self.setZValue(-0.5)                 # behind real elements
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setToolTip(f"{mac}\non this board's Wi-Fi as {ip}\n"
+                        f"(a real device — not part of the saved topology)")
+        self.setOpacity(0.0)
+        self._fade(0.96)
+
+    def _fade(self, to: float) -> None:
+        anim = QVariantAnimation(self)
+        anim.setStartValue(self.opacity())
+        anim.setEndValue(to)
+        anim.setDuration(220)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(self.setOpacity)
+        anim.start(QVariantAnimation.DeleteWhenStopped)
+        self._anim = anim
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-2, -2, self.W + 4, self.H + 4)
+
+    def paint(self, p: QPainter, *_) -> None:
+        t = self._theme                       # in canvas.py `theme` IS the palette
+        p.setRenderHint(QPainter.Antialiasing, True)
+        accent = QColor(t.accent_for("green"))
+
+        # dashed = "here now, not drawn": visually distinct from every real element
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, self.W, self.H), 9, 9)
+        p.fillPath(path, QBrush(QColor(t.panel2)))
+        pen = QPen(accent, 1.2, Qt.DashLine)
+        pen.setDashPattern([4, 3])
+        p.setPen(pen)
+        p.drawPath(path)
+
+        # a small radio glyph, so it reads as "arrived over the air"
+        p.setPen(QPen(accent, 1.4))
+        cx, cy = 15.0, self.H / 2
+        for r in (3.5, 7.0):
+            p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2), -50 * 16, 100 * 16)
+        p.setBrush(QBrush(accent))
+        p.drawEllipse(QPointF(cx - 1, cy), 1.6, 1.6)
+
+        f = QFont(p.font()); f.setPointSizeF(8.4); f.setBold(True)
+        p.setFont(f); p.setPen(QPen(QColor(t.text)))
+        p.drawText(QRectF(28, 5, self.W - 34, 15), Qt.AlignVCenter | Qt.AlignLeft, self.ip)
+        f.setBold(False); f.setPointSizeF(7.2)
+        p.setFont(f); p.setPen(QPen(QColor(t.muted)))
+        fm = QFontMetrics(f)
+        p.drawText(QRectF(28, 20, self.W - 34, 14), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(self.mac, Qt.ElideMiddle, int(self.W - 36)))
+
+
 class GhostItem(QGraphicsObject):
     """A translucent preview of a placeable neighbour, drawn during X-ray. Tap it and the
     view turns it into a real element wired to the long-pressed node. A ghost with
@@ -1229,6 +1306,62 @@ class CanvasView(QGraphicsView):
         ctx.bus.wizard_ghosts_requested.connect(self._on_wizard_requested)
         ctx.bus.wizard_ghosts_ready.connect(self._on_wizard_ghosts)
         ctx.bus.mission_changed.connect(lambda m: m is None and self.clear_xray())
+
+    def set_live_clients(self, live: dict) -> dict:
+        """Reconcile the devices currently on each board's radio with what is drawn.
+
+        `live` maps a GINI32 element id -> [{mac, ip}, ...]. Returns
+        {'joined': [...], 'left': [...]} so the caller can narrate the change.
+        These items are ephemeral by construction: nothing here touches the topology.
+        """
+        existing = getattr(self, "_live_clients", None)
+        if existing is None:
+            existing = self._live_clients = {}        # (device_id, mac) -> item
+
+        want: dict[tuple, dict] = {}
+        for did, clients in (live or {}).items():
+            for c in clients:
+                want[(did, c.get("mac", ""))] = c
+
+        joined, left = [], []
+
+        for key in list(existing):
+            if key not in want:
+                item = existing.pop(key)
+                if item.scene() is not None:
+                    item.scene().removeItem(item)
+                left.append(f"{key[1]}")
+
+        for key, c in want.items():
+            if key in existing:
+                continue
+            did, mac = key
+            node = self.scene_.nodes.get(did)
+            if node is None:
+                continue
+            item = LiveClientItem(self.scene_.theme, mac, c.get("ip", "?"))
+            self.scene_.addItem(item)
+            existing[key] = item
+            joined.append(f"{mac} ({c.get('ip', '?')})")
+
+        # lay each board's devices out beneath it, stacked
+        for did in {k[0] for k in existing}:
+            node = self.scene_.nodes.get(did)
+            if node is None:
+                continue
+            mine = [existing[k] for k in sorted(existing) if k[0] == did]
+            for i, item in enumerate(mine):
+                item.setPos(node.x() + (NODE_W - LiveClientItem.W) / 2,
+                            node.y() + NODE_H + 16 + i * (LiveClientItem.H + 6))
+
+        return {"joined": joined, "left": left}
+
+    def clear_live_clients(self) -> None:
+        """Drop every observed device — the lab stopped, so we know nothing."""
+        for item in getattr(self, "_live_clients", {}).values():
+            if item.scene() is not None:
+                item.scene().removeItem(item)
+        self._live_clients = {}
 
     def _show_narration(self, text: str) -> None:
         th = self.scene_.theme

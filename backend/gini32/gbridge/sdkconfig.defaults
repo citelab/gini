@@ -1,0 +1,25 @@
+# gBridge build configuration.
+#
+# The two settings that actually matter are IP_FORWARD and IPV4_NAPT: without them
+# lwIP will not route between the soft AP and the fabric interface, and devices
+# behind the board will associate and get an address but reach nothing.
+
+# --- routing and NAT between the AP face and the fabric interface ---
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+
+# --- room for the extra netif, its ARP entries, and in-flight frames ---
+CONFIG_LWIP_MAX_ACTIVE_TCP=16
+CONFIG_LWIP_ARP_TABLE_SIZE=16
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+
+# --- the soft AP needs a DHCP server; the station face does not need a client
+#     to be disabled, so both stay on ---
+CONFIG_LWIP_DHCPS=y
+
+# --- console over the built-in USB/UART bridge ---
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- a slightly larger event-loop task: the Wi-Fi + netif events are chatty ---
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

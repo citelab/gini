@@ -72,6 +72,13 @@ class SettingsDialog(QDialog):
         netf.addRow("", self.auto_internet)
         netf.addRow("", _note("Off = faithful mode: a machine reaches the internet only via "
                               "a drawn Internet element, routed through your network."))
+        self.autobuild = QCheckBox("Build missing lab images automatically")
+        self.autobuild.setChecked(bool(getattr(settings, "autobuild_images", False)))
+        netf.addRow("", self.autobuild)
+        netf.addRow("", _note("The gRouter and SDN controller run from images built on this machine. "
+                              "With this on, GINI builds one the first time you Run without it, "
+                              "instead of printing a docker build command and stopping. The first "
+                              "build takes a couple of minutes; after that it's instant."))
 
         # --- GINI AI ------------------------------------------------------ #
         aif = _page(tabs, "GINI AI")
@@ -184,6 +191,7 @@ class SettingsDialog(QDialog):
             "text_size": self.text_size.currentText(),
             "reduced_motion": self.reduced.isChecked(),
             "auto_internet": self.auto_internet.isChecked(),
+            "autobuild_images": self.autobuild.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),
             "llm_url": self.llm_url.text().strip() or "http://localhost:11434",
             "llm_model": self.llm_model.text().strip() or "llama3.1",

@@ -84,6 +84,10 @@ class Settings:
     llm_model: str = "llama3.1"
     llm_think: bool = False          # ask reasoning models (e.g. gemma4:e2b) to think
     llm_num_ctx: int = 8192          # context window (Ollama defaults to only 2048 + truncates)
+    # Build a missing backend image (gRouter / POX) automatically instead of printing the
+    # `docker build …` line and refusing to Run. Off by default: the first build takes a couple
+    # of minutes, and silently burning that on someone's first Run is a poor surprise.
+    autobuild_images: bool = False
     # backend: run the lab on the LOCAL Docker daemon, or a remote brokered GINI server
     # (a Kata-enabled Linux host reached over an authenticated API — see gini/server/).
     backend: str = "local"               # "local" | "gini-server"
@@ -102,6 +106,15 @@ class Settings:
     # auto-internet: every container gets a default eth to the internet (Docker NAT).
     # Off = "faithful mode": no internet unless an Internet element is drawn + wired.
     auto_internet: bool = False
+    # --- GINI32 hardware ---------------------------------------------------- #
+    # This install's identity to a board. A board records the id of the laptop that
+    # claimed it and then ignores every other laptop, which is what stops thirty
+    # students in one room from stealing each other's hardware. Minted on first use.
+    laptop_id: str = ""
+    # Boards this laptop has claimed: board name -> {mac, claimed_at}. Deliberately a
+    # SETTING, not part of a topology: opening a colleague's .gini file must not hand
+    # you their hardware.
+    claimed_boards: dict[str, dict] = field(default_factory=dict)
     # per-type auto-name prefix overrides, e.g. {"host": "Mach_"} -> Mach_1, Mach_2, …
     name_prefixes: dict[str, str] = field(default_factory=dict)
     # per-type GINI $/hr rental price overrides for the cost dashboard, e.g. {"database": 20}

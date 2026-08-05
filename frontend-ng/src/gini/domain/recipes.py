@@ -578,6 +578,28 @@ RECIPES: tuple[Recipe, ...] = (
         ),
         links=(("k", "sh"), ("k", "wl")),
     ),
+    # ---- real hardware in the loop ---------------------------------------- #
+    Recipe(
+        id="gini32_phone", name="A real phone inside the emulated network",
+        summary="A GINI32 board carries a real phone (or Pi) into the topology, so it can "
+                "ping an emulated machine.",
+        intent=("gini32", "esp32", "board", "hardware", "physical", "phone", "real device",
+                "cyber-physical", "hardware in the loop", "wireless", "gbridge"),
+        teaches="hardware-in-the-loop: a real radio bridging physical devices into an "
+                "emulated topology over Ethernet-in-UDP",
+        concept="networking-basics",
+        elements=(
+            _e("gb", "gini32",
+               "The real board — set BoardID to the id on its label (`gini32 provision`).",
+               col=0, row=0, props={"Mode": "routed"}),
+            _e("r1", "router", "The board's devices arrive on this router's subnet.",
+               col=1, row=0),
+            _e("s1", "switch", "The LAN the emulated machine sits on.", col=2, row=0),
+            _e("m1", "host", "An emulated machine for the real phone to ping.",
+               col=3, row=0),
+        ),
+        links=(("gb", "r1"), ("r1", "s1"), ("s1", "m1")),
+    ),
 )
 
 _BY_ID = {r.id: r for r in RECIPES}

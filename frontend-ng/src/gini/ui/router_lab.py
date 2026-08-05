@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QDialog, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -24,6 +24,7 @@ class RouterLab(QDialog):
     tablestats_ready = Signal(object)  # OpenFlow table-level stats dict
     routes_ready = Signal(list)  # parsed RouteEntry rows (from a worker thread)
     chain_ready = Signal(str)    # live `gpipe list` output (the deployed service chain)
+    delay_ready = Signal(str)    # live `delay show` output (link-delay status)
 
     def __init__(self, parent, theme: ThemeManager, device, program: RouterProgram,
                  on_console=None, command_fn=None, sdn=False, query_fn=None,
@@ -46,6 +47,7 @@ class RouterLab(QDialog):
         self.tablestats_ready.connect(self._on_table_stats)
         self.routes_ready.connect(self._on_routes)
         self.chain_ready.connect(self._on_chain)
+        self.delay_ready.connect(self._set_delay_status)
         if self.sdn:
             program.set_mode("openflow")   # an OVS is an OpenFlow switch by definition
             from ..domain.flowlog import FlowLog
@@ -57,7 +59,7 @@ class RouterLab(QDialog):
                   "router": ("Router Lab", "router")}
         kind, icon_key = _faces.get(self.face, _faces["router"])
         self.setWindowTitle(f"{kind} — {device.name}")
-        self.resize(880, 720 if self.face != "router" else 620)
+        self.resize(880, 720 if self.face != "router" else 560)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
 
         root = QVBoxLayout(self)
@@ -113,7 +115,8 @@ class RouterLab(QDialog):
             root.addWidget(self._build_firewall_panel())
             self._adv_box = QWidget()
             adv = QVBoxLayout(self._adv_box); adv.setContentsMargins(0, 0, 0, 0)
-            adv.addWidget(body_w); adv.addWidget(self._build_sfc_row()); adv.addWidget(foot_w)
+            adv.addWidget(body_w); adv.addWidget(self._build_sfc_row())
+            adv.addWidget(self._build_delay_panel()); adv.addWidget(foot_w)
             self._adv_box.setVisible(False)
             root.addWidget(self._advanced_toggle())
             root.addWidget(self._adv_box, 1)
@@ -121,6 +124,7 @@ class RouterLab(QDialog):
         else:  # router — the full pipeline is the point
             root.addWidget(body_w, 1)
             root.addWidget(self._build_sfc_row())
+            root.addWidget(self._build_delay_panel())
             root.addWidget(self._build_route_table())
             root.addWidget(foot_w)
 
@@ -137,7 +141,7 @@ class RouterLab(QDialog):
     # palette ---------------------------------------------------------------
     def _build_palette(self) -> QWidget:
         t = self.theme.theme
-        w = QWidget(); w.setObjectName("Sidebar"); w.setFixedWidth(214)
+        w = QWidget(); w.setObjectName("Sidebar")
         lay = QVBoxLayout(w); lay.setContentsMargins(10, 10, 10, 10); lay.setSpacing(5)
 
         def header(text: str) -> QLabel:
@@ -176,7 +180,12 @@ class RouterLab(QDialog):
         for mt in CUSTOM:
             lay.addWidget(pal_btn(mt, locked=False))
         lay.addStretch(1)
-        return w
+        # keep the palette from stretching the window tall on small screens: scroll it
+        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setWidget(w)
+        sc.setObjectName("Sidebar"); sc.setFrameShape(QFrame.NoFrame)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sc.setFixedWidth(216)
+        return sc
 
     def _build_pipeline(self) -> QScrollArea:
         self.pipe_host = QWidget()
@@ -415,16 +424,7 @@ class RouterLab(QDialog):
         w = QFrame(); w.setObjectName("Card")
         w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
                         f"border-radius:10px;}}")
-        lay = QVBoxLayout(w); lay.setContentsMargins(12, 10, 12, 12); lay.setSpacing(6)
-        head = QHBoxLayout()
-        title = QLabel("Routing Table")
-        title.setStyleSheet("font-size:13px; font-weight:600;")
-        self.route_status = QLabel("…"); self.route_status.setObjectName("Muted")
-        refresh = QPushButton("  Refresh"); refresh.setIcon(icons.icon("play", t.muted, 13))
-        refresh.clicked.connect(self._refresh_routes)
-        head.addWidget(title); head.addStretch(1)
-        head.addWidget(self.route_status); head.addSpacing(10); head.addWidget(refresh)
-        lay.addLayout(head)
+        lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
 
         cols = ["Network", "Netmask", "Next hop", "Interface"]
         self.route_table = QTableWidget(0, len(cols))
@@ -437,6 +437,15 @@ class RouterLab(QDialog):
         for i in range(len(cols)):
             hh.setSectionResizeMode(i, QHeaderView.Stretch if i in (0, 2)
                                     else QHeaderView.ResizeToContents)
+
+        head = QHBoxLayout()
+        title = self._chevron("Routing table", self.route_table, expanded=True)
+        self.route_status = QLabel("…"); self.route_status.setObjectName("Muted")
+        refresh = QPushButton("  Refresh"); refresh.setIcon(icons.icon("play", t.muted, 13))
+        refresh.clicked.connect(self._refresh_routes)
+        head.addWidget(title); head.addStretch(1)
+        head.addWidget(self.route_status); head.addSpacing(10); head.addWidget(refresh)
+        lay.addLayout(head)
         lay.addWidget(self.route_table)
         return w
 
@@ -543,6 +552,137 @@ class RouterLab(QDialog):
     def _set_fw_status(self, text: str) -> None:
         if hasattr(self, "fw_status"):
             self.fw_status.setText(text)
+
+    def _chevron(self, title: str, target: QWidget, expanded: bool) -> QPushButton:
+        """A flat header button that collapses/expands `target` (to save vertical space)."""
+        btn = QPushButton(); btn.setCheckable(True); btn.setChecked(expanded); btn.setFlat(True)
+        btn.setStyleSheet("text-align:left; font-size:13px; font-weight:600; border:none; padding:0;")
+
+        def sync(on):
+            target.setVisible(on)
+            btn.setText(("  ▾  " if on else "  ▸  ") + title)
+        btn.toggled.connect(sync); sync(expanded)
+        return btn
+
+    # Link delay (ingress / egress holding queues) --------------------------
+    def _delay_spin(self, val: float, hi: float, step: float, dec: int, suffix: str) -> QDoubleSpinBox:
+        s = QDoubleSpinBox()
+        s.setRange(0.0, hi); s.setSingleStep(step); s.setDecimals(dec)
+        s.setValue(val); s.setSuffix(suffix); s.setMaximumWidth(96)
+        return s
+
+    def _delay_row(self, lay, name: str, saved: str):
+        """One side's controls (base / jitter / correlation), seeded from a saved string."""
+        base = jit = corr = 0.0
+        try:
+            parts = (saved or "").split()
+            if parts: base = float(parts[0])
+            if len(parts) > 1: jit = float(parts[1])
+            if len(parts) > 2: corr = float(parts[2])
+        except ValueError:
+            pass
+        row = QHBoxLayout()
+        tag = QLabel(name); tag.setMinimumWidth(64); tag.setStyleSheet("font-weight:600;")
+        row.addWidget(tag)
+        row.addWidget(QLabel("base"));   b = self._delay_spin(base, 5000, 5, 0, " ms")
+        row.addWidget(b)
+        row.addWidget(QLabel("jitter")); j = self._delay_spin(jit, 1000, 1, 0, " ms")
+        row.addWidget(j)
+        row.addWidget(QLabel("corr"));   c = self._delay_spin(corr, 0.99, 0.05, 2, "")
+        row.addWidget(c)
+        row.addStretch(1)
+        lay.addLayout(row)
+        return b, j, c
+
+    def _build_delay_panel(self) -> QWidget:
+        t = self.theme.theme
+        w = QFrame(); w.setObjectName("Card")
+        w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
+                        f"border-radius:10px;}}")
+        lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
+
+        # collapsible body (hint + the two parameter rows) — collapsed by default to save height
+        body = QWidget()
+        bl = QVBoxLayout(body); bl.setContentsMargins(0, 6, 0, 0); bl.setSpacing(6)
+        hint = QLabel("Hold every packet on the way in (ingress) or out (egress) to model link "
+                      "latency. Jitter wanders with the correlation, order preserved. base 0 = off.")
+        hint.setObjectName("Faint"); hint.setWordWrap(True)
+        bl.addWidget(hint)
+        props = getattr(self.device, "properties", {}) or {}
+        self.di_base, self.di_jit, self.di_corr = self._delay_row(bl, "ingress", props.get("DelayIngress", ""))
+        self.de_base, self.de_jit, self.de_corr = self._delay_row(bl, "egress", props.get("DelayEgress", ""))
+
+        head = QHBoxLayout()
+        title = self._chevron("Link delay", body, expanded=False)
+        self.delay_status = QLabel(""); self.delay_status.setObjectName("Muted")
+        apply = QPushButton("  Apply"); apply.setObjectName("Accent")
+        apply.setIcon(icons.icon("send", "#ffffff", 13)); apply.clicked.connect(self._apply_delay)
+        clear = QPushButton("  Clear"); clear.clicked.connect(self._clear_delay)
+        head.addWidget(title); head.addStretch(1)
+        head.addWidget(self.delay_status); head.addSpacing(10)
+        head.addWidget(clear); head.addWidget(apply)
+        lay.addLayout(head)
+        lay.addWidget(body)
+        return w
+
+    @staticmethod
+    def _delay_cmd(side: str, base: float, jit: float, corr: float) -> str:
+        if base <= 0 and jit <= 0:
+            return f"delay {side} off"
+        return f"delay {side} {base:.0f} {jit:.0f} {corr:.2f}"
+
+    def _apply_delay(self) -> None:
+        ing = f"{self.di_base.value():.0f} {self.di_jit.value():.0f} {self.di_corr.value():.2f}"
+        egr = f"{self.de_base.value():.0f} {self.de_jit.value():.0f} {self.de_corr.value():.2f}"
+        props = getattr(self.device, "properties", None)
+        if props is not None:                       # persist onto the element
+            props["DelayIngress"] = ing if (self.di_base.value() or self.di_jit.value()) else ""
+            props["DelayEgress"]  = egr if (self.de_base.value() or self.de_jit.value()) else ""
+        qf = self.query_fn
+        if qf is None:
+            self._set_delay_status("not running — press Run, then Apply")
+            return
+        import threading
+        self._set_delay_status("applying…")
+        cmds = [self._delay_cmd("ingress", self.di_base.value(), self.di_jit.value(), self.di_corr.value()),
+                self._delay_cmd("egress",  self.de_base.value(),  self.de_jit.value(),  self.de_corr.value())]
+
+        def work():
+            out = ""
+            try:
+                for c in cmds:
+                    qf(c)
+                out = qf("delay show")
+            except Exception as e:
+                out = f"(apply failed: {e})"
+            self.delay_ready.emit(out.strip() or "applied")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _clear_delay(self) -> None:
+        for s in (self.di_base, self.di_jit, self.di_corr,
+                  self.de_base, self.de_jit, self.de_corr):
+            s.setValue(0.0)
+        props = getattr(self.device, "properties", None)
+        if props is not None:
+            props["DelayIngress"] = ""; props["DelayEgress"] = ""
+        qf = self.query_fn
+        if qf is None:
+            self._set_delay_status("cleared (not running)")
+            return
+        import threading
+        self._set_delay_status("clearing…")
+
+        def work():
+            try:
+                qf("delay clear")
+            except Exception as e:
+                self.delay_ready.emit(f"(clear failed: {e})"); return
+            self.delay_ready.emit("cleared")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_delay_status(self, text: str) -> None:
+        if hasattr(self, "delay_status"):
+            self.delay_status.setText(text.splitlines()[0] if text else "")
 
     # Service Function Chain controls (router / legacy pipeline) -------------
     def _build_sfc_row(self) -> QWidget:

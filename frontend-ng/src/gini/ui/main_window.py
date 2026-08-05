@@ -7,6 +7,7 @@ flow from the ThemeManager so Dark / Light / GINI Brand swap instantly.
 from __future__ import annotations
 
 import math
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup
@@ -131,6 +132,7 @@ class MainWindow(QMainWindow):
         self._workdir: str | None = None
         self._project_path: str | None = None
         self._project_dir: str | None = None       # active project folder (Projects)
+        self._experiment: str | None = None        # the experiment (topology) open within it
         self._router_programs: dict = {}        # device id -> RouterProgram (Router Lab)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
@@ -238,13 +240,13 @@ class MainWindow(QMainWindow):
             return
         v = dlg.values()
         s = self.ctx.settings
-        # apply every value the dialog returned (a missing key must never abort the save)
-        for k in ("theme", "text_size", "reduced_motion", "auto_internet",
-                  "llm_enabled", "llm_url", "llm_model", "llm_think",
-                  "name_prefixes", "prices", "show_help_on_launch",
-                  "tc_url", "tc_course", "tc_student", "tc_token", "tc_allow_insecure"):
-            if k in v:
-                setattr(s, k, v[k])
+        # Apply EVERY value the dialog returned that is a real Settings field. This used to be a
+        # hand-maintained whitelist, which meant adding a control to the dialog silently did
+        # nothing until you remembered to add its key here too — the edit was read, then dropped,
+        # and Settings saved the old value back. `hasattr` still guards against a typo'd key.
+        for k, val in v.items():
+            if hasattr(s, k):
+                setattr(s, k, val)
         self.ctx.topology.prefix_overrides = dict(s.name_prefixes)   # apply to current topo
         from .theme.manager import scale_for
         self.theme.set_font_scale(scale_for(v.get("text_size", "Normal")))   # live text-size switch
@@ -641,9 +643,21 @@ class MainWindow(QMainWindow):
 
     def _heartbeat(self) -> None:
         """Tell the course server we're here, and where we are on the current mission — that's what
-        makes a group view worth opening. Off the GUI thread; a failed beat is a non-event."""
+        makes a group view worth opening. Off the GUI thread; a failed beat is a non-event.
+
+        Defensive throughout, because this fires on a QTimer: an exception raised here lands in the
+        Qt event loop (noisy in the app, and fatal under pytest-qt, where it fails whichever test
+        happens to be running). A client that can't beat — no client, a stub, a half-built one — is
+        simply skipped."""
         tc = getattr(self.ctx, "teaching_center", None)
-        if tc is None or not tc.signed_in():
+        signed_in = getattr(tc, "signed_in", None)
+        beat = getattr(tc, "heartbeat", None)
+        if not callable(signed_in) or not callable(beat):
+            return
+        try:
+            if not signed_in():
+                return
+        except Exception:                                    # noqa: BLE001 — an unreachable centre
             return
         progress = {}
         try:
@@ -657,8 +671,14 @@ class MainWindow(QMainWindow):
                             "met": sc.met, "total": sc.total, "band": sc.band}
         except Exception:                                    # noqa: BLE001
             progress = {}
+
+        def _beat() -> None:                                 # swallow in the worker too — a dropped
+            try:                                             # beat must never surface as a warning
+                beat(progress)
+            except Exception:                                # noqa: BLE001
+                pass
         import threading
-        threading.Thread(target=lambda: tc.heartbeat(progress), daemon=True).start()
+        threading.Thread(target=_beat, daemon=True).start()
 
     def _persist_settings(self) -> None:
         """Save the current Settings to ~/.gini/config.json (used by the Cue Cards tour
@@ -759,9 +779,12 @@ class MainWindow(QMainWindow):
             return a
 
         # build the actions (same wiring as before — checkable, enable/disable, slots)
-        act("new", "new", "New project", self._new_project)
-        act("open", "open", "Open project", self._open_project_dialog)
-        act("save", "save", "Save project", self._save_project)
+        # The LEFT tray works INSIDE the current project — the express menu for its experiments.
+        # (Project-level operations — switch/create/delete a project — live on the centred
+        # navigator, so the two surfaces mean different things instead of duplicating each other.)
+        act("new", "new", "New experiment in this project", self._new_experiment)
+        act("open", "open", "Open an experiment from this project", self._open_experiment)
+        act("save", "save", "Save this experiment", self._save_project)
         act("compile", "compile", "Compile", self._compile)
         act("layout", "layout", "Arrange", self._auto_layout)
         self._connect_act = act("connect", "link", "Connect", self._toggle_connect, checkable=True)
@@ -889,22 +912,26 @@ class MainWindow(QMainWindow):
         self._nav_btn.setMenu(menu)
 
     def _build_nav_menu(self, menu) -> None:
+        """The centred navigator is PROJECT-level: which project am I in, and switch/create/
+        delete/list them. Experiments inside the current project are the left tray's job."""
         from ..app.paths import projects_dir
         from ..services import list_projects
         menu.clear()
-        header = menu.addAction(f"● {self._nav_btn.text()}")
+        header = menu.addAction(f"● {self._project_name()}")
         header.setEnabled(False)
+        sub = menu.addAction(f"    {len(self._experiments())} experiment(s) · "
+                             f"now: {self._experiment or '—'}")
+        sub.setEnabled(False)
         menu.addSeparator()
         menu.addAction("New project…", self._new_project)
         menu.addAction("Open project…", self._open_project_dialog)
-        menu.addAction("Save", self._save_project)
-        menu.addAction("Save As…", self._save_project_as)
         menu.addSeparator()
-        recents = list_projects(projects_dir())[:6]
-        if recents:
-            r = menu.addAction("Recent projects"); r.setEnabled(False)
-            for info in recents:
-                act = menu.addAction("   " + info["name"])
+        projects = list_projects(projects_dir())[:8]
+        if projects:
+            r = menu.addAction("Switch project"); r.setEnabled(False)
+            for info in projects:
+                n = info.get("experiments", 0)
+                act = menu.addAction(f"   {info['name']}" + (f"  ({n})" if n else ""))
                 act.setCheckable(True)
                 act.setChecked(info["path"] == self._project_dir)
                 act.triggered.connect(lambda _=False, p=info["path"]: self._switch_project(p))
@@ -921,6 +948,131 @@ class MainWindow(QMainWindow):
     def _set_project_label(self, name: str) -> None:
         if hasattr(self, "_nav_btn"):
             self._nav_btn.setText(name or "Untitled")
+
+    def _project_name(self) -> str:
+        from pathlib import Path
+        return Path(self._project_dir).name if self._project_dir else "Untitled"
+
+    def _experiments(self) -> list[str]:
+        from ..services import list_experiments
+        if not self._project_dir:
+            return []
+        return [e["name"] for e in list_experiments(self._project_dir)]
+
+    def _show_where(self) -> None:
+        """The nav chip names the project; the title adds › experiment once there's a choice to
+        make. With a single experiment the suffix is noise, so it's left off."""
+        proj = self._project_name()
+        self._set_project_label(proj)
+        exp = self._experiment
+        many = len(self._experiments()) > 1
+        self.setWindowTitle(f"gBuilder 6.0 — {proj}" + (f" › {exp}" if exp and many else ""))
+
+    # -- experiments (inside the current project) ---------------------------- #
+    def _new_experiment(self) -> None:
+        """Add another experiment to this project. The brief and the Ask GINI conversation are
+        project-level, so they carry over — that's the whole point of grouping experiments."""
+        from PySide6.QtWidgets import QInputDialog
+        from ..services import experiment_path
+        if self._switch_blocked():
+            return
+        if not self._project_dir:
+            self._save_project_as()                  # no project yet — make one first
+            if not self._project_dir:
+                return
+        name, ok = QInputDialog.getText(self, "New experiment", "Experiment name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if experiment_path(self._project_dir, name).exists():
+            self.ctx.log(f"“{name}” already exists in this project.", "info")
+            return
+        self._persist_current_project()              # keep the outgoing experiment
+        self._router_programs.clear()
+        from ..domain.topology import Topology
+        self._experiment = name
+        self._set_topology(Topology(name))
+        self.assistant.note_experiment(name)         # the canvas changed — tell the tutor
+        self._persist_current_project()              # materialise the new file
+        self._show_where()
+        self.ctx.log(f"New experiment “{name}” in “{self._project_name()}”.", "ok")
+
+    def _open_experiment(self) -> None:
+        """Pick another experiment in this project (the left tray's express switcher)."""
+        from PySide6.QtWidgets import QInputDialog
+        if self._switch_blocked():
+            return
+        names = self._experiments()
+        if not names:
+            self.ctx.log("This project has no other experiments yet — press ＋ to add one.", "info")
+            return
+        cur = self._experiment if self._experiment in names else names[0]
+        name, ok = QInputDialog.getItem(self, "Open experiment",
+                                        f"Experiments in “{self._project_name()}”:",
+                                        names, names.index(cur), False)
+        if ok and name:
+            self._switch_experiment(name)
+
+    def _switch_experiment(self, name: str) -> None:
+        from ..services import load_experiment
+        if not self._project_dir or name == self._experiment or self._switch_blocked():
+            return
+        self._persist_current_project()              # save the one we're leaving
+        try:
+            topo = load_experiment(self._project_dir, name)
+        except Exception as e:                       # noqa: BLE001
+            self.ctx.log(f"Couldn't open “{name}”: {e}", "error")
+            return
+        self._router_programs.clear()
+        self._experiment = name
+        self._set_topology(topo)
+        self.assistant.note_experiment(name)         # conversation continues, canvas changed
+        self._persist_current_project()              # remember which one is current
+        self._show_where()
+        self.ctx.log(f"Opened experiment “{name}”.", "ok")
+
+    def _rename_experiment(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        from ..services import rename_experiment
+        if not (self._project_dir and self._experiment) or self._switch_blocked():
+            return
+        new, ok = QInputDialog.getText(self, "Rename experiment", "New name:",
+                                       text=self._experiment)
+        new = (new or "").strip()
+        if not ok or not new or new == self._experiment:
+            return
+        self._persist_current_project()
+        if not rename_experiment(self._project_dir, self._experiment, new):
+            self.ctx.log(f"Couldn't rename to “{new}” (does it already exist?).", "info")
+            return
+        self._experiment = new
+        self.ctx.topology.name = new
+        self._persist_current_project()
+        self._show_where()
+        self.ctx.log(f"Renamed experiment to “{new}”.", "ok")
+
+    def _delete_experiment(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        from ..services import delete_experiment
+        if not (self._project_dir and self._experiment) or self._switch_blocked():
+            return
+        names = self._experiments()
+        if len(names) <= 1:
+            self.ctx.log("This is the project's only experiment — delete the project instead.",
+                         "info")
+            return
+        if QMessageBox.question(self, "Delete experiment",
+                                f"Delete “{self._experiment}” from this project?\n"
+                                f"The project's brief and AI conversation are kept."
+                                ) != QMessageBox.Yes:
+            return
+        gone = self._experiment
+        delete_experiment(self._project_dir, gone)
+        nxt = next((n for n in self._experiments() if n != gone), None)
+        if nxt:
+            self._experiment = None                  # force the switch to actually load
+            self._switch_experiment(nxt)
+        self.ctx.log(f"Deleted experiment “{gone}”.", "ok")
 
     # -- project operations ------------------------------------------------- #
     def _switch_blocked(self) -> bool:
@@ -946,14 +1098,15 @@ class MainWindow(QMainWindow):
         if folder.exists():
             self.ctx.log(f"A project named “{name}” already exists.", "info")
             return
+        from ..services.project import FIRST_EXPERIMENT
         self._persist_current_project()          # save whatever we were on
         self._project_dir = str(folder)
         self._project_path = None
+        self._experiment = FIRST_EXPERIMENT      # neutral — never the project's own name
         self._router_programs.clear()
         self._set_topology(Topology(name))
-        self.assistant.clear_conversation()
-        self._set_project_label(name)
-        self.setWindowTitle(f"gBuilder 6.0 — {name}")
+        self.assistant.clear_conversation()      # a NEW project = a fresh context (unlike a
+        self._show_where()                       # new experiment, which keeps the conversation)
         self._persist_current_project()          # materialise the folder on disk
         self.ctx.log(f"New project “{name}”.", "ok")
 
@@ -1052,25 +1205,35 @@ class MainWindow(QMainWindow):
         self._router_programs.clear()
         self._project_dir = data["path"]
         self._project_path = None
+        self._experiment = data.get("experiment")
         self._set_topology(data["topology"])
         self.assistant.set_brief(data["brief"])
         self.assistant.load_ai_state(data["ai_state"])   # swap the Ask GINI conversation
-        self._set_project_label(data["name"])
-        self.setWindowTitle(f"gBuilder 6.0 — {data['name']}")
+        self._show_where()
         remember_project(data["path"])
-        self.ctx.log(f"Opened project “{data['name']}”.", "ok")
+        n = len(data.get("experiments") or [])
+        self.ctx.log(f"Opened project “{data['name']}” ({n} experiment(s), "
+                     f"now “{self._experiment}”).", "ok")
 
     def _persist_current_project(self) -> None:
-        """Write the active project folder (topology + brief + AI conversation)."""
+        """Write the active project: the CURRENT experiment's topology, plus the project-level
+        brief and Ask GINI conversation (shared by every experiment in the project)."""
         if not self._project_dir:
             return
         from pathlib import Path
         from ..app.paths import remember_project
         from ..services import save_project_dir
+        from ..services.project import FIRST_EXPERIMENT
         name = Path(self._project_dir).name
-        self.ctx.topology.name = name
+        # Fall back to the neutral first-experiment name, NEVER the project's own. This used to be
+        # `self._experiment or name`, which meant any caller that forgot to set `_experiment` (the
+        # Default project, Save-As) silently produced an experiment named after its project — so
+        # the experiment list looked like it contained the project itself.
+        exp = self._experiment or FIRST_EXPERIMENT
+        self.ctx.topology.name = exp
         save_project_dir(self._project_dir, self.ctx.topology, name=name,
-                         brief=self.assistant.brief(), ai_state=self.assistant.ai_state())
+                         brief=self.assistant.brief(), ai_state=self.assistant.ai_state(),
+                         experiment=exp)
         remember_project(self._project_dir)
 
     def _save_project(self) -> None:
@@ -1088,11 +1251,15 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "Save project as", "Project name:", text=default)
         if not ok or not name.strip():
             return
+        from ..services.project import FIRST_EXPERIMENT
         ensure_dirs()
         self._project_dir = str(projects_dir() / name.strip())
         self._project_path = None
-        self._set_project_label(name.strip())
-        self.setWindowTitle(f"gBuilder 6.0 — {name.strip()}")
+        # never name the first experiment after the project (same rule as _new_project) — it made
+        # the experiment list look like it contained the project, and it collided with the very
+        # next "New experiment…" if the student typed the same name.
+        self._experiment = self._experiment or FIRST_EXPERIMENT
+        self._show_where()
         self._persist_current_project()
         self.ctx.log(f"Saved project “{name.strip()}”.", "ok")
 
@@ -1136,9 +1303,10 @@ class MainWindow(QMainWindow):
         if is_project_dir(d):
             self._load_project_folder(str(d))
             return
+        from ..services.project import FIRST_EXPERIMENT
         self._project_dir = str(d)           # adopt the current (empty) canvas as Default
-        self._set_project_label("Default")
-        self.setWindowTitle("gBuilder 6.0 — Default")
+        self._experiment = FIRST_EXPERIMENT
+        self._show_where()
         self._persist_current_project()      # materialise it so it's there next launch
         self.ctx.log("Working in the Default project — your topology and Ask GINI "
                      "conversation here are saved and restored across restarts.", "info")
@@ -1185,6 +1353,9 @@ class MainWindow(QMainWindow):
 
         self.inspector = Inspector(self.ctx, self.api, self.theme)
         self.inspector.query_fn = self.element_query
+        # Boards report through the relay, not a container — see Inspector._board_live_text.
+        self.inspector.board_status_fn = self._gloader.orchestrator.board_status
+        self.inspector.board_action_fn = self.board_action
         self.inspector.stats_fn = self._element_stats
         self.inspector.stats_all_fn = self._element_stats_all
         insp = QDockWidget("Inspector", self)
@@ -1246,10 +1417,17 @@ class MainWindow(QMainWindow):
             menu.addAction(a)
             return a
 
-        add(filem, "&New Project…", self._new_project, "Ctrl+N")
-        add(filem, "&Open Project…", self._open_project_dialog, "Ctrl+O")
-        add(filem, "&Save", self._save_project, "Ctrl+S")
-        add(filem, "Save &As…", self._save_project_as, "Ctrl+Shift+S")
+        # Experiments (inside the current project) — the everyday verbs get the shortcuts.
+        add(filem, "&New Experiment…", self._new_experiment, "Ctrl+N")
+        add(filem, "&Open Experiment…", self._open_experiment, "Ctrl+O")
+        add(filem, "&Save Experiment", self._save_project, "Ctrl+S")
+        add(filem, "&Rename Experiment…", self._rename_experiment)
+        add(filem, "&Delete Experiment…", self._delete_experiment)
+        filem.addSeparator()
+        # Projects (the container: brief + AI conversation + a family of experiments)
+        add(filem, "New &Project…", self._new_project, "Ctrl+Shift+N")
+        add(filem, "Open Pro&ject…", self._open_project_dialog, "Ctrl+Shift+O")
+        add(filem, "Save Project &As…", self._save_project_as, "Ctrl+Shift+S")
         add(filem, "Edit Project &Brief…", self._edit_brief)
         filem.addSeparator()
         add(filem, "&Import topology (.gini)…", self._open)   # legacy single-file import
@@ -1267,14 +1445,9 @@ class MainWindow(QMainWindow):
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
         tour_act.setMenuRole(QAction.MenuRole.NoRole)
 
-    def _new(self) -> None:
-        from ..domain import Topology
-        self._project_path = None
-        self._router_programs.clear()
-        self._set_topology(Topology("untitled"))
-        self.setWindowTitle("gBuilder 6.0 — networks + cloud")
-        self.ctx.log("New topology.", "info")
-
+    # Legacy single-file `.gini` import. Kept because older labs and shared files use it; the
+    # matching _new/_save/_save_as have been removed (nothing called them since projects became
+    # folders, and their separate `_project_path` tracker only invited confusion).
     def _open(self) -> None:
         from ..app.paths import projects_dir
         from ..services import PROJECT_EXT
@@ -1284,25 +1457,6 @@ class MainWindow(QMainWindow):
             f"GINI project (*{PROJECT_EXT});;All files (*)")
         if path:
             self._load_from_path(path)
-
-    def _save(self) -> None:
-        if self._project_path:
-            self._save_to_path(self._project_path)
-        else:
-            self._save_as()
-
-    def _save_as(self) -> None:
-        from ..app.paths import ensure_dirs, projects_dir
-        from ..services import PROJECT_EXT
-        from PySide6.QtWidgets import QFileDialog
-        ensure_dirs()
-        default = str(projects_dir() / f"untitled{PROJECT_EXT}")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save project", default, f"GINI project (*{PROJECT_EXT})")
-        if path:
-            if not path.endswith(PROJECT_EXT):
-                path += PROJECT_EXT
-            self._save_to_path(path)
 
     def _save_to_path(self, path: str) -> None:
         from pathlib import Path
@@ -1409,6 +1563,7 @@ class MainWindow(QMainWindow):
     def _toggle_edge_style(self, bent: bool) -> None:
         self.ctx.settings.connector_style = "orthogonal" if bent else "straight"
         self.ctx.bus.edges_restyled.emit()
+        self._persist_settings()          # a toolbar toggle is still a preference — remember it
         self.ctx.log(f"Connectors: {'bent (rounded)' if bent else 'straight'}.", "info")
 
     def _toggle_manual_addr(self, on: bool) -> None:
@@ -1545,6 +1700,8 @@ class MainWindow(QMainWindow):
             return
         self._last_services = list(cfg.services)
         self._last_k8s = list(cfg.k8s)
+        self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
+        self._board_state = {}          # board_id -> live state, refreshed by the poller
         self._workdir = tempfile.mkdtemp(prefix="gini-lab-")
         self.ctx.log(f"Launching {len(cfg.machines)} machines + {len(cfg.routers)} "
                      f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
@@ -1558,8 +1715,8 @@ class MainWindow(QMainWindow):
 
         self.run_button.set_state("booting")        # ring fills as containers come up
 
-        def worker(workdir=self._workdir, ai=auto_internet):
-            ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai)
+        def worker(workdir=self._workdir, ai=auto_internet, lid=self._laptop_id()):
+            ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai, laptop_id=lid)
             self.ctx.bus.run_state.emit(ok, msg)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1573,6 +1730,24 @@ class MainWindow(QMainWindow):
             self._set_runtime_status("running")
             self._poll.start()                  # reconcile with real container state
             self.ctx.log("Topology running on Docker.", "ok")
+            # GINI32: say out loud whether real boards can find this lab, and on which
+            # address. Discovery failing silently is indistinguishable from a board
+            # being broken, and it sends people debugging the wrong end of the link.
+            if getattr(self, "_last_gbridge", None):
+                where = getattr(self._gloader.orchestrator, "advertising", None)
+                boards = ", ".join(b.board_id for b in self._last_gbridge)
+                if where:
+                    self.ctx.log(f"GINI32: announcing this lab at {where} — boards "
+                                 f"expected: {boards}", "ok")
+                    self.ctx.log("GINI32: a board must be on the SAME Wi-Fi as this Mac; "
+                                 "if it never finds the lab, use `set server "
+                                 f"{where.split(':')[0]}` on the board.", "info")
+                else:
+                    why = getattr(self._gloader.orchestrator, "advertise_error", "")
+                    self.ctx.log("GINI32: could NOT announce on the network — boards will "
+                                 "not discover this lab. Set the address by hand on the "
+                                 "board: `set server <this Mac's IP>`."
+                                 + (f"  ({why})" if why else ""), "warn")
             self._wire_xv6_providers()          # attach live GDB bridges to any xv6 kernels
             self._populate_overlay_hosts()      # names resolve over gini0, not the Docker bridge
             grafana = None
@@ -1645,6 +1820,10 @@ class MainWindow(QMainWindow):
                 self._set_runtime_status("idle")
                 self.dashboard.stop()           # freeze the session's GINI $ bill
                 self.dashboard.set_grafana_url(None)
+                # Devices on a board's radio are facts about a RUNNING lab. With the
+                # lab down we no longer know anything, so stop claiming we do.
+                self.canvas.clear_live_clients()
+                self._board_state = {}
                 self._fabric_poll.stop()
                 self._k8s_poll.stop()
                 self.dashboard.set_fabric({})
@@ -1700,6 +1879,98 @@ class MainWindow(QMainWindow):
                         else states.get(_svc(donor.name))
                     node.set_status("ready" if dst == "running"
                                     else "error" if dst else "idle")
+            elif role == "gini32":
+                # A board has no container: it is real hardware, so the only thing that
+                # means "connected" is that it actually checked in. Distinguish "the lab
+                # is up and we are waiting for hardware" from "nothing is running" —
+                # they look identical otherwise, and only one of them is a problem.
+                bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
+                st = (getattr(self, "_board_state", None) or {}).get(bid)
+                if st and st.get("online"):
+                    node.set_status("running")            # -> chip reads "connected"
+                elif not bid:
+                    node.set_status("error")              # -> "no board": nothing can attach
+                else:
+                    node.set_status("searching")
+
+        self._poll_boards()
+
+    def _laptop_id(self) -> str:
+        """This install's identity to a board, minted once and then stable.
+
+        A board records the id of the laptop that claimed it and ignores every other
+        laptop — which is what stops thirty students in one room from taking each
+        other's hardware. It must therefore survive restarts.
+        """
+        lid = getattr(self.ctx.settings, "laptop_id", "") or ""
+        if not lid:
+            import uuid
+            lid = f"gb-{uuid.uuid4().hex[:12]}"
+            self.ctx.settings.laptop_id = lid
+            self._persist_settings()
+        return lid
+
+    def _persist_settings(self) -> None:
+        from ..app.paths import PERSISTED_KEYS, save_config
+        save_config({k: getattr(self.ctx.settings, k) for k in PERSISTED_KEYS})
+
+    def board_action(self, action: str, board: str) -> bool:
+        """Claim / release / blink a board, and remember what we own."""
+        ok = self._gloader.orchestrator.board_action(action, board)
+        if not ok:
+            return False
+        claimed = dict(getattr(self.ctx.settings, "claimed_boards", None) or {})
+        if action == "claim":
+            claimed[board] = {"claimed_at": time.time()}
+            self.ctx.log(f"GINI32: claimed {board} — it now ignores other laptops", "ok")
+        elif action == "release":
+            claimed.pop(board, None)
+            self.ctx.log(f"GINI32: released {board} — anyone may claim it now", "info")
+        else:
+            self.ctx.log(f"GINI32: {board} should be blinking — look at the bench", "info")
+        if action in ("claim", "release"):
+            self.ctx.settings.claimed_boards = claimed
+            self._persist_settings()
+        return True
+
+    def _poll_boards(self) -> None:
+        """Refresh real GINI32 board state, and the devices attached to their radios.
+
+        Devices are OBSERVED, not drawn: a phone joining a board's hotspot is a fact
+        about the physical world, so it appears as an ephemeral node and disappears
+        when it leaves. It is never written into the saved topology.
+        """
+        if not getattr(self, "_last_gbridge", None):
+            return
+        st = self._gloader.orchestrator.board_status()
+        if st is None:
+            return
+        boards = {b["board_id"]: b for b in st.get("boards", [])}
+        self._board_state = boards
+
+        # element id -> the devices its board currently carries
+        live: dict[str, list[dict]] = {}
+        for node in self.canvas.scene_.nodes.values():
+            if node.inst.type_key != "gini32":
+                continue
+            bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
+            b = boards.get(bid)
+            if not b:
+                continue
+            # Channel is reported by the hardware, never set here (APSTA forces it).
+            ch = b.get("channel") or 0
+            shown = f"{ch} (from '{b.get('uplink') or '?'}')" if ch else ""
+            if (node.inst.properties or {}).get("Channel") != shown:
+                node.inst.properties["Channel"] = shown
+            if b.get("online"):
+                live[node.inst.id] = list(b.get("clients") or [])
+
+        changed = self.canvas.set_live_clients(live)
+        if changed:
+            for gone in changed.get("left", []):
+                self.ctx.log(f"GINI32: device {gone} left the radio", "info")
+            for came in changed.get("joined", []):
+                self.ctx.log(f"GINI32: device {came} joined the radio", "ok")
 
     def _set_runtime_status(self, status: str) -> None:
         from ..services.compiler import _role

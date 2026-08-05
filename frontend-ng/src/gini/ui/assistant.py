@@ -364,6 +364,21 @@ class Assistant(QWidget):
     def brief(self) -> str:
         return self._brief
 
+    def note_experiment(self, name: str) -> None:
+        """Mark an experiment switch in the conversation.
+
+        The transcript is PROJECT-level, so it survives moving between experiments — that's the
+        point (the tutor should remember the whole arc). But without a marker the model would go on
+        reasoning about a canvas that has since been replaced. This drops a visible beat into the
+        transcript *and* the model's history, so 'the board' means the new board from here on."""
+        self._post("GINI", f"— switched to experiment “{name}” (the canvas is now this one) —")
+        if self._loop is not None:
+            from ..agent.llm.backend import Message
+            self._loop.history.append(
+                Message(role="user", content=f"[The user switched to experiment '{name}'. "
+                                             f"The canvas now shows that topology; earlier "
+                                             f"canvas details no longer apply.]"))
+
     def ai_state(self) -> dict:
         """Serialisable snapshot: the visible transcript + the model's message history."""
         history = []

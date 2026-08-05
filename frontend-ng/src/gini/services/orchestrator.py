@@ -38,6 +38,14 @@ WAN_GATEWAY = "192.168.244.1"
 # metrics. Published on a fixed host port so gBuilder can poll http://localhost:PORT.
 CLOUDFABRIC_PORT = 9099
 CLOUDFABRIC_HOST_PORT = 39099
+# GINI32: the gbridge relay's UDP port. Boards are flashed with the host address and
+# this port (gbridge_config.h: GB_DEFAULT_SERVER_PORT), so it is deliberately fixed and
+# identical inside and outside the container — a student reading the firmware and a
+# student reading the compose file must see the same number.
+GBRIDGE_PORT = 5555
+GBRIDGE_HOST_PORT = int(os.environ.get("GINI_GBRIDGE_PORT", GBRIDGE_PORT))
+# Read-only status feed for the UI (board online/offline, signal, connected devices).
+GBRIDGE_STATUS_PORT = 39098
 
 
 def _parse_bytes(s: str) -> float:
@@ -539,7 +547,7 @@ while True:
 
 
 def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str | Path,
-                  auto_internet: bool = True) -> Path:
+                  auto_internet: bool = True, laptop_id: str = "") -> Path:
     """Write a self-contained Docker project that runs this topology."""
     from ..app.paths import captures_dir, scripts_dir
     captures_dir().mkdir(parents=True, exist_ok=True)   # host dir bind-mounted for tap .pcaps
@@ -574,11 +582,13 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     for k in config.k8s:
         (work / "k8s" / k.svc).mkdir(parents=True, exist_ok=True)
         (work / "k8s" / k.svc / "manifests.yaml").write_text(k.manifests or "")
-    (work / "docker-compose.yml").write_text(_compose(config, auto_internet))
+    (work / "docker-compose.yml").write_text(
+        _compose(config, auto_internet, laptop_id))
     return work
 
 
-def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
+def _compose(config: RuntimeConfig, auto_internet: bool = True,
+             laptop_id: str = "") -> str:
     from ..app.paths import captures_dir, scripts_dir
     cap_host = str(captures_dir())          # host path bind-mounted into routers at /captures
     scr_host = str(scripts_dir())           # student Lua modules, mounted read-only at /scripts
@@ -619,6 +629,29 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True) -> str:
             "    networks: [gini]",
             "    environment:",
             f"      FABRIC_CONFIG: '{json.dumps(fabric)}'",
+        ]
+
+    # gbridge = the one container that talks to REAL hardware. It holds the fabric end of
+    # every drawn GINI32 board's link and relays frames to the board over the physical LAN.
+    # This is the only service with a published port: boards send to the host's LAN address,
+    # which is what lets a $5 chip on the desk reach a topology running inside Docker (and
+    # is why this works on macOS, where containers cannot see the LAN directly).
+    if rt.get("gbridge"):
+        gcfg = {"name": "gbridge", "listen_port": GBRIDGE_PORT,
+                "status_port": GBRIDGE_STATUS_PORT,
+                # Who this install is to a board. A board that has been claimed by a
+                # different laptop ignores us, and we ignore it.
+                "laptop_id": laptop_id or "", "boards": rt["gbridge"]}
+        lines += [
+            "  gbridge:",
+            "    build: { context: ., dockerfile: docker/Dockerfile.fabric }",
+            "    command: [\"python\", \"-m\", \"dataplane.gbridge\"]",
+            "    networks: [gini]",
+            "    ports:",
+            f'      - "{GBRIDGE_HOST_PORT}:{GBRIDGE_PORT}/udp"',
+            f'      - "{GBRIDGE_STATUS_PORT}:{GBRIDGE_STATUS_PORT}"',
+            "    environment:",
+            f"      GBRIDGE_CONFIG: '{json.dumps(gcfg)}'",
         ]
 
     # each router = its own real C gRouter container (prebuilt image). The gRouter's
@@ -843,6 +876,9 @@ class Orchestrator:
         self.runtime_dir = Path(runtime_dir)
         self.workdir: Path | None = None
         self.project = project        # docker compose -p <project> (per-student namespacing)
+        # mDNS announcer for GINI32 boards. Lives here (on the host) and not in a
+        # container because multicast is link-local and does not cross Docker's bridge.
+        self._advertiser = None
 
     @property
     def _dc(self) -> list:
@@ -851,7 +887,7 @@ class Orchestrator:
         return ["docker", "compose"] + (["-p", self.project] if self.project else [])
 
     def up(self, config: RuntimeConfig, workdir: str | Path,
-           auto_internet: bool = True) -> tuple[bool, str]:
+           auto_internet: bool = True, laptop_id: str = "") -> tuple[bool, str]:
         if config.routers or config.ovs_switches:   # routers & OVS use the gRouter image
             ok, msg = self._ensure_grouter_image()
             if not ok:
@@ -860,11 +896,56 @@ class Orchestrator:
             ok, msg = self._ensure_pox_image()
             if not ok:
                 return False, msg
-        self.workdir = write_project(config, workdir, self.runtime_dir, auto_internet)
+        self.workdir = write_project(config, workdir, self.runtime_dir,
+                                     auto_internet, laptop_id)
         # --remove-orphans clears containers from a previous run that are no longer in
         # this compose, so stale services (e.g. an old web app) can't linger on the
         # network and shadow / break name resolution.
-        return self._compose("up", "--build", "-d", "--remove-orphans")
+        ok, msg = self._compose("up", "--build", "-d", "--remove-orphans")
+        if ok:
+            self._start_advertiser(config)
+        return ok, msg
+
+    # ---- GINI32 discovery ------------------------------------------------- #
+
+    def _start_advertiser(self, config: RuntimeConfig) -> None:
+        """Announce this lab on the local link, but only while boards are drawn.
+
+        Advertising unconditionally would let a board latch onto a laptop that is running
+        nothing, so the announcement is tied to the lifetime of a topology that actually
+        has hardware in it."""
+        self._stop_advertiser()
+        self.advertise_error = ""
+        if not getattr(config, "gbridge", None):
+            return
+        try:
+            from .discovery import GiniAdvertiser
+            adv = GiniAdvertiser(
+                port=GBRIDGE_HOST_PORT,
+                txt={"boards": str(len(config.gbridge)), "port": str(GBRIDGE_HOST_PORT)})
+            if adv.start():
+                self._advertiser = adv
+            else:
+                self.advertise_error = adv.error or "could not open port 5353"
+        except Exception as exc:
+            # discovery is a convenience: a board can always be given an address by hand,
+            # so nothing here may take the lab down. It is recorded, never hidden.
+            self._advertiser = None
+            self.advertise_error = f"{exc.__class__.__name__}: {exc}"
+
+    def _stop_advertiser(self) -> None:
+        if self._advertiser is not None:
+            try:
+                self._advertiser.stop()
+            except Exception:
+                pass
+            self._advertiser = None
+
+    @property
+    def advertising(self) -> str | None:
+        """"<ip>:<port>" while announcing, else None — shown in the UI/diagnostics."""
+        a = self._advertiser
+        return f"{a.address}:{a.port}" if a is not None and a.running else None
 
     def redeploy_faas(self, config: RuntimeConfig, auto_internet: bool = True
                       ) -> tuple[bool, str]:
@@ -880,6 +961,20 @@ class Orchestrator:
         # --no-deps: don't touch the function's dependencies (queues/DBs stay up);
         # --force-recreate: pick up the new FAAS_CONFIG even though the image is cached.
         return self._compose("up", "-d", "--no-deps", "--force-recreate", "--build", "faas")
+
+    @staticmethod
+    def _autobuild_enabled(kind: str) -> bool:
+        """May we build a missing backend image ourselves? `GINI_AUTOBUILD_<KIND>` wins when set
+        (scripts / CI pin it explicitly); otherwise the persisted Settings toggle
+        (Settings → Networking → "Build missing lab images automatically") decides."""
+        env = os.environ.get(f"GINI_AUTOBUILD_{kind}")
+        if env is not None:
+            return env == "1"
+        try:
+            from ..app.paths import load_config
+            return bool(load_config().get("autobuild_images", False))
+        except Exception:                                # noqa: BLE001 — no config = not enabled
+            return False
 
     def _ensure_grouter_image(self) -> tuple[bool, str]:
         """The real gRouter runs from a locally-built image. Check it exists and, if we
@@ -898,11 +993,12 @@ class Orchestrator:
         if not dockerfile.exists():
             return False, (f"The real gRouter image '{GROUTER_IMAGE}' isn't built yet, and "
                            f"I can't find the backend to build it.\nBuild it once:\n  {build_cmd}")
-        if os.environ.get("GINI_AUTOBUILD_GROUTER") != "1":
+        if not self._autobuild_enabled("GROUTER"):
             return False, (f"The real gRouter image '{GROUTER_IMAGE}' isn't built yet.\n"
                            f"Build it once (takes a couple of minutes):\n  {build_cmd}\n"
-                           f"…then press Run again. (Set GINI_AUTOBUILD_GROUTER=1 to let the "
-                           f"app build it automatically.)")
+                           f"…then press Run again.\n"
+                           f"(Or tick Settings → Networking → \"Build missing lab images "
+                           f"automatically\" and press Run — GINI will build it for you.)")
         # opt-in auto-build
         b = subprocess.run(["docker", "build", "-f", "grouter-build/Dockerfile",
                             "-t", GROUTER_IMAGE, "."], cwd=str(backend),
@@ -924,10 +1020,11 @@ class Orchestrator:
         if not (sdn / "Dockerfile").exists():
             return False, (f"The POX image '{POX_IMAGE}' isn't built yet, and I can't find "
                            f"backend/sdn to build it.\nBuild it once:\n  {build_cmd}")
-        if os.environ.get("GINI_AUTOBUILD_POX") != "1":
+        if not self._autobuild_enabled("POX"):
             return False, (f"The SDN controller image '{POX_IMAGE}' isn't built yet.\n"
-                           f"Build it once:\n  {build_cmd}\n…then press Run again. "
-                           f"(Set GINI_AUTOBUILD_POX=1 to let the app build it automatically.)")
+                           f"Build it once:\n  {build_cmd}\n…then press Run again.\n"
+                           f"(Or tick Settings → Networking → \"Build missing lab images "
+                           f"automatically\" and press Run — GINI will build it for you.)")
         b = subprocess.run(["docker", "build", "-t", POX_IMAGE, "."], cwd=str(sdn),
                            capture_output=True, text=True, timeout=1800)
         if b.returncode != 0:
@@ -935,6 +1032,7 @@ class Orchestrator:
         return True, f"built {POX_IMAGE}"
 
     def down(self) -> tuple[bool, str]:
+        self._stop_advertiser()      # stop announcing before the relay goes away
         if not self.workdir:
             return True, "nothing running"
         return self._compose("down")
@@ -1274,6 +1372,38 @@ class Orchestrator:
             with urllib.request.urlopen(url, timeout=3) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except Exception:                       # noqa: BLE001 — agent may not be up yet
+            return None
+
+    def board_action(self, action: str, board: str) -> bool:
+        """claim / release / blink a real board. Queued by the relay and delivered on
+        the board's next contact, which is when we actually know where it is."""
+        if not self.workdir or action not in ("claim", "release", "blink"):
+            return False
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://localhost:{GBRIDGE_STATUS_PORT}/{action}",
+                data=json.dumps({"board": board}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=2) as r:
+                return bool(json.loads(r.read().decode()).get("ok"))
+        except Exception:                    # noqa: BLE001 — relay may not be up
+            return False
+
+    def board_status(self) -> dict | None:
+        """Live state of every real GINI32 board: online, signal, connected devices.
+
+        The UI calls only this, never the relay directly, so moving the relay out of
+        the container later is invisible above this line.
+        """
+        if not self.workdir:
+            return None
+        try:
+            import urllib.request
+            url = f"http://localhost:{GBRIDGE_STATUS_PORT}/"
+            with urllib.request.urlopen(url, timeout=2) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:            # noqa: BLE001 — relay may not be up yet, or no boards
             return None
 
     def _compose(self, *args: str) -> tuple[bool, str]:

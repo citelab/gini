@@ -1,0 +1,3 @@
+# CSI is compiled out by default — without this, esp_wifi_set_csi() returns
+# ESP_ERR_NOT_SUPPORTED at runtime and the sketch logs nothing.
+CONFIG_ESP_WIFI_CSI_ENABLED=y

@@ -27,6 +27,10 @@ _BODY: dict[str, str] = {
     "firewall": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.3h18M3 14.6h18M9 4v5.3M15 9.3v5.3M9 14.6V20"/>',
     "wifi": '<path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8 15.5a6 6 0 0 1 8 0"/><path d="M11 18.4a1.6 1.6 0 0 1 2 0"/>',
     "cloud": '<path d="M7 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.4A3.5 3.5 0 0 1 18 18z"/>',
+    # GINI32: a small board with a radiating antenna — a real chip, not a cloud
+    "gini32": '<rect x="3" y="10" width="11" height="9" rx="1.5"/>'
+              '<path d="M6 19v2M11 19v2M6 10V8.5M11 10V8.5"/>'
+              '<path d="M17 9.5a4 4 0 0 1 0 5M19.5 7a7 7 0 0 1 0 10"/>',
     # --- sdn ---
     "ovs": '<rect x="2.5" y="9" width="19" height="7" rx="2"/><path d="M12 3v6"/><path d="M7 20l5-3 5 3"/>',
     "controller": '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="11" r="2.5"/><path d="M12 13.5V17M9.5 11H7M17 11h-2.5"/>',

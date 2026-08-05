@@ -118,6 +118,10 @@ FREE = frozenset({
     "vpc", "cloud_subnet", "region",              # grouping boundaries
     "security_group", "gateway", "block_volume",  # not-yet-real placeholders
     "terminal", "storage_volume",                 # xv6 peripherals (software devices, no cost)
+    # A GINI32 board is REAL hardware the student already owns, not a rented
+    # resource. The meter models a cloud bill, so billing your own $5 chip would be
+    # the wrong lesson — the relay that carries it is part of the lab, not a rental.
+    "gini32",
     # Sources / Sinks (riders) — instruments that run inside a donor, no container of their own
     "ping_probe", "http_probe", "packet_view", "dns_probe", "traceroute_probe",
     "iperf_client", "iperf_server", "iface_stats", "xv6_shell", "xv6_workload",

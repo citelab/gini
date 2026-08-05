@@ -27,7 +27,7 @@ class Concept:
 CONCEPTS: tuple[Concept, ...] = (
     Concept(
         "networking-basics", "LANs, switching & routing",
-        ("host", "switch", "hub", "router", "firewall", "wap"),
+        ("host", "switch", "hub", "router", "firewall", "wap", "gini32"),
         ("lan", "subnet", "gateway", "layer 2", "layer 3", "l2", "l3", "ethernet",
          "collision", "broadcast", "arp", "mac", "ip", "route", "routing"),
         "GINI's networking plane is a real user-space fabric, not a simulation: links are "
