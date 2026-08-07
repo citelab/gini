@@ -1162,7 +1162,14 @@ class LiveClientItem(QGraphicsObject):
         self.ip = ip
         self.setZValue(-0.5)                 # behind real elements
         self.setAcceptedMouseButtons(Qt.NoButton)
-        self.setToolTip(f"{mac}\non this board's Wi-Fi as {ip}\n"
+        # "?" is a real value here, not a missing key: a stock-built firmware cannot read
+        # the DHCP leases (that needs GB_HAVE_STA_IPS) and reports every station as
+        # `mac/?`. Rendering the sentinel straight into the sentence produced "on this
+        # board's Wi-Fi as ?", which reads like a bug in the canvas rather than a
+        # limitation of the board. Say what is actually known instead.
+        where = (f"on this board's Wi-Fi as {ip}" if ip and ip != "?"
+                 else "on this board's Wi-Fi (address not reported by the board)")
+        self.setToolTip(f"{mac}\n{where}\n"
                         f"(a real device — not part of the saved topology)")
         self.setOpacity(0.0)
         self._fade(0.96)
