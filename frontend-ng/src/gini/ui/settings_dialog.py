@@ -154,6 +154,27 @@ class SettingsDialog(QDialog):
                              "Leave the server blank to work offline — Missions then offers the local "
                              "practice catalog."))
 
+        # --- Hardware (GINI32 boards) ------------------------------------- #
+        # The one thing a board cannot discover for itself. It is the same network for
+        # every board in a class, so it is entered here once and then written to each
+        # board over USB by Hardware → Set Up a Board.
+        hwf = _page(tabs, "Hardware")
+        self.board_ssid = QLineEdit(getattr(settings, "board_wifi_ssid", "") or "")
+        self.board_ssid.setPlaceholderText("the Wi-Fi this laptop is on — 2.4 GHz")
+        hwf.addRow("Lab Wi-Fi name", self.board_ssid)
+        self.board_pw = QLineEdit(getattr(settings, "board_wifi_password", "") or "")
+        self.board_pw.setEchoMode(QLineEdit.Password)
+        hwf.addRow("Lab Wi-Fi password", self.board_pw)
+        hwf.addRow("", _note(
+            "A GINI32 board joins this network to reach gBuilder, so it must be the SAME "
+            "network this laptop is on. ESP32 radios are 2.4 GHz only — a 5 GHz-only "
+            "network will never be found.\n\n"
+            "Set boards up from Hardware → Set Up a Board with the board plugged in over "
+            "USB. That is the only step that needs a cable; everything afterwards is "
+            "wireless.\n\n"
+            "This password is stored in the config file so boards can be set up without "
+            "retyping it. Use the shared lab network here, not a personal account."))
+
         # --- Help & Tour -------------------------------------------------- #
         hf = _page(tabs, "Help")
         self.show_help = QCheckBox("Show the feature tour (Cue Cards) at launch")
@@ -204,4 +225,10 @@ class SettingsDialog(QDialog):
             "tc_student": self.tc_student.text().strip(),
             "tc_token": self.tc_token.text().strip(),
             "tc_allow_insecure": self.tc_insecure.isChecked(),
+            # GINI32: the lab Wi-Fi written to boards over USB. Not stripped of case —
+            # SSIDs are case-sensitive — but surrounding whitespace is, because a name
+            # pasted from a slide routinely carries a trailing space and the board would
+            # then hunt forever for a network that does not exist.
+            "board_wifi_ssid": self.board_ssid.text().strip(),
+            "board_wifi_password": self.board_pw.text(),
         }

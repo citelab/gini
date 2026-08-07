@@ -1441,9 +1441,87 @@ class MainWindow(QMainWindow):
         quit_act = add(filem, "&Quit", self.close, "Ctrl+Q")
         quit_act.setMenuRole(QAction.MenuRole.NoRole)
 
+        # Hardware: real GINI32 boards. Its own menu because setting a board up is an
+        # action a student takes repeatedly, not a preference — and because a first-time
+        # user has to be able to FIND it without being told where to look.
+        hwm = mb.addMenu("Hard&ware")
+        setup_act = add(hwm, "&Set Up a Board…", self._setup_board, "Ctrl+Shift+B")
+        setup_act.setMenuRole(QAction.MenuRole.NoRole)
+        add(hwm, "&Boards…", self._show_boards)
+
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
         tour_act.setMenuRole(QAction.MenuRole.NoRole)
+
+    # ---------------------------------------------------------------- GINI32 boards
+
+    def _known_board_ids(self) -> list[str]:
+        """Every board id we have reason to believe exists: ones on this canvas, and
+        ones a running relay has actually heard from."""
+        ids = []
+        for node in getattr(self.canvas.scene_, "nodes", {}).values():
+            if node.inst.type_key == "gini32":
+                bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
+                if bid:
+                    ids.append(bid)
+        for bid in (getattr(self, "_board_state", None) or {}):
+            if bid not in ids:
+                ids.append(bid)
+        return ids
+
+    def _setup_board(self) -> None:
+        from .board_dialog import BoardSetupDialog
+        dlg = BoardSetupDialog(self, self.ctx.settings, self._known_board_ids())
+        if dlg.exec() and getattr(dlg, "applied_id", ""):
+            # The dialog put the lab Wi-Fi on Settings; persist it so the next board
+            # is a single click.
+            from ..app.paths import PERSISTED_KEYS, save_config
+            s = self.ctx.settings
+            # Remember the id so the canvas can offer it later. Without this the
+            # student has to retype it from memory, and a typo yields a board that
+            # is online and healthy yet invisible to the topology.
+            known = [b for b in (getattr(s, "known_boards", None) or [])
+                     if b != dlg.applied_id]
+            s.known_boards = ([dlg.applied_id] + known)[:32]
+            save_config({k: getattr(s, k) for k in PERSISTED_KEYS})
+            self.ctx.log(f"GINI32: board '{dlg.applied_id}' set up for Wi-Fi "
+                         f"'{s.board_wifi_ssid}'. Use that as the BoardID on the "
+                         f"canvas.", "ok")
+
+    def _show_boards(self) -> None:
+        """What the relay currently knows about real boards."""
+        from PySide6.QtWidgets import QMessageBox
+        st = None
+        try:
+            st = self._gloader.orchestrator.board_status()
+        except Exception:
+            st = None
+        if st is None:
+            QMessageBox.information(
+                self, "Boards",
+                "No running lab to ask.\n\nBoard status comes from the gbridge relay, "
+                "which runs while a topology containing a GINI32 element is up. Draw a "
+                "board, press Run, then look here.\n\nTo set a board up over USB, use "
+                "Hardware → Set Up a Board.")
+            return
+        boards = st.get("boards", [])
+        if not boards:
+            QMessageBox.information(self, "Boards",
+                                    "The lab is running but no GINI32 boards are drawn "
+                                    "on the canvas.")
+            return
+        lines = []
+        for b in boards:
+            where = b.get("addr") or "not seen yet"
+            state = "online" if b.get("online") else "OFFLINE"
+            lines.append(f"{b['board_id']}  —  {state}  ({where})\n"
+                         f"    fabric {b.get('ip') or '?'}   mode {b.get('mode') or '?'}"
+                         f"   clients {len(b.get('clients') or [])}")
+        foreign = st.get("foreign") or []
+        if foreign:
+            lines.append("\nHeard, but claimed by another computer:")
+            lines += [f"  {f['board_id']} (owner {f['owner']})" for f in foreign]
+        QMessageBox.information(self, "Boards", "\n".join(lines))
 
     # Legacy single-file `.gini` import. Kept because older labs and shared files use it; the
     # matching _new/_save/_save_as have been removed (nothing called them since projects became

@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import (
-    QEasingCurve, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation,
+    QEasingCurve, QPointF, QRect, QRectF, QSizeF, Qt, QTimer, QVariantAnimation,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF,
@@ -343,6 +343,11 @@ class NodeItem(QGraphicsObject):
         dt = self.inst.type
         accent = _qcolor(t.accent_for(dt.accent.value))
         p.setRenderHint(QPainter.Antialiasing, True)
+        # A SLOT-TAGGED element is scaffolding — a stand-in for a composition parameter, not part of
+        # the fragment being authored. Render it recessive so the canvas tells the truth: the bright,
+        # un-hulled elements are YOUR delta; the faded ones get replaced at compose time.
+        if getattr(self.inst, "slot", ""):
+            p.setOpacity(0.55)
 
         H = self.node_h()
         rect = QRectF(0.5, 0.5, NODE_W - 1, H - 1)
@@ -865,20 +870,73 @@ class CanvasScene(QGraphicsScene):
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         painter.fillRect(rect, _qcolor(self.theme.bg))
-        if not self.ctx.settings.grid:
+        if self.ctx.settings.grid:
+            painter.setPen(QPen(_qcolor(self.theme.grid), 1))
+            left = int(rect.left()) - (int(rect.left()) % GRID)
+            top = int(rect.top()) - (int(rect.top()) % GRID)
+            x = left
+            while x < rect.right():
+                painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
+                x += GRID
+            y = top
+            while y < rect.bottom():
+                painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+                y += GRID
+            self._draw_vignette(painter, rect)
+        self._draw_slot_hulls(painter)
+
+    def _draw_slot_hulls(self, painter: QPainter) -> None:
+        """Draw a labelled hull around each group of slot-tagged elements.
+
+        A fragment's slot is a *parameter*: while authoring, the canvas holds a stand-in provider so
+        you can wire your delta to something real. Without this, that scaffolding is indistinguishable
+        from the fragment itself — you see a whole network and can't tell which third is yours. The
+        hull is DERIVED (the bounding box of everything sharing a slot tag), so nothing is positioned
+        by hand and it stays right when nodes move. Label = slot · what fills it · how many."""
+        groups: dict[str, list] = {}
+        for n in self.nodes.values():
+            s = getattr(n.inst, "slot", "")
+            if s:
+                groups.setdefault(s, []).append(n)
+        if not groups:
             return
-        painter.setPen(QPen(_qcolor(self.theme.grid), 1))
-        left = int(rect.left()) - (int(rect.left()) % GRID)
-        top = int(rect.top()) - (int(rect.top()) % GRID)
-        x = left
-        while x < rect.right():
-            painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-            x += GRID
-        y = top
-        while y < rect.bottom():
-            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
-            y += GRID
-        self._draw_vignette(painter, rect)
+        t = self.theme
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        f = QFont(); f.setPointSize(9); f.setBold(True)
+        painter.setFont(f)
+        for name, items in sorted(groups.items()):
+            box = None
+            source = ""
+            for n in items:
+                source = source or getattr(n.inst, "slot_source", "")
+                r = QRectF(n.pos(), QSizeF(NODE_W * n.scale(), n.node_h() * n.scale()))
+                box = r if box is None else box.united(r)
+            if box is None:
+                continue
+            box = box.adjusted(-18, -26, 18, 18)
+            col = _qcolor(t.line)
+            fill = QColor(col); fill.setAlpha(16)
+            painter.setBrush(fill)
+            pen = QPen(col, 1.4)
+            pen.setStyle(Qt.DashLine)          # dashed = a placeholder, not a real boundary
+            painter.setPen(pen)
+            painter.drawRoundedRect(box, 12, 12)
+            lbl = QColor(col); lbl.setAlpha(210)
+            painter.setPen(QPen(lbl, 1))
+            painter.drawText(QRectF(box.left() + 10, box.top() + 4, box.width() - 20, 18),
+                             Qt.AlignLeft | Qt.AlignVCenter,
+                             self._slot_label(name, len(items), source))
+
+    def _slot_label(self, name: str, n_items: int, source: str = "") -> str:
+        """`nets · cap-lan · 3 elements` — the slot, WHAT is filling it, and the group's size.
+
+        The composer labels members `root_lans0`, `root_lans1`, … — the trailing index is the member
+        number, so strip it for display and show the slot's own name."""
+        import re
+        base = name.split("_")[-1] if "_" in name else name
+        base = re.sub(r"\d+$", "", base) or base
+        head = f"{base} · {source}" if source else base
+        return f"{head}   ·   {n_items} element(s)"
 
     def _draw_vignette(self, painter: QPainter, rect: QRectF) -> None:
         """A soft radial shade toward the viewport edges so the board reads as a

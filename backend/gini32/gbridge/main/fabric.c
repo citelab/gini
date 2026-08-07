@@ -58,6 +58,9 @@ static int  s_hellos_unanswered = 0;  /* hellos sent since the relay last config
  * counts data frames: while the fabric is DOWN there are no data frames, so s_tx tells
  * you nothing about whether this board is managing to speak at all. */
 static uint32_t s_ctrl_tx = 0, s_ctrl_fail = 0;
+static uint32_t s_trunc = 0;       /* control payloads clipped to G32_CTRL_MAX */
+static uint32_t s_fwd_in = 0;      /* frames arriving for someone BEHIND our radio */
+static uint32_t s_default_fixups = 0;  /* times we took the default route back */
 static int s_ctrl_errno = 0;
 static uint32_t s_dgrams_in = 0;   /* valid datagrams from the relay, any type */
 
@@ -85,10 +88,24 @@ static void g32_fill_header(uint8_t *buf, uint8_t type)
  * stack, which is the RX task's. */
 static void g32_send(uint8_t type, const uint8_t *payload, size_t len)
 {
-    uint8_t buf[G32_HDR_LEN + 64];
-    if (s_sock < 0 || len > sizeof(buf) - G32_HDR_LEN) {
+    /* Big enough for the largest control payload we build (the keepalive's telemetry
+     * buffer is 400 bytes), with room to grow.
+     *
+     * This was 64, which is smaller than a keepalive: `mac=… owner=…` is already ~44
+     * bytes before any telemetry, so EVERY keepalive was over the limit and was thrown
+     * away here, silently, before it reached the socket. The board therefore said hello
+     * once, was configured, then never spoke again — and 30s later declared the link
+     * dead and re-ran discovery, forever. Liveness must never be hostage to the size of
+     * the diagnostics we attach to it, so oversized payloads are now TRUNCATED rather
+     * than dropped: a keepalive carrying a short client list still keeps the link up. */
+    uint8_t buf[G32_HDR_LEN + G32_CTRL_MAX];
+    if (s_sock < 0) {
         s_drop++;
         return;
+    }
+    if (len > G32_CTRL_MAX) {
+        len = G32_CTRL_MAX;
+        s_trunc++;
     }
     g32_fill_header(buf, type);
     if (len && payload) {
@@ -105,6 +122,44 @@ static void g32_send(uint8_t type, const uint8_t *payload, size_t len)
     } else {
         s_ctrl_tx++;
     }
+}
+
+/* Extract `owner=<id>` from a payload of exactly `len` bytes.
+ *
+ * Length-bounded on purpose: the datagram buffer is reused, so anything that reads
+ * to a terminator can walk into the previous message's tail. The value also stops at
+ * the first character that cannot appear in a laptop id, which is what keeps a
+ * netmask fragment or an address from ever being welded onto an owner again.
+ * Returns true if an owner was found.
+ */
+static bool owner_from_payload(const char *payload, int len, char *out, size_t out_sz)
+{
+    const char key[] = "owner=";
+    const int klen = (int) (sizeof(key) - 1);
+    out[0] = '\0';
+    if (!payload || len < klen) {
+        return false;
+    }
+    for (int i = 0; i + klen <= len; i++) {
+        if (memcmp(payload + i, key, (size_t) klen) != 0) {
+            continue;
+        }
+        int j = i + klen;
+        size_t o = 0;
+        while (j < len && o + 1 < out_sz) {
+            char c = payload[j];
+            /* an id is letters, digits and '-'; anything else ends it */
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+                break;
+            }
+            out[o++] = c;
+            j++;
+        }
+        out[o] = '\0';
+        return o > 0;
+    }
+    return false;
 }
 
 /* Parse "ip=... mask=... gw=... mac=... mtu=..." from the HELLO_ACK. */
@@ -364,7 +419,7 @@ static void fabric_tx_task(void *arg)
 
 /* Build marker: bump on every firmware change so a stale flash is obvious in the log
  * rather than being mistaken for a failed fix. */
-#define GB_BUILD "gbridge-12 (txdiag)"
+#define GB_BUILD "gbridge-15 (default route)"
 
 static err_t fabric_netif_init(struct netif *netif)
 {
@@ -405,6 +460,40 @@ static void fabric_netif_bringup(void *arg)
     netif_set_link_up(&s_netif);
     /* The fabric is this board's route to everything that is not its own AP. */
     netif_set_default(&s_netif);
+}
+
+/* Re-assert the fabric as the default route. Runs on the lwIP thread.
+ *
+ * Setting it once at bring-up is not enough, and this was the bug that made the board
+ * look like a router that would not route. ESP-IDF's esp_netif layer re-picks the
+ * default netif on every interface event — AP start, station join, STA got-IP — by
+ * choosing the highest `route_prio` among the netifs IT knows about. Our fabric netif
+ * is a raw netif_add(); esp_netif has never heard of it, so it cannot win that contest
+ * and cannot even enter it. The moment the hotspot came up or a phone associated, the
+ * default route silently moved to the AP interface.
+ *
+ * Everything then followed from that one pointer:
+ *   - board -> 10.0.3.10 timed out: off-link, so it took the default route, which now
+ *     pointed at the radio, and went out over the air to nobody.
+ *   - phone -> M1 was dropped: ip4_forward routes the packet, gets the AP netif back,
+ *     sees route == input interface, and refuses to forward a packet out the interface
+ *     it arrived on. That check is correct; the route handed to it was not.
+ *   - board -> 10.0.9.2 worked throughout, because on-link traffic never consults the
+ *     default route at all. Which is exactly why the radio always looked healthy.
+ */
+static void fabric_default_assert(void *arg)
+{
+    (void) arg;
+    if (!s_added || netif_default == &s_netif) {
+        return;
+    }
+    if (netif_default) {
+        ESP_LOGW(TAG, "default route had been taken by %c%c -- moving it back to the "
+                      "fabric (%s); off-link traffic was going out the radio",
+                 netif_default->name[0], netif_default->name[1], s_cfg.ip);
+    }
+    netif_set_default(&s_netif);
+    s_default_fixups++;
 }
 
 /* Take the link down, also on the lwIP thread. */
@@ -566,11 +655,18 @@ static void fabric_rx_task(void *arg)
             n += gb_telemetry(tel + n, sizeof(tel) - n);
             g32_send(G32_KEEPALIVE, (const uint8_t *) tel, (size_t) (n > 0 ? n : 0));
             last_keepalive = now;
+            /* Piggy-backed on the keepalive rather than hooked to Wi-Fi events: there
+             * are several events that can move the default route (AP start, each
+             * station join, STA got-IP, and any reconnect), and a periodic check costs
+             * one pointer comparison while covering all of them, including ones added
+             * by a future IDF. */
+            tcpip_callback(fabric_default_assert, NULL);
         }
 
         struct sockaddr_in from;
         socklen_t flen = sizeof(from);
-        int n = recvfrom(s_sock, buf, sizeof(buf), 0,
+        /* Leave room for the terminator below — see the NUL-termination note. */
+        int n = recvfrom(s_sock, buf, sizeof(buf) - 1, 0,
                          (struct sockaddr *) &from, &flen);
         if (n < G32_HDR_LEN) {
             continue;                       /* timeout, or a runt */
@@ -579,6 +675,22 @@ static void fabric_rx_task(void *arg)
             buf[2] != G32_MAGIC2 || buf[3] != G32_VERSION) {
             continue;                       /* not ours */
         }
+
+        /* TERMINATE THE PAYLOAD before anything treats it as a string.
+         *
+         * `buf` is reused for every datagram, and recvfrom neither terminates nor
+         * clears the tail — so the bytes after a short datagram are whatever a longer
+         * earlier one left there. The text parsers below (strstr/sscanf for `owner=`)
+         * have no length to stop at, so they read straight off the end of the message
+         * and into that debris.
+         *
+         * This was not theoretical: a 21-byte `owner=gb-a5c4915cf6b9` landing on top of
+         * an earlier `ip=… mask=255.255.255.0 …` left `.255.255.0` at byte 21, and the
+         * board stored its owner as `gb-a5c4915cf6b9.255.255.0`. It then no longer
+         * matched the laptop that set it, so the relay ignored the board for good —
+         * silently, because an unrecognised owner is indistinguishable from silence.
+         */
+        buf[n] = '\0';
 
         uint8_t type = buf[4];
         uint8_t *payload = buf + G32_HDR_LEN;
@@ -620,10 +732,12 @@ static void fabric_rx_task(void *arg)
         /* ---- claiming ------------------------------------------------------ */
         if (type == G32_CLAIM) {
             char who[G32_OWNER_LEN] = "";
-            const char *p = strstr((const char *) payload, "owner=");
-            if (p) {
-                sscanf(p + 6, "%39s", who);
-            }
+            /* Parse within THIS datagram only. The buffer is terminated above, but an
+             * owner is the one field that, if it absorbs a stray byte, locks the board
+             * out of its rightful laptop permanently — so it is parsed against the
+             * declared length rather than trusting a terminator to be in the right
+             * place. Anything that is not a plain identifier ends the value. */
+            owner_from_payload((const char *) payload, paylen, who, sizeof(who));
             if (s_owner[0] && strcmp(s_owner, who) != 0) {
                 /* Already someone else's. Say so rather than going quiet, so the
                  * asking laptop can tell "refused" from "not listening". */
@@ -661,10 +775,11 @@ static void fabric_rx_task(void *arg)
              * whoever answers, which is what lets it be adopted in the first place. */
             if (s_owner[0]) {
                 char who[G32_OWNER_LEN] = "";
-                const char *p = strstr((const char *) payload, "owner=");
-                if (p) {
-                    sscanf(p + 6, "%39s", who);
-                }
+                /* Length-bounded, as in the CLAIM path. A normal HELLO_ACK carries no
+                 * `owner=` at all, so an unbounded search would happily find one left
+                 * behind by an earlier CLAIM in the same buffer — and we would then
+                 * reject our OWN laptop's configuration and sit there unconfigured. */
+                owner_from_payload((const char *) payload, paylen, who, sizeof(who));
                 if (who[0] && strcmp(who, s_owner) != 0) {
                     continue;                 /* a different laptop — not ours */
                 }
@@ -681,6 +796,27 @@ static void fabric_rx_task(void *arg)
         }
 
         if (type == G32_FRAME && paylen > 0 && s_up) {
+            /* Count frames that are addressed THROUGH us rather than TO us.
+             *
+             * These are the ones lwIP has to forward out of the AP interface. Without
+             * this number, "the board is not forwarding" and "nothing that needs
+             * forwarding ever arrives" look identical from the console — and they have
+             * completely different causes. If fwd_in climbs while devices behind the
+             * radio stay unreachable, the fault is inside lwIP's forwarding, not in
+             * the fabric, the routes, or the devices. */
+            if (paylen >= 34 && payload[12] == 0x08 && payload[13] == 0x00) {
+                const uint8_t *d = payload + 30;         /* IPv4 destination address */
+                char dst[16];
+                snprintf(dst, sizeof(dst), "%u.%u.%u.%u", d[0], d[1], d[2], d[3]);
+                if (strcmp(dst, s_cfg.ip) != 0) {
+                    s_fwd_in++;
+                    if (s_fwd_in <= 3) {
+                        ESP_LOGI(TAG, "frame to %s is not for us -> lwIP must forward it "
+                                      "out the hotspot (fwd_in=%u)",
+                                 dst, (unsigned) s_fwd_in);
+                    }
+                }
+            }
             struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t) paylen, PBUF_POOL);
             if (!p) {
                 s_drop++;
@@ -787,7 +923,7 @@ void fabric_status(char *out, size_t out_len)
              * fail>0 means our own transmits are erroring before they leave. */
             snprintf(out, out_len,
                      "fabric: DOWN  server %s:%u (%s), no HELLO_ACK yet\n"
-                     "       sent=%u fail=%u (errno %d)  in=%u  board '%s'\n"
+                     "       sent=%u fail=%u (errno %d)  in=%u  clipped=%u  board '%s'\n"
                      "       sent>0 and in=0 -> nothing is coming back: check the relay "
                      "is listening and no firewall sits between\n"
                      "       in>0 -> we ARE being answered but not configured: check "
@@ -795,7 +931,8 @@ void fabric_status(char *out, size_t out_len)
                      s_relay_ip, (unsigned) ntohs(s_relay.sin_port),
                      s_discovered ? "discovered" : "configured",
                      (unsigned) s_ctrl_tx, (unsigned) s_ctrl_fail, s_ctrl_errno,
-                     (unsigned) s_dgrams_in, s_board_id, s_board_id);
+                     (unsigned) s_dgrams_in, (unsigned) s_trunc,
+                     s_board_id, s_board_id);
         } else {
             snprintf(out, out_len,
                      "fabric: DOWN  no server found yet (looking for _gini._udp on this "
@@ -805,11 +942,15 @@ void fabric_status(char *out, size_t out_len)
     }
     snprintf(out, out_len,
              "fabric: UP %s  %s/%s gw %s  via %s:%u (%s)  rx=%u tx=%u drop=%u  "
-             "[datagrams in: ack=%u frame=%u]",
+             "[datagrams in: ack=%u frame=%u]  fwd_in=%u  default=%c%c fixups=%u",
              s_cfg.routed ? "routed" : "nat",
              s_cfg.ip, s_cfg.mask, s_cfg.gw,
              s_relay_ip, (unsigned) ntohs(s_relay.sin_port),
              s_discovered ? "discovered" : "configured",
              (unsigned) s_rx, (unsigned) s_tx, (unsigned) s_drop,
-             (unsigned) s_seen[G32_HELLO_ACK], (unsigned) s_seen[G32_FRAME]);
+             (unsigned) s_seen[G32_HELLO_ACK], (unsigned) s_seen[G32_FRAME],
+             (unsigned) s_fwd_in,
+             netif_default ? netif_default->name[0] : '?',
+             netif_default ? netif_default->name[1] : '?',
+             (unsigned) s_default_fixups);
 }

@@ -219,6 +219,32 @@ def test_validate_flags_missing_and_duplicate_board_ids():
     assert any("also used by" in i["message"] for i in validate(t))
 
 
+def test_filling_in_a_property_re_runs_the_lint():
+    """Editing a property must re-lint, or a fixed warning stays on screen forever.
+
+    Regression: the advisory lint ran only on topology_changed, but set_property emitted
+    device_changed alone. A board dropped on the canvas raised "No BoardID set" (the
+    default is blank, deliberately), the student then chose the id — and the amber badge
+    never cleared. The element ended up simultaneously showing "no BoardID" and
+    "connected", which cannot both be true: the relay matches hardware BY that id, so a
+    board with no id can never come online.
+    """
+    from gini.app import AppContext
+    from gini.agent.api import GiniAPI
+
+    ctx = AppContext()
+    api = GiniAPI(ctx)
+    fired: list[int] = []
+    ctx.bus.topology_changed.connect(lambda: fired.append(1))
+
+    board = api.add_device("gini32")
+    api.set_property(board["name"], "BoardID", "gini-5")
+
+    assert fired, "set_property did not re-trigger the lint; a cleared warning would stick"
+    d = ctx.topology.devices[board["id"]]
+    assert d.properties["BoardID"] == "gini-5"
+
+
 def test_telemetry_tracks_devices_joining_and_leaving_the_radio():
     """The board sends its FULL client list, so a lost datagram cannot strand a
     phantom device on the canvas."""

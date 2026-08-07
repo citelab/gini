@@ -61,6 +61,16 @@ class GiniAPI:
         if key == "Name":
             self.ctx.topology.rename(d.id, value)
         self.ctx.bus.device_changed.emit(d.id)
+        # The advisory lint reads PROPERTIES, not just shape — "No BoardID set",
+        # duplicate BoardID, overlapping PhysicalSubnet — but it only re-ran on
+        # topology_changed. So a warning raised when an element was dropped (every
+        # property still at its default) was never re-evaluated once the student
+        # filled the property in: a GINI32 board showed the amber "!" for a missing
+        # BoardID while simultaneously reporting itself online, which is impossible,
+        # since the relay matches boards BY that id. The badge was simply stale.
+        # This is debounced (120 ms) and text fields commit on editingFinished, so
+        # re-linting here costs nothing per edit.
+        self.ctx.bus.topology_changed.emit()
         return self._device_dict(d)
 
     # -- manual addressing -------------------------------------------------- #

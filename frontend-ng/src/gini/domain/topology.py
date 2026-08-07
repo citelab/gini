@@ -34,6 +34,10 @@ class DeviceInstance:
     # composition slot this device belongs to (a scaffold/bound dependency, e.g. "A"). Empty = the
     # fragment's own delta. Predicates reference it as `type@slot`.
     slot: str = ""
+    # WHICH fragment was materialized into that slot (e.g. "cap-lan"). Provenance only — no predicate
+    # reads it; it exists so the canvas can label a slot group with what actually fills it
+    # ("nets · cap-lan ×4") instead of just a count, and so a composed board is self-describing.
+    slot_source: str = ""
 
     @property
     def type(self) -> DeviceType:

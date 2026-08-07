@@ -106,6 +106,18 @@ class Settings:
     # auto-internet: every container gets a default eth to the internet (Docker NAT).
     # Off = "faithful mode": no internet unless an Internet element is drawn + wired.
     auto_internet: bool = False
+    # GINI32 hardware: the lab Wi-Fi a board joins to reach this machine. It is the
+    # same network for every board in a class, so it is remembered once here and
+    # then written to each board over USB by Hardware > Set Up a Board. The password
+    # is stored because a board cannot be set up without it and there is nowhere else
+    # to keep it; it is the shared lab network, not a personal credential.
+    board_wifi_ssid: str = ""
+    board_wifi_password: str = ""
+    # Boards this laptop has set up over USB. Kept so the canvas can OFFER an id
+    # instead of asking the student to retype one from memory — a mistyped BoardID
+    # produces a board that is online and healthy but invisible to the topology,
+    # which is the single most confusing failure in the whole GINI32 story.
+    known_boards: list = field(default_factory=list)
     # --- GINI32 hardware ---------------------------------------------------- #
     # This install's identity to a board. A board records the id of the laptop that
     # claimed it and then ignores every other laptop, which is what stops thirty

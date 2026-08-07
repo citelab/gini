@@ -41,6 +41,7 @@ _LEVEL_COLOR = {_obj.PLACEMENT: "#3B82F6", _obj.CONNECTION: "#10B981",
 
 class FragmentManager(QDialog):
     _cert_ready = Signal(object, object)         # (CertReport, frag_dict) — from the grade thread
+    _tc_index_ready = Signal(object)             # set[str] | None — ids the Teaching Center holds
 
     def __init__(self, parent, ctx, *, author: str = "") -> None:
         super().__init__(parent)
@@ -48,6 +49,11 @@ class FragmentManager(QDialog):
         self._author = author
         self._certified_hash: str | None = None  # hash of the dict last certified runtime-green
         self._cert_ready.connect(self._on_cert_ready)
+        # ids published to the Teaching Center. None = UNKNOWN (offline / not a teacher / not asked
+        # yet) — distinct from an empty set, so the list can stay silent instead of claiming a
+        # fragment is unpublished when we simply couldn't check.
+        self._tc_ids: set | None = None
+        self._tc_index_ready.connect(self._on_tc_index)
         self._recorder: _au.Recorder | None = None
         self._editing_id: str | None = None
         self._steps: list[dict] = []
@@ -70,6 +76,8 @@ class FragmentManager(QDialog):
         for icon, tip, slot in (("layout", "List", self._show_list),
                                 ("plus", "Create", self._create),
                                 ("pencil", "Edit", self._edit_selected),
+                                ("compile", "Composer — build a concrete network from certified "
+                                            "fragments and save it", self._composer),
                                 ("trash", "Delete", self._delete_selected)):
             b = QToolButton()
             b.setIcon(self._ic(icon, 20)); b.setToolTip(tip)
@@ -78,6 +86,15 @@ class FragmentManager(QDialog):
             b.clicked.connect(slot)
             rail.addWidget(b)
         rail.addStretch(1)
+        # Help sits at the BOTTOM of the rail — a "?" glyph (there's no help icon in the set, and a
+        # question mark reads unambiguously anyway).
+        helpb = QToolButton()
+        helpb.setText("?")
+        helpb.setToolTip("Help — what fragments, slots, certification and composition mean")
+        helpb.setAutoRaise(True); helpb.setFixedSize(38, 34)
+        helpb.setStyleSheet("QToolButton { font-size: 17px; font-weight: 700; }")
+        helpb.clicked.connect(self._show_help)
+        rail.addWidget(helpb)
         rail_w = QWidget(); rail_w.setLayout(rail); rail_w.setFixedWidth(46)
         rail_w.setObjectName("FragRail")
         # a darker panel behind the icon rail so it reads as its own column
@@ -106,15 +123,114 @@ class FragmentManager(QDialog):
             if w is not None:
                 w.setParent(None); w.deleteLater()
 
+    # --------------------------------------------------------------- help
+    HELP = """
+<h3>Fragment Manager</h3>
+<p>A <b>fragment</b> is a certified building block. You author one on the canvas, prove it works on
+the live stack, and the composer then builds bigger networks out of it — that's how a handful of
+blocks turn into many experiments.</p>
+
+<h4>Two kinds of fragment</h4>
+<ul>
+<li><b>▪ Terminal</b> — self-contained, no holes. A LAN (2 hosts + a switch) is one. It's a
+<i>value</i>: it can be dropped into another fragment's slot.</li>
+<li><b>◆ Non-terminal</b> — has one or more open <b>slots</b>, shown in the list as
+<code>⟨nets ×2+⟩</code>. A router "over 2-or-more networks" is one. It's a <i>template</i>: it isn't
+a real network until its slots are filled.</li>
+</ul>
+<p>Think of a terminal as a value and a non-terminal as a function:
+<code>router-net(nets := cap-lan, N=4)</code> evaluates to a concrete 4-LAN network.</p>
+
+<h4>The buttons</h4>
+<ul>
+<li><b>Record</b> — turn it on and BUILD on the canvas; each action becomes a step.</li>
+<li><b>Read canvas</b> — one-shot: derive steps from a board you already built.</li>
+<li><b>Add dependency</b> — build ON another certified fragment. It loads as a <b>locked
+scaffold</b> and becomes a <b>slot</b>; only your own delta is saved. Choose a floor of 2+ to make
+the slot <i>repeatable</i> (the composer can then scale it to any N), and choose whether members
+hub back to your delta or interconnect as peers (mesh / ring / line / star).</li>
+<li><b>Add a live check</b> — an L4 runtime probe (e.g. "this host reaches that one"), which only a
+running system can answer.</li>
+<li><b>Certify</b> — grade this fragment on the LIVE stack. Takes ~5–10s: it starts any Sources and
+Sinks, lets traffic accumulate, grades, then stops them.</li>
+<li><b>Validate ×N</b> — a <b>TEST</b>, not a build: fill the slots with N providers, materialize
+the whole topology, and grade it. It proves your pattern generalizes. <b>Nothing is saved</b> and
+the result is thrown away.</li>
+<li><b>Composer</b> (rail) — the opposite: build a concrete network from certified fragments and
+<b>keep</b> it, saved as a new terminal block.</li>
+</ul>
+
+<h4>Ports · In and Out</h4>
+<p>Attach a <b>Source</b> (Ping Probe, HTTP Probe…) or a <b>Sink</b> (Packet View, iPerf Server…) to
+an element and it becomes an input/output <b>port</b>. A Sink's measurement can be turned into a
+graded <b>output check</b> with <b>＋ check</b> — that's how you grade what the system <i>did</i>,
+not just how it was wired. The <b>Contract</b> line (provides / requires) is derived automatically;
+you never type capability roles.</p>
+
+<h4>The steps list</h4>
+<p>Each step has a coloured <b>level</b> chip — <b>L1</b> place, <b>L2</b> connect, <b>L3</b> group,
+<b>L4</b> live — click it to change. The <b>☆/★</b> is the difficulty <i>pass</i>: 0 stars is the
+base experiment, ★ steps switch on in later passes so a student walks the experiment
+progressively. ▲▼ reorder, ✕ deletes.</p>
+
+<h4>Certification — and why it matters</h4>
+<p>The <b>✓</b> means the fragment was graded green against a running system. Only certified
+fragments can fill a slot or be uploaded, because the composer builds on them blindly — a broken
+block would poison every experiment made from it. Editing a fragment drops its ✓ until you
+re-certify.</p>
+
+<h4>Typical flow</h4>
+<ol>
+<li>Create a terminal (e.g. a LAN) → Run → Certify → Save.</li>
+<li>Create a non-terminal → <b>Add dependency</b> (the terminal, floor 2+) → build your delta →
+add a live check → Run → Certify → Save.</li>
+<li><b>Validate ×N</b> at a few values of N to prove the pattern scales.</li>
+<li><b>Composer</b> to build and keep a concrete network, or <b>Upload</b> to the Teaching Center.</li>
+</ol>
+
+<h4>Two gotchas</h4>
+<ul>
+<li>Validate ×N <b>replaces the canvas</b>. Reopen the fragment from the list before composing
+again — and Save is blocked while a validation instance is showing (it would overwrite your
+authored pattern with the scaled copy).</li>
+<li>A fragment can never fill <b>its own</b> slot (directly or in a cycle) — that would be a
+grammar with no base case. Nesting <i>different</i> fragments (campus → site → LAN) is fine and is
+exactly what recursion means here.</li>
+</ul>
+"""
+
+    def _show_help(self) -> None:
+        """The manual, in-app. This dialog is a lot of concepts (terminals, slots, certification,
+        validation vs composition) and a student shouldn't have to infer them from button labels."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Fragment Manager — Help")
+        dlg.resize(620, 640)
+        lay = QVBoxLayout(dlg)
+        view = QTextBrowser()
+        view.setOpenExternalLinks(True)
+        view.setHtml(self.HELP)
+        lay.addWidget(view, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        bb.accepted.connect(dlg.accept)
+        lay.addWidget(bb)
+        dlg.exec()
+
     # ------------------------------------------------------------ certify
     def _library_excluding(self, fid: str) -> list:
         return [f for f in _frag.all_fragments() if f.id != fid]
 
     def _dict_from_fragment(self, f) -> dict:
-        """Rebuild the authoring dict from a saved Fragment (inverse of build_fragment_dict)."""
+        """Rebuild the authoring dict from a saved Fragment (inverse of build_fragment_dict).
+
+        Must mirror `_current_dict` field-for-field: the two are compared by `_dict_hash` to decide
+        whether a reopened fragment is still the content that was certified. A field present in one
+        and missing in the other (e.g. `stars`) would look like an edit and drop the ✓."""
         def objs(items):
             return [{"id": o.id, "say": o.say, "check": o.check, "kind": o.kind,
-                     "probe": o.probe, "level": o.level or _obj.level_of(o)} for o in items]
+                     "probe": o.probe, "level": o.level or _obj.level_of(o),
+                     "stars": getattr(o, "stars", 0)} for o in items]
         forks = [{"id": fk.id, "label": fk.label, "difficulty": fk.difficulty, "kind": fk.kind,
                   "objectives": objs(fk.objectives)} for fk in f.forks]
         return _au.build_fragment_dict(
@@ -218,6 +334,22 @@ class FragmentManager(QDialog):
         d = _content.user_content_dir()
         return sorted(p.stem for p in d.glob("*.yaml")) if d.exists() else []
 
+    @staticmethod
+    def _open_slots(f) -> list[str]:
+        """The names of a fragment's unfilled slots / peer groups, as `name ×min+`. Empty = a
+        TERMINAL (self-contained); non-empty = a NON-TERMINAL (a template that must be filled)."""
+        if f is None:
+            return []
+        out = []
+        for s in list(getattr(f, "slots", ()) or ()):
+            out.append(f"{s.name} ×{s.min}" + ("+" if s.max != 1 else ""))
+        for p in list(getattr(f, "peerings", ()) or ()):
+            out.append(f"{p.name} ×{p.min}+ {p.topology}")
+        return out
+
+    def _is_terminal(self, f) -> bool:
+        return not self._open_slots(f)
+
     def _show_list(self) -> None:
         self._clear_body()
         self._body.addWidget(QLabel("<b>Your fragments</b>"))
@@ -228,10 +360,22 @@ class FragmentManager(QDialog):
             certified = bool(getattr(f, "certified", False))
             forks = f"   ·  {len(f.forks)} fork(s)" if (f and f.forks) else ""
             mark = "✓ " if certified else "○ "           # ✓ = runtime-certified, ○ = not yet
-            it = QListWidgetItem(f"{mark}{fid}{forks}")
+            # TERMINAL (▪) vs NON-TERMINAL (◆) — the grammar distinction that decides what you can DO
+            # with a block: a terminal is self-contained (a value, fills other fragments' slots); a
+            # non-terminal has open slots (a template, must be filled before it's a real network).
+            open_slots = self._open_slots(f)
+            shape = "◆ " if open_slots else "▪ "
+            holes = f"   ⟨{', '.join(open_slots)}⟩" if open_slots else ""
+            tc_suffix, tc_tip = self._tc_mark(fid)
+            it = QListWidgetItem(f"{mark}{shape}{fid}{holes}{forks}{tc_suffix}")
             it.setData(Qt.UserRole, fid)
-            it.setToolTip("Certified — runtime-playtested (winnable + live)" if certified
-                          else "Not certified — Run the topology and press Certify before upload")
+            cert_tip = ("Certified — runtime-playtested (winnable + live)" if certified
+                        else "Not certified — Run the topology and press Certify before upload")
+            shape_tip = (f"NON-TERMINAL — a template with open slot(s): {', '.join(open_slots)}. "
+                         f"Fill them with Validate ×N (or use it in the Composer)."
+                         if open_slots else
+                         "TERMINAL — self-contained. Can fill another fragment's slot.")
+            it.setToolTip("\n".join(x for x in (shape_tip, cert_tip, tc_tip) if x))
             if certified:
                 it.setForeground(QColor("#10B981"))       # green marks a certified block
             self.listw.addItem(it)
@@ -245,6 +389,42 @@ class FragmentManager(QDialog):
         up.setMinimumHeight(34)
         up.clicked.connect(self._upload_selected)
         self._body.addWidget(up)
+        self._refresh_tc_index()          # background; re-renders with ↑ marks when it lands
+
+    # -- "is it on the Teaching Center?" ------------------------------------ #
+    def _refresh_tc_index(self, force: bool = False) -> None:
+        """Ask the Center which fragments it holds, off the GUI thread. Cached: the list re-renders
+        when the answer arrives. `force` re-asks after an upload or delete changed it."""
+        if self._tc_ids is not None and not force:
+            return
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None or not getattr(tc, "is_teacher", lambda: False)():
+            return                                        # not a teacher: stays UNKNOWN, shown blank
+        import threading
+
+        def work():
+            try:
+                lib = tc.fragment_library()
+            except Exception:                             # noqa: BLE001 — offline stays unknown
+                lib = None
+            ids = None
+            if isinstance(lib, list):
+                ids = {str(x.get("id", x) if isinstance(x, dict) else x) for x in lib}
+            self._tc_index_ready.emit(ids)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_tc_index(self, ids) -> None:
+        self._tc_ids = ids
+        if getattr(self, "listw", None) is not None:      # only re-render if the list is showing
+            self._show_list()
+
+    def _tc_mark(self, fid: str) -> tuple[str, str]:
+        """(suffix, tooltip-line) for a fragment's publication state. Silent when unknown."""
+        if self._tc_ids is None:
+            return "", ""
+        if fid in self._tc_ids:
+            return "  ↑", "Published to the Teaching Center — experiments can be composed from it."
+        return "", "Local only — not yet uploaded to the Teaching Center."
 
     def _selected_id(self) -> str | None:
         it = getattr(self, "listw", None) and self.listw.currentItem()
@@ -274,17 +454,42 @@ class FragmentManager(QDialog):
             if str(spec.get("id", "")) == fid or p.stem == fid:
                 p.unlink(missing_ok=True); removed = True
         _frag.reload()
+        # The teacher owns both sides, so a local delete deletes centrally too — otherwise the copy
+        # is just re-pulled on the next sign-in and the deletion silently undoes itself. Best-effort
+        # and non-blocking: an unreachable Center must never make a local delete fail.
+        central = self._delete_on_center(fid)
         if _frag.get(fid) is not None:                    # survived the unlink → it's a built-in
             QMessageBox.information(self, "Built-in fragment",
                 f"'{fid}' is a built-in that ships with GINI, so it reloads from the app each "
                 f"launch and can't be removed here. (Any authored copy was deleted.) Built-ins are "
                 f"uncertified, so they no longer show up as dependency options.")
         elif removed:
-            QMessageBox.information(self, "Deleted",
-                f"Removed '{fid}' locally. Note: if you had published it to the Teaching Center, it "
-                f"will re-sync on next sign-in — delete it on the Teaching Center too to remove it "
-                f"for good.")
+            QMessageBox.information(self, "Deleted", f"Removed '{fid}'.{central}")
         self._show_list()
+
+    def _delete_on_center(self, fid: str) -> str:
+        """Delete the fragment from the Teaching Center too (teacher only). Returns a sentence to
+        append to the local confirmation. Never raises — losing the Center must not block a delete."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None or not getattr(tc, "is_teacher", lambda: False)():
+            return ""                                     # not signed in as teacher: nothing central
+        try:
+            res = tc.delete_fragment(fid)
+        except Exception as e:                            # noqa: BLE001
+            res = {"ok": False, "error": str(e)}
+        if not isinstance(res, dict):                     # a malformed reply is a failure, not a crash
+            res = {"ok": False, "error": f"unexpected reply: {res!r}"}
+        if res.get("ok"):
+            self.ctx.log(f"Removed '{fid}' from the Teaching Center too.", "ok")
+            if self._tc_ids is not None:
+                self._tc_ids.discard(fid)                 # drop the ↑ mark immediately
+            return " Removed from the Teaching Center as well."
+        err = res.get("error", "unknown error")
+        if "no such" in str(err).lower() or "not found" in str(err).lower():
+            return ""                                     # never published there — nothing to say
+        self.ctx.log(f"Couldn't remove '{fid}' from the Teaching Center: {err}", "error")
+        return (f"\n\n⚠ It could NOT be removed from the Teaching Center ({err}), so it will "
+                f"re-sync on your next sign-in. Delete it there, or retry when the server is up.")
 
     def _edit_selected(self) -> None:
         fid = self._selected_id()
@@ -370,6 +575,8 @@ class FragmentManager(QDialog):
                          f"experiments from it." if res.get("ok")
                          else f"Upload refused: {res.get('error', 'unknown error')}",
                          "ok" if res.get("ok") else "error")
+            if res.get("ok"):
+                self._refresh_tc_index(force=True)        # the ↑ mark appears without a reopen
         threading.Thread(target=work, daemon=True).start()
         self.ctx.log(f"Uploading '{fid}' to the Teaching Center…", "info")
 
@@ -412,6 +619,17 @@ class FragmentManager(QDialog):
                     # no slot. Rebuild the exclude set so re-save/recompute stays delta-only.
                     self._scaffold_ids = {did for did, dev in self.ctx.topology.devices.items()
                                           if getattr(dev, "slot", "")}
+            # CARRY THE CERTIFICATION FORWARD. Save stamps `certified` only when the content hash
+            # matches the one last graded green; on a freshly-opened editor that hash is None, so
+            # re-saving an already-certified fragment would silently ERASE its ✓ (which is exactly
+            # what happens when you reopen a fragment between Validate ×N runs). Seed the hash from
+            # the stored fragment: unchanged content keeps the stamp, edited content still drops it.
+            if getattr(f, "certified", False):
+                self._certified_hash = self._dict_hash(self._dict_from_fragment(f))
+            else:
+                self._certified_hash = None
+        else:
+            self._certified_hash = None          # a brand-new fragment starts uncertified
 
         self._clear_body()
 
@@ -450,9 +668,12 @@ class FragmentManager(QDialog):
         # old "Add fork" button is retired.)
         cert = QPushButton("Certify"); cert.setToolTip("Check this fragment (compiler + composability)")
         cert.clicked.connect(self._certify_current); acts.addWidget(cert)
-        comp = QPushButton("Compose ×N")
-        comp.setToolTip("Scale this fragment: bind its slot to N certified providers, build the whole "
-                        "topology on the canvas, and grade it")
+        # A TEST, not a build: it proves this fragment's pattern still holds at N. The result is a
+        # throwaway validation instance (Save stays disabled while one is showing) — to keep a
+        # composition, use the Composer, which saves it as a new terminal fragment.
+        comp = QPushButton("Validate ×N")
+        comp.setToolTip("TEST that this fragment's pattern scales: fill its slot with N certified "
+                        "providers, build the topology, and grade it. Nothing is saved.")
         comp.clicked.connect(self._compose_validate); acts.addWidget(comp)
         self._body.addWidget(self._card(acts))
         self._sync_record_btn()
@@ -631,10 +852,12 @@ class FragmentManager(QDialog):
                 self._merge_scaffold(subtopo, slot_name, col=r)
         else:
             objs = [{"check": o.check} for o in prov.instantiate() if o.check]
-            for _ in range(reps):                            # drop `reps` representatives of the LAN
-                ids = _au.materialize(self.ctx, objs)
+            band = self._slot_band(slot_name)                # this slot's own column band
+            for r in range(reps):                            # drop `reps` representatives of the LAN
+                ids = _au.materialize(self.ctx, objs, x0=60 + (band + r) * 300)
                 for did in ids:                              # all share the one slot name
                     self.ctx.topology.devices[did].slot = slot_name
+                    self.ctx.topology.devices[did].slot_source = prov.id   # …and what filled it
                 self._scaffold_ids |= set(ids)
         self._slots.append({"name": slot_name, "role": slot_role,
                             "min": n if cardinal else 1, "max": 0 if cardinal else 1,
@@ -646,6 +869,14 @@ class FragmentManager(QDialog):
             f"Loaded '{prov.id}' as slot {slot_name} — {kind}. Wire your delta to it and refer to it "
             f"as type@{slot_name} — e.g. link(router, {hint}). Only your delta is saved; press "
             f"Compose ×N to scale + validate.")
+
+    def _slot_band(self, slot_name: str) -> int:
+        """The first free layout column for a slot's scaffold. Each slot occupies its own band of
+        columns, so R_net(X, Y, Z) shows three side-by-side groups rather than three piles at x=70."""
+        used = {getattr(d, "slot", "") for d in self.ctx.topology.devices.values()}
+        used.discard("")
+        used.discard(slot_name)                  # this slot's own reps continue its band
+        return len(used) * 2                     # 2 columns per slot (the two representatives)
 
     def _slot_role(self, prov) -> str:
         """The role a slot should require: the ROOT ancestor of a network-ish provide (loose, so the
@@ -676,7 +907,26 @@ class FragmentManager(QDialog):
                 "This fragment has nothing to scale. Press 'Add dependency', choose a certified "
                 "provider, and make it a repeatable leg (2+) or a peer group (mesh/ring/…).")
             return
-        _frag.FRAGMENTS[frag.id] = frag                      # so the assembler can resolve it by id
+        # Validate ×N is READ-ONLY. The composer resolves `binding["fragment"]` through the registry,
+        # so the in-editor draft has to be visible there for the call — but the draft carries no
+        # `certified` flag (that's stamped at Save), so installing it plainly would overwrite the
+        # loaded, certified entry and the list would show the fragment as uncertified. Carry the
+        # stamp onto the draft, and put the original back when we're done.
+        prev = _frag.FRAGMENTS.get(frag.id)
+        if prev is not None and getattr(prev, "certified", False):
+            import dataclasses
+            frag = dataclasses.replace(frag, certified=True)
+        _frag.FRAGMENTS[frag.id] = frag
+        try:
+            self._compose_validate_inner(frag)
+        finally:
+            if prev is not None:                             # restore the saved fragment verbatim
+                _frag.FRAGMENTS[frag.id] = prev
+            else:
+                _frag.FRAGMENTS.pop(frag.id, None)           # never-saved draft: leave no trace
+
+    def _compose_validate_inner(self, frag) -> None:
+        from ..domain import compose as _compose
         binding = self._resolve_binding(frag)
         if binding is None:
             return
@@ -712,6 +962,86 @@ class FragmentManager(QDialog):
             msg += "\n\nNot satisfied:\n• " + "\n• ".join(unmet[:8])
         QMessageBox.information(self, "Composition validated", msg)
 
+    # ------------------------------------------------------------- composer
+    def _composer(self) -> None:
+        """Build a CONCRETE network from certified fragments and keep it.
+
+        The counterpart to Validate ×N: that one *tests* whether an authored pattern scales (and
+        throws the result away); this one *applies* a non-terminal to real arguments and saves the
+        result as a new fragment. Grammar-wise it's a derivation — applying a production rule to
+        terminals yields a terminal — so the output is a self-contained block with no open slots,
+        which can itself fill another fragment's slot, or be uploaded to the Teaching Center."""
+        from ..domain import compose as _compose
+        from ..domain import objectives as _obj
+
+        composable = [f for f in _frag.all_fragments()
+                      if getattr(f, "certified", False) and not self._is_terminal(f)]
+        if not composable:
+            QMessageBox.information(self, "Composer",
+                "No certified NON-TERMINAL fragments yet.\n\nA composable block is one with open "
+                "slots (◆ in the list) — author one with 'Add dependency', certify it, then compose "
+                "it here.")
+            return
+        labels = [f"{f.id}   ⟨{', '.join(self._open_slots(f))}⟩" for f in composable]
+        pick, ok = QInputDialog.getItem(self, "Composer",
+            "Which template do you want to build from?\nIts open slots are shown in ⟨…⟩ — you'll "
+            "fill them next:", labels, 0, False)
+        if not ok:
+            return
+        frag = composable[labels.index(pick)]
+
+        binding = self._resolve_binding(frag)             # asks provider + N per slot (recursively)
+        if binding is None:
+            return
+        mode_pick, ok = QInputDialog.getItem(self, "Grading mode",
+            "How are students graded on the result?\n\n"
+            "• open — any N ≥ the floor passes (the general pattern)\n"
+            "• fixed — exactly this N (a specific, reproducible lab)",
+            ["open (student picks N ≥ floor)", "fixed (exactly this N)"], 1, False)
+        if not ok:
+            return
+        mode = "open" if mode_pick.startswith("open") else "fixed"
+        try:
+            topo, objs = _compose.materialize(binding, mode=mode)
+        except _compose.CompositionError as e:
+            QMessageBox.warning(self, "Composer", str(e))
+            return
+
+        new_id, ok = QInputDialog.getText(self, "Name this composition",
+            "Save the built network as a new fragment id:", text=f"{frag.id}-built")
+        if not ok or not new_id.strip():
+            return
+        new_id = _au.slug(new_id)
+
+        self._load_composed(topo)                          # draw it, tagged by slot
+        results = _obj.evaluate_all(objs, _obj.TopologyWorld(topo), None)
+        rows = [{"id": o.id, "say": o.say, "kind": o.kind, "check": o.check, "probe": o.probe,
+                 "level": o.level, "stars": getattr(o, "stars", 0)} for o in objs]
+        provides, requires = _au.derive_contract(self.ctx.topology)
+        d = _au.build_fragment_dict(
+            frag_id=new_id, teaches=frag.teaches, spirit=frag.spirit,
+            summary=(frag.summary or frag.id) + f" — built ({len(topo.devices)} elements)",
+            objectives=rows, provides=provides or None, requires=requires or None,
+            stage=topo.to_dict(), author=self._author)
+        problems = _au.validate_dict(d)
+        if problems:
+            QMessageBox.warning(self, "Composer", "The built network isn't gradable:\n• "
+                                + "\n• ".join(problems))
+            return
+        _au.save_fragment(d)
+        _frag.reload()
+        met = sum(1 for r in results if r.status == "met")
+        pend = sum(1 for r in results if r.status == "pending")
+        # it is NOT certified — it has never been run. That gate stays honest.
+        QMessageBox.information(self, "Composition saved",
+            f"Saved '{new_id}' — a TERMINAL block of {len(topo.devices)} elements "
+            f"(no open slots).\n\n{met}/{len(results)} structural objectives met"
+            + (f", {pend} live check(s) pending." if pend else ".")
+            + "\n\nIt is NOT certified yet: press Run, then open it and press Certify to prove it "
+              "live. Then it can fill another fragment's slot or go to the Teaching Center.")
+        self._composed_objectives = None                   # it's saved now, not a scratch validation
+        self._show_list()
+
     def _load_composed(self, topo) -> None:
         """Replace the canvas with a materialized composition, laid out in a simple grid and keeping
         each device's slot tag so the scaled network is visible and re-gradable."""
@@ -721,6 +1051,7 @@ class FragmentManager(QDialog):
             col, row = i % 8, i // 8
             inst = self.ctx.add_device(dv.type_key, x=90 + col * 120, y=90 + row * 120)
             inst.slot = getattr(dv, "slot", "")
+            inst.slot_source = getattr(dv, "slot_source", "")     # keep "what filled this" for labels
             idmap[dv.id] = inst.id
         for l in topo.links.values():
             s, t = idmap.get(l.source_id), idmap.get(l.target_id)
@@ -736,9 +1067,13 @@ class FragmentManager(QDialog):
     def _merge_scaffold(self, topo, slot_name: str, col: int = 0) -> None:
         """Merge a fully-materialized composite provider onto the canvas as a scaffold — every device
         tagged with `slot_name` (so the delta refers to it as type@slot), laid out in a column so
-        representatives don't overlap. Its links (and rider attachments) come along too."""
+        representatives don't overlap. Its links (and rider attachments) come along too.
+
+        `col` is the representative index WITHIN this slot; the slot's own band offset is added here,
+        so a multi-slot fragment (R_net(X, Y, Z)) lays its scaffolds out side by side instead of
+        stacking every slot on top of the first."""
         idmap: dict[str, str] = {}
-        base_x = 70 + col * 300
+        base_x = 70 + (self._slot_band(slot_name) + col) * 300
         for i, dv in enumerate(topo.devices.values()):
             inst = self.ctx.add_device(dv.type_key, x=base_x + (i % 3) * 85, y=70 + (i // 3) * 90)
             inst.slot = slot_name
@@ -760,46 +1095,61 @@ class FragmentManager(QDialog):
         return (bool((getattr(f, "stage", None) or {}).get("devices"))
                 or bool(getattr(f, "slots", ())) or bool(getattr(f, "peerings", ())))
 
-    def _resolve_binding(self, frag) -> dict | None:
+    def _resolve_binding(self, frag, seen: frozenset = frozenset()) -> dict | None:
         """Recursively ask which certified provider (and how many) fills each slot / peer group —
-        descending into composite providers — and return a composition binding, or None if cancelled."""
+        descending into composite providers — and return a composition binding, or None if cancelled.
+
+        `seen` carries the chain of fragments already being expanded, so a fragment can never be
+        bound into its own slot (directly or through a cycle A→B→A). That would be a grammar with
+        no base case: the dialog would recurse forever asking to fill the same slot. Genuine
+        recursion (campus → site → lan) is DIFFERENT fragments per level and is unaffected."""
+        chain = seen | {frag.id}
         bind: dict = {}
         for S in frag.slots:
-            members = self._pick_members(S.name, S.role, S.min, S.max, cardinal=(S.max != 1))
+            members = self._pick_members(S.name, S.role, S.min, S.max,
+                                         cardinal=(S.max != 1), owner=frag.id, seen=chain)
             if members is None:
                 return None
             bind.setdefault("bind", {})[S.name] = members
         for PG in frag.peerings:
-            members = self._pick_members(PG.name, PG.role, PG.min, PG.max, cardinal=True)
+            members = self._pick_members(PG.name, PG.role, PG.min, PG.max,
+                                         cardinal=True, owner=frag.id, seen=chain)
             if members is None:
                 return None
             bind.setdefault("peer", {})[PG.name] = members
         return {"fragment": frag.id, **bind}
 
-    def _pick_members(self, name, role, mn, mx, cardinal):
+    def _pick_members(self, name, role, mn, mx, cardinal, owner: str = "", seen: frozenset = frozenset()):
         from ..domain import capabilities as _caps
         provs = [f for f in _frag.all_fragments()
                  if getattr(f, "certified", False) and _caps.any_satisfies(f.provides, role)
-                 and self._materializable(f)]
+                 and self._materializable(f)
+                 and f.id not in seen]                       # no self-reference / no cycles
         if not provs:
-            QMessageBox.information(self, "Compose ×N",
-                f"No certified provider fills '{name}' (role {role}). Certify a {role} fragment first.")
+            QMessageBox.information(self, "Validate ×N",
+                f"No certified provider fills '{name}' (role {role}).\n\nIt needs a CERTIFIED "
+                f"fragment that provides {role} — and it can't be one already in this composition "
+                f"({', '.join(sorted(seen))}), since a block can't contain itself.")
             return None
         names = [f.id for f in provs]
-        pick, ok = QInputDialog.getItem(self, f"Fill '{name}'",
-            f"Fill '{name}' ({role}) with which certified provider?", names, 0, False)
+        # Name the fragment being scaled: this dialog supplies the ARGUMENT to `owner`'s slot — it is
+        # not choosing a new pattern. Without the owner named it reads as "pick a fragment".
+        head = f"Scaling '{owner}' — slot '{name}'" if owner else f"Fill '{name}'"
+        pick, ok = QInputDialog.getItem(self, head,
+            f"'{owner}' needs {role} in its '{name}' slot.\n"
+            f"Which certified fragment goes in each member?", names, 0, False)
         if not ok:
             return None
         n = mn
         if cardinal:
-            n, ok = QInputDialog.getInt(self, f"Fill '{name}'",
-                f"How many '{pick}' in '{name}'?", max(2, mn), mn, mx or 32, 1)
+            n, ok = QInputDialog.getInt(self, head,
+                f"How many '{pick}' in '{owner}'.{name}?", max(2, mn), mn, mx or 32, 1)
             if not ok:
                 return None
         pf = _frag.get(pick)
         member = pick
         if pf is not None and (pf.slots or pf.peerings):     # composite → resolve its sub-binding once
-            member = self._resolve_binding(pf)
+            member = self._resolve_binding(pf, seen)
             if member is None:
                 return None
         return [member] * n                                  # a uniform group of the chosen provider
@@ -1019,6 +1369,17 @@ class FragmentManager(QDialog):
             stage=stage if (stage and stage.get("devices")) else None, author=self._author)
 
     def _finalize(self) -> None:
+        # GUARD: a validation instance is on the canvas, and Save snapshots the canvas as this
+        # fragment's authoring board — saving now would replace the small authored pattern with the
+        # scaled instance and corrupt the fragment. Reopen to get the pattern back.
+        if getattr(self, "_composed_objectives", None):
+            QMessageBox.information(
+                self, "Not while a validation is showing",
+                "The canvas is holding a Validate ×N instance, not this fragment's authoring board.\n\n"
+                "Saving now would overwrite the authored pattern with the scaled copy. Go Back to "
+                "list and reopen the fragment to restore its board, then Save.\n\n"
+                "(To KEEP a composition as its own block, use the Composer in the icon rail.)")
+            return
         raw = self.fid.text().strip()
         if not raw:
             QMessageBox.warning(self, "Save", "Give the fragment an id."); return

@@ -11,25 +11,48 @@ iPad through the topology's Internet element.
 
 ## 1. Provision a board
 
-The firmware is built **once** and is identical on every board. What makes a board
-`gini-5` is a few hundred bytes of NVS, written separately — so adding a board takes
-seconds and you can never flash "the wrong build".
+The firmware is built and flashed **once** and is identical on every board. What makes
+a board `gini-5` is a few hundred bytes of NVS, written separately — so adding a board
+takes seconds and you can never flash "the wrong build".
+
+Only three things live on a board: its **id**, and the **lab Wi-Fi credentials** it
+needs to reach gBuilder. Those are bootstrap — they cannot be delivered over the link
+they are required to establish. Everything else comes from the canvas.
+
+### From gBuilder (what students do)
+
+No toolchain, no terminal. With the board plugged in over USB:
+
+1. **File → Settings → Hardware** — enter the lab Wi-Fi name and password *once*.
+   It is the same network for the whole class, so this is a per-laptop step, not a
+   per-board one.
+2. **Hardware → Set Up a Board…** (⌘⇧B). It finds the board, shows what it currently
+   holds, and suggests a free name like `gini-2`.
+3. Press **Set Up Board**. It writes the settings, saves them, and reboots the board.
+
+That is the only step in the whole GINI32 story that needs a cable. Afterwards the
+board is wireless — and gBuilder remembers the name, so the canvas can offer it
+instead of asking anyone to retype it.
+
+### From the command line (instructor / first flash)
+
+Flashing still needs ESP-IDF, so the first write to a virgin board is a terminal job:
 
 ```bash
 cd backend/gini32
 . ~/esp/esp-idf/export.sh
 
 ./gini32 build                                   # once, for all boards
+./gini32 flash -p /dev/cu.usbserial-120          # firmware only
 ./gini32 setup -p /dev/cu.usbserial-120 --id gini-5 \
-               --ssid <your lab wifi> --pass <password>
+               --ssid <your lab wifi> --pass <password>   # build+flash+provision
 ```
 
-**Write `gini-5` on a label and stick it on the board.** That string is the only
-link between this physical object and the canvas.
+`./gini32 show -p <port>` reads a board back, and `./gini32 unpair -p <port>` frees one
+that is still claimed by a laptop that has gone away.
 
-Only three things live on a board — its **id**, and the **lab Wi-Fi credentials** it
-needs to reach gBuilder. Those are bootstrap: they cannot be delivered over the link
-they are required to establish. Everything else comes from the canvas.
+**Write `gini-5` on a label and stick it on the board.** That string is the only link
+between this physical object and the canvas.
 
 **Which USB port?** On chips with native USB (S2/S3/C3/C6) use the one labelled
 **UART** — the console is on UART0, so the native-USB port flashes but shows nothing.
@@ -46,7 +69,7 @@ Drop a **GINI32 Board** on the canvas and wire it to a Router or Switch.
 
 | Property | Set it to | Notes |
 |---|---|---|
-| `BoardID` | `gini-5` | **must match the label.** Blank = nothing will attach |
+| `BoardID` | `gini-5` | **must match the label.** Blank = nothing will attach. Pick it from the dropdown rather than typing — it lists boards set up here, and boards on the air once the lab is running |
 | `Mode` | `routed` (default) | `routed` = reachable both ways; `nat` = devices hidden |
 | `ApSSID` | blank | blank ⇒ named after the element, e.g. `GINI32-GB1` |
 | `ApPassword` | `gini12345` | ≥ 8 chars, or the hotspot is open |

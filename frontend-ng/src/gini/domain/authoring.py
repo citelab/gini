@@ -220,11 +220,15 @@ def _label(type_key: str) -> str:
     return (dt.label if dt else type_key).lower()
 
 
-def materialize(ctx, objectives) -> list[str]:
+def materialize(ctx, objectives, x0: float = 60.0) -> list[str]:
     """Build a minimal board satisfying a provider fragment's STRUCTURAL objectives, as a SCAFFOLD
     the teacher authors a dependent fragment on top of. Returns the created device ids (the scaffold
     set). Behavioral objectives are ignored (a reach can't be placed). Links use a star: every A of a
-    `link(a, b)` is wired to the first B, so a LAN provider comes out as hosts-on-a-switch."""
+    `link(a, b)` is wired to the first B, so a LAN provider comes out as hosts-on-a-switch.
+
+    `x0` is the left edge of this scaffold's layout band. Each call otherwise starts at the same x,
+    so a fragment with several slots (or several representatives) would stack them all on top of
+    each other; the caller passes a per-slot offset to lay them out side by side."""
     import re
     created: list[str] = []
     by_type: dict[str, list[str]] = {}
@@ -232,7 +236,7 @@ def materialize(ctx, objectives) -> list[str]:
     def place(type_key: str, n: int) -> None:
         have = by_type.setdefault(type_key, [])
         while len(have) < n:
-            inst = ctx.add_device(type_key, x=60 + len(created) * 70, y=70 + len(by_type) * 90)
+            inst = ctx.add_device(type_key, x=x0 + len(created) * 70, y=70 + len(by_type) * 90)
             have.append(inst.id)
             created.append(inst.id)
 

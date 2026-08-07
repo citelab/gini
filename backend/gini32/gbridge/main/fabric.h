@@ -20,6 +20,11 @@
 #define G32_VERSION     1
 #define G32_HDR_LEN     24
 #define G32_ID_LEN      16
+/* Largest CONTROL payload (hello / keepalive telemetry). Must exceed the biggest
+ * string those build -- the keepalive's is 400 bytes -- or the message that keeps the
+ * link alive gets discarded for being too informative. Data frames do not come through
+ * here; they take fabric_linkoutput and are bounded by the MTU. */
+#define G32_CTRL_MAX    512
 
 #define G32_HELLO       0x01
 #define G32_HELLO_ACK   0x02

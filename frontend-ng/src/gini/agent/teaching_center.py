@@ -266,6 +266,28 @@ class TeachingCenterClient:
             return {"ok": False, "error": "Teacher sign-in required to upload."}
         return obj if isinstance(obj, dict) else {"ok": False, "error": f"Server said {status}."}
 
+    def fragment_library(self) -> list | None:
+        """What the Teaching Center currently holds — used to show, per fragment, whether it has been
+        published. Returns None (not []) when the answer is UNKNOWN (offline, not a teacher), so the
+        UI can stay silent rather than wrongly claiming "not published"."""
+        status, obj = self._transport("GET", "/api/fragments", None)
+        if status != 200 or not isinstance(obj, list):
+            return None
+        return obj
+
+    def delete_fragment(self, fragment_id: str) -> dict:
+        """Remove a fragment from the Teaching Center library.
+
+        The teacher owns both sides of a fragment's life, so deleting locally should delete
+        centrally too — otherwise the local copy is simply re-pulled on the next sign-in and the
+        'deletion' silently undoes itself."""
+        status, obj = self._transport("POST", "/api/fragments/delete", {"id": fragment_id})
+        if status == 0:
+            return {"ok": False, "error": "Can't reach the course server."}
+        if status == 401:
+            return {"ok": False, "error": "Teacher sign-in required to delete."}
+        return obj if isinstance(obj, dict) else {"ok": False, "error": f"Server said {status}."}
+
     def set_photo(self, data_url: str) -> dict:
         """Upload (or clear) my profile photo — a small data-URL. Stored on the course server so the
         instructor sees a real face next to a name."""

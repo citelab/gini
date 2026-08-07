@@ -107,4 +107,7 @@ PERSISTED_KEYS = (
     # once; `claimed_boards` is a property of this laptop, never of a topology, so a
     # colleague's .gini file cannot hand you their hardware.
     "laptop_id", "claimed_boards",
+    # The lab Wi-Fi written to a board over USB. Remembered so setting up the second
+    # and subsequent boards is one click — it is the same network for a whole class.
+    "board_wifi_ssid", "board_wifi_password", "known_boards",
 )

@@ -106,15 +106,19 @@ def _is_rider(type_key: str) -> bool:
     return bool(dt and getattr(dt, "rider", False))
 
 
-def _instantiate_stage(topo: Topology, stage: dict, label: str) -> None:
+def _instantiate_stage(topo: Topology, stage: dict, label: str, source: str = "") -> None:
     """Rebuild a provider's saved board into `topo`, tagging every (non-rider) device with `label`.
-    Reproduces the exact certified structure (all hosts wired to the switch, etc.)."""
+    Reproduces the exact certified structure (all hosts wired to the switch, etc.).
+
+    `source` records WHICH fragment was instantiated here — provenance only (no predicate reads it),
+    so a composed board can say "these came from cap-lan" rather than leaving the reader to guess."""
     idmap: dict[str, str] = {}
     for d in stage.get("devices", []) or []:
         if _is_rider(d.get("type_key", "")):
             continue                                      # ports, not structure
         inst = topo.add_device(d["type_key"])
         inst.slot = label
+        inst.slot_source = source
         idmap[d["id"]] = inst.id
     for l in stage.get("links", []) or []:
         if l.get("kind") == "attach":
@@ -167,7 +171,7 @@ def _build(binding: dict, topo: Topology, out: list[Objective], path: str,
     # A LEAF provider (a certified board, no slots) is reproduced faithfully, every device tagged
     # with this member's path.
     if is_provider and getattr(F, "stage", None) and F.stage.get("devices") and not F.slots:
-        _instantiate_stage(topo, F.stage, path)
+        _instantiate_stage(topo, F.stage, path, source=F.id)
         for t in F.objectives:
             # A provider's OWN live/output checks (reach, measure on its riders) are proven by its
             # certificate — we trust it, we don't re-run them here. (The composer strips riders, so a

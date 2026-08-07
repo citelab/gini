@@ -45,6 +45,10 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/sockets.h"
+#include "esp_timer.h"
+#include <errno.h>
+#include <unistd.h>          /* close() for the ping socket */
 
 #include "gbridge_config.h"
 #include "fabric.h"
@@ -441,6 +445,122 @@ int gb_telemetry(char *out, size_t out_len)
     return n;
 }
 
+/* ------------------------------------------------------------------- ping */
+
+/* Ping FROM the board.
+ *
+ * This exists because of a question that kept coming up and could not be answered:
+ * when an emulated machine cannot reach a phone on the hotspot, is the board failing
+ * to forward, or is the phone simply not replying? Every other test involves both at
+ * once. From here the board talks to the device directly on its own AP subnet, with
+ * no forwarding and no fabric in the path, so the two are finally separable.
+ *
+ * `ping 10.0.9.2`  -- a device on our hotspot: pure radio, no forwarding.
+ * `ping 10.0.1.1`  -- the gRouter: our fabric link, no radio.
+ * Phones are the usual culprit: iOS keeps an association on a network it has decided
+ * has no internet, while quietly ignoring traffic on it.
+ */
+static uint16_t icmp_cksum(const void *data, size_t len)
+{
+    const uint8_t *b = (const uint8_t *) data;
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        sum += (uint32_t) ((b[i] << 8) | b[i + 1]);
+    }
+    if (len & 1) {
+        sum += (uint32_t) (b[len - 1] << 8);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return (uint16_t) ~sum;
+}
+
+static void cmd_ping(const char *target)
+{
+    while (*target == ' ') {
+        target++;
+    }
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = ipaddr_addr(target);
+    if (dst.sin_addr.s_addr == IPADDR_NONE || !*target) {
+        printf("usage: ping <ip>   (e.g. ping 10.0.9.2)\n");
+        return;
+    }
+
+    /* IPPROTO_ICMP is the socket-API constant; IP_PROTO_ICMP is lwIP's internal
+     * protocol number and is not visible through lwip/sockets.h. */
+    int s = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (s < 0) {
+        printf("ping: cannot open a raw socket (errno %d)\n", errno);
+        return;
+    }
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    int replies = 0;
+    for (int seq = 1; seq <= 3; seq++) {
+        uint8_t pkt[32];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 8;                                  /* type 8 = echo request     */
+        pkt[4] = 0x67; pkt[5] = 0x62;                /* id "gb"                   */
+        pkt[6] = (uint8_t) (seq >> 8); pkt[7] = (uint8_t) seq;
+        memcpy(pkt + 8, "gini32", 6);
+        uint16_t ck = icmp_cksum(pkt, sizeof(pkt));
+        pkt[2] = (uint8_t) (ck >> 8); pkt[3] = (uint8_t) ck;
+
+        int64_t t0 = esp_timer_get_time();
+        if (sendto(s, pkt, sizeof(pkt), 0, (struct sockaddr *) &dst, sizeof(dst)) < 0) {
+            printf("  seq=%d  send failed (errno %d) -- no route to %s?\n",
+                   seq, errno, target);
+            continue;
+        }
+        /* Read until we see OUR echo reply: a raw ICMP socket also sees other
+         * traffic, and reporting someone else's packet as a reply would be worse
+         * than reporting nothing. */
+        for (;;) {
+            uint8_t buf[128];
+            struct sockaddr_in from;
+            socklen_t flen = sizeof(from);
+            int n = recvfrom(s, buf, sizeof(buf), 0, (struct sockaddr *) &from, &flen);
+            if (n <= 0) {
+                printf("  seq=%d  no reply (timeout)\n", seq);
+                break;
+            }
+            int ihl = (buf[0] & 0x0f) * 4;           /* skip the IP header       */
+            if (n < ihl + 8 || buf[ihl] != 0) {
+                continue;                            /* not an echo REPLY        */
+            }
+            if (buf[ihl + 4] != 0x67 || buf[ihl + 5] != 0x62) {
+                continue;                            /* not ours                 */
+            }
+            int rseq = (buf[ihl + 6] << 8) | buf[ihl + 7];
+            if (rseq != seq) {
+                continue;
+            }
+            /* Integer milliseconds on purpose. "%f" drags in newlib's floating-point
+             * formatter, which needs far more stack than a console task has — it
+             * overflowed and panicked the board on the first successful reply. */
+            printf("  seq=%d  reply from %s  %d ms\n", seq, target,
+                   (int) ((esp_timer_get_time() - t0) / 1000));
+            replies++;
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    close(s);
+
+    printf("ping %s: %d/3 replied", target, replies);
+    if (replies == 0) {
+        printf(" -- nothing came back. If this is a device on our hotspot, the board "
+               "can reach it over the radio only if the device answers: phones often "
+               "hold the association but ignore a network they think has no internet.");
+    }
+    printf("\n");
+}
+
 /* ---------------------------------------------------------- serial console */
 
 static void print_settings(void)
@@ -471,6 +591,10 @@ static void handle_command(char *line)
                "  save                persist settings to NVS\n"
                "  unpair              release this board so another laptop can claim it\n"
                "  blink               flash the LED, to find this board on the bench\n"
+               "  ping <ip>           ping FROM the board — the only way to tell a\n"
+               "                      forwarding fault from a device that is not\n"
+               "                      answering (try a phone on the hotspot, then\n"
+               "                      the gRouter)\n"
                "  reboot              restart the board\n");
         return;
     }
@@ -505,6 +629,10 @@ static void handle_command(char *line)
     }
     if (!strcmp(line, "blink")) {
         gb_blink();
+        return;
+    }
+    if (!strncmp(line, "ping ", 5)) {
+        cmd_ping(line + 5);
         return;
     }
     if (!strcmp(line, "show")) {
@@ -621,7 +749,9 @@ void app_main(void)
      * likely state for a fresh board is "wrong Wi-Fi credentials", and that is
      * exactly when you need the prompt — making you wait for a network that will
      * never arrive is precisely backwards. */
-    xTaskCreate(console_task, "console", 4096, NULL, 3, NULL);
+    /* 6 KB, not 4: `ping` runs on this task and holds a receive buffer plus a socket,
+     * and printf's formatter is not frugal. 4 KB overflowed and panicked the board. */
+    xTaskCreate(console_task, "console", 6144, NULL, 3, NULL);
 
     wifi_start_apsta();
 

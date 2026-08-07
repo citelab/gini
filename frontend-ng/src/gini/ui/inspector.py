@@ -718,6 +718,41 @@ class Inspector(QWidget):
                         f"{b.get('ap_ssid') or ''} from a phone.")
         return "\n".join(rows)
 
+    def _build_board_offline_picker(self, d) -> None:
+        """Offer the boards set up from this computer, while no lab is running."""
+        known = list(getattr(self.ctx.settings, "known_boards", None) or [])
+        mine = str((d.properties or {}).get("BoardID", "")).strip()
+        if not known and not mine:
+            lbl = QLabel("No boards set up yet — use Hardware → Set Up a Board with "
+                         "one plugged in over USB. Run the topology to see which "
+                         "boards are on the network.")
+            lbl.setStyleSheet("color: %s;" % self.theme.theme.muted)
+            lbl.setWordWrap(True)
+            self.props_form.addRow("Board", lbl)
+            return
+
+        combo = QComboBox()
+        combo.setEditable(True)              # an id can still be typed by hand
+        combo.addItem("")
+        for name in known:
+            combo.addItem(f"{name}  ·  set up here", name)
+        if mine and mine not in known:
+            combo.addItem(f"{mine}  ·  typed", mine)
+        idx = next((i for i in range(combo.count()) if combo.itemData(i) == mine), 0)
+        combo.setCurrentIndex(idx)
+
+        def pick(_i: int) -> None:
+            name = combo.currentData() or combo.currentText().split("  ·  ")[0].strip()
+            self._commit("BoardID", name)
+        combo.activated.connect(pick)
+        self.props_form.addRow("Board", combo)
+
+        hint = QLabel("Boards set up from this computer. Run the topology to see "
+                      "which are actually on the network.")
+        hint.setStyleSheet("color: %s;" % self.theme.theme.muted)
+        hint.setWordWrap(True)
+        self.props_form.addRow("", hint)
+
     def _build_board_panel(self, d, accent: str) -> None:
         """Pick which physical board plays this element, and claim it.
 
@@ -727,10 +762,11 @@ class Inspector(QWidget):
         """
         st = self.board_status_fn() if self.board_status_fn else None
         if st is None:
-            lbl = QLabel("Run the topology to see boards on the network.")
-            lbl.setStyleSheet("color: %s;" % self.theme.theme.muted)
-            lbl.setWordWrap(True)
-            self.props_form.addRow("Boards", lbl)
+            # Nothing is running, so we cannot say who is on the air. We CAN still
+            # offer the boards this laptop has set up: retyping an id from memory is
+            # exactly where a typo creeps in, and a mistyped BoardID gives a board
+            # that is online and healthy but invisible to the topology.
+            self._build_board_offline_picker(d)
             return
 
         avail = st.get("available") or []
