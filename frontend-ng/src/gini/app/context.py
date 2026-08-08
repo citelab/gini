@@ -25,6 +25,7 @@ class EventBus(QObject):
     canvas_background_clicked = Signal()  # left-click on empty canvas (exit sticky modes)
     llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
     enrolment_changed = Signal(str, bool, int)  # (student, course-server online, missions due)
+    boards_changed = Signal()         # a real GINI32 board came online or went quiet
     theme_changed = Signal(str)       # theme name
     log = Signal(str, str)            # level, message
     assistant_message = Signal(str, str)  # role, text

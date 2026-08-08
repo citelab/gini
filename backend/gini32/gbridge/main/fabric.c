@@ -61,6 +61,8 @@ static uint32_t s_ctrl_tx = 0, s_ctrl_fail = 0;
 static uint32_t s_trunc = 0;       /* control payloads clipped to G32_CTRL_MAX */
 static uint32_t s_fwd_in = 0;      /* frames arriving for someone BEHIND our radio */
 static uint32_t s_default_fixups = 0;  /* times we took the default route back */
+static uint32_t s_oversize = 0;    /* frames too big for this hop (see clamp_tcp_mss) */
+static uint32_t s_clamped = 0;     /* SYNs whose MSS we lowered to fit the fabric */
 static int s_ctrl_errno = 0;
 static uint32_t s_dgrams_in = 0;   /* valid datagrams from the relay, any type */
 
@@ -165,8 +167,22 @@ static bool owner_from_payload(const char *payload, int len, char *out, size_t o
 /* Parse "ip=... mask=... gw=... mac=... mtu=..." from the HELLO_ACK. */
 static bool parse_netcfg(const char *s, size_t len, fabric_netcfg_t *out)
 {
-    char buf[192];
+    /* Sized to the largest control payload the relay can send, and STATIC.
+     *
+     * This was `char buf[192]` on the stack, and 192 was already too small: a 32-char
+     * SSID with a 64-char password puts the HELLO_ACK at ~258 bytes, and the guard below
+     * rejects anything that does not fit — so the board would discard its whole
+     * configuration and log only "HELLO_ACK without a usable address". Nothing would
+     * have shown WHY. Adding `dns=` made an already-tight buffer worse.
+     *
+     * Static rather than a bigger stack array because this runs on the RX task, whose
+     * stack has overflowed before (two MTU-sized buffers). Only that task parses, so
+     * there is no re-entrancy to protect against. */
+    static char buf[G32_CTRL_MAX];
     if (len == 0 || len >= sizeof(buf)) {
+        ESP_LOGW(TAG, "config payload is %u bytes, too long to parse (max %u) — "
+                      "is the hotspot SSID or password very long?",
+                 (unsigned) len, (unsigned) sizeof(buf) - 1);
         return false;
     }
     memcpy(buf, s, len);
@@ -197,6 +213,11 @@ static bool parse_netcfg(const char *s, size_t len, fabric_netcfg_t *out)
             strncpy(out->ap_ssid, val, sizeof(out->ap_ssid) - 1);
         } else if (!strcmp(key, "appass")) {
             strncpy(out->ap_pass, val, sizeof(out->ap_pass) - 1);
+        } else if (!strcmp(key, "dns")) {
+            /* An EMPTY value is meaningful: it means the canvas has no Internet element,
+             * so stop offering a resolver. memset above already cleared it, so simply
+             * copying the (possibly empty) value carries that instruction through. */
+            strncpy(out->dns, val, sizeof(out->dns) - 1);
         } else if (!strcmp(key, "mac")) {
             unsigned m[6];
             if (sscanf(val, "%x:%x:%x:%x:%x:%x",
@@ -344,6 +365,108 @@ static bool resolve_relay(void)
     return false;
 }
 
+/* ------------------------------------------------------- path MTU / MSS clamp */
+
+/* The largest TCP payload that still fits the fabric hop: MTU minus the smallest
+ * possible IPv4 (20) and TCP (20) headers. */
+#define GB_FABRIC_MSS   (GB_FABRIC_MTU - 40)
+
+/* One's-complement checksum fixup for a single changed 16-bit word (RFC 1624).
+ * Recomputing the whole TCP checksum would mean walking the payload; this is exact
+ * and costs a few instructions. */
+static uint16_t csum_replace16(uint16_t hc, uint16_t old16, uint16_t new16)
+{
+    uint32_t sum = (uint16_t) ~hc;
+    sum += (uint16_t) ~old16;
+    sum += new16;
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t) ~sum;
+}
+
+/* Lower the MSS a device advertises so the far end never sends a segment too big for
+ * this hop. Returns true if the frame was modified.
+ *
+ * WHY THIS EXISTS. The fabric hop is Ethernet-in-UDP, so it carries 1400 bytes, not the
+ * 1500 an ordinary Wi-Fi client assumes. Nothing tells a phone that. It joins the
+ * hotspot, advertises MSS 1460, and the web server duly sends 1500-byte packets which
+ * this board cannot forward — they were counted as `drop` and nothing was ever sent
+ * back, so from the phone the internet simply hangs. The give-away is that PING and DNS
+ * work perfectly: they are small. Only real traffic is big enough to fall off the edge.
+ *
+ * Path MTU discovery is supposed to solve this and does not, in practice: it needs ICMP
+ * "fragmentation needed" to come back, lwIP does not generate it for FORWARDED packets,
+ * and modern TCP sets DF on everything. Clamping the MSS in the SYN is what every router
+ * on a tunnelled link does instead, precisely because it needs no cooperation from
+ * either end. It must be applied in BOTH directions: the phone's SYN tells the server
+ * what to send, and the server's SYN-ACK tells the phone.
+ */
+static bool clamp_tcp_mss(uint8_t *frame, uint16_t len, uint16_t max_mss)
+{
+    if (len < 54) {                                  /* eth + min ip + min tcp */
+        return false;
+    }
+    if (frame[12] != 0x08 || frame[13] != 0x00) {    /* not IPv4 */
+        return false;
+    }
+    uint8_t *ip = frame + 14;
+    if ((ip[0] >> 4) != 4) {
+        return false;
+    }
+    const uint16_t ihl = (uint16_t) ((ip[0] & 0x0F) * 4);
+    if (ihl < 20 || (uint16_t) (14 + ihl + 20) > len) {
+        return false;
+    }
+    if (ip[9] != 6) {                                /* not TCP */
+        return false;
+    }
+    /* A fragment other than the first has no TCP header to read. */
+    if ((((uint16_t) ip[6] << 8 | ip[7]) & 0x1FFF) != 0) {
+        return false;
+    }
+    uint8_t *tcp = ip + ihl;
+    if (!(tcp[13] & 0x02)) {                         /* only SYN carries an MSS option */
+        return false;
+    }
+    const uint16_t doff = (uint16_t) ((tcp[12] >> 4) * 4);
+    if (doff < 20 || (uint16_t) (14 + ihl + doff) > len) {
+        return false;
+    }
+
+    bool changed = false;
+    uint16_t i = 20;
+    while (i + 1 < doff) {
+        const uint8_t kind = tcp[i];
+        if (kind == 0) {                             /* end of options */
+            break;
+        }
+        if (kind == 1) {                             /* NOP padding */
+            i++;
+            continue;
+        }
+        const uint8_t olen = tcp[i + 1];
+        if (olen < 2 || i + olen > doff) {
+            break;                                   /* malformed: leave well alone */
+        }
+        if (kind == 2 && olen == 4) {
+            const uint16_t mss = (uint16_t) ((tcp[i + 2] << 8) | tcp[i + 3]);
+            if (mss > max_mss) {
+                const uint16_t ck = (uint16_t) ((tcp[16] << 8) | tcp[17]);
+                const uint16_t nck = csum_replace16(ck, mss, max_mss);
+                tcp[i + 2] = (uint8_t) (max_mss >> 8);
+                tcp[i + 3] = (uint8_t) (max_mss & 0xFF);
+                tcp[16] = (uint8_t) (nck >> 8);
+                tcp[17] = (uint8_t) (nck & 0xFF);
+                changed = true;
+            }
+            break;                                   /* only one MSS option is legal */
+        }
+        i += olen;
+    }
+    return changed;
+}
+
 /* ------------------------------------------------------------ netif callbacks */
 
 /* One queued outbound frame, already wrapped in its G32 header. */
@@ -364,7 +487,15 @@ static err_t fabric_linkoutput(struct netif *netif, struct pbuf *p)
     (void) netif;
 
     if (p->tot_len > GB_FABRIC_MTU + 32) {
-        s_drop++;
+        /* Counted separately and named, because this drop used to be indistinguishable
+         * from a busy queue — and it is the one that makes the internet "not work" from
+         * a device on the radio while ping and DNS look perfect. See clamp_tcp_mss(). */
+        s_oversize++;
+        if (s_oversize <= 3) {
+            ESP_LOGW(TAG, "dropped a %u-byte frame: this hop carries %u "
+                          "(a device is sending more than the fabric can take)",
+                     (unsigned) p->tot_len, (unsigned) GB_FABRIC_MTU);
+        }
         return ERR_MEM;
     }
     tx_item_t *it = malloc(sizeof(*it));            /* freed by the sender task */
@@ -379,6 +510,10 @@ static err_t fabric_linkoutput(struct netif *netif, struct pbuf *p)
         free(it);
         s_drop++;
         return ERR_BUF;
+    }
+    /* Outbound: a device on our radio is telling the far end how much it may send. */
+    if (clamp_tcp_mss(it->buf + G32_HDR_LEN, n, GB_FABRIC_MSS)) {
+        s_clamped++;
     }
     it->len = (uint16_t) (G32_HDR_LEN + n);
 
@@ -419,7 +554,7 @@ static void fabric_tx_task(void *arg)
 
 /* Build marker: bump on every firmware change so a stale flash is obvious in the log
  * rather than being mistaken for a failed fix. */
-#define GB_BUILD "gbridge-15 (default route)"
+#define GB_BUILD "gbridge-19 (mss)"
 
 static err_t fabric_netif_init(struct netif *netif)
 {
@@ -576,7 +711,7 @@ static void fabric_configure(const fabric_netcfg_t *cfg)
     /* The hotspot is a canvas decision too. Applied after the fabric is configured
      * so a board that cannot reach gBuilder never tears down a working AP. */
     if (s_cfg.ap_cidr[0] || s_cfg.ap_ssid[0]) {
-        gb_ap_configure(s_cfg.ap_cidr, s_cfg.ap_ssid, s_cfg.ap_pass);
+        gb_ap_configure(s_cfg.ap_cidr, s_cfg.ap_ssid, s_cfg.ap_pass, s_cfg.dns);
     }
 
     s_up = true;
@@ -817,6 +952,11 @@ static void fabric_rx_task(void *arg)
                     }
                 }
             }
+            /* Inbound: the far end's SYN-ACK tells the device on our radio how much IT
+             * may send. Clamping only one direction fixes only half the connections. */
+            if (clamp_tcp_mss(payload, (uint16_t) paylen, GB_FABRIC_MSS)) {
+                s_clamped++;
+            }
             struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t) paylen, PBUF_POOL);
             if (!p) {
                 s_drop++;
@@ -942,7 +1082,8 @@ void fabric_status(char *out, size_t out_len)
     }
     snprintf(out, out_len,
              "fabric: UP %s  %s/%s gw %s  via %s:%u (%s)  rx=%u tx=%u drop=%u  "
-             "[datagrams in: ack=%u frame=%u]  fwd_in=%u  default=%c%c fixups=%u",
+             "[datagrams in: ack=%u frame=%u]  fwd_in=%u  default=%c%c fixups=%u  "
+             "mss<=%u clamped=%u oversize=%u",
              s_cfg.routed ? "routed" : "nat",
              s_cfg.ip, s_cfg.mask, s_cfg.gw,
              s_relay_ip, (unsigned) ntohs(s_relay.sin_port),
@@ -952,5 +1093,6 @@ void fabric_status(char *out, size_t out_len)
              (unsigned) s_fwd_in,
              netif_default ? netif_default->name[0] : '?',
              netif_default ? netif_default->name[1] : '?',
-             (unsigned) s_default_fixups);
+             (unsigned) s_default_fixups,
+             (unsigned) GB_FABRIC_MSS, (unsigned) s_clamped, (unsigned) s_oversize);
 }

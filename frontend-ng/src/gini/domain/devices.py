@@ -206,7 +206,13 @@ _DEVICES: list[DeviceType] = [
     DeviceType(
         "cloud", "Internet", Category.EXTERNAL, "cloud", Accent.SLATE,
         "External network / the Internet.",
-        default_properties={"Name": "Internet"},
+        # DNS lives HERE rather than on the things that use it, because name resolution
+        # is a property of "the outside world is reachable" — which is precisely what
+        # this element represents. Remove the element and DNS goes with it, which is the
+        # honest behaviour: there is nothing left to resolve names against.
+        # Handed to real devices on a GINI32 board's hotspot via DHCP; editable because
+        # some campus networks block public resolvers.
+        default_properties={"Name": "Internet", "DNS": "8.8.8.8"},
     ),
     # A real ESP32 board (GINI32) running the gBridge firmware: the one element on
     # the palette that is not emulated at all. It stands for a physical radio on

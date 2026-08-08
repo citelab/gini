@@ -55,6 +55,33 @@
 #define GB_DISCOVER_TIMEOUT_MS  3000
 #define GB_LINK_STALE_MS        30000
 
+/* ---- the indicator LED that `blink` flashes ------------------------------- */
+/* Which GPIO the on-board LED sits on, or -1 for a board that has none.
+ *
+ * This is only the DEFAULT: `set led <gpio>` overrides it and is saved in NVS, so
+ * finding the right pin on a new board model costs one console command instead of a
+ * rebuild-and-flash per guess. Boards vary and there is no way to detect it in
+ * software — hence a setting rather than a constant.
+ *
+ * TWO KINDS OF LED EXIST and they need different drivers, so the type is a setting
+ * too — `set led <gpio> rgb` or `set led <gpio> plain`:
+ *
+ *   plain  a single-colour LED, driven by the pin level (gpio_set_level).
+ *   rgb    ONE addressable WS2812, driven by an RMT-timed bitstream. This is what most
+ *          ESP32-S3 devkits actually carry, INSTEAD of a plain LED: on the
+ *          ESP32-S3-DevKitC-1 it is GPIO38 (v1.1) or GPIO48 (the original revision),
+ *          and the board's only other LED is the power indicator, wired straight to
+ *          the rail and not controllable at all.
+ *
+ * Getting the type wrong is SILENT — a WS2812 reads a slow level toggle as a reset and
+ * stays dark, which looks identical to a wrong pin number. Hence an explicit flag
+ * rather than inferring one from the other.
+ *
+ * The default below suits an ESP32-S3-DevKitC-1 v1.1 out of the box. Original revision:
+ * `set led 48 rgb`. Plain LED: `set led <gpio> plain`. No usable LED: `set led -1`. */
+#define GB_DEFAULT_LED_GPIO     38
+#define GB_DEFAULT_LED_RGB      1
+
 /* ---- this board's identity, matched against the canvas element ------------ */
 /* Must equal the GINI32 element's "BoardID" property in gBuilder. */
 #define GB_DEFAULT_BOARD_ID     "gini32-1"

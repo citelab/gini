@@ -387,6 +387,35 @@ class NetworkSpec:
     internal: bool = False         # True = no external connectivity (the VPC fabric net)
 
 
+# Fallback resolver when an Internet element carries no DNS of its own (an older saved
+# topology, drawn before the property existed). Google's is used because it is the one
+# public resolver reachable from essentially every network that has internet at all.
+DEFAULT_PUBLIC_DNS = "8.8.8.8"
+
+
+def _internet_dns(topo) -> str:
+    """The resolver to hand out, taken from the Internet element on the canvas.
+
+    Blanking the property is a legitimate choice — "internet, but resolve names
+    yourself" — so an explicitly empty value is honoured rather than back-filled.
+    """
+    for d in topo.devices.values():
+        if d.type_key != "cloud":
+            continue
+        props = d.properties or {}
+        if "DNS" not in props:
+            return DEFAULT_PUBLIC_DNS          # saved before the property existed
+        raw = str(props.get("DNS", "")).strip()
+        return raw if _valid_ip(raw) else ""
+    return ""
+
+
+def _valid_ip(text: str) -> bool:
+    parts = (text or "").split(".")
+    return (len(parts) == 4
+            and all(p.isdigit() and len(p) <= 3 and 0 <= int(p) <= 255 for p in parts))
+
+
 @dataclass
 class GBridgeSpec:
     """One drawn GINI32 element: a real board's end of a fabric link.
@@ -412,6 +441,10 @@ class GBridgeSpec:
     # firmware, so two boards never collide and a lab can be renamed without a reflash.
     ap_ssid: str = ""
     ap_pass: str = ""
+    # The resolver the board's DHCP server hands to real devices, or "" when the canvas
+    # has no Internet element. Empty is meaningful, not missing: with nothing to egress
+    # through, offering a resolver would promise name resolution that cannot work.
+    dns: str = ""
 
 
 @dataclass
@@ -503,7 +536,7 @@ class RuntimeConfig:
                 {"board_id": b.board_id, "name": _svc(b.name), "label": b.name,
                  "ip": b.ip, "mask": b.mask, "gw": b.gw, "mac": b.mac, "mtu": b.mtu,
                  "mode": b.mode, "physical_subnet": b.physical_subnet,
-                 "ap_ssid": b.ap_ssid, "ap_pass": b.ap_pass,
+                 "ap_ssid": b.ap_ssid, "ap_pass": b.ap_pass, "dns": b.dns,
                  "fabric": b.ep.wiring(docker)}
                 for b in self.gbridge
             ],
@@ -898,6 +931,14 @@ class RuntimeCompiler:
                 if not ap_ssid:
                     ap_ssid = f"GINI32-{re.sub(r'[^A-Za-z0-9-]', '', name[end]) or 'board'}"
                 ap_pass = str(props.get("ApPassword", "")).strip()
+                # Real devices on the board's radio get a resolver ONLY when the canvas
+                # has an Internet element to egress through. Without one, an iPad could
+                # still be handed 8.8.8.8, would send queries into a topology with no way
+                # out, and would sit there timing out — which looks like broken Wi-Fi
+                # rather than a network with deliberately no internet in it. This is also
+                # why DNS follows the same route as everything else the board is told:
+                # the canvas decides, the board obeys.
+                dns = _internet_dns(topo) if have_internet else ""
                 cfg.gbridge.append(GBridgeSpec(
                     name=name[end], board_id=board_id,
                     ip=iface_ip[key], mask="255.255.255.0",
@@ -906,7 +947,7 @@ class RuntimeCompiler:
                     # The board always serves this subnet; `mode` only decides whether
                     # the emulated side gets a ROUTE to it or the devices are hidden.
                     physical_subnet=phys, seg=seg,
-                    ap_ssid=ap_ssid, ap_pass=ap_pass))
+                    ap_ssid=ap_ssid, ap_pass=ap_pass, dns=dns))
 
         # inline VNFs: a forwarding container that applies a network function between its
         # segments (the Internet-element pattern, but fabric<->fabric + an NF instead of NAT).

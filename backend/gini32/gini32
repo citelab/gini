@@ -6,7 +6,8 @@
 # What makes a board "gini-5" is a few hundred bytes of NVS written separately, so
 # provisioning a device takes seconds and never risks flashing the wrong build.
 #
-#   ./gini32 build                                   # compile once
+#   ./gini32 build                                   # compile once (also stages for gBuilder)
+#   ./gini32 stage                                   # re-copy the images gBuilder flashes
 #   ./gini32 flash    -p /dev/cu.usbserial-120       # firmware only
 #   ./gini32 provision -p /dev/cu.usbserial-120 --id gini-5 \
 #                      --ssid lab-wifi --pass hunter2
@@ -91,6 +92,24 @@ cmd_build() {
     info "building gBridge"
     idf.py build
     ok "firmware built — the same binary goes on every board"
+    cmd_stage
+}
+
+# Copy the built images where gBuilder can find them, so Hardware -> Flash a Board works
+# on a machine with no ESP-IDF. This runs automatically after every build: a shipped
+# binary that silently lags the source is exactly the "stale flash masquerading as a
+# fixed one" trap that has already cost this project two debugging sessions.
+cmd_stage() {
+    local out="$HERE/firmware/$TARGET"
+    local b="$PROJ/build"
+    [ -f "$b/gbridge.bin" ] || die "nothing built for $TARGET yet — run: ./gini32 build"
+    mkdir -p "$out"
+    cp "$b/bootloader/bootloader.bin" "$out/"
+    cp "$b/partition_table/partition-table.bin" "$out/"
+    cp "$b/gbridge.bin" "$out/"
+    local marker
+    marker="$(strings "$out/gbridge.bin" 2>/dev/null | grep -m1 -o 'gbridge-[0-9]* ([^)]*)' || true)"
+    ok "staged $TARGET firmware for gBuilder${marker:+ ($marker)}"
 }
 
 cmd_flash() {
@@ -176,6 +195,7 @@ main() {
     local sub="${1:-}"; shift || true
     case "$sub" in
         build)     parse_args "$@"; cmd_build ;;
+        stage)     parse_args "$@"; cmd_stage ;;
         flash)     parse_args "$@"; cmd_flash ;;
         provision) parse_args "$@"; cmd_provision ;;
         setup)     parse_args "$@"; cmd_setup ;;

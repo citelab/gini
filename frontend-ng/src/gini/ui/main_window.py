@@ -1324,6 +1324,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._persist_current_project()      # never lose the active project's work / chat
+        # Reap any hardware worker still talking to a board over USB. Quitting while one
+        # runs garbage-collects a live QThread, which Qt turns into an abort — so the app
+        # would "crash on exit" for anyone who closed the window mid-scan.
+        from .worker_host import drain
+        drain()
         super().closeEvent(e)
 
     def _refresh_icons(self) -> None:
@@ -1444,10 +1449,19 @@ class MainWindow(QMainWindow):
         # Hardware: real GINI32 boards. Its own menu because setting a board up is an
         # action a student takes repeatedly, not a preference — and because a first-time
         # user has to be able to FIND it without being told where to look.
+        # Ordered as a board's life runs, not alphabetically: flash a new one, set it up,
+        # release it when it is someone else's turn, and list what is out there. Flashing
+        # comes FIRST because it is the only step a brand-new board can start with — Set
+        # Up talks to a console that does not exist until firmware is on the board.
         hwm = mb.addMenu("Hard&ware")
+        flash_act = add(hwm, "&Flash a Board…", self._flash_board)
+        flash_act.setMenuRole(QAction.MenuRole.NoRole)
         setup_act = add(hwm, "&Set Up a Board…", self._setup_board, "Ctrl+Shift+B")
         setup_act.setMenuRole(QAction.MenuRole.NoRole)
-        add(hwm, "&Boards…", self._show_boards)
+        reset_act = add(hwm, "&Reset a Board…", self._reset_board)
+        reset_act.setMenuRole(QAction.MenuRole.NoRole)
+        hwm.addSeparator()
+        add(hwm, "&List Boards…", self._show_boards)
 
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
@@ -1468,6 +1482,32 @@ class MainWindow(QMainWindow):
             if bid not in ids:
                 ids.append(bid)
         return ids
+
+    def _flash_board(self) -> None:
+        """Put firmware on a board, then offer to set it up in the same sitting.
+
+        Chained deliberately: a freshly flashed board is useless until it has the lab
+        Wi-Fi, and making the student find the next menu item themselves is exactly the
+        kind of gap that turns a five-minute task into a support question.
+        """
+        from .flash_dialog import FlashBoardDialog
+        from PySide6.QtWidgets import QMessageBox
+        dlg = FlashBoardDialog(self)
+        if not dlg.exec():
+            return
+        self.ctx.log("GINI32: board flashed", "ok")
+        if QMessageBox.question(
+                self, "Set the board up now?",
+                "The board has firmware but no lab Wi-Fi yet, so it cannot reach "
+                "gBuilder.\n\nSet it up now?") == QMessageBox.StandardButton.Yes:
+            self._setup_board()
+
+    def _reset_board(self) -> None:
+        """Release a board's pairing over USB — see ui/reset_dialog.py for why USB."""
+        from .reset_dialog import ResetBoardDialog
+        dlg = ResetBoardDialog(self)
+        if dlg.exec():
+            self.ctx.log("GINI32: board released — any gBuilder may claim it now", "ok")
 
     def _setup_board(self) -> None:
         from .board_dialog import BoardSetupDialog
@@ -2011,6 +2051,20 @@ class MainWindow(QMainWindow):
             self._persist_settings()
         return True
 
+    @staticmethod
+    def _ap_gateway(subnet: str) -> str:
+        """The board's own address on its hotspot: the .1 of the physical subnet.
+
+        The firmware takes .1 and DHCPs the rest (gb_ap_configure), so this is derived
+        rather than reported — one fact, one place. Returns "" for anything unparsable,
+        because a wrong address on the canvas is worse than none.
+        """
+        head = (subnet or "").split("/")[0].strip()
+        parts = head.split(".")
+        if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            return ""
+        return ".".join(parts[:3] + ["1"])
+
     def _poll_boards(self) -> None:
         """Refresh real GINI32 board state, and the devices attached to their radios.
 
@@ -2024,6 +2078,8 @@ class MainWindow(QMainWindow):
         if st is None:
             return
         boards = {b["board_id"]: b for b in st.get("boards", [])}
+        was_online = {k: bool(v.get("online"))
+                      for k, v in (getattr(self, "_board_state", None) or {}).items()}
         self._board_state = boards
 
         # element id -> the devices its board currently carries
@@ -2034,6 +2090,7 @@ class MainWindow(QMainWindow):
             bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
             b = boards.get(bid)
             if not b:
+                node.set_board_addr("")
                 continue
             # Channel is reported by the hardware, never set here (APSTA forces it).
             ch = b.get("channel") or 0
@@ -2042,6 +2099,20 @@ class MainWindow(QMainWindow):
                 node.inst.properties["Channel"] = shown
             if b.get("online"):
                 live[node.inst.id] = list(b.get("clients") or [])
+                # The hotspot's own address, so the node says WHERE the board is and not
+                # merely that it exists — every other element on the canvas shows its
+                # address, and a board was the one thing you had to go and look up.
+                # Cleared below the moment it goes quiet: a stale address on a board that
+                # is not there is worse than no address, because it looks reachable.
+                node.set_board_addr(self._ap_gateway(b.get("physical_subnet") or ""))
+            else:
+                node.set_board_addr("")
+
+        # Tell the Inspector, which otherwise keeps showing a board that has gone away —
+        # it reads board state once, when the panel is built.
+        now_online = {k: bool(v.get("online")) for k, v in boards.items()}
+        if now_online != was_online:
+            self.ctx.bus.boards_changed.emit()
 
         changed = self.canvas.set_live_clients(live)
         if changed:

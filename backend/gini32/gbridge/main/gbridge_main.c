@@ -27,6 +27,12 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+/* `dhcps_offer_t` (u8) and OFFER_DNS (0x02) — which options the soft AP's DHCP server
+ * hands out. esp_netif.h does NOT pull these in: esp_netif_dhcps_option() takes a void*,
+ * so the option types belong to the DHCP server, not the netif API. Verified against
+ * IDF v5.4: both are in dhcpserver.h (NOT dhcpserver_options.h, which exists but only
+ * carries the option-code defines). Reached via the lwip/include/apps include path. */
+#include "dhcpserver/dhcpserver.h"
 /* Pairing a connected station's MAC with the address our DHCP server gave it needs an
  * API whose home has moved between IDF releases, and which is absent from IDF v5.4's
  * public headers here. MACs always work (esp_wifi_ap_get_sta_list), so that is the
@@ -44,6 +50,7 @@
 #include "nvs.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
+#include "led_strip.h"          /* the WS2812 on most S3 devkits — see gb_blink() */
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
 #include "esp_timer.h"
@@ -70,6 +77,17 @@ typedef struct {
     /* The laptop that claimed this board. Empty = unclaimed, so any laptop
      * may adopt it. Persisted, so a claim survives a power cut. */
     char owner[40];
+    /* Which pin the indicator LED is on; -1 = this board has none.
+     *
+     * A SETTING rather than a compile-time constant because the pin differs between
+     * board models and is the one thing about a board you cannot determine from
+     * software. Baking in a guess means a wrong guess costs a full build-and-flash
+     * cycle to test the next candidate; `set led 13` costs a second. */
+    int16_t led_gpio;
+    /* 1 = the pin drives an ADDRESSABLE WS2812 (one pixel), 0 = a plain LED.
+     * Not detectable either: both are "a pin with an LED on it" from software, and
+     * driving the wrong one produces silence rather than an error. */
+    uint8_t led_rgb;
 } gb_settings_t;
 
 static gb_settings_t s_set;
@@ -91,6 +109,8 @@ static void settings_defaults(gb_settings_t *s)
     strncpy(s->ap_ssid, GB_DEFAULT_AP_SSID, sizeof(s->ap_ssid) - 1);
     strncpy(s->ap_pass, GB_DEFAULT_AP_PASS, sizeof(s->ap_pass) - 1);
     s->ap_channel = GB_DEFAULT_AP_CHANNEL;
+    s->led_gpio = GB_DEFAULT_LED_GPIO;
+    s->led_rgb = GB_DEFAULT_LED_RGB;
 }
 
 static void nvs_get_str_or(nvs_handle_t h, const char *key, char *dst, size_t len)
@@ -124,6 +144,17 @@ static void settings_load(gb_settings_t *s)
     if (nvs_get_u8(h, "apchan", &ch) == ESP_OK && ch) {
         s->ap_channel = ch;
     }
+    /* No `&& led` guard here, unlike the two above: -1 ("this board has no LED") and
+     * 0 (GPIO 0) are both meaningful saved values, so absence is the ONLY reason to
+     * keep the default. */
+    int16_t led = 0;
+    if (nvs_get_i16(h, "led", &led) == ESP_OK) {
+        s->led_gpio = led;
+    }
+    uint8_t rgb = 0;
+    if (nvs_get_u8(h, "ledrgb", &rgb) == ESP_OK) {
+        s->led_rgb = rgb ? 1 : 0;       /* 0 is a real saved value here too */
+    }
     nvs_close(h);
 }
 
@@ -142,6 +173,8 @@ static esp_err_t settings_save(const gb_settings_t *s)
     nvs_set_str(h, "appass", s->ap_pass);
     nvs_set_u16(h, "port", s->server_port);
     nvs_set_u8(h, "apchan", s->ap_channel);
+    nvs_set_i16(h, "led", s->led_gpio);
+    nvs_set_u8(h, "ledrgb", s->led_rgb);
     /* NOTE: `owner` is deliberately NOT written here. A claim is changed only by
      * claiming or releasing (gb_owner_save), never as a side effect of `save` —
      * otherwise editing an unrelated setting could silently re-own the board. */
@@ -256,6 +289,18 @@ static void wifi_start_apsta(void)
     sta.sta.pmf_cfg.capable  = true;
     sta.sta.pmf_cfg.required = false;
 
+    /* A board that has never been configured by a canvas must NOT raise the bare
+     * factory name: every board would raise the SAME one, and a room of thirty boards
+     * booting means thirty access points called "GINI32". A phone then attaches to
+     * whichever it heard loudest, which is a genuinely nasty thing to debug in a class.
+     * Qualify it with the board's own id, which is unique by construction. */
+    if (!strcmp(s_set.ap_ssid, GB_DEFAULT_AP_SSID) && s_set.board_id[0]) {
+        char boot_ssid[33];
+        snprintf(boot_ssid, sizeof(boot_ssid), "%s-%s", GB_DEFAULT_AP_SSID, s_set.board_id);
+        strncpy(s_set.ap_ssid, boot_ssid, sizeof(s_set.ap_ssid) - 1);
+        s_set.ap_ssid[sizeof(s_set.ap_ssid) - 1] = '\0';
+    }
+
     wifi_config_t ap = { 0 };
     strncpy((char *) ap.ap.ssid, s_set.ap_ssid, sizeof(ap.ap.ssid) - 1);
     ap.ap.ssid_len = strlen(s_set.ap_ssid);
@@ -301,22 +346,66 @@ void gb_owner_save(const char *owner)
  * ones. Claiming by name is useless if you cannot tell which object you are naming. */
 void gb_blink(void)
 {
-#ifdef GB_LED_GPIO
-    gpio_reset_pin(GB_LED_GPIO);
-    gpio_set_direction(GB_LED_GPIO, GPIO_MODE_OUTPUT);
+    /* This used to be `#ifdef GB_LED_GPIO`, and GB_LED_GPIO was never defined anywhere
+     * in the tree — so every board ever built took the log-only branch below and Blink
+     * appeared to do nothing at all. A fallback that is silently the ONLY path is worse
+     * than no fallback: the feature looked implemented and wasn't. The pin is a runtime
+     * setting now, so a board with no LED is a deliberate `set led -1`, not an accident
+     * of the build. */
+    const int pin = s_set.led_gpio;
+    if (pin < 0 || !GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+        for (int i = 0; i < 3; i++) {
+            ESP_LOGW(TAG, ">>> THIS IS THE BOARD YOU ARE LOOKING FOR (%s) <<< "
+                          "(no LED pin set — `set led <gpio>` to use one)", s_set.board_id);
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
+        return;
+    }
+    if (s_set.led_rgb) {
+        /* An addressable WS2812 — what most ESP32-S3 devkits carry INSTEAD of a plain
+         * LED (DevKitC-1: GPIO38 on v1.1, GPIO48 on the original; the only other LED on
+         * that board is the power indicator, hardwired to the rail). It decodes pulse
+         * WIDTHS in the hundreds of nanoseconds, so toggling the pin every 120 ms reads
+         * as a long reset and the LED simply stays dark — which is exactly what a wrong
+         * `set led <pin>` looks like, hence the explicit `rgb` flag rather than a guess.
+         *
+         * The strip is created and torn down per blink so the RMT channel is held only
+         * while flashing; blink is rare and not on any hot path. */
+        led_strip_handle_t strip = NULL;
+        led_strip_config_t scfg = {
+            .strip_gpio_num = pin,
+            .max_leds = 1,
+        };
+        led_strip_rmt_config_t rcfg = {
+            .clk_src = RMT_CLK_SRC_DEFAULT,
+            .resolution_hz = 10 * 1000 * 1000,   /* 10 MHz: 0.1 us per tick */
+        };
+        esp_err_t err = led_strip_new_rmt_device(&scfg, &rcfg, &strip);
+        if (err != ESP_OK || !strip) {
+            ESP_LOGW(TAG, "cannot drive an RGB LED on gpio %d: %s", pin,
+                     esp_err_to_name(err));
+            return;
+        }
+        for (int i = 0; i < 6; i++) {
+            /* Deliberately dim. These are bright enough at full scale to be unpleasant
+             * to look at on a bench, and we only need to be identifiable, not blinding. */
+            led_strip_set_pixel(strip, 0, 0, 40, 60);
+            led_strip_refresh(strip);
+            vTaskDelay(pdMS_TO_TICKS(150));
+            led_strip_clear(strip);
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+        led_strip_del(strip);
+        return;
+    }
+
+    gpio_reset_pin((gpio_num_t) pin);
+    gpio_set_direction((gpio_num_t) pin, GPIO_MODE_OUTPUT);
     for (int i = 0; i < 12; i++) {
-        gpio_set_level(GB_LED_GPIO, i & 1);
+        gpio_set_level((gpio_num_t) pin, i & 1);
         vTaskDelay(pdMS_TO_TICKS(120));
     }
-    gpio_set_level(GB_LED_GPIO, 0);
-#else
-    /* No LED configured for this board layout — say it loudly instead, so the
-     * feature degrades to something a student can still act on. */
-    for (int i = 0; i < 3; i++) {
-        ESP_LOGW(TAG, ">>> THIS IS THE BOARD YOU ARE LOOKING FOR (%s) <<<", s_set.board_id);
-        vTaskDelay(pdMS_TO_TICKS(300));
-    }
-#endif
+    gpio_set_level((gpio_num_t) pin, 0);
 }
 
 /* ------------------------------------------------ canvas-driven hotspot ---- */
@@ -326,18 +415,71 @@ void gb_blink(void)
 static char s_ap_applied_cidr[20];
 static char s_ap_applied_ssid[33];
 static char s_ap_applied_pass[65];
+static char s_ap_applied_dns[16];
+static bool s_dns_ever_applied = false;   /* "" is a real value, so track "never set" */
 
-void gb_ap_configure(const char *cidr, const char *ssid, const char *pass)
+/* Tell the DHCP server which resolver to hand out, or to stop offering one.
+ *
+ * Without this a device gets an address and a gateway but NO name server, which is a
+ * peculiarly confusing failure: `ping 8.8.8.8` works, so the network is obviously fine,
+ * yet nothing loads. ESP-IDF's softAP does not offer DNS unless asked to.
+ *
+ * The address comes from the canvas' Internet element, so removing that element stops
+ * the offer — a device is never promised name resolution the topology cannot deliver.
+ */
+static void ap_apply_dns(const char *dns)
+{
+    esp_netif_dhcps_stop(s_ap_netif);            /* required before either call below */
+
+    dhcps_offer_t offer = dns[0] ? OFFER_DNS : 0;
+    if (dns[0]) {
+        esp_netif_dns_info_t info;
+        memset(&info, 0, sizeof(info));
+        info.ip.type = ESP_IPADDR_TYPE_V4;
+        info.ip.u_addr.ip4.addr = ipaddr_addr(dns);
+        if (esp_netif_set_dns_info(s_ap_netif, ESP_NETIF_DNS_MAIN, &info) != ESP_OK) {
+            ESP_LOGW(TAG, "could not set hotspot DNS to %s", dns);
+        }
+    }
+    esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET,
+                           ESP_NETIF_DOMAIN_NAME_SERVER, &offer, sizeof(offer));
+    esp_netif_dhcps_start(s_ap_netif);
+
+    if (dns[0]) {
+        ESP_LOGI(TAG, "hotspot DNS %s — devices can resolve names through the topology",
+                 dns);
+    } else {
+        ESP_LOGI(TAG, "hotspot offers no DNS (no Internet element on the canvas) — "
+                      "devices can reach the drawn network but cannot resolve names");
+    }
+    /* Existing devices keep the lease they already have, so they pick this up on their
+     * next renewal or when they rejoin. Nothing is kicked off deliberately: dropping
+     * every device to change one DHCP option is a worse trade than a delayed update. */
+}
+
+void gb_ap_configure(const char *cidr, const char *ssid, const char *pass,
+                     const char *dns)
 {
     cidr = cidr ? cidr : "";
     ssid = ssid ? ssid : "";
     pass = pass ? pass : "";
+    dns = dns ? dns : "";
 
     bool net_changed = cidr[0] && strcmp(cidr, s_ap_applied_cidr) != 0;
     bool wifi_changed = (ssid[0] && strcmp(ssid, s_ap_applied_ssid) != 0)
                         || (strcmp(pass, s_ap_applied_pass) != 0);
-    if (!net_changed && !wifi_changed) {
+    /* No `dns[0] &&` guard, unlike ssid: going from a resolver to none is a real change
+     * that must be applied, and it is what deleting the Internet element looks like. */
+    bool dns_changed = !s_dns_ever_applied || strcmp(dns, s_ap_applied_dns) != 0;
+    if (!net_changed && !wifi_changed && !dns_changed) {
         return;                                  /* nothing to do — stay quiet */
+    }
+
+    if (dns_changed) {
+        ap_apply_dns(dns);
+        strncpy(s_ap_applied_dns, dns, sizeof(s_ap_applied_dns) - 1);
+        s_ap_applied_dns[sizeof(s_ap_applied_dns) - 1] = '\0';
+        s_dns_ever_applied = true;
     }
 
     if (net_changed) {
@@ -387,6 +529,20 @@ void gb_ap_configure(const char *cidr, const char *ssid, const char *pass)
                      strlen(pass) >= 8 ? "WPA2" : "open");
             strncpy(s_ap_applied_ssid, use_ssid, sizeof(s_ap_applied_ssid) - 1);
             strncpy(s_ap_applied_pass, pass, sizeof(s_ap_applied_pass) - 1);
+            /* Remember the name across reboots. It used to live only in the RAM copy
+             * above, so a board reverted to the factory SSID on every power cycle and
+             * every phone on it had to be re-pointed by hand — even though the canvas
+             * had named it. Written only inside `wifi_changed`, so this is a handful of
+             * NVS writes over a board's life, not one per keepalive. */
+            strncpy(s_set.ap_ssid, use_ssid, sizeof(s_set.ap_ssid) - 1);
+            strncpy(s_set.ap_pass, pass, sizeof(s_set.ap_pass) - 1);
+            nvs_handle_t h;
+            if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+                nvs_set_str(h, "apssid", s_set.ap_ssid);
+                nvs_set_str(h, "appass", s_set.ap_pass);
+                nvs_commit(h);
+                nvs_close(h);
+            }
         } else {
             ESP_LOGE(TAG, "could not set hotspot SSID '%s'", use_ssid);
         }
@@ -572,6 +728,12 @@ static void print_settings(void)
     printf("  apssid  %s\n", s_set.ap_ssid);
     printf("  appass  %s\n", s_set.ap_pass[0] ? "(set)" : "(open)");
     printf("  apchan  %u\n", (unsigned) s_set.ap_channel);
+    if (s_set.led_gpio < 0) {
+        printf("  led     (none — `set led <gpio>` to make Blink light something)\n");
+    } else {
+        printf("  led     gpio %d (%s)\n", (int) s_set.led_gpio,
+               s_set.led_rgb ? "addressable RGB" : "plain");
+    }
 }
 
 static void handle_command(char *line)
@@ -587,10 +749,13 @@ static void handle_command(char *line)
         printf("commands:\n"
                "  status              link state, counters, and who owns this board\n"
                "  show                current settings\n"
-               "  set <key> <value>   ssid|pass|server|port|id|apssid|appass|apchan\n"
+               "  set <key> <value>   ssid|pass|server|port|id|apssid|appass|apchan|led\n"
                "  save                persist settings to NVS\n"
                "  unpair              release this board so another laptop can claim it\n"
                "  blink               flash the LED, to find this board on the bench\n"
+               "                      (needs `set led <gpio> [rgb|plain]` once — the pin\n"
+               "                      and the LED type differ per board model and cannot\n"
+               "                      be detected; S3 devkits are usually `38 rgb`)\n"
                "  ping <ip>           ping FROM the board — the only way to tell a\n"
                "                      forwarding fault from a device that is not\n"
                "                      answering (try a phone on the hotspot, then\n"
@@ -609,6 +774,12 @@ static void handle_command(char *line)
         char radio[400];
         gb_telemetry(radio, sizeof(radio));
         printf("radio: %s\n", radio);
+        /* What devices are handed for name resolution. Worth its own line: "ping 8.8.8.8
+         * works but nothing loads" is the signature of a missing DNS option, and this
+         * turns that from a guess into a reading. */
+        printf("dhcp:  %s\n", s_ap_applied_dns[0]
+               ? s_ap_applied_dns
+               : "no DNS offered (no Internet element on the canvas)");
         const char *o = fabric_owner();
         printf("claim: %s\n", o && o[0] ? o
                : "unclaimed — any gBuilder on this network may adopt this board");
@@ -679,7 +850,18 @@ static void handle_command(char *line)
             strncpy(s_set.ap_pass, val, sizeof(s_set.ap_pass) - 1);
         } else if (!strcmp(key, "apchan")) {
             s_set.ap_channel = (uint8_t) atoi(val);
-        } else {
+        } else if (!strcmp(key, "led")) {
+            /* `set led <gpio> [rgb|plain]` — the type defaults to plain, so the common
+             * case stays short and the unusual one is stated explicitly. */
+            int pin = atoi(val);
+            /* Reject an unusable pin HERE, where a human is watching, rather than
+             * silently at blink time when they are across the room looking at the LED. */
+            if (pin >= 0 && !GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+                printf("gpio %d cannot drive an output on this chip\n", pin);
+                return;
+            }
+            s_set.led_gpio = (int16_t) pin;
+            s_set.led_rgb = (strstr(val, "rgb") != NULL) ? 1 : 0;
             printf("unknown key: %s\n", key);
             return;
         }

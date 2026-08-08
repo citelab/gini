@@ -136,6 +136,11 @@ class Inspector(QWidget):
         ctx.bus.selection_changed.connect(self._on_select)
         ctx.bus.device_changed.connect(self._on_changed)
         ctx.bus.addressing_changed.connect(self._rebuild)
+        # The board panel reads hardware state ONCE, when it is built. Without this the
+        # Inspector kept describing a board that had been unplugged — claim, MAC and all
+        # — which is the most misleading thing on the screen, because every other pane
+        # had already noticed it was gone.
+        ctx.bus.boards_changed.connect(self._on_boards_changed)
         ctx.bus.function_invoke_result.connect(self._on_invoke_result)
         ctx.bus.rider_ran.connect(self._on_rider_ran)
         self._invoke_result = None               # the Function Invoke panel's result widget
@@ -219,6 +224,18 @@ class Inspector(QWidget):
         # combo change, line-edit commit). Rebuilding now would delete that widget while
         # Qt is still using it -> segfault. singleShot(0) runs it after the signal unwinds.
         if device_id == self._device_id:
+            QTimer.singleShot(0, self._rebuild)
+
+    def _on_boards_changed(self) -> None:
+        """A real board came online or went quiet — refresh, if we are showing one.
+
+        Deferred for the same reason as _on_changed: this arrives on a poll tick that may
+        be nested inside a widget's own signal, and rebuilding the form under Qt's feet
+        deletes a widget it is still using. Restricted to gini32 so a board appearing
+        does not disturb someone editing an unrelated element's properties.
+        """
+        d = self.ctx.topology.devices.get(self._device_id) if self._device_id else None
+        if d is not None and d.type_key == "gini32":
             QTimer.singleShot(0, self._rebuild)
 
     def _clear_form(self) -> None:

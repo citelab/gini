@@ -80,6 +80,11 @@ class BoardInfo:
     has_password: bool = False
     server: str = ""
     ap_ssid: str = ""
+    # The laptop holding this board's claim, "" if unclaimed. Comes from `status`, not
+    # `show` — the claim is link state, not a setting — but it is read on the same open,
+    # because opening the port reboots the board and doing it twice is a wasted six
+    # seconds per board.
+    owner: str = ""
     extra: dict = field(default_factory=dict)
 
     @property
@@ -274,6 +279,16 @@ class BoardConsole:
         # `show` always prints several keys; anything less is not our console
         if found < 3 or (not info.board_id and not info.ssid):
             return None
+        # Who owns it. Best-effort: an older firmware has no `claim:` line, and not
+        # knowing the owner must never make a board look unidentifiable.
+        try:
+            st = self.command("status")
+            m = re.search(r"^claim:\s*(.+)$", st, re.M)
+            if m:
+                claim = m.group(1).strip()
+                info.owner = "" if claim.lower().startswith("unclaimed") else claim
+        except OSError:
+            pass
         return info
 
     def apply(self, ssid: str, password: str, board_id: str,
@@ -300,6 +315,29 @@ class BoardConsole:
             self._write("reboot\r\n")
             time.sleep(0.3)          # it is going away; nothing useful to read back
         return True, f"'{board_id}' set up for network '{ssid}'"
+
+
+    def unpair(self) -> tuple[bool, str]:
+        """Release this board's claim, so another laptop can adopt it.
+
+        This is the deliberate counterpart to there being NO automatic release: a claimed
+        board must never re-open itself while its owner is away from the bench, so the
+        only way back is physical possession — and USB is what "physical possession"
+        means in software. It is also the honest recovery path for the classroom failure
+        the claim mechanism exists to prevent: a board adopted by the wrong laptop, which
+        from the student's side looks like a board that simply refuses to appear.
+        """
+        out = self.command("unpair", timeout=5.0)
+        low = out.lower()
+        if "already unclaimed" in low:
+            return True, "this board was not claimed by anyone — nothing to release"
+        if "released" in low:
+            # Echo the previous owner back: in a lab it matters WHOSE board you just took.
+            m = re.search(r"released from '([^']*)'", out)
+            who = m.group(1) if m else ""
+            return True, (f"released from {who} — any gBuilder may now claim it" if who
+                          else "released — any gBuilder may now claim it")
+        return False, f"the board did not confirm the release: {out.strip()[:120]}"
 
 
 def detect_boards(ports: list[PortInfo] | None = None) -> tuple[list[BoardInfo], list[PortInfo]]:

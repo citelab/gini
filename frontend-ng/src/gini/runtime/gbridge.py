@@ -66,13 +66,25 @@ _TYPE_NAME = {T_HELLO: "HELLO", T_HELLO_ACK: "HELLO_ACK",
               T_CLAIM: "CLAIM", T_CLAIM_ACK: "CLAIM_ACK",
               T_RELEASE: "RELEASE", T_BLINK: "BLINK"}
 
-# A board is considered offline if nothing has been heard from it for this long.
-OFFLINE_AFTER = 30.0
-
-# The board's keepalive period (gbridge_config.h: GB_KEEPALIVE_MS). Kept here only as
-# the yardstick for "is this datagram late?" — the board decides the real cadence, and
-# nothing breaks if the two drift apart.
+# The board's keepalive period (gbridge_config.h: GB_KEEPALIVE_MS). Also the yardstick
+# for "is this datagram late?" — the board decides the real cadence, and nothing breaks
+# if the two drift apart.
 BOARD_KEEPALIVE_S = 5.0
+
+# How many keepalives may go missing before we call a board offline.
+#
+# Expressed as a MULTIPLE rather than a flat number of seconds, so the relationship to
+# the board's cadence cannot silently rot if either is retuned. Three missed hellos is
+# the usual convention for exactly this trade-off (OSPF's dead interval is 4x hello,
+# RIP's timeout 6x): enough to ride out the two-in-a-row losses that a busy 2.4 GHz
+# channel produces, few enough that unplugging a board is noticed while the student is
+# still looking at the screen.
+#
+# This was 30 s — SIX missed keepalives — which meant pulling a board's power left it
+# reading "connected" for over half a minute. Nothing needed that much slack; it was
+# just a round number chosen before the keepalive interval existed.
+OFFLINE_GRACE = 3.2                     # 3 missed keepalives, plus a little jitter
+OFFLINE_AFTER = BOARD_KEEPALIVE_S * OFFLINE_GRACE       # 16 s
 
 
 def encode(msg_type: int, board_id: str, payload: bytes = b"") -> bytes:
@@ -110,6 +122,11 @@ class BoardLink:
         self.physical_subnet: str = cfg.get("physical_subnet", "")
         self.ap_ssid: str = cfg.get("ap_ssid", "")
         self.ap_pass: str = cfg.get("ap_pass", "")
+        # Resolver for devices on the board's radio; "" when the canvas has no Internet
+        # element. Rides the HELLO_ACK like everything else, so drawing or deleting the
+        # Internet element reaches a RUNNING board on its next keepalive — no reflash,
+        # no rejoin of the topology.
+        self.dns: str = cfg.get("dns", "")
         # --- reported BY the board (telemetry in each keepalive) --------------- #
         self.channel: int = 0          # forced by the uplink in APSTA; observed only
         self.rssi: int = 0             # uplink signal strength, dBm
@@ -152,6 +169,12 @@ class BoardLink:
             parts.append(f"apssid={self.ap_ssid}")
         if self.ap_pass:
             parts.append(f"appass={self.ap_pass}")
+        # ALWAYS sent, even empty. "dns=" with no value is the instruction to stop
+        # offering a resolver — which is what deleting the Internet element means. If it
+        # were omitted when empty, a board told about DNS once would keep handing it out
+        # forever, promising name resolution through a topology that no longer has a way
+        # out. Absent and empty must not mean the same thing here.
+        parts.append(f"dns={self.dns}")
         return " ".join(parts).encode("ascii")
 
     def note_telemetry(self, payload: bytes) -> None:

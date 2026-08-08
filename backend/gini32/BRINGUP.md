@@ -21,22 +21,81 @@ they are required to establish. Everything else comes from the canvas.
 
 ### From gBuilder (what students do)
 
-No toolchain, no terminal. With the board plugged in over USB:
+No toolchain, no terminal. The **Hardware** menu covers a board's whole life, in the
+order that life runs:
+
+| | |
+|---|---|
+| **Flash a Board…** | put firmware on a brand-new board |
+| **Set Up a Board…** (⌘⇧B) | give it the lab Wi-Fi and an id |
+| **Reset a Board…** | release its pairing so someone else can use it |
+| **List Boards…** | what the running lab can see |
+
+With the board plugged in over USB:
 
 1. **File → Settings → Hardware** — enter the lab Wi-Fi name and password *once*.
    It is the same network for the whole class, so this is a per-laptop step, not a
    per-board one.
-2. **Hardware → Set Up a Board…** (⌘⇧B). It finds the board, shows what it currently
+2. **Hardware → Flash a Board…** — only for a board that has never been flashed. It
+   identifies the chip, names the firmware it is about to write, and offers to go
+   straight on to setup. Needs `esptool` (`pip install esptool`) but **not** ESP-IDF.
+3. **Hardware → Set Up a Board…** (⌘⇧B). It finds the board, shows what it currently
    holds, and suggests a free name like `gini-2`.
-3. Press **Set Up Board**. It writes the settings, saves them, and reboots the board.
+4. Press **Set Up Board**. It writes the settings, saves them, and reboots the board.
 
 That is the only step in the whole GINI32 story that needs a cable. Afterwards the
 board is wireless — and gBuilder remembers the name, so the canvas can offer it
 instead of asking anyone to retype it.
 
-### From the command line (instructor / first flash)
+**Re-flashing an existing board is safe.** The images are written at their own offsets,
+which leaves NVS at `0x9000` untouched, so the board keeps its id, its lab Wi-Fi, its
+pairing and its LED pin across a firmware update. (This is also why the firmware is
+*not* shipped as a single merged image: merging pads the gaps with `0xFF` and would run
+straight over NVS, silently unpairing every board it touched.)
 
-Flashing still needs ESP-IDF, so the first write to a virgin board is a terminal job:
+### Internet and DNS for devices on the hotspot
+
+Draw an **Internet** element and real devices on a board's radio reach the outside world
+through the drawn topology — the same NAT path the emulated machines use, so a traceroute
+from an iPad shows the routers you drew.
+
+Name resolution needs one extra thing, and its absence is confusing rather than obvious:
+ESP-IDF's soft AP does **not** offer a DNS server over DHCP unless told to. A device
+therefore gets an address and a gateway but no resolver, so `ping 8.8.8.8` works — the
+network is plainly fine — yet nothing loads. The board now hands out a resolver, taken
+from the **DNS** property on the Internet element (default `8.8.8.8`, editable because
+some campus networks block public resolvers).
+
+**No Internet element means no resolver is offered**, deliberately. There would be
+nothing to egress through, so a device would sit timing out on every lookup, which looks
+like broken Wi-Fi rather than a network built without a way out. Adding or removing the
+element reaches a running board on its next keepalive — no reflash, no restart.
+
+`status` on the board reports what it is handing out:
+
+```
+dhcp:  8.8.8.8
+dhcp:  no DNS offered (no Internet element on the canvas)
+```
+
+A device that is already connected keeps the lease it has, so it picks up a change on its
+next renewal or when it rejoins the hotspot. Nothing is kicked off deliberately —
+dropping every device to change one DHCP option is a worse trade than a delayed update.
+
+**Reset a Board** exists because a claimed board is invisible to every laptop except its
+owner — so a board someone else claimed looks, from your side, exactly like a board that
+is simply broken. There is deliberately no automatic release: physical possession is the
+authority, and USB is what physical possession means in software.
+
+### From the command line (instructor)
+
+**Building** needs ESP-IDF and always will: the toolchain, `export.sh` sourced into the
+environment, a per-chip `set-target`, and network access for the managed components.
+That is an instructor-grade install, and no UI hides it. It is also rare — the firmware
+is built *once* and is identical on every board, so building is a developer act while
+flashing is a routine student one. `./gini32 build` stages the images into
+`firmware/<target>/` automatically, which is what gBuilder then flashes; `./gini32 stage`
+re-copies them without rebuilding.
 
 ```bash
 cd backend/gini32
@@ -206,6 +265,32 @@ Inspector's board list is for the other cases — adopting a board before wiring
 seeing what is on the network.
 
 * **Blink** flashes a board's LED, so you can tell which physical object you are naming.
+  The default suits an **ESP32-S3-DevKitC-1 v1.1** (GPIO38, addressable RGB) with no
+  setup at all. For anything else, tell the board once, over the console:
+
+  ```
+  gini> set led 48 rgb      # DevKitC-1, ORIGINAL revision
+  gini> set led 13 plain    # a board with a plain single-colour LED
+  gini> set led -1          # a board with no usable LED
+  gini> save
+  gini> blink               # test it right there, without gBuilder in the loop
+  ```
+
+  **Two kinds of LED exist and they need different drivers.** A `plain` LED is driven
+  by the pin level; an `rgb` one is a single WS2812 that decodes pulse *widths* in the
+  hundreds of nanoseconds. Toggling a WS2812's pin slowly reads as a reset, so it stays
+  dark — indistinguishable from a wrong pin number. That is why the type is stated
+  rather than inferred.
+
+  Most ESP32-S3 devkits carry the addressable one *instead of* a plain LED: on the
+  DevKitC-1 the only other LED is the power indicator, wired to the rail and not
+  controllable. Per Espressif's user guide, the RGB is on **GPIO38 (v1.1)** or
+  **GPIO48 (original)**.
+
+  Neither the pin nor the type can be detected in software, so both are saved settings
+  rather than compile-time constants: trying the next candidate costs a console command,
+  not a rebuild-and-flash. `show` reports both. With `led -1`, Blink falls back to
+  shouting on the serial console.
 * **Release** (or `unpair` on the board) hands it back to the pool.
 
 There is deliberately **no timeout**: a board must never re-open itself while its owner

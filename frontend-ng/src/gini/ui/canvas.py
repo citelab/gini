@@ -241,6 +241,9 @@ class NodeItem(QGraphicsObject):
         self._scene = scene
         self.inst = inst
         self.status = "idle"
+        # GINI32 only: the hotspot address of the real board currently checked in, or ""
+        # when none is. Observed hardware state, so it is never saved with the topology.
+        self.board_addr = ""
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
@@ -408,11 +411,21 @@ class NodeItem(QGraphicsObject):
 
         # primary IP (once compiled) — at-a-glance addressing on the node
         addr = self._scene.ctx.addressing.get(self.inst.name)
+        ip = ""
         if addr and addr.get("interfaces"):
             ifaces = addr["interfaces"]
             ip = ifaces[0]["ip"].split("/")[0]
             if len(ifaces) > 1:
                 ip += f"  +{len(ifaces) - 1}"
+        elif getattr(self, "board_addr", ""):
+            # A GINI32 board is not in the compiled addressing table — it has no
+            # container and the canvas never assigns it a machine address. Its meaningful
+            # address is the hotspot gateway it raises for real devices, which only
+            # exists while the hardware is actually checked in. Set (and cleared) by
+            # _poll_boards, so an unplugged board stops advertising an address it no
+            # longer answers on.
+            ip = self.board_addr
+        if ip:
             p.setPen(_qcolor(t.accent))
             fip = QFont(); fip.setStyleHint(QFont.Monospace); fip.setPointSize(_sp(8))
             p.setFont(fip)
@@ -614,6 +627,15 @@ class NodeItem(QGraphicsObject):
 
     def set_status(self, status: str) -> None:
         self.status = status
+        self.update()
+
+    def set_board_addr(self, addr: str) -> None:
+        """Show (or clear) a real board's hotspot address. Repaints only on change —
+        this is called from a 3 s poll, and repainting every node every tick would put
+        the canvas under constant needless load."""
+        if addr == self.board_addr:
+            return
+        self.board_addr = addr
         self.update()
 
     def set_spotlight(self, on: bool) -> None:

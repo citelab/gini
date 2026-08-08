@@ -57,6 +57,11 @@ typedef struct {
     char ap_cidr[20];      /* e.g. 10.0.9.0/24 — we take .1 and DHCP the rest */
     char ap_ssid[33];
     char ap_pass[65];
+    /* Resolver to hand real devices by DHCP. EMPTY means the canvas has no Internet
+     * element, so offer none: a device given a resolver it cannot reach sits there
+     * timing out, which looks like broken Wi-Fi rather than a network that deliberately
+     * has no way out. Empty is an instruction, not a missing value. */
+    char dns[16];
 } fabric_netcfg_t;
 
 /* --- implemented in gbridge_main.c, which owns the Wi-Fi interfaces ---------- */
@@ -64,7 +69,8 @@ typedef struct {
 /* Raise/adjust the soft AP to match what the canvas asked for. Safe to call
  * repeatedly: it returns immediately unless something actually changed, so a
  * keepalive every few seconds does not keep kicking connected devices off. */
-void gb_ap_configure(const char *cidr, const char *ssid, const char *pass);
+void gb_ap_configure(const char *cidr, const char *ssid, const char *pass,
+                     const char *dns);
 
 /* Fill `out` with what this board can see, for the keepalive payload:
  *   ch=6 rssi=-71 up=lab-wifi sta=2 c=aa:bb:cc:dd:ee:ff/10.0.9.2 c=...

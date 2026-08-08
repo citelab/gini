@@ -219,6 +219,109 @@ def test_validate_flags_missing_and_duplicate_board_ids():
     assert any("also used by" in i["message"] for i in validate(t))
 
 
+def _board_and_internet(with_internet: bool, dns=None):
+    """A board behind a router, optionally with an Internet element to egress through."""
+    t = Topology()
+    board = t.add_device("gini32", x=0, y=0)
+    board.properties["BoardID"] = "gini-5"
+    r1 = t.add_device("router", x=1, y=0)
+    t.add_link(board.id, r1.id)
+    if with_internet:
+        net = t.add_device("cloud", x=2, y=0)
+        if dns is not None:
+            net.properties["DNS"] = dns
+        t.add_link(r1.id, net.id)
+    return t
+
+
+def test_devices_get_a_resolver_only_when_the_canvas_has_an_internet_element():
+    """The reported symptom: an iPad on the board's hotspot could ping 8.8.8.8 but
+    nothing loaded — it had an address and a gateway but no name server, because
+    ESP-IDF's softAP does not offer DNS unless told to.
+
+    The other half matters just as much: with no Internet element there is nothing to
+    egress through, so offering a resolver would promise name resolution that cannot
+    work, and the device would sit timing out — which looks like broken Wi-Fi rather
+    than a network deliberately built without a way out.
+    """
+    rt = RuntimeCompiler().compile(_board_and_internet(True)).to_runtime(docker=True)
+    assert rt["gbridge"][0]["dns"] == "8.8.8.8"
+
+    rt = RuntimeCompiler().compile(_board_and_internet(False)).to_runtime(docker=True)
+    assert rt["gbridge"][0]["dns"] == ""
+
+
+def test_the_resolver_is_editable_on_the_internet_element():
+    """Some campus networks block public resolvers, so this cannot be hardcoded."""
+    rt = RuntimeCompiler().compile(
+        _board_and_internet(True, dns="1.1.1.1")).to_runtime(docker=True)
+    assert rt["gbridge"][0]["dns"] == "1.1.1.1"
+
+
+@pytest.mark.parametrize("junk", ["", "  ", "not-an-ip", "8.8.8", "999.1.1.1"])
+def test_an_unusable_resolver_is_dropped_rather_than_passed_on(junk):
+    """Handing a device a malformed resolver is worse than handing it none: it fails
+    slowly, at every lookup, instead of failing honestly at DHCP time."""
+    rt = RuntimeCompiler().compile(
+        _board_and_internet(True, dns=junk)).to_runtime(docker=True)
+    assert rt["gbridge"][0]["dns"] == ""
+
+
+def test_dns_is_always_stated_in_the_hello_ack_even_when_empty():
+    """`dns=` with no value is the instruction to STOP offering a resolver.
+
+    Regression risk: if the key were omitted when empty, a board told about DNS once
+    would keep handing it out forever — so deleting the Internet element would leave
+    every device still pointed at a resolver the topology can no longer reach. Absent
+    and empty must not mean the same thing on this wire.
+    """
+    link = gb.BoardLink({"board_id": "gini-5", "ip": "10.0.4.10", "dns": "",
+                         "fabric": {"bind_host": "127.0.0.1", "bind_port": _free_port(),
+                                    "peer_host": "127.0.0.1", "peer_port": _free_port()}})
+    assert b"dns=" in link.netcfg()
+
+    link.dns = "8.8.8.8"
+    assert b"dns=8.8.8.8" in link.netcfg()
+
+
+def test_a_board_is_declared_offline_after_three_missed_keepalives():
+    """Unplugging a board must be noticed while the student is still looking at it.
+
+    Regression: this was a flat 30 s — SIX missed keepalives — so pulling a board's power
+    left the canvas reading "connected" for over half a minute, and the delay looked like
+    a bug in the link rather than a timeout. Three missed hellos is the usual convention
+    for this trade-off (OSPF's dead interval is 4x hello): enough to ride out the
+    two-in-a-row losses a busy 2.4 GHz channel produces, few enough to be responsive.
+    """
+    assert gb.OFFLINE_AFTER == pytest.approx(gb.BOARD_KEEPALIVE_S * gb.OFFLINE_GRACE)
+    assert 3 * gb.BOARD_KEEPALIVE_S <= gb.OFFLINE_AFTER <= 4 * gb.BOARD_KEEPALIVE_S
+
+    link = gb.BoardLink({"board_id": "gini-5",
+                         "fabric": {"bind_host": "127.0.0.1", "bind_port": _free_port(),
+                                    "peer_host": "127.0.0.1", "peer_port": _free_port()}})
+    link.addr = ("192.168.1.9", 5555)
+    now = time.time()
+
+    link.last_seen = now - 2 * gb.BOARD_KEEPALIVE_S      # one lost keepalive
+    assert link.online, "a single lost keepalive must not unplug a working board"
+    link.last_seen = now - 3 * gb.BOARD_KEEPALIVE_S      # two lost
+    assert link.online, "two lost keepalives happen on a busy channel"
+    link.last_seen = now - 5 * gb.BOARD_KEEPALIVE_S      # well past the grace
+    assert not link.online
+
+
+def test_the_hotspot_address_is_derived_from_the_physical_subnet():
+    """The firmware takes .1 of its subnet and DHCPs the rest, so the canvas derives the
+    board's address rather than being told it — one fact, one place."""
+    from gini.ui.main_window import MainWindow
+    assert MainWindow._ap_gateway("10.0.9.0/24") == "10.0.9.1"
+    assert MainWindow._ap_gateway("192.168.4.0/24") == "192.168.4.1"
+    # anything unparsable yields nothing: a WRONG address on the canvas is worse than
+    # none, because it looks reachable
+    for junk in ("", "not-a-subnet", "10.0.9", "10.0.999.0/24", "10.0.9.0.1/24"):
+        assert MainWindow._ap_gateway(junk) == ""
+
+
 def test_filling_in_a_property_re_runs_the_lint():
     """Editing a property must re-lint, or a fixed warning stays on screen forever.
 

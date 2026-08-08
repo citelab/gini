@@ -11,20 +11,14 @@ long makes a working setup look like a hang.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..services import boardsetup as bs
-
-
-# A worker and its thread outlive the dialog that started them (see _run), so they
-# need an owner that is not the dialog. Both matter: garbage-collecting a running
-# QThread makes Qt abort, and freeing the worker out from under a thread that is
-# about to invoke it is a segfault. Entries retire themselves when the thread ends.
-_LIVE_THREADS: set = set()          # {(QThread, worker)}
+from .worker_host import WorkerHost, _LIVE_THREADS       # noqa: F401 (tests inspect it)
 
 
 def _note(text: str) -> QLabel:
@@ -69,7 +63,7 @@ class _Apply(QObject):
             self.done.emit(False, str(e))
 
 
-class BoardSetupDialog(QDialog):
+class BoardSetupDialog(WorkerHost, QDialog):
     """Pick a plugged-in board, confirm the details, write them."""
 
     def __init__(self, parent, settings, known_ids: list[str] | None = None) -> None:
@@ -233,66 +227,8 @@ class BoardSetupDialog(QDialog):
 
     # ------------------------------------------------------------------- utils
 
-    def _run(self, worker: QObject, on_done) -> None:
-        """Run a worker on its own thread and clean both up when it finishes.
-
-        The thread is deliberately NOT parented to this dialog. Serial work is slow —
-        a board reboots when its port is opened — so a student can easily press Cancel
-        mid-scan; a parented QThread would then be destroyed while still running, and
-        Qt aborts the whole process when that happens. Unparented, it is held by the
-        module-level registry until it finishes on its own, and the callbacks simply
-        stop touching a dialog that has gone away.
-        """
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        # Hold a Python reference to BOTH. PySide does not keep the worker alive just
-        # because a signal is connected to it, so a worker passed in as a temporary is
-        # garbage-collected the moment this call returns — the thread then sits in its
-        # event loop forever and nothing is ever emitted.
-        entry = (thread, worker)
-        _LIVE_THREADS.add(entry)
-        self._worker = worker
-
-        # Connect to BOUND METHODS of this dialog, never to a closure. A closure has no
-        # thread affinity, so Qt picks a direct connection and the "handler" would run
-        # on the worker thread — touching widgets from off the GUI thread, which hangs
-        # or crashes. A bound method of a QObject living in the GUI thread makes the
-        # connection queued, which is the whole point of doing this work on a thread.
-        worker.done.connect(on_done)
-        worker.done.connect(thread.quit)
-        self._connections = [(worker.done, on_done)]
-        if hasattr(worker, "failed"):
-            worker.failed.connect(self._worker_failed)
-            worker.failed.connect(thread.quit)
-            self._connections.append((worker.failed, self._worker_failed))
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda: _LIVE_THREADS.discard(entry))
-        thread.finished.connect(thread.deleteLater)
-        self._thread = thread
-        thread.start()
-
-    def _detach(self) -> None:
-        """Cut every path from a running worker back into this dialog.
-
-        The `_alive` flag is not enough on its own: if the dialog is destroyed while a
-        worker is still going, the queued call lands on a freed C++ object and takes the
-        process with it. Disconnecting our own handlers (and only ours — `thread.quit`
-        stays connected, or the thread would never stop) makes the worker harmless.
-        """
-        import warnings
-        self._alive = False
-        for signal, slot in getattr(self, "_connections", []):
-            # A worker that already finished has dropped its connections, and PySide
-            # reports that as a warning rather than an exception. Closing a dialog
-            # after a successful scan is the common case, so this must be silent.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                try:
-                    signal.disconnect(slot)
-                except (RuntimeError, TypeError):
-                    pass
-        self._connections = []
+    # _run() and _detach() now come from WorkerHost — one copy of the threading
+    # rules, shared with the flash dialog. See ui/worker_host.py.
 
     def closeEvent(self, event) -> None:
         self._detach()
