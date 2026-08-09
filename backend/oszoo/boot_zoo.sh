@@ -164,6 +164,22 @@ if [ -n "$disk" ] && [ "${ZOO_PERSIST:-0}" = "1" ] && [ "$media" = "hd" ]; then
     [ -f "$overlay" ] && { disk="$overlay"; fmt=qcow2; }
 fi
 
+# Optional add-ons dropped into a DOSBox C: folder (a directory disk) before boot. The Win 3.11
+# element ships Digger Remastered — a fast, speed-corrected DOS game — into C:\DIGGER, so students
+# can run it from the DOS prompt (`cd \DIGGER` then `DIGGER`). Cached with the C: drive.
+case " ${ZOO_ADDONS:-} " in
+    *" digger "*)
+        if [ -d "${disk:-}" ] && [ ! -e "$disk/DIGGER/DIGGER.EXE" ]; then
+            echo "OS Zoo: adding Digger Remastered to C:\\DIGGER ..." >&2
+            mkdir -p "$disk/DIGGER"
+            if curl -fSL --retry 3 "http://www.digger.org/digger.zip" -o "$CACHE/digger.zip"; then
+                unzip -oq "$CACHE/digger.zip" -d "$disk/DIGGER" && rm -f "$CACHE/digger.zip"
+            else
+                echo "OS Zoo: Digger download failed (skipping)." >&2
+            fi
+        fi ;;
+esac
+
 # Old x86 OSes (MS-DOS, Win9x) address the disk by CHS via INT13; if QEMU's auto-geometry differs
 # from the geometry baked into the image, the OS boots the MBR but can't read its FAT. Read the
 # real geometry from the partition table's end-CHS so we can hand it to QEMU.

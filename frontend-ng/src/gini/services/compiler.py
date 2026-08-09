@@ -1134,6 +1134,8 @@ class RuntimeCompiler:
                     env["ZOO_IMAGE"] = str(p.get("Image", ""))
                 if str(p.get("Rom", "")):                 # Basilisk II: a Mac ROM
                     env["ZOO_ROM"] = str(p.get("Rom", ""))
+                if d.type_key == "win31":                 # ship Digger Remastered on the Win 3.11 C:
+                    env["ZOO_ADDONS"] = "digger"          # (run it from the DOS prompt: cd\digger, digger)
             # persist downloaded guest images on the host so each OS is fetched once, not on
             # every Run (an anonymous /zoo/cache volume is discarded when the container recreates).
             # Computed inline (mirrors app.paths.oszoo_cache_dir) to keep the compiler Qt-free.
