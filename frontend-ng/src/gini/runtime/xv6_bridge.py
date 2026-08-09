@@ -169,6 +169,10 @@ class Xv6Bridge:
     def kill(self, pid: int) -> None:
         self.agent.post(f"/kill?pid={int(pid)}")
 
+    def sc(self) -> str:
+        """Raw gini_scdump text (SC counts + TRACE ring) for the histogram + strace panels."""
+        return self.agent.get_text("/sc")
+
     def console(self) -> str:
         return self.agent.get_text("/console")
 

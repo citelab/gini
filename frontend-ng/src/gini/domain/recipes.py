@@ -600,6 +600,99 @@ RECIPES: tuple[Recipe, ...] = (
         ),
         links=(("gb", "r1"), ("r1", "s1"), ("s1", "m1")),
     ),
+    # ---- OS Zoo — boot a real historical OS ------------------------------- #
+    Recipe(
+        id="os_zoo_freedos", name="Boot FreeDOS (OS Zoo)",
+        summary="A real MS-DOS-compatible OS you boot and drive from an embedded screen — the "
+                "command-line PC of the DOS era.",
+        intent=("freedos", "dos", "os zoo", "historical", "vintage", "retro", "command line",
+                "boot", "emulator", "old os"),
+        teaches="what a single-tasking, real-mode DOS PC looks like, live under emulation",
+        concept="os-zoo",
+        elements=(
+            _e("os", "freedos", "Double-click to open the Zoo Lab and use FreeDOS live.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_kolibri", name="Boot KolibriOS (OS Zoo)",
+        summary="A tiny GUI OS written in assembly that boots from a single floppy to a graphical "
+                "desktop in seconds — the fast OS Zoo guest.",
+        intent=("kolibri", "kolibrios", "assembly", "tiny", "fast", "gui", "os zoo", "floppy",
+                "desktop", "boot", "emulator"),
+        teaches="how small and fast an OS can be — a full GUI desktop in 1.44 MB of assembly",
+        concept="os-zoo",
+        elements=(
+            _e("os", "kolibri", "Double-click to open the Zoo Lab and use the KolibriOS desktop.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_menuet", name="Boot MenuetOS (OS Zoo)",
+        summary="The assembly GUI OS KolibriOS forked from — a whole desktop on one floppy, "
+                "booting in seconds.",
+        intent=("menuet", "menuetos", "assembly", "tiny", "fast", "gui", "os zoo", "floppy",
+                "desktop", "boot", "emulator"),
+        teaches="another take on a tiny, fast, all-assembly GUI OS (the root of KolibriOS)",
+        concept="os-zoo",
+        elements=(
+            _e("os", "menuet", "Double-click to open the Zoo Lab and use the MenuetOS desktop.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_msdos", name="Boot MS-DOS 6.22 (OS Zoo)",
+        summary="The real Microsoft MS-DOS 6.22, booted from a disk image under QEMU — drag on and "
+                "Run; the disk downloads on first boot.",
+        intent=("ms-dos", "msdos", "dos", "microsoft dos", "6.22", "real dos", "os zoo", "boot",
+                "emulator", "command prompt"),
+        teaches="the original Microsoft MS-DOS — compare it side by side with FreeDOS",
+        concept="os-zoo",
+        elements=(
+            _e("os", "msdos", "Double-click to open the Zoo Lab and use the MS-DOS C:\\> prompt.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_mac7", name="Boot Mac System 7 (OS Zoo)",
+        summary="Classic Macintosh System 7 on an emulated 68k Mac — drag on and Run; the ROM and "
+                "disk download on first boot.",
+        intent=("mac", "macintosh", "system 7", "mac os", "classic mac", "basilisk", "68k",
+                "apple", "os zoo", "boot", "emulator"),
+        teaches="what classic Mac OS (System 7) looked and felt like, on emulated 68k hardware",
+        concept="os-zoo",
+        elements=(
+            _e("os", "mac7", "Double-click to open the Zoo Lab and use the System 7 desktop.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_win31", name="Boot Windows 3.11 (OS Zoo)",
+        summary="Windows for Workgroups 3.11 under DOSBox — drag on and Run; a pre-installed image "
+                "downloads on first boot.",
+        intent=("windows", "windows 3.1", "windows 3.11", "win31", "dosbox", "program manager",
+                "wfw", "os zoo", "boot", "emulator", "vintage windows"),
+        teaches="what early graphical Windows (3.x) was like, running fast under DOSBox",
+        concept="os-zoo",
+        elements=(
+            _e("os", "win31", "Double-click to open the Zoo Lab and use Windows 3.11.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_byo", name="Bring your own classic OS (OS Zoo)",
+        summary="Run a proprietary classic OS (Windows 95, Mac System 7, …) GINI can't ship: "
+                "supply a disk image you own and GINI provides the emulator.",
+        intent=("windows 95", "win95", "mac", "system 7", "classic mac", "bring your own",
+                "byo", "own image", "proprietary", "os zoo", "emulator", "rom", "disk image"),
+        teaches="how GINI runs a proprietary OS legally — you supply the image, GINI the emulator",
+        concept="os-zoo",
+        elements=(
+            _e("os", "oszoo_byo",
+               "Set Image to a disk image you legally own (and Arch/Emulator to match — 68k Mac "
+               "needs Basilisk and a ROM), then open the Zoo Lab.", col=0, row=0),
+        ),
+    ),
 )
 
 _BY_ID = {r.id: r for r in RECIPES}

@@ -1970,8 +1970,10 @@ class MainWindow(QMainWindow):
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
             elif role in ("router", "ovs", "controller", "service", "compute", "k8scluster",
-                          "xv6"):
+                          "xv6", "oszoo"):
                 st = states.get(_svc(node.inst.name))            # each its own container
+                # OS Zoo card tracks its emulator: the container stays up while QEMU/DOSBox/
+                # Basilisk runs, so "running" here means the guest is actually up.
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
             elif role in ("k8sworkload", "hpa", "k8snode"):      # live inside the cluster
@@ -2127,7 +2129,7 @@ class MainWindow(QMainWindow):
             if _role(node.inst.type_key) in ("machine", "switch", "router", "ovs",
                                              "controller", "service", "compute", "function",
                                              "k8scluster", "k8sworkload", "hpa", "k8snode",
-                                             "xv6", "peripheral"):
+                                             "xv6", "oszoo", "peripheral"):
                 node.set_status(status)
 
     def _do_recompute(self) -> None:
@@ -2589,6 +2591,9 @@ class MainWindow(QMainWindow):
         if dev.type_key == "xv6":                # xv6 Machine -> the OS workbench
             self._open_machine_lab(device_id)
             return
+        if _role(dev.type_key) == "oszoo":       # OS Zoo -> the historical OS in an embedded screen
+            self._open_zoo_lab(device_id)
+            return
         if dev.type_key in ("terminal", "storage_volume"):
             self._open_peripheral(device_id)     # Terminal / disk view on its xv6
             return
@@ -2813,11 +2818,65 @@ class MainWindow(QMainWindow):
         from .machine_lab import MachineLab
         dev = self.ctx.topology.devices[device_id]
         ms = self._machine_state_for(device_id)
-        self._machine_lab = MachineLab(
-            self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
-            on_console=lambda: self._open_terminal(device_id))
+        try:
+            self._machine_lab = MachineLab(
+                self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
+                on_console=lambda: self._open_terminal(device_id))
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.ctx.bus.log.emit("error", f"Machine Lab failed to open: {e}\n{tb}")
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                box = QMessageBox(self)
+                box.setWindowTitle("Machine Lab failed to open")
+                box.setIcon(QMessageBox.Warning)
+                box.setText(f"The Machine Lab could not open:\n{e}")
+                box.setDetailedText(tb)      # expandable, selectable traceback to copy
+                box.exec()
+            except Exception:
+                pass
+            return
         self._machine_lab.show()
         self._machine_lab.raise_()
+
+    def _open_zoo_lab(self, device_id: str) -> None:
+        """Open the Zoo Lab on an OS Zoo element — the historical OS running under emulation,
+        its screen embedded over noVNC. Needs the topology running (the container serves the
+        framebuffer). If QtWebEngine isn't available, fall back to the system browser so the
+        feature still works with no extra dependency."""
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        if not self._running:
+            self.ctx.log("Start the topology first (Run), then open the OS Zoo screen.", "info")
+            return
+        from ..services.compiler import _svc
+        svc = _svc(dev.name)
+        screen = None
+        for s in getattr(self, "_last_services", []):
+            if _svc(s.name) == svc:
+                screen = next((p for p in s.ports
+                               if p.get("web") and p.get("label") == "screen"), None)
+                break
+        if screen is None:
+            self.ctx.log(f"{dev.name}: no OS Zoo screen port — rebuild the image (gini-oszoo).",
+                         "info")
+            return
+        url = f"http://localhost:{screen['host']}{screen.get('path', '')}"
+        try:
+            from .zoo_lab import ZooLab
+        except Exception as e:                    # QtWebEngine missing -> browser fallback
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(url))
+            self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
+                         f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
+            return
+        self._zoo_lab = ZooLab(self, self.theme, dev, url)
+        self._zoo_lab.show()
+        self._zoo_lab.raise_()
+        self.ctx.log(f"Opening {dev.name} (OS Zoo): {url}", "ok")
 
     def _open_console(self, device_id: str) -> None:
         """Open a service's web dashboard (Grafana, MinIO, RabbitMQ, …) in the browser.

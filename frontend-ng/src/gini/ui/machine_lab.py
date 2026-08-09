@@ -19,7 +19,8 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..domain.machine_state import MachineState
@@ -40,6 +41,51 @@ def _pid_color(pid) -> str:
     h = ((pid * 137.508) % 360) / 360.0        # golden angle -> maximally spread hues
     r, g, b = colorsys.hsv_to_rgb(h, 0.58, 0.88)
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+class LayerCard(QFrame):
+    """A clickable card in the layered overview: title + one-line description + a live mini-stat.
+    Cards are grouped into OS layers (user / syscall interface / kernel / hardware) so the front
+    door reads like the textbook stack — the student drills into a component instead of being
+    dropped straight into the dense scheduler view."""
+
+    clicked = Signal()
+
+    def __init__(self, theme, title, desc, accent_key) -> None:
+        super().__init__()
+        self.theme = theme
+        self._accent = accent_key
+        t = theme.theme
+        acc = t.accent_for(accent_key)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMinimumHeight(92)
+        self.setStyleSheet(
+            f"LayerCard{{background:{t.panel};border:1px solid {t.line};border-radius:12px;}}"
+            f"LayerCard:hover{{border-color:{acc};background:{t.panel2};}}")
+        v = QVBoxLayout(self); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(3)
+        row = QHBoxLayout(); row.setSpacing(6)
+        dot = QLabel("●"); dot.setStyleSheet(f"color:{acc};font-size:11px;border:none;")
+        ttl = QLabel(title)
+        ttl.setStyleSheet(_scss(f"color:{t.text};font-size:14px;font-weight:600;border:none;"))
+        row.addWidget(dot); row.addWidget(ttl); row.addStretch(1)
+        v.addLayout(row)
+        d = QLabel(desc); d.setWordWrap(True)
+        d.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;border:none;"))
+        v.addWidget(d)
+        v.addStretch(1)
+        self.stat = QLabel("")
+        self.stat.setStyleSheet(
+            _scss(f"color:{acc};font-family:monospace;font-size:12px;font-weight:600;border:none;"))
+        v.addWidget(self.stat)
+
+    def set_stat(self, text) -> None:
+        self.stat.setText(text or "")
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
 
 
 class GanttStrip(QWidget):
@@ -109,65 +155,172 @@ class MachineLab(QDialog):
 
         t = theme.theme
         self.setWindowTitle(f"Machine Lab — {device.name}")
-        self.resize(900, 680)
+        self.resize(940, 700)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
 
         root = QVBoxLayout(self)
-        self._build_header(root)
-        self._build_controls(root)
+        self._build_topbar(root)
+
+        # Two rooms behind one door: the layered OVERVIEW (page 0, shown first) and the dense
+        # SCHEDULER view (page 1). The scheduler page is built eagerly so its widgets exist for
+        # rendering + tests even while the overview is on screen.
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        self._sched_page = QWidget()
+        spl = QVBoxLayout(self._sched_page); spl.setContentsMargins(0, 0, 0, 0)
+        self._build_controls(spl)
         if self.live:
-            self._build_launcher(root)   # launch/kill programs to give the scheduler real work
-        self._build_panels(root)
+            self._build_launcher(spl)   # launch/kill programs to give the scheduler real work
+        self._build_panels(spl)
+
+        self._overview = self._build_overview()
+        self._stack.addWidget(self._overview)     # index 0
+        self._stack.addWidget(self._sched_page)   # index 1
 
         self._busy = False
+        self._closed = False                      # set on close; guards worker-thread callbacks
         self.snap_ready.connect(self._on_snap)
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._on_poll)
+        self._ov_poll = QTimer(self)              # slow refresh so overview mini-stats stay live
+        self._ov_poll.timeout.connect(self._on_ov_poll)
 
+        self._show_overview()
         self._render()   # initial paint (state's first snapshot is taken when it's created)
         if self.live:
-            self._fetch(step=False)   # kick an async read so the table populates on open
+            self._fetch(step=False)   # kick an async read so the stats/table populate on open
 
-    # -- header ----------------------------------------------------------- #
-    def _build_header(self, root) -> None:
+    # -- top bar (persistent across pages) -------------------------------- #
+    def _build_topbar(self, root) -> None:
         t = self.theme.theme
         head = QHBoxLayout()
+        self._back_btn = QPushButton("  ← Overview")
+        self._back_btn.setStyleSheet(self._btn_css())
+        self._back_btn.clicked.connect(self._show_overview)
+        self._back_btn.setVisible(False)
+        head.addWidget(self._back_btn)
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("host", t.accent_for("red"), 24))
-        title = QLabel(f"  xv6 Scheduler — {self.device.name}")
-        title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
-        head.addWidget(ic); head.addWidget(title); head.addStretch(1)
+        self._title_lbl = QLabel(f"  Machine Lab — {self.device.name}")
+        self._title_lbl.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
+        head.addWidget(ic); head.addWidget(self._title_lbl); head.addStretch(1)
         mode = QLabel("live (GDB)" if self.live else "offline demo")
         mode.setStyleSheet(
             f"color:{t.success if self.live else t.muted};"
             f"background:{t.panel2};border:1px solid {t.line};border-radius:9px;"
             "padding:2px 10px;font-size:11px;")
         head.addWidget(mode)
-        memory = QPushButton("  Memory")
-        memory.setIcon(icons.icon("layout", t.accent_for("purple"), 14))
-        memory.setToolTip("Virtual memory — page tables, the allocator, and page faults")
-        memory.clicked.connect(self._open_memory_lab)
-        memory.setStyleSheet(self._btn_css())
-        head.addWidget(memory)
-        storage = QPushButton("  Storage")
-        storage.setIcon(icons.icon("database", t.accent_for("cyan"), 14))
-        storage.setToolTip("File system — inodes, buffer cache, and the write-ahead log")
-        storage.clicked.connect(self._open_storage_lab)
-        storage.setStyleSheet(self._btn_css())
-        head.addWidget(storage)
-        syscalls = QPushButton("  Syscall Builder")
-        syscalls.setIcon(icons.icon("compile", t.accent_for("red"), 14))
-        syscalls.setToolTip("Add your own system call to xv6 — generate the real kernel edits")
-        syscalls.clicked.connect(self._open_syscall_builder)
-        syscalls.setStyleSheet(self._btn_css())
-        head.addWidget(syscalls)
-        # No Console button here — the console is a *peripheral*: drop a Terminal on the canvas,
-        # wire it to this xv6 Machine, and double-click it.
         root.addLayout(head)
-        hint = QLabel("Watch the kernel move the CPU between processes. Slow the time-slice or "
-                      "Step one context switch at a time to see it happen.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
-        root.addWidget(hint)
+
+    # -- overview: the layered OS stack of drill-down cards --------------- #
+    def _build_overview(self) -> QWidget:
+        t = self.theme.theme
+        page = QWidget()
+        outer = QVBoxLayout(page); outer.setContentsMargins(0, 0, 0, 0)
+        intro = QLabel("The xv6 machine, layer by layer. Pick a component to open it — you drill "
+                       "into detail as you need it.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
+        outer.addWidget(intro)
+
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        body = QWidget(); col = QVBoxLayout(body); col.setContentsMargins(2, 2, 2, 2)
+        col.setSpacing(6)
+        self._ov_cards: dict = {}
+
+        # top of the stack: what the student's programs are, running in user mode
+        col.addWidget(self._layer_band("USER SPACE", [
+            ("programs", "Programs & Shell", "The processes you launch — running in user mode.",
+             "green", self._open_console)]))
+        col.addWidget(self._boundary("ecall  ▾  trap into the kernel  ·  sret  ▴  back to user"))
+        # the system-call interface: the door between user and kernel
+        col.addWidget(self._layer_band("SYSTEM-CALL INTERFACE", [
+            ("syscalls", "System Calls", "Live histogram (last 60s) + strace-style trace.",
+             "blue", self._open_syscall_lab),
+            ("builder", "Syscall Builder", "Add your own syscall — real kernel edits generated.",
+             "red", self._open_syscall_builder)]))
+        col.addWidget(self._boundary("supervisor mode  ·  the kernel"))
+        # the kernel's core subsystems
+        col.addWidget(self._layer_band("KERNEL", [
+            ("scheduler", "Process Scheduler", "Watch the CPU move between processes.",
+             "red", self._show_scheduler),
+            ("memory", "Virtual Memory", "Page tables, the allocator, and page faults.",
+             "purple", self._open_memory_lab),
+            ("storage", "File System", "Inodes, buffer cache, and the write-ahead log.",
+             "cyan", self._open_storage_lab),
+            ("journey", "Traps & Context Switches", "Step a syscall (trap) vs a switch (swtch).",
+             "amber", self._open_journey)]))
+        col.addWidget(self._boundary("registers · trapframe · timer interrupts"))
+        # the hardware the kernel drives
+        col.addWidget(self._layer_band("HARDWARE", [
+            ("cpu", "CPU & Registers", "Per-core registers, satp, and the kernel stack.",
+             "red", self._show_scheduler)]))
+        col.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        return page
+
+    def _layer_band(self, name, cards) -> QFrame:
+        t = self.theme.theme
+        band = QFrame()
+        band.setStyleSheet(
+            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:12px;}}")
+        v = QVBoxLayout(band); v.setContentsMargins(12, 8, 12, 12); v.setSpacing(8)
+        lbl = QLabel(name)
+        lbl.setStyleSheet(_scss(f"color:{t.faint};font-size:10px;font-weight:700;"
+                                "letter-spacing:2px;border:none;"))
+        v.addWidget(lbl)
+        row = QHBoxLayout(); row.setSpacing(8)
+        for key, title, desc, accent, handler in cards:
+            card = LayerCard(self.theme, title, desc, accent)
+            card.clicked.connect(handler)
+            self._ov_cards[key] = card
+            row.addWidget(card)
+        v.addLayout(row)
+        return band
+
+    def _boundary(self, text) -> QLabel:
+        t = self.theme.theme
+        lbl = QLabel(text); lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet(_scss(f"color:{t.faint};font-size:10px;letter-spacing:1px;"))
+        return lbl
+
+    # -- page navigation -------------------------------------------------- #
+    def _show_overview(self) -> None:
+        self._stack.setCurrentWidget(self._overview)
+        self._back_btn.setVisible(False)
+        self._title_lbl.setText(f"  Machine Lab — {self.device.name}")
+        if self.live:
+            self._ov_poll.start(2000)     # keep the mini-stats fresh while the hub is up
+        self._update_overview()
+
+    def _show_scheduler(self) -> None:
+        self._ov_poll.stop()
+        self._stack.setCurrentWidget(self._sched_page)
+        self._back_btn.setVisible(True)
+        self._title_lbl.setText(f"  Process scheduler — {self.device.name}")
+
+    def _on_ov_poll(self) -> None:
+        """Slow overview refresh: read current state (live) so the cards' mini-stats update."""
+        if self.live and not self._closed:
+            self._fetch(step=False)
+
+    def _open_syscall_lab(self) -> None:
+        from .syscall_lab import SyscallLab
+        # live /sc over the serial when running; DemoScheduler.sc() offline
+        src = getattr(self.state.provider, "sc", None)
+        self._sclab = SyscallLab(self, self.theme, device=self.device,
+                                 sc_source=src if callable(src) else None)
+        self._sclab.show(); self._sclab.raise_()
+
+    def _open_journey(self) -> None:
+        from .cpu_journey import CpuJourney
+        # seed the syscall path with the running proc's live registers, if we have them
+        cpu = self.state.latest.cpu if (self.state.latest and self.state.latest.cpu) else None
+        self._journey = CpuJourney(self, self.theme, device=self.device, cpu=cpu)
+        self._journey.show(); self._journey.raise_()
 
     def _open_memory_lab(self) -> None:
         from .memory_lab import MemoryLab
@@ -204,6 +357,11 @@ class MachineLab(QDialog):
     # -- controls (time-slice + step/run) --------------------------------- #
     def _build_controls(self, root) -> None:
         t = self.theme.theme
+        hint = QLabel("Watch the kernel move the CPU between processes. Slow the time-slice or "
+                      "Step one context switch at a time to see it happen.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
+        root.addWidget(hint)
         bar = QFrame(); bar.setStyleSheet(
             _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         lay = QHBoxLayout(bar); lay.setContentsMargins(12, 8, 12, 8)
@@ -302,8 +460,11 @@ class MachineLab(QDialog):
     # -- the four state panels -------------------------------------------- #
     def _build_panels(self, root) -> None:
         grid = QGridLayout(); grid.setSpacing(10)
-        self._proc_tbl = self._make_proc_table()
-        grid.addWidget(self._panel("Processes  ·  proc[]", self._proc_tbl, fill=True), 0, 0)
+        from .process_tree import ProcessTree
+        self._proc_tree = ProcessTree(self.theme)
+        self._proc_tree.set_live(self.live)
+        self._proc_tree.kill_requested.connect(self._kill)
+        grid.addWidget(self._panel("Processes  ·  tree", self._proc_tree, fill=True), 0, 0)
         # per-CPU tables: one column per CPU (so both cores' registers/memory show on SMP)
         self._reg_tbl = self._make_cpu_table(self._REG_ROWS)
         grid.addWidget(self._panel("CPU registers  ·  per core", self._reg_tbl, fill=True), 0, 1)
@@ -399,10 +560,13 @@ class MachineLab(QDialog):
         except Exception:
             pass
         for _ in range(6):
+            if self._closed:
+                return
             time.sleep(0.4)
             try:
                 self.state.refresh()      # blocks until the read completes (worker thread)
-                self.snap_ready.emit(None)  # repaint on the GUI thread
+                if not self._closed:
+                    self.snap_ready.emit(None)  # repaint on the GUI thread
             except (Exception, RuntimeError):
                 return                    # dialog closed mid-refresh -> stop quietly
 
@@ -412,6 +576,9 @@ class MachineLab(QDialog):
             self._console.show(); self._console.raise_()
         elif self.on_console:
             self.on_console()
+        else:
+            # no live console (offline demo) — the process tree IS the list of programs
+            self._show_scheduler()
 
     # -- control handlers ------------------------------------------------- #
     def _apply_slice(self) -> None:
@@ -455,7 +622,7 @@ class MachineLab(QDialog):
         """Pull a snapshot from the live bridge on a worker thread (gdb-over-HTTP can block for
         a moment or time out), then repaint on the GUI thread. Skips if a read is in flight so
         Run/Step can't pile up and freeze the UI."""
-        if self._busy:
+        if self._busy or self._closed:
             return
         self._busy = True
         import threading
@@ -463,13 +630,16 @@ class MachineLab(QDialog):
         def work():
             try:
                 self.state.step() if step else self.state.refresh()
-                self.snap_ready.emit(None)  # marshal back to the GUI thread
+                if not self._closed:            # don't signal a dialog that's being torn down
+                    self.snap_ready.emit(None)  # marshal back to the GUI thread
             except (Exception, RuntimeError):
                 pass                        # incl. dialog closed mid-read
         threading.Thread(target=work, daemon=True).start()
 
     def _on_snap(self, _obj) -> None:
         self._busy = False
+        if self._closed:
+            return
         self._render()
 
     def _toggle_run(self) -> None:
@@ -490,30 +660,10 @@ class MachineLab(QDialog):
         if snap is None:
             return
         t = self.theme.theme
-        # process table
-        self._proc_tbl.setRowCount(len(snap.procs))
+        # process TREE — highlight whatever is running on any CPU (SMP-aware)
         run = snap.running_pid
-        for r, p in enumerate(snap.procs):
-            for c, val in enumerate((str(p.pid), p.state, p.name)):
-                it = QTableWidgetItem(val)
-                if p.pid == run:
-                    it.setForeground(QColor(_pid_color(p.pid)))
-                    f = it.font(); f.setBold(True); it.setFont(f)
-                elif p.state == "sleeping":
-                    it.setForeground(QColor(t.faint))
-                self._proc_tbl.setItem(r, c, it)
-            # a kill button for user processes (never init/sh); live only
-            if self.live and p.pid > 2:
-                b = QPushButton("✕")
-                b.setToolTip(f"kill pid {p.pid}")
-                b.setFixedSize(28, 22)
-                b.setStyleSheet(
-                    f"QPushButton{{color:{t.muted};background:transparent;border:none;}}"
-                    f"QPushButton:hover{{color:{t.accent_for('red')};}}")
-                b.clicked.connect(lambda _c=False, pid=p.pid: self._kill(pid))
-                self._proc_tbl.setCellWidget(r, 3, b)
-            else:
-                self._proc_tbl.removeCellWidget(r, 3)
+        running_pids = set(snap.cpus.values()) if snap.cpus else ({run} if run else set())
+        self._proc_tree.set_procs(snap.procs, running_pids)
         # per-CPU registers + memory (a column per core; falls back to one column single-CPU)
         cpu_regs = snap.cpu_regs or ({0: snap.cpu} if snap.cpu else {})
         cids = sorted(cpu_regs)
@@ -557,9 +707,49 @@ class MachineLab(QDialog):
         kq = getattr(self.state.provider, "kernel_quantum", None)   # the kernel's ACTUAL quantum
         qtxt = f" · Q{kq}" if kq else ""
         self._switch_lbl.setText(f"{n} sw · {self._switch_rate:.1f}/s{qtxt}")
+        self._update_overview()
+
+    def _update_overview(self) -> None:
+        """Refresh the overview cards' live mini-stats from the (cheap) scheduler snapshot.
+        Only the always-cheap cards carry a live number; Memory / File system / Builder keep a
+        descriptive line so the hub never hammers the serial just to draw the front door."""
+        cards = getattr(self, "_ov_cards", None)
+        if not cards:
+            return
+        snap = self.state.latest
+        procs = snap.procs if snap else []
+        user = [p for p in procs if p.pid and p.pid > 2]     # everything past init(1)+sh(2)
+        active = [p for p in procs if p.state in ("running", "runnable", "sleeping")]
+        rate = getattr(self, "_switch_rate", 0.0)
+        cpus = (snap.cpu_regs or snap.cpus) if snap else {}
+        ncpu = len(cpus) or 1
+        run = snap.running_pid if snap else None
+        if "programs" in cards:
+            cards["programs"].set_stat(
+                f"{len(user)} user program{'s' if len(user) != 1 else ''}" if user
+                else "shell ready")
+        if "scheduler" in cards:
+            cards["scheduler"].set_stat(f"{len(active)} procs · {rate:.1f} sw/s")
+        if "journey" in cards:
+            cards["journey"].set_stat(f"{self.state.timeline.switches()} switches so far")
+        if "cpu" in cards:
+            cards["cpu"].set_stat(
+                f"{ncpu} core{'s' if ncpu != 1 else ''}"
+                + (f" · running pid {run}" if run else " · idle"))
+        # descriptive (no cheap live number without an extra serial read)
+        cards.get("syscalls") and cards["syscalls"].set_stat("open for live histogram →")
+        cards.get("builder") and cards["builder"].set_stat("generate kernel edits →")
+        cards.get("memory") and cards["memory"].set_stat("page tables & faults →")
+        cards.get("storage") and cards["storage"].set_stat("inodes & the log →")
 
     def closeEvent(self, e) -> None:  # noqa: N802
+        self._closed = True            # stop any in-flight worker from signalling a dead dialog
         self._poll.stop()
+        self._ov_poll.stop()
+        try:
+            self.snap_ready.disconnect(self._on_snap)
+        except (RuntimeError, TypeError):
+            pass
         super().closeEvent(e)
 
 

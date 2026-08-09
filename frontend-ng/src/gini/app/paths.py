@@ -30,6 +30,14 @@ def captures_dir() -> Path:
     return gini_home() / "captures"
 
 
+def oszoo_cache_dir() -> Path:
+    """Host directory for OS Zoo guest images. Bind-mounted into each OS Zoo container at
+    ``/zoo/cache``, so a historical OS's ISO/disk downloads once and is reused across runs
+    (an anonymous volume would be discarded on recreate, forcing a re-download every Run).
+    Survives topology teardown."""
+    return gini_home() / "oszoo-cache"
+
+
 def scripts_dir() -> Path:
     """Host directory for student-written router modules. Bind-mounted (read-only) into each
     gRouter container at ``/scripts``, so a Lua data-plane VNF edited on the host machine loads

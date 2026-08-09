@@ -23,6 +23,12 @@ from .cloud_catalog import is_service, service_for
 ROUTERS = {"router", "firewall"}
 SWITCHES = {"switch", "hub"}        # plain L2 — live in the shared `fabric` container
 GROUPS = {"vpc", "cloud_subnet", "region"}
+# OS Zoo: emulated historical OSes, one container each, screen served over noVNC (a web port).
+# "BYO-style" elements carry Emulator/Image/Rom properties and boot via the generic BYO path — the
+# generic "Classic OS (your image)" plus the convenience presets (Mac System 7, Windows 3.11) whose
+# properties are simply pre-filled with a download URL (GINI still ships no proprietary image).
+OSZOO_BYO_KEYS = {"oszoo_byo", "msdos", "mac7", "win31"}
+OSZOO_KEYS = {"freedos", "kolibri", "menuet"} | OSZOO_BYO_KEYS
 # Sources/Sinks: instruments that run INSIDE a donor container — they get no runtime node
 # of their own, and their (attach) edges are never wired.
 RIDERS = {k for k, dt in _dev.REGISTRY.items() if getattr(dt, "rider", False)}
@@ -63,6 +69,8 @@ def _role(type_key: str) -> str:
         return "vnf"
     if type_key == "xv6":              # standalone teaching kernel (QEMU-RISC-V) — no fabric
         return "xv6"
+    if type_key in OSZOO_KEYS:         # OS Zoo: emulated historical OS, embedded via noVNC
+        return "oszoo"
     if type_key == "gini32":           # a REAL ESP32 board: addressed on the fabric like a
         return "gini32"                # host, but reached through the gbridge relay, not a
                                        # container of its own — see _build_gbridge().
@@ -1095,6 +1103,59 @@ class RuntimeCompiler:
                 cpus=_cpus_for(d), networks=["gini"]))
             host_port += 2
 
+        # OS Zoo — a real historical OS under emulation. One container per element, image
+        # `gini-oszoo:latest`, with ZOO_OS selecting the guest; the container runs the emulator
+        # (`-vnc :0`) + websockify/noVNC and publishes the framebuffer as a web page. The Zoo Lab
+        # embeds that URL in a QWebEngineView. Standalone (no fabric wiring in v1).
+        for d in topo.devices.values():
+            if role.get(d.id) != "oszoo":
+                continue
+            p = props[d.id]
+            is_byo = d.type_key in OSZOO_BYO_KEYS
+            os_id = "byo" if is_byo else d.type_key
+            env = {"ZOO_OS": os_id,
+                   "ZOO_PERSIST": "1" if str(p.get("Persist", "false")).lower() == "true" else "0"}
+            if is_byo:                                    # BYO / preset: Emulator + Image (+Rom)
+                env["ZOO_EMULATOR"] = str(p.get("Emulator", "qemu"))
+                env["ZOO_ARCH"] = str(p.get("Arch", "x86"))
+                # Image/Rom may be a local path (bind-mounted below) OR an http(s):// URL that the
+                # container downloads on first boot. Pass the raw value; boot_zoo.sh decides.
+                if str(p.get("Image", "")):
+                    env["ZOO_IMAGE"] = str(p.get("Image", ""))
+                if str(p.get("Rom", "")):                 # Basilisk II: a Mac ROM
+                    env["ZOO_ROM"] = str(p.get("Rom", ""))
+            # persist downloaded guest images on the host so each OS is fetched once, not on
+            # every Run (an anonymous /zoo/cache volume is discarded when the container recreates).
+            # Computed inline (mirrors app.paths.oszoo_cache_dir) to keep the compiler Qt-free.
+            import os
+            from pathlib import Path
+            _home = Path(os.environ.get("GINI_HOME_DIR") or (Path.home() / ".gini")).expanduser()
+            cache = _home / "oszoo-cache"; cache.mkdir(parents=True, exist_ok=True)
+            volumes = [f"{cache}:/zoo/cache"]
+            def _is_url(s: str) -> bool:
+                return s.startswith("http://") or s.startswith("https://")
+            img = str(p.get("Image", "")) if is_byo else ""
+            if img and not _is_url(img):                   # local path -> bind-mount read-only
+                volumes.append(f"{img}:/zoo/byo.img:ro")   # (a URL is downloaded in the container)
+            rom = str(p.get("Rom", "")) if is_byo else ""
+            if rom and not _is_url(rom):                   # Basilisk II Mac ROM, read-only
+                volumes.append(f"{rom}:/zoo/rom:ro")
+            # Basilisk II creates its 60 Hz timer as a real-time-scheduled thread; Docker's default
+            # sandbox (seccomp + no CAP_SYS_NICE) forbids RT scheduling, so that container needs to
+            # be privileged. QEMU/DOSBox guests don't, so keep them unprivileged.
+            needs_priv = is_byo and str(p.get("Emulator", "")) == "basilisk"
+            cfg.services.append(ServiceSpec(
+                name=d.name, type_key=d.type_key, image="gini-oszoo:latest",
+                summary=f"OS Zoo: {d.type_key} under emulation, screen embedded over noVNC.",
+                command=[], env=env, privileged=needs_priv,
+                # the noVNC web console (the Zoo Lab embeds this) + the raw VNC port.
+                ports=[{"container": 6080, "host": host_port, "label": "screen",
+                        "web": True, "path": "/vnc.html?autoconnect=1&resize=remote"},
+                       {"container": 5900, "host": host_port + 1, "label": "vnc",
+                        "web": False, "path": ""}],
+                volumes=volumes, cpus=_cpus_for(d), networks=["gini"]))
+            host_port += 2
+
         # make proxies / load balancers actually route to their drawn backends
         self._wire_proxies(cfg, topo, role, name, props)
         # serverless: gather Functions into the shared faas runtime + route API Gateways to it
@@ -1660,12 +1721,13 @@ def validate(topo: Topology) -> list[dict]:
         nets.append((d.name, net))
 
     # 1. isolated devices (degree 0) — not part of any network. xv6 runs standalone (it
-    #    has no networking), and its peripherals are optional, so none of them are "islands".
+    #    has no networking), its peripherals are optional, and OS Zoo guests run in isolation
+    #    (display-only, no fabric wiring in v1), so none of them are "islands".
     tkey = {d.id: d.type_key for d in topo.devices.values()}
     for did, r in role.items():
         if r == "group" or nbrs[did]:
             continue
-        if tkey[did] in ("xv6", "terminal", "storage_volume"):
+        if r == "oszoo" or tkey[did] in ("xv6", "terminal", "storage_volume"):
             continue
         issues.append({"level": "warn", "device": name[did],
                        "message": f"{name[did]} isn't connected to anything."})

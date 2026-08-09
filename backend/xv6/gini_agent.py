@@ -278,6 +278,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x16"), ctype="text/plain")   # Ctrl-V -> gini_vmdump()
         elif path == "/fs":
             self._send(_SERIAL.dump(b"\x06"), ctype="text/plain")   # Ctrl-F -> gini_fsdump()
+        elif path == "/sc":
+            self._send(_SERIAL.dump(b"\x13"), ctype="text/plain")   # Ctrl-S -> gini_scdump()
         else:
             self._send({"error": "not found"})
 

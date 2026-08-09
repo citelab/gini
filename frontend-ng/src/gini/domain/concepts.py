@@ -325,6 +325,30 @@ CONCEPTS: tuple[Concept, ...] = (
         "Storage face shows the layout, inodes, directory tree, buffer cache, and the log "
         "transaction as it fills and commits.",
     ),
+    Concept(
+        "os-zoo", "The OS Zoo (historical OSes under emulation)",
+        ("freedos", "kolibri", "menuet", "msdos", "mac7", "win31", "oszoo_byo"),
+        ("os zoo", "freedos", "dos", "ms-dos", "msdos", "kolibri", "kolibrios", "menuet",
+         "menuetos", "assembly",
+         "windows", "win95",
+         "windows 95", "mac", "system 7", "classic", "historical", "emulator", "emulation",
+         "qemu", "vnc", "novnc", "basilisk", "dosbox", "vintage", "retro", "boot"),
+        "The OS Zoo is a play-with-real-OSes section (separate from the xv6 workbench, which is "
+        "about OS internals). Each Zoo element is a genuine historical operating system running "
+        "under emulation inside a Docker container — QEMU for x86 guests (FreeDOS, KolibriOS, "
+        "MenuetOS), Basilisk II for a 68k classic Mac — with its screen embedded in gBuilder over "
+        "noVNC (a VNC framebuffer served as a web page, shown in a QWebEngineView). Double-click an "
+        "element to open the Zoo Lab and use the OS live: mouse, keyboard, boot and all. GINI ships "
+        "only freely-redistributable OSes (FreeDOS, KolibriOS and MenuetOS boot out of the box; "
+        "KolibriOS and MenuetOS — tiny assembly OSes on a single floppy — are the fast ones). "
+        "Proprietary OSes (Windows 95, Mac "
+        "System 7) use the 'Classic OS (your image)' "
+        "element: GINI provides the emulator and points to where the image legally lives, and you "
+        "supply a disk image (and a Mac ROM for 68k) you own — GINI hosts nothing copyrighted. "
+        "Boots are ephemeral by default (a clean image each Run); turn on Persist to keep changes "
+        "in a qcow2 overlay. v1 is display-only; fabric networking (wiring a Zoo OS into the GINI "
+        "network like any machine) is v2.",
+    ),
 )
 
 

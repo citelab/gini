@@ -37,6 +37,7 @@ class Category(str, Enum):
     SINK = "Sinks"                    # observer riders — read outputs off a donor element
     SERVERLESS = "Serverless"
     EXTERNAL = "External"
+    OS_ZOO = "OS Zoo"                 # play with real historical OSes (emulated, embedded noVNC)
 
 
 # Within the Machines section, order is the ISOLATION LADDER — lightest first. This is the lesson:
@@ -584,6 +585,83 @@ _DEVICES: list[DeviceType] = [
         attaches_to=("xv6",),
         default_properties={"Name": "", "Program": "spin", "Args": "", "Background": "true"},
         property_choices={"Background": ("true", "false")},
+    ),
+
+    # ---- OS Zoo — real historical OSes under emulation, embedded via noVNC ------
+    DeviceType(
+        "freedos", "FreeDOS", Category.OS_ZOO, "host", Accent.ORANGE,
+        "The open, still-maintained MS-DOS-compatible OS — the command-line PC of the DOS era. "
+        "Boots out of the box; double-click to use it in an embedded screen.",
+        default_properties={"Name": "", "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "kolibri", "KolibriOS", Category.OS_ZOO, "host", Accent.ORANGE,
+        "A tiny GUI operating system written entirely in assembly — the whole thing boots from a "
+        "single 1.44 MB floppy to a full graphical desktop in seconds, even under emulation. The "
+        "fast one to reach for.",
+        default_properties={"Name": "", "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "menuet", "MenuetOS", Category.OS_ZOO, "host", Accent.ORANGE,
+        "The assembly GUI OS that KolibriOS forked from — a complete graphical desktop with apps "
+        "on a single 1.44 MB floppy (the 32-bit build is open source). Boots in seconds under "
+        "emulation, just like KolibriOS.",
+        default_properties={"Name": "", "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "msdos", "MS-DOS 6.22", Category.OS_ZOO, "host", Accent.PURPLE,
+        "The real Microsoft MS-DOS 6.22, booted from a disk image under QEMU (so it's the genuine "
+        "article — `VER` reports MS-DOS, not a clone). Drag it on and Run — GINI downloads a public "
+        "pre-installed MS-DOS 6.22 disk on first boot (GINI ships nothing proprietary) and boots to "
+        "the C:\\> prompt. Put it next to FreeDOS to compare the original with the open re-creation. "
+        "The Image URL is pre-filled and editable. Ephemeral unless Persist is on.",
+        default_properties={
+            "Name": "", "Emulator": "qemu", "Arch": "x86",
+            "Image": "https://archive.org/download/pre-installed-ms-dos-622-disk-image/"
+                     "Installed%20MS-DOS%206.22.img",
+            "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "mac7", "Mac System 7", Category.OS_ZOO, "host", Accent.PURPLE,
+        "Classic Macintosh System 7 on an emulated 68k Mac (Basilisk II). Just drag it on and Run — "
+        "GINI downloads a Quadra ROM and a bootable System 7.5.3 disk from a public archive on first "
+        "boot (GINI ships nothing proprietary) and boots to the Mac desktop. The Image/Rom URLs are "
+        "pre-filled; change them to point at files you prefer. Ephemeral unless Persist is on.",
+        default_properties={
+            "Name": "", "Emulator": "basilisk", "Arch": "68k",
+            "Image": "https://archive.org/download/system-753/System753.dsk",
+            "Rom": "https://archive.org/download/mac_rom_archive_-_as_of_8-19-2011/"
+                   "mac_rom_archive_-_as_of_8-19-2011.zip/"
+                   "F1ACAD13%20-%20Quadra%20610%2C650%2Cmaybe%20800.ROM",
+            "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "win31", "Windows 3.11", Category.OS_ZOO, "host", Accent.PURPLE,
+        "Windows for Workgroups 3.11 under DOSBox — the fast vintage-Windows path. Just drag it on "
+        "and Run — GINI downloads a public, pre-installed Windows 3.11, mounts it as C:, and starts "
+        "Windows (GINI ships nothing proprietary). The Image URL is pre-filled; change it to point "
+        "at a folder or zip you prefer. Ephemeral unless Persist is on.",
+        default_properties={
+            "Name": "", "Emulator": "dosbox", "Arch": "x86",
+            "Image": "https://archive.org/download/win3_stock/win311-stock.zip",
+            "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "oszoo_byo", "Classic OS (your image)", Category.OS_ZOO, "host", Accent.SLATE,
+        "Bring your own OS: run a proprietary classic OS that GINI can't legally ship. Pick the "
+        "emulator — QEMU (Windows 95/98, or any bootable x86 disk), DOSBox (DOS and Windows 3.x, "
+        "the fast path), or Basilisk II (classic 68k Mac — System 7 / Mac OS 8). Set 'Image' to a "
+        "disk image (or folder for DOSBox) you own, and 'Rom' to a Macintosh ROM for Basilisk. "
+        "GINI provides the emulator and hosts nothing — you supply the image.",
+        default_properties={"Name": "", "Emulator": "qemu", "Image": "", "Rom": "", "Arch": "x86"},
+        property_choices={"Emulator": ("qemu", "dosbox", "basilisk"),
+                          "Arch": ("x86", "x86_64", "68k")},
     ),
 ]
 

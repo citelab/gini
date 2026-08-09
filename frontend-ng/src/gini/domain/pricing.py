@@ -18,6 +18,14 @@ DEFAULT_RATES: dict[str, float] = {
     "container": 5.0,
     "host": 2.0,             # a plain Machine / end host
     "xv6": 2.0,              # xv6 teaching kernel under QEMU-RISC-V (a single-CPU learning VM)
+    # --- OS Zoo (emulated historical OSes; each is a QEMU/emulator VM) --------- #
+    "freedos": 2.0,
+    "kolibri": 2.0,
+    "menuet": 2.0,
+    "msdos": 2.0,          # MS-DOS 6.22 preset (QEMU; disk image downloaded)
+    "mac7": 3.0,            # Mac System 7 preset (Basilisk II; image/ROM downloaded)
+    "win31": 3.0,          # Windows 3.11 preset (DOSBox; image downloaded)
+    "oszoo_byo": 3.0,        # bring-your-own classic OS (Windows/Mac) under emulation
     # --- serverless (cheap, scale-to-zero; pay per use, not per idle hour) --- #
     "function": 1.0,         # a handler in the shared FaaS runtime
     "api_gateway": 5.0,      # a managed API front door (Traefik)
@@ -102,6 +110,7 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     "Services": ("database", "nosql", "object_store", "stream", "queue",
                  "messaging", "cache", "load_balancer", "proxy", "web_app"),
     "Observability": ("metrics", "dashboard", "tracing", "load_generator"),
+    "OS Zoo": ("freedos", "kolibri", "menuet", "msdos", "mac7", "win31", "oszoo_byo"),
 }
 CATEGORY_ORDER = tuple(CATEGORIES.keys())
 _CAT_OF = {tk: cat for cat, tks in CATEGORIES.items() for tk in tks}

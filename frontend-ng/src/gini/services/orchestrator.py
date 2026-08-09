@@ -711,7 +711,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             f"    image: {s['image']}",
             f"    networks: [{', '.join(s.get('networks') or ['gini'])}]",   # VPC/subnet nets, or flat gini
         ]
-        if s.get("type") == "xv6":            # locally-built kernel image, never on a registry
+        # locally-built images (xv6 kernel, OS Zoo emulators) are never on a registry, so tell
+        # compose not to try to pull them — otherwise `docker compose up` fails with access denied.
+        if str(s.get("image", "")).startswith(("gini-xv6", "gini-oszoo")):
             lines.append("    pull_policy: never")
         if s.get("runtime"):                                  # Kata Instance -> VM isolation
             lines.append(f"    runtime: {s['runtime']}")
