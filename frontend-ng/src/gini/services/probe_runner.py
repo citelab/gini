@@ -103,7 +103,7 @@ class DockerProbeRunner:
         control plane did something. A non-empty match is a substring test against the entries."""
         from ..domain.flowtable import flows
         svc = self._service(ovs)
-        code, out = self._exec(svc, ["python3", "/build/grouter-zig/grconsole.py",
+        code, out = self._exec(svc, ["python3", "/build/grouter-build/grconsole.py",
                                      f"/run/{svc}.ctl", "--once", "openflow entry all"])
         if code != 0 or not out:
             return False
@@ -117,3 +117,33 @@ class DockerProbeRunner:
             return True
         needle = match.lower()
         return any(needle in str(r).lower() for r in rows)
+
+
+class RuntimeRunner(DockerProbeRunner):
+    """DockerProbeRunner + `measure()` — the runtime half of an output check. It resolves
+    `measure(rider_type, metric)` by reading the LIVE measurement of the matching attached Source/Sink
+    from `get_results` (the streaming rider snapshots the grader has already started + let run). We
+    read the streaming session's reading rather than doing a one-shot capture, because `docker exec`
+    block-buffers output — a timeout-killed one-shot comes back empty even when the manual streaming
+    view sees packets. `get_results()` → {rider_id: snapshot}; `get_topology()` finds the rider."""
+
+    def __init__(self, orchestrator, get_topology, get_results, *, timeout: float = 8.0) -> None:
+        super().__init__(orchestrator, timeout=timeout)
+        self._get_topology = get_topology
+        self._get_results = get_results
+
+    def measure(self, rider_type: str, metric: str):
+        from ..domain.objectives import slot_match
+        base, _, slot = str(rider_type).partition("@")       # measure(packet_view@A, packets)
+        topo = self._get_topology()
+        results = self._get_results() or {}
+        for d in getattr(topo, "devices", {}).values():
+            if getattr(d, "type_key", None) != base:
+                continue
+            if not slot_match(getattr(d, "slot", ""), slot):
+                continue
+            snap = results.get(d.id)
+            m = (snap or {}).get("measurement") or {}
+            if metric in m:
+                return m.get(metric)
+        return None

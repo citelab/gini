@@ -34,9 +34,108 @@ from gini.domain import objectives as _obj
 BANDS = ("gold", "pass", "partial", "incomplete")
 
 
+# ---- fragment registration (author → TC upload, Build 3) ------------------- #
+def register_fragment(yaml_text: str) -> dict:
+    """Register a teacher-authored fragment uploaded from gBuilder.
+
+    The version gate is the validation itself: the fragment is checked against THIS server's
+    vocabulary (its known elements / predicates / probes / capabilities). A primitive the server
+    doesn't have — because the fragment was authored on a newer engine — makes validation fail with
+    the exact missing thing. That's the honest 'your engine has something mine doesn't' refusal,
+    rather than silently mis-composing. On success it lands in the course content layer and is
+    immediately available to compose experiments from."""
+    from gini.domain import content as _content
+    from gini.domain import fragment_yaml as _fy
+    from gini.domain import fragments as _frag
+    try:
+        d = yaml.safe_load(yaml_text)
+        frag = _fy.fragment_from_dict(d)
+    except Exception as e:                               # noqa: BLE001 — malformed upload
+        return {"ok": False, "error": f"Couldn't read the fragment: {e}"}
+    if not frag.id:
+        return {"ok": False, "error": "Fragment has no id."}
+    problems = _fy.validate(frag)                        # ← the version gate, against OUR vocabulary
+    if problems:
+        return {"ok": False, "error": "This server can't grade it (likely authored on a newer "
+                                      "gBuilder): " + "; ".join(problems),
+                "engine_version": getattr(_content, "ENGINE_VERSION", "")}
+    path = _content.ensure_user_content_dir() / f"{frag.id}.yaml"
+    path.write_text(_fy.to_yaml(frag), encoding="utf-8")
+    _frag.reload()                                       # available to compose immediately
+    return {"ok": True, "id": frag.id,
+            "engine_version": getattr(frag, "engine_version", ""),
+            "forks": len(frag.forks)}
+
+
+def vocabulary() -> dict:
+    """The server's asset manifest — the discovery protocol. What a fragment may be built from on this
+    engine version. Lets an author (or another TC) know what's composable here."""
+    from gini.domain import vocabulary as _vocab
+    return _vocab.export()
+
+
+def authored_content() -> list[dict]:
+    """The teacher-authored fragments in this course's content layer, for OTA pull by student clients.
+    Built-ins are NOT included — students already ship those; the channel carries only what the
+    teacher added. Each item is hash-pinned so a client can skip what it already has."""
+    import hashlib
+
+    from gini.domain import content as _content
+    d = _content.user_content_dir()
+    out = []
+    if d.exists():
+        for p in sorted(d.glob("*.yaml")):
+            text = p.read_text(encoding="utf-8")
+            try:
+                spec = yaml.safe_load(text) or {}
+            except Exception:                            # noqa: BLE001 — skip an unreadable file
+                continue
+            out.append({"id": p.stem, "engine_version": str(spec.get("engine_version", "")),
+                        "hash": hashlib.sha256(text.encode()).hexdigest(), "yaml": text})
+    return out
+
+
+def delete_fragment(fragment_id: str) -> dict:
+    """Remove a teacher-authored fragment from this course's content layer. This is the source of
+    truth clients OTA-pull, so deleting here stops it re-seeding to students (they drop it on next
+    sync). Matches by INTERNAL id or filename stem, so a fragment saved with a spaced/mixed-case id
+    (e.g. "simple LAN.yaml") is still deletable. Built-ins don't live here, so they're never touched."""
+    from gini.domain import content as _content
+    from gini.domain import fragments as _frag
+    if not fragment_id:
+        return {"ok": False, "error": "No fragment id."}
+    d = _content.user_content_dir()
+    removed = []
+    if d.exists():
+        for p in list(d.glob("*.yaml")):
+            try:
+                spec = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            except Exception:                            # noqa: BLE001 — unreadable → try the stem
+                spec = {}
+            if str(spec.get("id", "")) == fragment_id or p.stem == fragment_id:
+                p.unlink(missing_ok=True); removed.append(p.stem)
+    _frag.reload()                                       # drop it from what this TC composes with
+    if not removed:
+        return {"ok": False, "error": f"No authored fragment '{fragment_id}' here to delete."}
+    return {"ok": True, "id": fragment_id, "removed": removed}
+
+
 # ---- the fragment library (what a teacher can build from) ------------------ #
 def fragment_library() -> list[dict]:
-    """Every foundational fragment a teacher may compose with — grouped by what it teaches."""
+    """Every foundational fragment a teacher may compose with — grouped by what it teaches. Each is
+    flagged `authored` (teacher-added, in this course's content layer → deletable) vs a built-in that
+    ships with the engine, and `certified` (runtime-playtested), so the author menu can act on them."""
+    from gini.domain import content as _content
+    authored_ids: set[str] = set()
+    d = _content.user_content_dir()
+    if d.exists():
+        for p in d.glob("*.yaml"):
+            authored_ids.add(p.stem)
+            try:
+                spec = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                authored_ids.add(str(spec.get("id", "")))
+            except Exception:                            # noqa: BLE001 — stem alone still flags it
+                pass
     out = []
     for f in _frag.all_fragments():
         out.append({
@@ -44,6 +143,8 @@ def fragment_library() -> list[dict]:
             "parent": f.parent, "catalog": f.catalog, "spirit": f.spirit,
             "objectives": [{"say": o.say, "level": _obj.level_of(o)} for o in f.objectives],
             "has_live": any(o.kind == "behavioral" for o in f.objectives),
+            "authored": f.id in authored_ids,
+            "certified": bool(getattr(f, "certified", False)),
         })
     return sorted(out, key=lambda d: (d["layer"] != "core", d["parent"], d["id"]))
 
@@ -81,6 +182,8 @@ class Course:
         self.course = course
         self.data = self.root / "data"
         self.data.mkdir(parents=True, exist_ok=True)
+        from store import Store
+        self.store = Store(root)         # roster/profiles/submissions live here now (lessons stay files)
 
     # -- lessons -------------------------------------------------------------- #
     @property
@@ -101,13 +204,25 @@ class Course:
         out = []
         for row in self.manifest():
             spec = self.lesson_spec(row["id"])
-            out.append({**row, "fragments": spec.get("fragments", []),
+            out.append({**row, "status": row.get("status", "released"),
+                        "fragments": spec.get("fragments", []),
                         "genre": spec.get("genre", ""), "brief": spec.get("brief", "")})
         return out
 
+    def released_manifest(self) -> list[dict]:
+        """What STUDENTS see — released lessons only. Drafts never reach the student-facing manifest,
+        so a work-in-progress experiment can't be played (or seen) until the teacher approves it."""
+        return [r for r in self.manifest() if r.get("status", "released") != "draft"]
+
+    def _write_manifest(self, rows: list[dict]) -> None:
+        rows.sort(key=lambda r: (r.get("release") or "", r["id"]))
+        self._manifest_path.write_text(json.dumps(rows, indent=2) + "\n")
+
     def save_lesson(self, spec: dict, *, release: str = "", due: str = "",
-                    attempts: int = 3) -> dict:
-        """Validate, write the pack, and put it in the manifest (= released to the class)."""
+                    attempts: int = 3, release_now: bool = False) -> dict:
+        """Validate + write the pack. By default it's saved as a DRAFT (the approval gate) — the
+        teacher playtests the whole experiment, then approves to release. `release_now=True` skips
+        the gate (e.g. re-releasing a known-good lesson)."""
         pv = preview(spec)
         if not pv["ok"]:
             return {"ok": False, "problems": pv["problems"]}
@@ -117,13 +232,61 @@ class Course:
         text = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True, width=100)
         p.write_text(text, encoding="utf-8")
 
+        prev = next((r for r in self.manifest() if r["id"] == lid), None)
+        pack_hash = hashlib.sha256(text.encode()).hexdigest()
+        # A re-save whose pack CHANGED must be re-playtested — the grading loop can't inherit an old
+        # sign-off for different content. release_now (a known-good re-release) counts as playtested.
+        playtested = bool(release_now) or (prev is not None and prev.get("playtested")
+                                           and prev.get("pack_hash") == pack_hash)
         rows = [r for r in self.manifest() if r["id"] != lid]
         rows.append({"id": lid, "title": spec.get("title", lid),
                      "release": release, "due": due, "attempts": int(attempts),
-                     "pack_hash": hashlib.sha256(text.encode()).hexdigest()})
-        rows.sort(key=lambda r: (r.get("release") or "", r["id"]))
-        self._manifest_path.write_text(json.dumps(rows, indent=2) + "\n")
-        return {"ok": True, "lesson": lid}
+                     "status": "released" if release_now else "draft",
+                     "playtested": playtested,
+                     "pack_hash": pack_hash})
+        self._write_manifest(rows)
+        return {"ok": True, "lesson": lid, "status": "released" if release_now else "draft"}
+
+    def mark_playtested(self, lesson_id: str) -> dict:
+        """The teacher confirms the composed experiment played correctly on the canvas — the last
+        gate before it can be assigned to students (it's part of their grading loop)."""
+        rows = self.manifest()
+        row = next((r for r in rows if r["id"] == lesson_id), None)
+        if row is None:
+            return {"ok": False, "error": "No such experiment (save it first)."}
+        row["playtested"] = True
+        self._write_manifest(rows)
+        return {"ok": True, "lesson": lesson_id, "playtested": True}
+
+    def approve_lesson(self, lesson_id: str, *, release: str = "", due: str = "",
+                       attempts: int | None = None) -> dict:
+        """Release a draft to the class — the teacher's sign-off after playtesting the experiment."""
+        rows = self.manifest()
+        row = next((r for r in rows if r["id"] == lesson_id), None)
+        if row is None:
+            return {"ok": False, "error": "No such experiment (save it first)."}
+        if not row.get("playtested"):
+            return {"ok": False, "error": "Playtest the experiment on the canvas and confirm it "
+                    "before releasing — it's part of the students' grading loop."}
+        row["status"] = "released"
+        if release:
+            row["release"] = release
+        if due:
+            row["due"] = due
+        if attempts is not None:
+            row["attempts"] = int(attempts)
+        self._write_manifest(rows)
+        return {"ok": True, "lesson": lesson_id, "status": "released"}
+
+    def unrelease_lesson(self, lesson_id: str) -> dict:
+        """Pull a released experiment back to draft — students stop seeing it."""
+        rows = self.manifest()
+        row = next((r for r in rows if r["id"] == lesson_id), None)
+        if row is None:
+            return {"ok": False, "error": "No such experiment."}
+        row["status"] = "draft"
+        self._write_manifest(rows)
+        return {"ok": True, "lesson": lesson_id, "status": "draft"}
 
     def delete_lesson(self, lesson_id: str) -> dict:
         rows = [r for r in self.manifest() if r["id"] != lesson_id]
@@ -131,42 +294,73 @@ class Course:
         return {"ok": True}
 
     # -- roster (enrolment) --------------------------------------------------- #
-    @property
-    def _roster_path(self) -> Path:
-        return self.data / "roster.json"
-
     def roster(self) -> list[dict]:
-        p = self._roster_path
-        return json.loads(p.read_text()) if p.exists() else []
+        return self.store.roster()
 
-    def enrol(self, student_id: str, name: str = "") -> dict:
-        rows = [r for r in self.roster() if r["id"] != student_id]
-        row = {"id": student_id, "name": name or student_id,
-               "token": secrets.token_urlsafe(12)}
-        rows.append(row)
-        rows.sort(key=lambda r: r["id"])
-        self._roster_path.write_text(json.dumps(rows, indent=2) + "\n")
+    def enrol(self, student_id: str, name: str = "", group: str = "",
+              ai_hosted: bool = False, sis_id: str = "") -> dict:
+        """Enrol (or re-enrol) a student.
+
+        `id` is the USERNAME — the handle the student signs in with and everyone sees ('ravi'). The
+        teacher picks it; it just has to be unique in the course. `sis_id` is the school-supplied
+        number ('2511') — pure bookkeeping, never a login and never an address. Keeping them separate
+        is the whole point: the human handle can be a friendly nickname while the registrar's id
+        stays attached for records.
+
+        Re-enrolling KEEPS the existing token, group, sis_id and ai grant unless a new value is given
+        — fixing a display name must not invalidate the token a student is about to use."""
+        old = self.store.enrolment(student_id) or {}
+        row = {"id": student_id, "name": name or old.get("name") or student_id,
+               "sis_id": sis_id if sis_id != "" else old.get("sis_id", ""),
+               "token": old.get("token") or secrets.token_urlsafe(12),
+               "group": group if group != "" else old.get("group", ""),
+               # Phase E: may this student's AI be HOSTED on the course server (capacity is the
+               # teacher's to give). Not granted → their AI just runs locally, as it already does.
+               "ai_hosted": bool(ai_hosted or old.get("ai_hosted", False))}
+        self.store.upsert_enrolment(student_id, name=row["name"], sis_id=row["sis_id"],
+                                    token=row["token"], group=row["group"],
+                                    ai_hosted=row["ai_hosted"])
         return row
 
     def unenrol(self, student_id: str) -> dict:
-        rows = [r for r in self.roster() if r["id"] != student_id]
-        self._roster_path.write_text(json.dumps(rows, indent=2) + "\n")
+        self.store.delete_enrolment(student_id)
         return {"ok": True}
+
+    # -- groups (teacher-formed; optional per class) --------------------------- #
+    def set_group(self, student_id: str, group: str) -> dict:
+        if self.store.enrolment(student_id) is None:
+            return {"ok": False, "error": "No such student."}
+        self.store.set_field(student_id, "group", (group or "").strip())
+        return {"ok": True, "group": (group or "").strip()}
+
+    def set_ai_hosted(self, student_id: str, on: bool) -> dict:
+        if self.store.enrolment(student_id) is None:
+            return {"ok": False, "error": "No such student."}
+        self.store.set_field(student_id, "ai_hosted", bool(on))
+        return {"ok": True, "ai_hosted": bool(on)}
+
+    def groups(self) -> dict:
+        """{group_name: [rows]}. Ungrouped students are simply absent — a class with no groups is a
+        smaller product, not a broken one."""
+        out: dict[str, list] = {}
+        for r in self.roster():
+            g = (r.get("group") or "").strip()
+            if g:
+                out.setdefault(g, []).append(r)
+        return out
+
+    def group_of(self, student_id: str) -> str:
+        row = next((r for r in self.roster() if r["id"] == student_id), None)
+        return (row or {}).get("group", "") or ""
+
+    def members_of(self, group: str) -> list[str]:
+        if not group:
+            return []
+        return [r["id"] for r in self.roster() if (r.get("group") or "") == group]
 
     # -- submissions ---------------------------------------------------------- #
     def submissions(self) -> list[dict]:
-        p = self.data / "submissions.jsonl"
-        if not p.exists():
-            return []
-        out = []
-        for line in p.read_text().splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-        return out
+        return self.store.submissions()
 
     def _resolve_lesson(self, lesson_id: str):
         spec = self.lesson_spec(lesson_id)
@@ -261,10 +455,9 @@ class Course:
 
         # concept mastery across the class, from the authoritative profiles
         concepts: dict = {}
-        for p in sorted((self.data / "profiles").glob("*.json")) if (self.data / "profiles").exists() else []:
-            try:
-                prof = json.loads(p.read_text())
-            except json.JSONDecodeError:
+        for r in self.roster():
+            prof = self.store.profile(r["id"])
+            if not prof:
                 continue
             for rec in (prof.get("lessons") or {}).values():
                 c = rec.get("concept") or "?"

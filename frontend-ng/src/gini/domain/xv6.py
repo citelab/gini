@@ -61,11 +61,14 @@ class Snapshot:
 
 
 # -- parsers ---------------------------------------------------------------- #
-_PROC_RE = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)\s+(\S+)")
+# `<pid> <state> <name> [<ppid>]` — ppid is optional (stock procdump omits it; gini_dump adds it).
+_PROC_RE = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)\s+(\S+)(?:\s+(\d+))?")
 
 
 def parse_procdump(text: str) -> list[Proc]:
-    """xv6 `procdump` (Ctrl-P) lines `<pid> <state> <name>` -> Procs (active only)."""
+    """xv6 process dump lines `<pid> <state> <name> [<ppid>]` -> Procs (active only). The
+    optional ppid (from gini_dump) drives the process tree; stock procdump lines parse fine
+    with parent left as None."""
     out: list[Proc] = []
     for line in (text or "").splitlines():
         m = _PROC_RE.match(line)
@@ -74,7 +77,8 @@ def parse_procdump(text: str) -> list[Proc]:
         st = _STATE.get(m.group(2).lower())
         if st is None or st == "unused":
             continue
-        out.append(Proc(int(m.group(1)), st, m.group(3)))
+        parent = int(m.group(4)) if m.group(4) is not None else None
+        out.append(Proc(int(m.group(1)), st, m.group(3), parent=parent))
     return out
 
 
@@ -144,6 +148,110 @@ def running_pid(procs) -> int | None:
     return None
 
 
+# current xv6-riscv system-call numbers (fork=1 .. sync=22); custom syscalls (Syscall Builder)
+# start at 23 and are supplied via the `extra` map.
+SYSCALL_NAMES = {
+    1: "fork", 2: "exit", 3: "wait", 4: "pipe", 5: "read", 6: "kill", 7: "exec", 8: "fstat",
+    9: "chdir", 10: "dup", 11: "getpid", 12: "sbrk", 13: "pause", 14: "uptime", 15: "open",
+    16: "write", 17: "mknod", 18: "unlink", 19: "link", 20: "mkdir", 21: "close", 22: "sync",
+}
+
+
+def syscall_name(num: int, extra: dict | None = None) -> str:
+    if extra and num in extra:
+        return extra[num]
+    return SYSCALL_NAMES.get(num, f"sys{num}")
+
+
+def parse_sccounts(text: str) -> dict:
+    """gini_scdump `SC <num> <count>` lines -> {syscall_number: cumulative_count}."""
+    return {int(m.group(1)): int(m.group(2))
+            for m in re.finditer(r"SC (\d+) (\d+)", text or "")}
+
+
+@dataclass
+class SyscallEvent:
+    pid: int
+    num: int
+    a0: str = ""       # first arg (hex) at call time
+    ret: str = ""      # return value (hex)
+
+
+def parse_sctrace(text: str) -> list:
+    """gini_scdump `TRACE <pid> <num> <a0> <ret>` lines -> [SyscallEvent] (oldest -> newest)."""
+    out: list = []
+    for m in re.finditer(r"TRACE (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)", text or ""):
+        out.append(SyscallEvent(int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)))
+    return out
+
+
+class SyscallRate:
+    """Rolling per-syscall call count over a time window (default 60s) — the histogram feed.
+    Feed cumulative `{num: count}` snapshots with their wall-clock time; `rates()` returns how
+    many of each syscall happened in the last `window` seconds (now-count minus the count as of
+    ~window ago). Before the window fills, it uses the oldest snapshot (calls-so-far)."""
+
+    def __init__(self, window: float = 60.0, cap: int = 300) -> None:
+        from collections import deque
+        self.window = window
+        self.snaps = deque(maxlen=cap)          # (t, {num: cumulative_count})
+
+    def add(self, t: float, counts: dict) -> None:
+        self.snaps.append((t, dict(counts)))
+
+    def rates(self) -> dict:
+        if not self.snaps:
+            return {}
+        now_t, now = self.snaps[-1]
+        cutoff = now_t - self.window
+        base = self.snaps[0][1]                 # oldest, until we have a snapshot past the cutoff
+        for t, c in self.snaps:
+            if t <= cutoff:
+                base = c
+            else:
+                break
+        out = {num: now[num] - base.get(num, 0) for num in now}
+        return {k: v for k, v in out.items() if v > 0}
+
+
+@dataclass
+class TreeNode:
+    proc: Proc
+    depth: int
+
+
+def build_process_tree(procs) -> list:
+    """Order procs as a depth-first process TREE by parent links, returning [TreeNode(proc, depth)]
+    in display order (depth = indentation). Roots are procs whose parent is 0/None/missing (init).
+    Defensive against cycles and orphans so a bad read can never hang or drop a process."""
+    by_pid = {p.pid: p for p in procs}
+    children: dict = {}
+    roots: list = []
+    for p in procs:
+        par = p.parent
+        if par and par in by_pid and par != p.pid:
+            children.setdefault(par, []).append(p)
+        else:
+            roots.append(p)
+    out: list = []
+    seen: set = set()
+
+    def walk(p, depth):
+        if p.pid in seen:                       # cycle guard
+            return
+        seen.add(p.pid)
+        out.append(TreeNode(p, depth))
+        for c in sorted(children.get(p.pid, []), key=lambda c: c.pid):
+            walk(c, depth + 1)
+
+    for r in sorted(roots, key=lambda p: p.pid):
+        walk(r, 0)
+    for p in procs:                             # any left over (cycle) -> show at root
+        if p.pid not in seen:
+            out.append(TreeNode(p, 0))
+    return out
+
+
 # -- scheduling timeline (Gantt) -------------------------------------------- #
 @dataclass
 class Slot:
@@ -201,6 +309,16 @@ class DemoScheduler:
 
     def set_timeslice(self, ticks: int) -> None:
         self.timeslice = max(1, int(ticks))
+
+    def sc(self) -> str:
+        """Offline demo of gini_scdump — growing syscall counts + a few recent calls, so the
+        histogram/trace panels are explorable without a container."""
+        self._sc_t = getattr(self, "_sc_t", 0) + 1
+        n = self._sc_t
+        lines = [f"SC 1 {n}", f"SC 16 {n * 7}", f"SC 5 {n * 3}", f"SC 13 {n * 2}", f"SC 12 {n}"]
+        trace = ["TRACE 2 1 0x0 0x5", "TRACE 5 16 0x4 0x6", "TRACE 5 12 0x1000 0x4000",
+                 "TRACE 2 3 0x0 0x5"]
+        return "\n".join(lines + trace) + "\n"
 
     def step(self) -> "Snapshot":
         """Advance one context switch and return the new snapshot."""

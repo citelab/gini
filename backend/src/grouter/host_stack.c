@@ -5,7 +5,7 @@
  * (host_stack_input) and the lwIP wrappers (UDPProcess/TCPProcess, moved here from
  * ip.c). The core forwarding path only ever calls host_stack_input(). Build a pure
  * forwarder that doesn't need lwIP with -DGR_NO_HOST_STACK (and drop the lwIP sources;
- * see build.zig -Dhost_stack=false).
+ * see build.sh LUA/host-stack knobs).
  */
 #include "host_stack.h"
 #include "ip.h"          /* ip_packet_t, UDPProcess/TCPProcess prototypes */

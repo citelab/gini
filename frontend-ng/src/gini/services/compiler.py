@@ -16,12 +16,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..domain import devices as _dev
 from ..domain.topology import Topology
 from .cloud_catalog import is_service, service_for
 
 ROUTERS = {"router", "firewall"}
 SWITCHES = {"switch", "hub"}        # plain L2 — live in the shared `fabric` container
 GROUPS = {"vpc", "cloud_subnet", "region"}
+# OS Zoo: emulated historical OSes, one container each, screen served over noVNC (a web port).
+# "BYO-style" elements carry Emulator/Image/Rom properties and boot via the generic BYO path — the
+# generic "Classic OS (your image)" plus the convenience presets (Mac System 7, Windows 3.11) whose
+# properties are simply pre-filled with a download URL (GINI still ships no proprietary image).
+OSZOO_BYO_KEYS = {"oszoo_byo", "msdos", "mac7", "win31"}
+OSZOO_KEYS = {"freedos", "kolibri", "menuet"} | OSZOO_BYO_KEYS
+# Sources/Sinks: instruments that run INSIDE a donor container — they get no runtime node
+# of their own, and their (attach) edges are never wired.
+RIDERS = {k for k, dt in _dev.REGISTRY.items() if getattr(dt, "rider", False)}
 K8S_ROLES = {"k8s_cluster": "k8scluster", "pod": "k8sworkload",
              "instance_group": "hpa", "k8s_node": "k8snode"}
 
@@ -30,6 +40,10 @@ K8S_ROLES = {"k8s_cluster": "k8scluster", "pod": "k8sworkload",
 # is the control plane — it is NOT a data host and gets no data-plane IP/gateway.
 DEFAULT_OF_PORT = 6633
 DEFAULT_OF_APP = "gini.samples.switch"
+
+# GINI32: every real board is served by one shared relay container, so a board's fabric
+# endpoint lives at this service name. (The board itself is out on the physical LAN.)
+GBRIDGE_SVC = "gbridge"
 
 
 def _role(type_key: str) -> str:
@@ -55,8 +69,15 @@ def _role(type_key: str) -> str:
         return "vnf"
     if type_key == "xv6":              # standalone teaching kernel (QEMU-RISC-V) — no fabric
         return "xv6"
+    if type_key in OSZOO_KEYS:         # OS Zoo: emulated historical OS, embedded via noVNC
+        return "oszoo"
+    if type_key == "gini32":           # a REAL ESP32 board: addressed on the fabric like a
+        return "gini32"                # host, but reached through the gbridge relay, not a
+                                       # container of its own — see _build_gbridge().
     if type_key in ("terminal", "storage_volume"):   # xv6 peripherals: pure UI, no
         return "peripheral"                          # container; never emitted/addressed
+    if type_key in RIDERS:             # Sources/Sinks: run on a donor, no container of their own
+        return "rider"
     if type_key in GROUPS:
         return "group"
     return "machine"                   # host = a node on the simulated tun fabric
@@ -64,6 +85,14 @@ def _role(type_key: str) -> str:
 
 def _svc(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower()) or "node"
+
+
+def _hostname(name: str) -> str:
+    """The hostname to set inside the machine container — the user's element name (e.g.
+    'toronto.on') made into a valid hostname, so `hostname` at the shell matches the label on
+    the canvas and the student needs no mental mapping. Falls back to the service name."""
+    h = re.sub(r"[^a-zA-Z0-9.-]", "-", (name or "").strip()).strip(".-")
+    return h or _svc(name)
 
 
 def _cpus_for(device) -> float:
@@ -81,9 +110,11 @@ def _toolkit_for(device) -> str:
     bind9 for the DNS chapter, postfix for mail, ettercap/dsniff for the spoofing labs.
 
     Anything unrecognised means lean: a typo must not silently pull in the 10x image."""
+    if getattr(device, "type_key", "") == "desktop":     # the headful Desktop element is always gui
+        return "gui"
     props = getattr(device, "properties", None) or {}
     want = str(props.get("Toolkit", "")).strip().lower()
-    return "full" if want == "full" else "lean"
+    return want if want in ("full", "security", "gui") else "lean"
 
 
 def _xv6_harts(device) -> int:
@@ -191,6 +222,7 @@ class MachineSpec:
     # DIFFERENT axis from the size tier above: size = how much CPU it gets and what it costs;
     # toolkit = what software is installed in it. A lean host with an XL cap is perfectly valid.
     toolkit: str = "lean"
+    novnc_port: int = 0            # headful ("gui") host: published host port for its noVNC console
     # --- inline VNF (NFV service function) ----------------------------------- #
     forward: bool = False          # IP-forward between its interfaces (a transit node)
     nf: str = ""                   # the network function kind: firewall|block|ids|cache|shaper
@@ -366,9 +398,70 @@ class NetworkSpec:
     internal: bool = False         # True = no external connectivity (the VPC fabric net)
 
 
+# Fallback resolver when an Internet element carries no DNS of its own (an older saved
+# topology, drawn before the property existed). Google's is used because it is the one
+# public resolver reachable from essentially every network that has internet at all.
+DEFAULT_PUBLIC_DNS = "8.8.8.8"
+
+
+def _internet_dns(topo) -> str:
+    """The resolver to hand out, taken from the Internet element on the canvas.
+
+    Blanking the property is a legitimate choice — "internet, but resolve names
+    yourself" — so an explicitly empty value is honoured rather than back-filled.
+    """
+    for d in topo.devices.values():
+        if d.type_key != "cloud":
+            continue
+        props = d.properties or {}
+        if "DNS" not in props:
+            return DEFAULT_PUBLIC_DNS          # saved before the property existed
+        raw = str(props.get("DNS", "")).strip()
+        return raw if _valid_ip(raw) else ""
+    return ""
+
+
+def _valid_ip(text: str) -> bool:
+    parts = (text or "").split(".")
+    return (len(parts) == 4
+            and all(p.isdigit() and len(p) <= 3 and 0 <= int(p) <= 255 for p in parts))
+
+
+@dataclass
+class GBridgeSpec:
+    """One drawn GINI32 element: a real board's end of a fabric link.
+
+    Unlike every other spec this does NOT become a container. The `gbridge` relay
+    owns `ep` (the fabric-side UDP endpoint) and forwards frames over the physical
+    LAN to whichever address the board checked in from. Everything here except
+    `board_id` is handed to the board in the relay's HELLO_ACK, so the canvas stays
+    the single source of truth for the board's fabric identity.
+    """
+    name: str
+    board_id: str                  # must match the id flashed on the board
+    ip: str                        # fabric address assigned from its segment
+    mask: str
+    gw: str                        # its gateway (the router on that segment)
+    mac: str
+    ep: Endpoint
+    mode: str = "nat"              # nat = devices hidden behind `ip`; routed = own subnet
+    physical_subnet: str = ""      # the subnet behind the radio (always allocated)
+    mtu: int = 1400
+    seg: int = -1                  # the segment it sits on (routed-mode route emission)
+    # The hotspot the board raises for real devices. Assigned here, not baked into
+    # firmware, so two boards never collide and a lab can be renamed without a reflash.
+    ap_ssid: str = ""
+    ap_pass: str = ""
+    # The resolver the board's DHCP server hands to real devices, or "" when the canvas
+    # has no Internet element. Empty is meaningful, not missing: with nothing to egress
+    # through, offering a resolver would promise name resolution that cannot work.
+    dns: str = ""
+
+
 @dataclass
 class RuntimeConfig:
     machines: list[MachineSpec] = field(default_factory=list)
+    gbridge: list[GBridgeSpec] = field(default_factory=list)   # real GINI32 boards
     switches: list[SwitchSpec] = field(default_factory=list)
     routers: list[RouterSpec] = field(default_factory=list)
     ovs_switches: list[OvsSpec] = field(default_factory=list)
@@ -386,9 +479,10 @@ class RuntimeConfig:
     def to_runtime(self, docker: bool) -> dict:
         return {
             "machines": [
-                {"name": _svc(m.name), "gw": m.gw,
+                {"name": _svc(m.name), "hostname": _hostname(m.name), "gw": m.gw,
                  "gateway": m.gateway, "fabric_default": m.fabric_default,
                  "fabric_gw": m.fabric_gw, "cpus": m.cpus, "toolkit": m.toolkit,
+                 "novnc_port": m.novnc_port,
                  "forward": m.forward, "nf": m.nf, "nf_rules": m.nf_rules,
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "tap": f"gini{idx}",
                              "port": i.ep.wiring(docker)}
@@ -447,6 +541,17 @@ class RuntimeConfig:
                           "region": n.region, "internal": n.internal} for n in self.networks],
             # security groups -> per-member iptables (a sidecar in each member's netns).
             "firewalls": self.firewalls,
+            # Real GINI32 boards. One `gbridge` relay container serves all of them:
+            # `fabric` is its end of the link to the board's router, and the rest is
+            # the identity it hands the board when the board announces itself.
+            "gbridge": [
+                {"board_id": b.board_id, "name": _svc(b.name), "label": b.name,
+                 "ip": b.ip, "mask": b.mask, "gw": b.gw, "mac": b.mac, "mtu": b.mtu,
+                 "mode": b.mode, "physical_subnet": b.physical_subnet,
+                 "ap_ssid": b.ap_ssid, "ap_pass": b.ap_pass, "dns": b.dns,
+                 "fabric": b.ep.wiring(docker)}
+                for b in self.gbridge
+            ],
         }
 
 
@@ -588,7 +693,11 @@ class RuntimeCompiler:
         ctrl_switches: dict[str, list[str]] = {}   # controller did -> [ovs did]
         for l in topo.links.values():
             rs, rt = role.get(l.source_id), role.get(l.target_id)
-            if rs == "group" or rt == "group":
+            if getattr(l, "kind", "link") == "attach" or rs == "rider" or rt == "rider":
+                # a Source/Sink mount: the rider runs inside the donor, so this is not a cable.
+                cfg.notes.append(f"skipped rider attach: "
+                                 f"{name.get(l.source_id)}–{name.get(l.target_id)}")
+            elif rs == "group" or rt == "group":
                 cfg.notes.append(f"skipped link touching grouping: "
                                  f"{name.get(l.source_id)}–{name.get(l.target_id)}")
             elif rs in K8S_ROLES.values() or rt in K8S_ROLES.values():
@@ -643,7 +752,15 @@ class RuntimeCompiler:
             # their own `gini-grouter` container (the real C gRouter), so a router's
             # location is its own service name. Machines are their own containers too.
             # This makes every router link a symmetric cross-container UDP link.
-            loc = "fabric" if role[device_id] == "switch" else _svc(name[device_id])
+            #
+            # A GINI32 board is the one endpoint that is NOT a container: it is real
+            # hardware on the physical LAN. Its location is the shared `gbridge` relay,
+            # which owns this end of the link and forwards to the board over the LAN.
+            # The gRouter on the far side therefore needs no notion of hardware at all.
+            r = role[device_id]
+            loc = ("fabric" if r == "switch"
+                   else GBRIDGE_SVC if r == "gini32"
+                   else _svc(name[device_id]))
             return Endpoint(device=name[device_id], location=loc)
 
         port = 5000
@@ -667,7 +784,10 @@ class RuntimeCompiler:
         # forwarding node in the path, so it's addressed like a router and becomes the
         # gateway on its point-to-point segments — neighbours then route THROUGH it.
         ordered = sorted(kept, key=lambda l: 0)
-        for did_role in ("router", "vnf", "machine"):
+        # A GINI32 board is addressed exactly like a host on its segment (it presents one
+        # fabric address, behind which its real devices are NATed), so it shares the
+        # machine numbering pass.
+        for did_role in ("router", "vnf", "machine", "gini32"):
             for l in kept:
                 seg = seg_ids[seg_of_link[l.id]]
                 base = f"10.0.{seg + 1}."
@@ -764,6 +884,83 @@ class RuntimeCompiler:
                     cpus=_cpus_for(topo.devices[did]),    # size tier -> CPU limit
                     toolkit=_toolkit_for(topo.devices[did])))   # lean (default) | full
 
+        # GINI32 boards: real hardware on the fabric. No container is emitted — the shared
+        # `gbridge` relay holds this end of the link and carries frames to the board over
+        # the physical LAN. We only need to hand it the identity the canvas assigned.
+        for l in kept:
+            seg = seg_ids[seg_of_link[l.id]]
+            for end in (l.source_id, l.target_id):
+                if role[end] != "gini32":
+                    continue
+                key = (l.id, end)
+                if key not in iface_ip:
+                    continue
+                midx += 1
+                dev = topo.devices[end]
+                props = getattr(dev, "properties", None) or {}
+                # Blank BoardID falls back to the element's own name. That id will not
+                # match any real board — but it is UNIQUE per element, which is the
+                # point: the earlier shared default made a second board vanish from the
+                # relay's table silently. Emitting nothing instead would be worse still,
+                # because the relay is what collects announcing boards for the Inspector
+                # to offer: no entry means no relay means an empty picker and no way to
+                # fix the very problem. So the element compiles, validate() flags it on
+                # the canvas, and the Inspector names the boards that ARE on the air.
+                board_id = str(props.get("BoardID", "")).strip() or _svc(name[end])
+                mode = str(props.get("Mode", "routed")).strip().lower()
+                if mode not in ("nat", "routed"):
+                    mode = "routed"
+
+                # The subnet behind this board's radio. Blank means "allocate me one":
+                # every board needs a DISTINCT one, or routers end up with two routes
+                # to the same network via different next hops and neither works. We
+                # skip any third octet the topology's own segments already use.
+                phys = str(props.get("PhysicalSubnet", "")).strip()
+                if not phys:
+                    used = {int(c.split(".")[2]) for c in cfg.subnets.values()}
+                    used |= {int(b.physical_subnet.split(".")[2])
+                             for b in cfg.gbridge if b.physical_subnet}
+                    oct3 = 9
+                    while oct3 in used:
+                        oct3 += 1
+                    phys = f"10.0.{oct3}.0/24"
+                elif not _valid_cidr(phys):
+                    cfg.notes.append(
+                        f"{name[end]}: PhysicalSubnet {phys!r} is not a valid CIDR — "
+                        f"allocating one automatically")
+                    phys = ""
+                    used = {int(c.split(".")[2]) for c in cfg.subnets.values()}
+                    used |= {int(b.physical_subnet.split(".")[2])
+                             for b in cfg.gbridge if b.physical_subnet}
+                    oct3 = 9
+                    while oct3 in used:
+                        oct3 += 1
+                    phys = f"10.0.{oct3}.0/24"
+
+                # The hotspot real devices join. Named after the element unless the
+                # user overrode it, so two boards are distinguishable on a phone.
+                ap_ssid = str(props.get("ApSSID", "")).strip()
+                if not ap_ssid:
+                    ap_ssid = f"GINI32-{re.sub(r'[^A-Za-z0-9-]', '', name[end]) or 'board'}"
+                ap_pass = str(props.get("ApPassword", "")).strip()
+                # Real devices on the board's radio get a resolver ONLY when the canvas
+                # has an Internet element to egress through. Without one, an iPad could
+                # still be handed 8.8.8.8, would send queries into a topology with no way
+                # out, and would sit there timing out — which looks like broken Wi-Fi
+                # rather than a network with deliberately no internet in it. This is also
+                # why DNS follows the same route as everything else the board is told:
+                # the canvas decides, the board obeys.
+                dns = _internet_dns(topo) if have_internet else ""
+                cfg.gbridge.append(GBridgeSpec(
+                    name=name[end], board_id=board_id,
+                    ip=iface_ip[key], mask="255.255.255.0",
+                    gw=seg_gateway.get(seg, ""), mac=mac(seg, 4, midx),
+                    ep=eps[key], mode=mode,
+                    # The board always serves this subnet; `mode` only decides whether
+                    # the emulated side gets a ROUTE to it or the devices are hidden.
+                    physical_subnet=phys, seg=seg,
+                    ap_ssid=ap_ssid, ap_pass=ap_pass, dns=dns))
+
         # inline VNFs: a forwarding container that applies a network function between its
         # segments (the Internet-element pattern, but fabric<->fabric + an NF instead of NAT).
         # Addressed like a router above, so it's the gateway on its point-to-point segments;
@@ -841,6 +1038,12 @@ class RuntimeCompiler:
         # managed cloud services — each backed by an off-the-shelf image. Web consoles
         # get a unique published host port so several services can coexist.
         host_port = 38000
+        # headful ("gui") machines publish their noVNC console on a unique host port too, so the
+        # Desktop element can open the embedded screen (the machine dict carries the port).
+        for m in cfg.machines:
+            if m.toolkit == "gui":
+                m.novnc_port = host_port
+                host_port += 1
         for d in topo.devices.values():
             if role.get(d.id) != "service":
                 continue
@@ -910,6 +1113,61 @@ class RuntimeCompiler:
                 cpus=_cpus_for(d), networks=["gini"]))
             host_port += 2
 
+        # OS Zoo — a real historical OS under emulation. One container per element, image
+        # `gini-oszoo:latest`, with ZOO_OS selecting the guest; the container runs the emulator
+        # (`-vnc :0`) + websockify/noVNC and publishes the framebuffer as a web page. The Zoo Lab
+        # embeds that URL in a QWebEngineView. Standalone (no fabric wiring in v1).
+        for d in topo.devices.values():
+            if role.get(d.id) != "oszoo":
+                continue
+            p = props[d.id]
+            is_byo = d.type_key in OSZOO_BYO_KEYS
+            os_id = "byo" if is_byo else d.type_key
+            env = {"ZOO_OS": os_id,
+                   "ZOO_PERSIST": "1" if str(p.get("Persist", "false")).lower() == "true" else "0"}
+            if is_byo:                                    # BYO / preset: Emulator + Image (+Rom)
+                env["ZOO_EMULATOR"] = str(p.get("Emulator", "qemu"))
+                env["ZOO_ARCH"] = str(p.get("Arch", "x86"))
+                # Image/Rom may be a local path (bind-mounted below) OR an http(s):// URL that the
+                # container downloads on first boot. Pass the raw value; boot_zoo.sh decides.
+                if str(p.get("Image", "")):
+                    env["ZOO_IMAGE"] = str(p.get("Image", ""))
+                if str(p.get("Rom", "")):                 # Basilisk II: a Mac ROM
+                    env["ZOO_ROM"] = str(p.get("Rom", ""))
+                if d.type_key == "win31":                 # ship Digger Remastered on the Win 3.11 C:
+                    env["ZOO_ADDONS"] = "digger"          # (run it from the DOS prompt: cd\digger, digger)
+            # persist downloaded guest images on the host so each OS is fetched once, not on
+            # every Run (an anonymous /zoo/cache volume is discarded when the container recreates).
+            # Computed inline (mirrors app.paths.oszoo_cache_dir) to keep the compiler Qt-free.
+            import os
+            from pathlib import Path
+            _home = Path(os.environ.get("GINI_HOME_DIR") or (Path.home() / ".gini")).expanduser()
+            cache = _home / "oszoo-cache"; cache.mkdir(parents=True, exist_ok=True)
+            volumes = [f"{cache}:/zoo/cache"]
+            def _is_url(s: str) -> bool:
+                return s.startswith("http://") or s.startswith("https://")
+            img = str(p.get("Image", "")) if is_byo else ""
+            if img and not _is_url(img):                   # local path -> bind-mount read-only
+                volumes.append(f"{img}:/zoo/byo.img:ro")   # (a URL is downloaded in the container)
+            rom = str(p.get("Rom", "")) if is_byo else ""
+            if rom and not _is_url(rom):                   # Basilisk II Mac ROM, read-only
+                volumes.append(f"{rom}:/zoo/rom:ro")
+            # Basilisk II creates its 60 Hz timer as a real-time-scheduled thread; Docker's default
+            # sandbox (seccomp + no CAP_SYS_NICE) forbids RT scheduling, so that container needs to
+            # be privileged. QEMU/DOSBox guests don't, so keep them unprivileged.
+            needs_priv = is_byo and str(p.get("Emulator", "")) == "basilisk"
+            cfg.services.append(ServiceSpec(
+                name=d.name, type_key=d.type_key, image="gini-oszoo:latest",
+                summary=f"OS Zoo: {d.type_key} under emulation, screen embedded over noVNC.",
+                command=[], env=env, privileged=needs_priv,
+                # the noVNC web console (the Zoo Lab embeds this) + the raw VNC port.
+                ports=[{"container": 6080, "host": host_port, "label": "screen",
+                        "web": True, "path": "/vnc.html?autoconnect=1&resize=remote"},
+                       {"container": 5900, "host": host_port + 1, "label": "vnc",
+                        "web": False, "path": ""}],
+                volumes=volumes, cpus=_cpus_for(d), networks=["gini"]))
+            host_port += 2
+
         # make proxies / load balancers actually route to their drawn backends
         self._wire_proxies(cfg, topo, role, name, props)
         # serverless: gather Functions into the shared faas runtime + route API Gateways to it
@@ -956,14 +1214,22 @@ class RuntimeCompiler:
         # static inter-router routes: each router needs a route to every subnet it is
         # NOT directly on, via the neighbouring router on the shortest path. (There is no
         # routing protocol between the C routers, so we compute the static routes here.)
+        # A routed-mode GINI32 board fronts a real subnet behind its radio, which no
+        # router knows about. Feed those in as extra destinations reached via the board.
+        extra = [(b.physical_subnet, b.seg, b.ip)
+                 for b in cfg.gbridge if b.mode == "routed" and b.physical_subnet
+                 and b.seg >= 0]
         self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                                gw_seg, gw_ip)
+                                gw_seg, gw_ip, extra)
 
         return cfg
 
     @staticmethod
     def _add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                           gw_seg=None, gw_ip=None) -> None:
+                           gw_seg=None, gw_ip=None, extra_nets=None) -> None:
+        """extra_nets: [(cidr, seg, via_ip)] — destinations that are not GINI subnets but
+        hang off a node ON `seg` (a routed-mode GINI32 board's physical subnet). Routers on
+        that segment route to them via `via_ip`; others hop toward a router that is."""
         import ipaddress
         from collections import deque
 
@@ -1007,6 +1273,29 @@ class RuntimeCompiler:
                                "mask": str(net.netmask),
                                "gw": rtr_seg_ip[(nh, shared)],
                                "dev": rtr_seg_dev[(did, shared)]})
+
+            # subnets living behind a routed-mode GINI32 board (real devices on its radio)
+            for cidr, bseg, via_ip in (extra_nets or []):
+                try:
+                    net = ipaddress.ip_network(cidr, strict=False)
+                except ValueError:
+                    continue
+                if bseg in my_segs:                            # board is on my segment
+                    routes.append({"net": str(net.network_address),
+                                   "mask": str(net.netmask), "gw": via_ip,
+                                   "dev": rtr_seg_dev[(did, bseg)]})
+                else:                                          # hop toward its router
+                    cand = [c for c in seg_routers.get(bseg, []) if c in dist and c != did]
+                    if not cand:
+                        continue
+                    nh = firsthop[min(cand, key=lambda c: dist[c])]
+                    if nh is None:
+                        continue
+                    shared = adj[did][nh]
+                    routes.append({"net": str(net.network_address),
+                                   "mask": str(net.netmask),
+                                   "gw": rtr_seg_ip[(nh, shared)],
+                                   "dev": rtr_seg_dev[(did, shared)]})
 
             # default route (0.0.0.0/0) toward the Internet/NAT gateway, so internet-
             # bound traffic leaves the lab through the drawn Internet element.
@@ -1405,13 +1694,52 @@ def validate(topo: Topology) -> list[dict]:
         nbrs[l.source_id].append(l.target_id)
         nbrs[l.target_id].append(l.source_id)
 
+    # 0. GINI32 boards name real hardware. A missing or duplicated BoardID does not
+    #    fail loudly at run time — the relay keys its table by that id, so a duplicate
+    #    makes one board silently disappear. Say so on the canvas instead.
+    boards = [d for d in topo.devices.values() if d.type_key == "gini32"]
+    seen_ids: dict[str, str] = {}
+    for d in boards:
+        bid = str((d.properties or {}).get("BoardID", "")).strip()
+        if not bid:
+            issues.append({"level": "warn", "device": d.name,
+                           "message": "No BoardID set — put the id from the board's "
+                                      "label here (see `gini32 provision --id`), or no "
+                                      "hardware will attach to this element."})
+        elif bid in seen_ids:
+            issues.append({"level": "warn", "device": d.name,
+                           "message": f"BoardID {bid!r} is also used by "
+                                      f"{seen_ids[bid]} — two elements cannot share one "
+                                      f"physical board; one of them will never connect."})
+        else:
+            seen_ids[bid] = d.name
+    # overlapping physical subnets => routers get two routes to one network
+    import ipaddress as _ipa
+    nets: list[tuple] = []
+    for d in boards:
+        raw = str((d.properties or {}).get("PhysicalSubnet", "")).strip()
+        if not raw:
+            continue                      # blank is fine: allocated automatically
+        try:
+            net = _ipa.ip_network(raw, strict=False)
+        except ValueError:
+            continue                      # the compiler already notes and replaces it
+        for other, onet in nets:
+            if net.overlaps(onet):
+                issues.append({"level": "warn", "device": d.name,
+                               "message": f"PhysicalSubnet {raw} overlaps {other}'s — "
+                                          f"give each board its own, or leave both blank "
+                                          f"to have them allocated."})
+        nets.append((d.name, net))
+
     # 1. isolated devices (degree 0) — not part of any network. xv6 runs standalone (it
-    #    has no networking), and its peripherals are optional, so none of them are "islands".
+    #    has no networking), its peripherals are optional, and OS Zoo guests run in isolation
+    #    (display-only, no fabric wiring in v1), so none of them are "islands".
     tkey = {d.id: d.type_key for d in topo.devices.values()}
     for did, r in role.items():
         if r == "group" or nbrs[did]:
             continue
-        if tkey[did] in ("xv6", "terminal", "storage_volume"):
+        if r == "oszoo" or tkey[did] in ("xv6", "terminal", "storage_volume"):
             continue
         issues.append({"level": "warn", "device": name[did],
                        "message": f"{name[did]} isn't connected to anything."})
@@ -1493,4 +1821,18 @@ def address_map(topo: Topology) -> dict[str, dict]:
     for s in cfg.switches:
         out[s.name] = {"role": "switch", "ports": len(s.eps), "interfaces": [],
                        "peers": [e.peer.device for e in s.eps]}
+    return out
+
+
+def overlay_hosts(addressing: dict) -> dict:
+    """device name -> its primary overlay (gini0) IP, from `address_map` output. GINI writes these
+    into each machine's /etc/hosts so names resolve over the DRAWN network (gini0) instead of the
+    Docker bridge — which is what makes DNS/getent/ping/reach ride the overlay."""
+    out: dict[str, str] = {}
+    for name, info in (addressing or {}).items():
+        for itf in info.get("interfaces", []):
+            ip = str(itf.get("ip", "")).split("/")[0].strip()
+            if ip:
+                out[name] = ip
+                break
     return out

@@ -25,6 +25,7 @@
 #include <netinet/in.h>
 #include "routetable.h"
 #include "openflow_config.h"
+#include "gr_delay_ctl.h"
 
 #define MAX_MTU 1500
 #define BASEPORTNUM 60000
@@ -932,7 +933,28 @@ void *GNETHandler(void *outq)
 			}
 		}
 
-		iface->devdriver->todev((void *)in_pkt);
+		if (gr_egress_line != NULL)
+		{
+			/* egress link delay: hold, then send in order on the delay thread */
+			if (!gr_delay_push(gr_egress_line, in_pkt))
+				free(in_pkt);            /* holding queue full -> drop */
+		}
+		else
+			iface->devdriver->todev((void *)in_pkt);
 
 	}
+}
+
+/*
+ * Egress link-delay release callback: runs on the delay thread when a held packet is due.
+ * The interface is re-resolved because time has passed since the packet was parked.
+ */
+void gr_egress_emit(void *pkt)
+{
+	gpacket_t *p = (gpacket_t *)pkt;
+	interface_t *ifc = findInterface(p->frame.dst_interface);
+	if (ifc != NULL && ifc->state != INTERFACE_DOWN)
+		ifc->devdriver->todev((void *)p);
+	else
+		free(p);                          /* interface gone while held -> drop */
 }

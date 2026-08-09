@@ -17,7 +17,16 @@ DEFAULT_RATES: dict[str, float] = {
     "kinstance": 14.0,       # Kata Instance — a real microVM, so it costs more than a VM image
     "container": 5.0,
     "host": 2.0,             # a plain Machine / end host
+    "desktop": 3.0,          # a headful Machine (lean host + a light X desktop over noVNC)
     "xv6": 2.0,              # xv6 teaching kernel under QEMU-RISC-V (a single-CPU learning VM)
+    # --- OS Zoo (emulated historical OSes; each is a QEMU/emulator VM) --------- #
+    "freedos": 2.0,
+    "kolibri": 2.0,
+    "menuet": 2.0,
+    "msdos": 2.0,          # MS-DOS 6.22 preset (QEMU; disk image downloaded)
+    "mac7": 3.0,            # Mac System 7 preset (Basilisk II; image/ROM downloaded)
+    "win31": 3.0,          # Windows 3.11 preset (DOSBox; image downloaded)
+    "oszoo_byo": 3.0,        # bring-your-own classic OS (Windows/Mac) under emulation
     # --- serverless (cheap, scale-to-zero; pay per use, not per idle hour) --- #
     "function": 1.0,         # a handler in the shared FaaS runtime
     "api_gateway": 5.0,      # a managed API front door (Traefik)
@@ -94,7 +103,7 @@ def resizable(type_key: str) -> bool:
 
 # Dashboard breakdown groups. Order is the display order.
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "Compute": ("instance", "kinstance", "container", "host", "xv6"),
+    "Compute": ("instance", "kinstance", "container", "host", "desktop", "xv6"),
     "Serverless": ("function", "api_gateway"),
     "Kubernetes": ("k8s_cluster", "pod", "k8s_node", "instance_group", "registry"),
     "Networking": ("router", "ovs", "controller", "firewall", "vnf", "switch",
@@ -102,6 +111,7 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     "Services": ("database", "nosql", "object_store", "stream", "queue",
                  "messaging", "cache", "load_balancer", "proxy", "web_app"),
     "Observability": ("metrics", "dashboard", "tracing", "load_generator"),
+    "OS Zoo": ("freedos", "kolibri", "menuet", "msdos", "mac7", "win31", "oszoo_byo"),
 }
 CATEGORY_ORDER = tuple(CATEGORIES.keys())
 _CAT_OF = {tk: cat for cat, tks in CATEGORIES.items() for tk in tks}
@@ -118,6 +128,13 @@ FREE = frozenset({
     "vpc", "cloud_subnet", "region",              # grouping boundaries
     "security_group", "gateway", "block_volume",  # not-yet-real placeholders
     "terminal", "storage_volume",                 # xv6 peripherals (software devices, no cost)
+    # A GINI32 board is REAL hardware the student already owns, not a rented
+    # resource. The meter models a cloud bill, so billing your own $5 chip would be
+    # the wrong lesson — the relay that carries it is part of the lab, not a rental.
+    "gini32",
+    # Sources / Sinks (riders) — instruments that run inside a donor, no container of their own
+    "ping_probe", "http_probe", "packet_view", "dns_probe", "traceroute_probe",
+    "iperf_client", "iperf_server", "iface_stats", "xv6_shell", "xv6_workload",
 })
 
 

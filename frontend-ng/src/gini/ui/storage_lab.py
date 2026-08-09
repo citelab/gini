@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..domain.xv6_fs import DemoDisk
 from .theme import ThemeManager, icons
+from .theme.manager import scale_css as _scss
 
 _REGION_ACCENT = {"boot": "slate", "super": "blue", "log": "amber", "inodes": "green",
                   "bitmap": "purple", "data": "cyan"}
@@ -98,21 +99,21 @@ class StorageLab(QDialog):
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("database", t.accent_for("cyan"), 22))
         title = QLabel(f"  File system — {getattr(self.device, 'name', 'xv6')}")
-        title.setStyleSheet(f"color:{t.text};font-size:16px;font-weight:600;")
+        title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         root.addLayout(head)
         hint = QLabel("The on-disk regions, the inodes and the tree they build, the buffer "
                       "cache, and the write-ahead log that makes writes crash-safe.")
-        hint.setWordWrap(True); hint.setStyleSheet(f"color:{t.muted};font-size:11px;")
+        hint.setWordWrap(True); hint.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
         root.addWidget(hint)
 
     def _panel(self, title, inner, fill=False) -> QFrame:
         t = self.theme.theme
         f = QFrame(); f.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         h = QLabel(title); h.setStyleSheet(
-            f"color:{t.muted};font-size:11px;font-weight:600;border:none;")
+            _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         v.addWidget(h)
         inner.setStyleSheet((inner.styleSheet() or "") + "border:none;")
         v.addWidget(inner, 1 if fill else 0)
@@ -136,11 +137,11 @@ class StorageLab(QDialog):
     def _build_log_panel(self) -> QFrame:
         t = self.theme.theme
         f = QFrame(); f.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         top = QHBoxLayout()
         h = QLabel("Write-ahead log  ·  journal"); h.setStyleSheet(
-            f"color:{t.muted};font-size:11px;font-weight:600;border:none;")
+            _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         top.addWidget(h); top.addStretch(1)
         self._log_phase = QLabel(); self._log_phase.setStyleSheet(
             f"color:{t.text};background:{t.panel};border:1px solid {t.line};"
@@ -148,7 +149,7 @@ class StorageLab(QDialog):
         top.addWidget(self._log_phase)
         v.addLayout(top)
         self._log_body = QLabel(); self._log_body.setWordWrap(True); self._log_body.setAlignment(Qt.AlignTop)
-        self._log_body.setStyleSheet(f"color:{t.text};font-family:monospace;font-size:12px;border:none;")
+        self._log_body.setStyleSheet(_scss(f"color:{t.text};font-family:monospace;font-size:12px;border:none;"))
         v.addWidget(self._log_body, 1)
         live = not hasattr(self.provider, "simulate_write")   # live reader can't fake a txn
         btn = QPushButton("  Refresh" if live else "  Simulate write")

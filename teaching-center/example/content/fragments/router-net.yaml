@@ -1,0 +1,174 @@
+id: router-net
+layer: core
+teaches: router test
+spirit: different LANs talking with each other
+summary: this is for student learning
+provides:
+- router-gateway
+requires:
+- network
+objectives:
+- id: place-router
+  say: Place a router
+  check: exists(router)
+  level: 1
+- id: link-router-switch-at-nets
+  say: Wire the router to the switch (slot nets)
+  check: link(router, switch@nets)
+  level: 2
+- id: live-host-at-nets-host-at-nets-ok
+  say: 'Live: the machine (slot nets) reaches the machine (slot nets) (Run to check)'
+  kind: behavioral
+  probe: reach(host@nets -> host@nets) == ok
+  level: 4
+stage:
+  name: test-01
+  manual_addressing: false
+  devices:
+  - id: host-1
+    type_key: host
+    name: M1
+    x: 60.0
+    y: 160.0
+    parent_id: null
+    properties:
+      Name: M1
+      OS: linux
+      Interfaces: '1'
+      Toolkit: lean
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: nets
+  - id: host-2
+    type_key: host
+    name: M2
+    x: 130.0
+    y: 160.0
+    parent_id: null
+    properties:
+      Name: M2
+      OS: linux
+      Interfaces: '1'
+      Toolkit: lean
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: nets
+  - id: switch-3
+    type_key: switch
+    name: S1
+    x: 548.0
+    y: -58.00000000000006
+    parent_id: null
+    properties:
+      Name: S1
+      Priority: '100'
+      MAC: ''
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: nets
+  - id: host-6
+    type_key: host
+    name: M3
+    x: 60.0
+    y: 160.0
+    parent_id: null
+    properties:
+      Name: M3
+      OS: linux
+      Interfaces: '1'
+      Toolkit: lean
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: nets
+  - id: host-7
+    type_key: host
+    name: M4
+    x: 130.0
+    y: 160.0
+    parent_id: null
+    properties:
+      Name: M4
+      OS: linux
+      Interfaces: '1'
+      Toolkit: lean
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: nets
+  - id: switch-8
+    type_key: switch
+    name: S2
+    x: 200.0
+    y: -65.00000000000006
+    parent_id: null
+    properties:
+      Name: S2
+      Priority: '100'
+      MAC: ''
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: nets
+  - id: router-11
+    type_key: router
+    name: R1
+    x: 361.0
+    y: -219.0
+    parent_id: null
+    properties:
+      Name: R1
+      Forwarding: 'true'
+    static_ips: {}
+    size: 1
+    w: 0.0
+    h: 0.0
+    slot: ''
+  links:
+  - id: link-4
+    source_id: host-1
+    target_id: switch-3
+    label: ''
+    kind: link
+  - id: link-5
+    source_id: host-2
+    target_id: switch-3
+    label: ''
+    kind: link
+  - id: link-9
+    source_id: host-6
+    target_id: switch-8
+    label: ''
+    kind: link
+  - id: link-10
+    source_id: host-7
+    target_id: switch-8
+    label: ''
+    kind: link
+  - id: link-12
+    source_id: router-11
+    target_id: switch-8
+    label: ''
+    kind: link
+  - id: link-13
+    source_id: router-11
+    target_id: switch-3
+    label: ''
+    kind: link
+slots:
+- name: nets
+  role: network
+  min: 2
+  max: 0
+engine_version: '6.0'
+author: prof
+certified: true

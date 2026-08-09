@@ -333,6 +333,9 @@ extern gr_cp_module_t *gr_cp_hello_create(void);   /* the B2.3 demo module */
 extern gr_cp_module_t *gr_cp_dhcp_create(void);    /* B2.4 DHCP server */
 extern gr_cp_module_t *gr_cp_rip_create(void);     /* B2.4 distance-vector routing */
 extern gr_cp_module_t *gr_cp_igmp_create(void);    /* B3 IGMP snooping */
+#ifdef GR_LUA
+extern gr_cp_module_t *gr_cp_lua_create(void);     /* control-plane Lua: routing in Lua */
+#endif
 
 typedef struct { const char *name; gr_cp_module_t *(*ctor)(void); } gr_cp_reg_t;
 
@@ -341,6 +344,9 @@ static const gr_cp_reg_t CP_REGISTRY[] = {
     { "dhcp",  gr_cp_dhcp_create  },
     { "rip",   gr_cp_rip_create   },
     { "igmp",  gr_cp_igmp_create  },
+#ifdef GR_LUA
+    { "lua",   gr_cp_lua_create   },   /* gpipe cp add lua <script> — implement a protocol */
+#endif
 };
 
 const char *gr_cp_names(void)

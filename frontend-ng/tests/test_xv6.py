@@ -1,6 +1,7 @@
 """xv6 state parsing + scheduling timeline (the Machine Lab's read side)."""
 from gini.domain.xv6 import (
-    Snapshot, SchedTimeline, parse_backtrace, parse_procdump, parse_registers, running_pid,
+    Snapshot, SchedTimeline, build_process_tree, parse_backtrace, parse_procdump,
+    parse_registers, running_pid,
 )
 
 PROCDUMP = """
@@ -44,6 +45,57 @@ def test_parse_backtrace():
     fr = parse_backtrace(BT)
     assert [f.fn for f in fr] == ["scheduler", "main"]
     assert fr[0].loc == "kernel/proc.c:451"
+
+
+def test_parse_procdump_captures_ppid():
+    procs = parse_procdump("1 sleep init 0\n2 sleep sh 1\n5 run busy 2\n")
+    assert [(p.pid, p.parent) for p in procs] == [(1, 0), (2, 1), (5, 2)]
+    # stock procdump (no ppid column) still parses, parent left None
+    assert parse_procdump("3 run spin")[0].parent is None
+
+
+def test_build_process_tree_orders_by_parent():
+    procs = parse_procdump("1 sleep init 0\n2 sleep sh 1\n4 run busy 2\n5 runble busy 2\n"
+                           "7 zombie hello 2\n")
+    tree = build_process_tree(procs)
+    assert [(n.proc.pid, n.depth) for n in tree] == [
+        (1, 0), (2, 1), (4, 2), (5, 2), (7, 2)]           # init > sh > {busy,busy,zombie}
+
+
+def test_build_process_tree_survives_a_cycle():
+    # a bad read where two procs point at each other must not hang or drop anyone
+    procs = parse_procdump("8 run a 9\n9 run b 8\n")
+    tree = build_process_tree(procs)
+    assert {n.proc.pid for n in tree} == {8, 9}
+
+
+def test_parse_sccounts_and_names():
+    from gini.domain.xv6 import parse_sccounts, syscall_name
+    counts = parse_sccounts("SC 1 12\nSC 16 340\nSC 23 4\n")
+    assert counts == {1: 12, 16: 340, 23: 4}
+    assert syscall_name(1) == "fork" and syscall_name(16) == "write" and syscall_name(22) == "sync"
+    assert syscall_name(23, {23: "trace"}) == "trace"     # user-defined
+    assert syscall_name(99) == "sys99"                    # unknown -> numbered
+
+
+def test_parse_sctrace():
+    from gini.domain.xv6 import parse_sctrace
+    evs = parse_sctrace("TRACE 2 1 0x0 0x7\nTRACE 7 16 0x4 0x6\n")
+    assert [(e.pid, e.num, e.ret) for e in evs] == [(2, 1, "0x7"), (7, 16, "0x6")]
+
+
+def test_syscall_rate_60s_window():
+    from gini.domain.xv6 import SyscallRate
+    r = SyscallRate(window=60.0)
+    r.add(0.0, {1: 0, 16: 0})
+    r.add(5.0, {1: 2, 16: 40})
+    r.add(20.0, {1: 10, 16: 120})
+    r.add(70.0, {1: 30, 16: 400})     # now=70, cutoff=10 -> baseline is the t=5 snapshot
+    rates = r.rates()
+    assert rates[1] == 28 and rates[16] == 360    # 30-2, 400-40
+    # a syscall with no calls in the window is dropped
+    r.add(75.0, {1: 30, 16: 400})
+    assert all(v > 0 for v in r.rates().values())
 
 
 def test_parse_cpu_lines():

@@ -1,8 +1,9 @@
 """Routing/ARP-table parsing — turn the gRouter's `route` and `arp` CLI dumps into rows for
 the Router Lab's routing view.
 
-A regular router is the C gRouter; at runtime `element_query(router, "route")` prints its
-route table and `element_query(router, "arp")` its ARP cache. This module parses both.
+A regular router is the C gRouter; at runtime `element_query(router, "route show")` prints
+its route table and `element_query(router, "arp show")` its ARP cache (the gRouter CLI needs
+the `show` subcommand — a bare `route`/`arp` prints nothing). This module parses both.
 Pure/text-only, so it's unit-tested without Docker.
 
 `route` output (from routetable.c printRouteTable):

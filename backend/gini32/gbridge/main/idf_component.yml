@@ -1,0 +1,13 @@
+## Managed components. `mdns` moved out of ESP-IDF core into the component registry
+## in v5.x, so it is pulled in here; `idf.py build` fetches it automatically.
+dependencies:
+  espressif/mdns: "^1.2.0"
+  ## Drives the addressable RGB LED that most ESP32-S3 devkits carry INSTEAD of a plain
+  ## one (DevKitC-1: GPIO38 on v1.1, GPIO48 on the original). A WS2812 needs an
+  ## RMT-timed bitstream, so it cannot be blinked with gpio_set_level.
+  ##
+  ## Pinned to 2.x deliberately: 3.x renamed the pixel-format field in
+  ## led_strip_config_t, and this code is written against the 2.x struct.
+  espressif/led_strip: "~2.5"
+  idf:
+    version: ">=5.0"

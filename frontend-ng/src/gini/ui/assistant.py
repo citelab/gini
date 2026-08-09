@@ -9,6 +9,8 @@ share one brain.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -23,6 +25,7 @@ from ..app import AppContext
 from ..domain import all_devices
 from .mission_panel import MissionPanel
 from .theme import ThemeManager, icons
+from .theme.manager import sp as _sp
 
 
 class _MissionPanelProxy:
@@ -96,6 +99,10 @@ class Assistant(QWidget):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 
+        # the Ask GINI dock's floor. The mode-button row used to force ~490px; with it in a scroll
+        # strip we pin a slimmer minimum (~15% narrower) so the panel can be dragged narrower.
+        self.setMinimumWidth(416)
+
         self.log = QTextBrowser()
         self.log.setOpenExternalLinks(False)
         # empty state = a clickable topic cloud (things to explore/build); it swaps to the
@@ -119,6 +126,38 @@ class Assistant(QWidget):
         self._mission_debounce.setInterval(180)
         self._mission_debounce.timeout.connect(
             lambda: self._dispatch_mission("on_canvas_changed"))
+
+        # UNIFIED CONVERSATION RIBBON — one surface for GINI *and* people. GINI is just the first
+        # target; Instructor / Group / groupmates join it when you're signed in to a course. Same
+        # pattern as the Missions ribbon: a switcher on top, one shared transcript below. When you're
+        # not enrolled it never appears, so the solo experience is exactly as before.
+        self._convo = "gini"               # active conversation id ("gini" or a channel id)
+        self._channels: list[dict] = []    # human channels from the Teaching Center
+        self._human_msgs: list[dict] = []  # last poll of human messages
+        self._convo_seen: dict[str, float] = {}   # channel -> ts of last message the student saw
+        self._convo_btns: dict[str, QPushButton] = {}
+        self._convo_bar = QWidget()
+        self._convo_row = QHBoxLayout(self._convo_bar)
+        self._convo_row.setContentsMargins(0, 0, 0, 2)
+        self._convo_row.setSpacing(4)
+        # the ribbon can hold many channels (a teacher sees one per student). A raw button row would
+        # force the whole Ask GINI dock as wide as all its pills — so it lives in a horizontal scroll
+        # strip: extra channels scroll, they never widen the panel.
+        self._convo_scroll = QScrollArea()
+        self._convo_scroll.setWidget(self._convo_bar)
+        self._convo_scroll.setWidgetResizable(True)
+        self._convo_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._convo_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._convo_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._convo_scroll.setFixedHeight(40)
+        self._convo_scroll.setMinimumWidth(120)      # small floor → it never demands to be wide
+        self._convo_scroll.setVisible(False)
+        lay.addWidget(self._convo_scroll)
+        self._convo_timer = QTimer(self)
+        self._convo_timer.setInterval(6000)
+        self._convo_timer.timeout.connect(self._poll_convos)
+        self.mission_ui_op.connect(self._apply_convo_op)   # worker → UI thread (reuse the queue)
+        ctx.bus.enrolment_changed.connect(self._on_enrolment_convos)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_cloud())     # index 0: the cloud
@@ -182,7 +221,20 @@ class Assistant(QWidget):
         self._tutor_box.toggled.connect(lambda v: setattr(self, "_tutor", v))
         chips.addWidget(self._tutor_box)
         # (the model presence indicator now lives in the toolbar — see ModeIndicator)
-        lay.addLayout(chips)
+        # wrap the mode row so the whole thing can be hidden when a human conversation is selected.
+        # It also lives in a horizontal scroll strip: the six mode buttons are the widest fixed thing
+        # in the panel, so a raw row set the dock's MINIMUM width. In the strip they scroll when the
+        # dock is dragged to its narrowest, so the panel can be slimmer.
+        self._mode_bar = QWidget()
+        self._mode_bar.setLayout(chips)
+        self._mode_scroll = QScrollArea()
+        self._mode_scroll.setWidget(self._mode_bar)
+        self._mode_scroll.setWidgetResizable(True)
+        self._mode_scroll.setFrameShape(QScrollArea.NoFrame)
+        self._mode_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._mode_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._mode_scroll.setFixedHeight(self._mode_bar.sizeHint().height() + 4)
+        lay.addWidget(self._mode_scroll)
 
         # "thinking" spinner — shown while an LLM answer is in flight
         self._spinner = QLabel("")
@@ -312,6 +364,21 @@ class Assistant(QWidget):
     def brief(self) -> str:
         return self._brief
 
+    def note_experiment(self, name: str) -> None:
+        """Mark an experiment switch in the conversation.
+
+        The transcript is PROJECT-level, so it survives moving between experiments — that's the
+        point (the tutor should remember the whole arc). But without a marker the model would go on
+        reasoning about a canvas that has since been replaced. This drops a visible beat into the
+        transcript *and* the model's history, so 'the board' means the new board from here on."""
+        self._post("GINI", f"— switched to experiment “{name}” (the canvas is now this one) —")
+        if self._loop is not None:
+            from ..agent.llm.backend import Message
+            self._loop.history.append(
+                Message(role="user", content=f"[The user switched to experiment '{name}'. "
+                                             f"The canvas now shows that topology; earlier "
+                                             f"canvas details no longer apply.]"))
+
     def ai_state(self) -> dict:
         """Serialisable snapshot: the visible transcript + the model's message history."""
         history = []
@@ -364,12 +431,31 @@ class Assistant(QWidget):
         m = re.search(r"<body[^>]*>(.*)</body>", html, re.S)
         return m.group(1) if m else html
 
-    def _msg_html(self, role: str, text: str, error: bool = False,
-                  markdown: bool = False) -> str:
+    def _role_color(self, role: str, ai: bool) -> str:
+        """Colour per speaker, so one shared transcript reads clearly. ProfAI (and any …AI) is
+        deliberately the muted colour and carries an 'AI' tag — a student must always be able to tell
+        an AI standing in for a human from the human themselves. That distinction is a safety line,
+        not decoration, so it never blends into the person it speaks for."""
         t = self.theme.theme
-        label = t.accent if role == "GINI" else t.muted
+        if ai:
+            return t.muted
+        if role == "GINI":
+            return t.accent
+        if role in ("You", "you"):
+            return t.muted
+        if role == "Prof":
+            return getattr(t, "success", t.accent)          # the real instructor: solid, authoritative
+        return getattr(t, "accent2", t.accent)              # a groupmate
+
+    def _msg_html(self, role: str, text: str, error: bool = False,
+                  markdown: bool = False, ai: bool = False) -> str:
+        t = self.theme.theme
+        label = self._role_color(role, ai)
         body = getattr(t, "danger", "#ff5555") if error else t.text   # errors in red
-        lbl = f'<b style="color:{label};">{role}:</b>'
+        tag = ' <span style="font-size:10px;opacity:.7;">· AI</span>' if ai else ""
+        lbl = f'<b style="color:{label};">{role}:{tag}</b>' if not ai else \
+              f'<b style="color:{label};">{role}</b><span style="color:{label};font-size:10px;">' \
+              f' · AI</span><b style="color:{label};">:</b>'
         if markdown and not error:
             return (f'<div style="margin:6px 0;">{lbl}'
                     f'<div style="color:{body};">{self._md_to_html(text)}</div></div>')
@@ -379,9 +465,13 @@ class Assistant(QWidget):
     def _post(self, role: str, text: str, error: bool = False,
               markdown: bool = False) -> None:
         self._messages.append((role, text, error, markdown))
-        self.log.append(self._msg_html(role, text, error, markdown))
-        if hasattr(self, "_stack"):
-            self._stack.setCurrentWidget(self.log)   # a message -> show the conversation
+        # only paint into the log if the GINI conversation is the one on screen; otherwise it's
+        # stored and shown when the student switches back (an async reply must not bleed into a
+        # human thread they've navigated to).
+        if getattr(self, "_convo", "gini") == "gini":
+            self.log.append(self._msg_html(role, text, error, markdown))
+            if hasattr(self, "_stack"):
+                self._stack.setCurrentWidget(self.log)
         self.ctx.bus.assistant_message.emit(role, text)
         if role == "GINI":
             self._raise_self()          # surface the Ask GINI tab so replies aren't missed
@@ -389,11 +479,151 @@ class Assistant(QWidget):
     def _rerender(self) -> None:
         """Re-paint the whole conversation in the current theme's colours (message
         colours are baked into the HTML at post time, so a theme switch must redraw)."""
+        if getattr(self, "_convo", "gini") != "gini":
+            self._render_convo()                      # a human thread is showing — repaint that
+            return
         self.log.clear()
         for role, text, error, markdown in self._messages:
             self.log.append(self._msg_html(role, text, error, markdown))
         if hasattr(self, "_cloud_flow"):
             self._populate_cloud()                    # recolour the cloud on theme switch
+
+    # -- unified conversations: GINI + people in one surface ---------------- #
+    _CONVO_NOTE = {
+        "teacher": "Only you and your instructor (and ProfAI, when they're away) can read this.",
+        "group": "Your whole group — and your instructor and ProfAI — can read this channel.",
+        "dm": "Private. Your instructor and ProfAI don't see this. Stored on the course server.",
+    }
+
+    def _on_enrolment_convos(self, student: str, online: bool, due: int) -> None:
+        """Signed in → start polling for messages and show the ribbon. Signed out → hide it and
+        fall back to the GINI-only surface (exactly the pre-enrolment experience)."""
+        if student:
+            self._poll_convos()
+            if not self._convo_timer.isActive():
+                self._convo_timer.start()
+        else:
+            self._convo_timer.stop()
+            self._channels = []
+            self._human_msgs = []
+            self._select_convo("gini")
+            self._rebuild_convo_ribbon()
+
+    def _poll_convos(self) -> None:
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None or not tc.signed_in():
+            return
+
+        def work():
+            try:
+                chans = tc.channels()
+                msgs = tc.messages()
+            except Exception:                          # noqa: BLE001 — a failed poll is a non-event
+                return
+            self.mission_ui_op.emit(("convos", chans, msgs))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_convo_op(self, op) -> None:
+        if not isinstance(op, tuple) or not op or op[0] != "convos":
+            return                                     # not ours (the mission queue is shared)
+        _, chans, msgs = op
+        self._channels = chans or []
+        self._human_msgs = msgs or []
+        self._rebuild_convo_ribbon()
+        if self._convo != "gini":
+            self._render_convo()
+
+    def _rebuild_convo_ribbon(self) -> None:
+        while self._convo_row.count():
+            it = self._convo_row.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None); w.deleteLater()
+        self._convo_btns = {}
+        # no course / no channels → no ribbon at all (solo experience unchanged)
+        if not self._channels:
+            self._convo_scroll.setVisible(False)
+            return
+        self._convo_scroll.setVisible(True)
+        self._add_convo_btn("gini", "GINI")
+        for c in self._channels:
+            self._add_convo_btn(c["id"], c.get("title", c["id"]), kind=c.get("kind", ""))
+        self._convo_row.addStretch(1)
+
+    def _add_convo_btn(self, cid: str, title: str, kind: str = "") -> None:
+        b = QPushButton(title)
+        b.setObjectName("ModeBtn")
+        b.setCheckable(True)
+        b.setChecked(cid == self._convo)
+        b.setCursor(Qt.PointingHandCursor)
+        # an unread dot when another conversation has something newer than you've seen
+        if cid != "gini" and cid != self._convo:
+            newest = max((m["ts"] for m in self._human_msgs if m.get("channel") == cid),
+                         default=0)
+            if newest > self._convo_seen.get(cid, 0):
+                b.setText(title + "  •")
+        b.clicked.connect(lambda _=False, c=cid: self._select_convo(c))
+        self._convo_btns[cid] = b
+        self._convo_row.addWidget(b)
+
+    def _select_convo(self, cid: str) -> None:
+        self._convo = cid
+        gini = cid == "gini"
+        # the GINI controls belong to the GINI conversation; a human thread shows a plain message box
+        for w in (getattr(self, "_mode_scroll", None),):
+            if w is not None:
+                w.setVisible(gini)
+        self._set_gini_controls_visible(gini)
+        if gini:
+            self.input.setPlaceholderText("Ask GINI to build, inspect, or explain…")
+            self._rerender()
+        else:
+            ch = next((c for c in self._channels if c["id"] == cid), {})
+            who = ch.get("title", "them")
+            self.input.setPlaceholderText(f"Message {who}…")
+            self._convo_seen[cid] = time.time()        # mark read
+            self._render_convo()
+        # reflect selection on the ribbon
+        for c, btn in self._convo_btns.items():
+            btn.setChecked(c == cid)
+        self._rebuild_convo_ribbon()
+
+    def _set_gini_controls_visible(self, on: bool) -> None:
+        """Show/hide GINI's own controls (mode chips, wizard/coach panels, followups) so a human
+        thread isn't cluttered with build tools."""
+        for name in ("_follow_box", "_wz_panel", "_picker_header", "_picker_scroll"):
+            w = getattr(self, name, None)
+            if w is not None and not on:
+                w.setVisible(False)
+        for b in (self._chat_btn, self._explain_btn, self._wizard_btn, self._coach_btn,
+                  self._missions_btn, self._tutor_box):
+            b.setVisible(on)
+
+    def _render_convo(self) -> None:
+        """Paint the active HUMAN thread into the shared transcript."""
+        if self._convo == "gini":
+            return
+        ch = next((c for c in self._channels if c["id"] == self._convo), {})
+        self.log.clear()
+        note = self._CONVO_NOTE.get(ch.get("kind", ""), "")
+        if note:
+            self.log.append(f'<p style="color:{self.theme.theme.muted};font-size:11px;'
+                            f'margin:2px 0 8px;">{note}</p>')
+        for m in self._human_msgs:
+            if m.get("channel") != self._convo:
+                continue
+            ai = m.get("kind") == "ai"
+            self.log.append(self._msg_html(m.get("from", "?"), m.get("body", ""), ai=ai))
+        self._stack.setCurrentWidget(self.log)
+        self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def open_conversation(self, channel_id: str) -> None:
+        """Focus a specific human thread (used by the User pill's Messages / group items)."""
+        self._raise_self()
+        if any(c["id"] == channel_id for c in self._channels):
+            self._select_convo(channel_id)
+        else:
+            self._select_convo("gini")   # not loaded yet → land on GINI, poll will add it
 
     # -- topic cloud (empty-state) ----------------------------------------- #
     def _build_cloud(self) -> QWidget:
@@ -432,7 +662,7 @@ class Assistant(QWidget):
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(
                 f"QPushButton{{border:1px solid {col}; color:{col}; border-radius:13px; "
-                f"padding:4px 11px; font-size:{px}px; background:transparent;}}"
+                f"padding:4px 11px; font-size:{_sp(px)}px; background:transparent;}}"
                 f"QPushButton:hover{{background:{col}22;}}")
             btn.clicked.connect(lambda _=False, q=it.query: self._cloud_pick(q))
             flow.addWidget(btn)
@@ -477,6 +707,10 @@ class Assistant(QWidget):
         if not text:
             return
         self.input.clear()
+        # a human conversation is selected → the message goes to a person, not the AI router
+        if getattr(self, "_convo", "gini") != "gini":
+            self._send_human(text)
+            return
         self._post("You", text)
         # Wizard's objective is set via its own goal box; the chat box here is for
         # refining / asking (goal-aware via the injected context) — same brain as Q&A.
@@ -488,6 +722,32 @@ class Assistant(QWidget):
         if reply is not None:   # None => an LLM answer is coming asynchronously
             self._post("GINI", reply)
             self._refresh_followups()   # chips appear iff this was an explain (_last_ref set)
+
+    def _send_human(self, text: str) -> None:
+        """Send to the selected person/group via the Teaching Center, then re-poll so the thread
+        (including any ProfAI reply the server generated) shows up."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        ch = next((c for c in self._channels if c["id"] == self._convo), {})
+        if tc is None or not ch:
+            return
+        to = ("teacher" if ch["kind"] == "teacher" else
+              "group" if ch["kind"] == "group" else ch.get("peer", ""))
+        # optimistic echo (the next poll reconciles from the server copy)
+        self._human_msgs.append({"channel": self._convo, "from": "You", "kind": "human",
+                                 "body": text, "ts": time.time()})
+        self._render_convo()
+
+        def work():
+            res = tc.send_message(to, text)
+            if not res.get("ok"):
+                self.ctx.log(f"Message not sent: {res.get('error', 'unknown error')}", "error")
+            try:
+                msgs = tc.messages()
+            except Exception:                          # noqa: BLE001
+                msgs = None
+            if msgs is not None:
+                self.mission_ui_op.emit(("convos", self._channels, msgs))
+        threading.Thread(target=work, daemon=True).start()
 
     # deterministic intent handling (LLM-free) ------------------------------ #
     def _handle(self, text: str) -> str:
@@ -1034,6 +1294,8 @@ class Assistant(QWidget):
             gm_factory=AgentGameMaster)         # reasoning runs through the multi-agent stack
         self._mission_busy = self._mission_dirty = False
         self._hide_mission_picker()         # drop the picker once we're playing
+        self._select_convo("gini")          # a mission plays in the GINI surface, never a human thread
+        self._convo_scroll.setVisible(False)   # Missions takes over the panel (it's nice as-is)
         self._mission_panel.setVisible(True)
         if not self._apply_stage(lesson):   # M3: pre-build the board, if the lesson stages one
             self.end_mission()              # student kept their canvas — don't start on the wrong board
@@ -1099,6 +1361,7 @@ class Assistant(QWidget):
         self._hide_mission_picker()
         self._clear_mission_flags()
         self._restore_chat()                    # bring back the pre-mission conversation
+        self._rebuild_convo_ribbon()            # the conversation ribbon comes back after a mission
 
     # -- focused-chat archive (a mission is a bounded episode) --------------- #
     def _archive_chat(self) -> None:

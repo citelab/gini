@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..domain import objectives as _obj
+from .theme.manager import scale_css as _scss
 
 
 # Hard width cap for the HUD. A QLabel with wordWrap reports its full one-line text as its
@@ -64,10 +65,10 @@ class MissionPanel(QWidget):
 
         header = QHBoxLayout()
         self._title = _fluid(QLabel("Mission"))
-        self._title.setStyleSheet("font-size:16px; font-weight:700;")
+        self._title.setStyleSheet(_scss("font-size:16px; font-weight:700;"))
         header.addWidget(self._title, 1)
         self._clock = QLabel("—:—")
-        self._clock.setStyleSheet("font-size:15px; font-weight:600;")
+        self._clock.setStyleSheet(_scss("font-size:15px; font-weight:600;"))
         self._lives = QLabel("")
         header.addWidget(self._lives)
         header.addSpacing(10)
@@ -75,7 +76,7 @@ class MissionPanel(QWidget):
         lay.addLayout(header)
 
         self._brief = _fluid(QLabel(""))
-        self._brief.setStyleSheet("font-size:12px;")
+        self._brief.setStyleSheet(_scss("font-size:12px;"))
         lay.addWidget(self._brief)
 
         # the LEVEL RIBBON — the shape of the whole journey, always visible
@@ -109,7 +110,7 @@ class MissionPanel(QWidget):
         lay.addWidget(self._run_btn)
 
         self._band = QLabel("")
-        self._band.setStyleSheet("font-size:14px; font-weight:700;")
+        self._band.setStyleSheet(_scss("font-size:14px; font-weight:700;"))
         self._band.setVisible(False)
         lay.addWidget(self._band)
         lay.addStretch(1)
@@ -192,7 +193,7 @@ class MissionPanel(QWidget):
             label = {"gold": "★ GOLD", "pass": "✓ PASS", "partial": "◐ PARTIAL",
                      "incomplete": "✗ INCOMPLETE"}.get(sc.band, sc.band.upper())
             self._band.setText(f"{label} — {sc.summary}")
-            self._band.setStyleSheet(f"font-size:14px; font-weight:700; color:{col};")
+            self._band.setStyleSheet(_scss(f"font-size:14px; font-weight:700; color:{col};"))
             self._band.setVisible(True)
         else:
             self._band.setVisible(False)
@@ -285,7 +286,7 @@ class MissionPanel(QWidget):
         if self._peek is not None and self._peek != active:
             way = "back at" if active is not None and view < active else "ahead at"
             look = QLabel(f"Looking {way} Level {view} — you're on Level {active}.")
-            look.setStyleSheet(f"color:{self._c('pending')}; font-size:11px; font-weight:600;")
+            look.setStyleSheet(_scss(f"color:{self._c('pending')}; font-size:11px; font-weight:600;"))
             self._obj_box.addWidget(look)
 
         head = QLabel(f"LEVEL {view} · {_obj.LEVEL_NAME.get(view, '').upper()}")
@@ -297,5 +298,5 @@ class MissionPanel(QWidget):
             role = {"met": "met", "unmet": "unmet", "pending": "pending"}.get(r.status, "text")
             weight = "600" if r.status == _obj.MET else "400"
             # only ONE level is on screen, so the tasks can finally be a readable size
-            row.setStyleSheet(f"color:{self._c(role)}; font-weight:{weight}; font-size:13px;")
+            row.setStyleSheet(_scss(f"color:{self._c(role)}; font-weight:{weight}; font-size:13px;"))
             self._obj_box.addWidget(row)

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import devices as _dev
+
 # Reusable groups (expanded into concrete edges at import). Keep these aligned with the
 # device registry keys.
 GROUPS: dict[str, tuple[str, ...]] = {
@@ -46,6 +48,12 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("router", "cloud", "Reach the public Internet through this router.", ()),
     ("router", "firewall", "Filter traffic between trust zones with a firewall.", ()),
     ("firewall", "cloud", "Guard the boundary between the LAN and the Internet.", ()),
+
+    # ---- real hardware in the loop (GINI32) ------------------------------- #
+    # The board is a gateway for the physical devices behind its radio, so it wires
+    # into the topology exactly where a router or a LAN does.
+    ("gini32", "router", "Bring real devices behind the board into this router's subnet.", ()),
+    ("gini32", "switch", "Put the board's real devices on this LAN.", ()),
 
     # ---- NFV / service function chaining --------------------------------- #
     # A VNF is an inline network function: it sits BETWEEN two elements in the path, so it
@@ -140,8 +148,46 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 _XV6_PERIPHERALS = frozenset({"terminal", "storage_volume"})
 
 
+# --------------------------------------------------------------------------- #
+# Attach grammar: riders (Sources / Sinks) mount onto a donor, they don't wire.
+# --------------------------------------------------------------------------- #
+def is_rider(type_key: str) -> bool:
+    dt = _dev.REGISTRY.get(type_key)
+    return bool(dt and getattr(dt, "rider", False))
+
+
+def attach_targets(rider_type: str) -> tuple[str, ...]:
+    """The donor type_keys a rider may ride (empty if it isn't a rider)."""
+    dt = _dev.REGISTRY.get(rider_type)
+    return tuple(getattr(dt, "attaches_to", ()) or ()) if dt else ()
+
+
+def riders_for(donor_type: str) -> list[str]:
+    """Every rider type that can mount on this donor (drives X-ray from the donor's side)."""
+    return sorted(k for k, dt in _dev.REGISTRY.items()
+                  if getattr(dt, "rider", False)
+                  and donor_type in (getattr(dt, "attaches_to", ()) or ()))
+
+
+def attach_blocked(rider_type: str, donor_type: str) -> str | None:
+    """A reason to REJECT mounting `rider_type` on `donor_type`, or None to allow it."""
+    if not is_rider(rider_type):
+        return "Only a Source or Sink can be attached — wire the rest as network links."
+    if is_rider(donor_type):
+        return "A donor can't be another Source/Sink — attach the rider to a Machine, Router, …"
+    if donor_type not in attach_targets(rider_type):
+        tgts = ", ".join(attach_targets(rider_type)) or "a compatible element"
+        return f"A {rider_type} attaches to {tgts} — not {donor_type}."
+    return None
+
+
 def link_blocked(a: str, b: str) -> str | None:
     """A reason to REJECT an a–b link (a HARD constraint), or None to allow it."""
+    # A Source/Sink rides its donor with a dotted ATTACH edge, never a network cable.
+    for x, other in ((a, b), (b, a)):
+        if is_rider(x):
+            return (f"A {x} is a Source/Sink — attach it to its donor (dotted), don't wire it as "
+                    f"a network link.")
     if a == "xv6" or b == "xv6":
         other = b if a == "xv6" else a
         if other != "xv6" and other not in _XV6_PERIPHERALS:

@@ -36,6 +36,7 @@ class ModeIndicator(QWidget):
         self._model_ok = False        # reachable?
         self._student = ""            # "" = not enrolled in any course
         self._tc_ok = False           # course server reachable?
+        self._is_teacher = False      # signed in with a teacher role?
         self._due = 0                 # assigned missions not yet completed
         self.setFixedHeight(26)
         self.setMouseTracking(True)
@@ -67,14 +68,17 @@ class ModeIndicator(QWidget):
 
     def set_enrolment(self, student: str, online: bool, due: int = 0) -> None:
         """student='' → signed out (grey, and that is FINE); signed in + reachable → green with the
-        count of missions still due; signed in + unreachable → amber (we still know what's due, from
-        the cached manifest — being offline doesn't erase your homework)."""
+        count of missions still due; signed in + unreachable → amber. `due < 0` = a TEACHER: no
+        assignments-due notion applies, so the pill shows the role instead of a count."""
         self._student = student or ""
         self._tc_ok = bool(online)
+        self._is_teacher = int(due) < 0
         self._due = max(0, int(due))
         if not self._student:
             tip = ("Not signed in to a course. gBuilder works fully without one — click to enrol "
                    "in a Teaching Center (Settings → Teaching Center).")
+        elif self._is_teacher:
+            tip = f"Signed in as {self._student} (teacher). Click for teacher tools."
         elif not self._tc_ok:
             tip = (f"Signed in as {self._student}, but the course server isn't reachable. "
                    f"Showing your cached assignments; results will sync when it's back.")
@@ -89,6 +93,8 @@ class ModeIndicator(QWidget):
     def _user_text(self) -> str:
         if not self._student:
             return "sign in"
+        if getattr(self, "_is_teacher", False):
+            return f"{self._student} · teacher"
         if not self._tc_ok:
             return f"{self._student} · offline"
         return f"{self._student} · {self._due} due" if self._due else f"{self._student} · clear"
@@ -107,7 +113,8 @@ class ModeIndicator(QWidget):
 
     # -- geometry ----------------------------------------------------------- #
     def _font(self) -> QFont:
-        f = QFont(); f.setPointSize(9); f.setBold(True)
+        from .theme.manager import sp
+        f = QFont(); f.setPointSize(sp(9)); f.setBold(True)
         return f
 
     def _mode_color(self) -> QColor:

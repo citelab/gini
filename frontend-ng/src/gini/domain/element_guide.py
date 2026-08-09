@@ -48,6 +48,19 @@ GUIDE: dict[str, str] = {
         "The Internet element represents the outside world / upstream network. Connect it "
         "to a router or gateway to model traffic leaving your topology toward the public "
         "Internet."),
+    "gini32": (
+        "A GINI32 Board is a REAL ESP32 on your desk running the gBridge firmware — the "
+        "only element that is not emulated. It raises its own Wi-Fi network; phones, "
+        "Raspberry Pis and sensors that join it become hosts inside the drawn topology, "
+        "their traffic carried as Ethernet-in-UDP to the emulated core. Wire it to a "
+        "router or switch and set BoardID to the id on the board's LABEL (written by "
+        "`gini32 provision --id`); everything else — address, hotspot name, subnet — is "
+        "handed to the board from the canvas when it checks in. Mode 'routed' (the "
+        "default) gives the physical subnet its own route so traffic flows BOTH ways; "
+        "'nat' hides the real devices behind the board's single address, which is the "
+        "asymmetry the book asks you to discover. Channel is REPORTED by the board, not "
+        "set — one radio serves both faces, so the hotspot follows the uplink's channel. "
+        "Devices that join the hotspot appear on the canvas by themselves."),
 
     # --- software-defined networking -------------------------------------- #
     "ovs": (
@@ -80,6 +93,14 @@ GUIDE: dict[str, str] = {
         "time. It is standalone by default (no fabric wiring); you drive it from its own serial "
         "console. Use it to teach processes, scheduling, virtual memory, traps and file "
         "systems on a kernel small enough to read end to end."),
+    "desktop": (
+        "A Desktop is a headful Machine — a real Linux host on the fabric (it has an IP, is "
+        "pingable and routable, and carries the usual networking tools) that also runs a light "
+        "graphical desktop: a fluxbox window manager, a file manager, a terminal, and the Dillo "
+        "browser. Double-click it to open its screen in an embedded window over noVNC. Reach for it "
+        "when you want a GUI in the topology — for example, to point a browser at a web server "
+        "another machine is serving. It carries an X stack, so it's heavier than a plain Machine; "
+        "use a plain Machine when you only need a shell."),
     "terminal": (
         "A Terminal is an xv6 Machine's console — a screen and keyboard in one, like a real tty "
         "(xv6's console is a single bidirectional UART, so output and input share one stream). "
@@ -219,6 +240,85 @@ GUIDE: dict[str, str] = {
         "A Load Generator (Fortio) fires controlled traffic at a target and reports QPS and "
         "latency histograms. Use it to run experiments — push a service until it slows or "
         "an autoscaler reacts, and watch the metrics/dashboards respond."),
+    # --- Sources / Sinks (riders: run inside a donor, no container of their own) --------- #
+    "ping_probe": (
+        "A Ping Probe is a Source: attach it to a Machine/Router and it runs `ping` INSIDE that "
+        "donor, streaming live RTT and loss. Double-click to start/stop. Count 0 pings until you "
+        "stop it; Count N sends N. It has no container — it rides its donor over a dotted edge."),
+    "http_probe": (
+        "An HTTP Probe is a Source: it runs `curl` inside its donor at a Target/Path and reports "
+        "2xx success rate and latency. Continuous (Count 0) or a fixed number (Count N). Lighter "
+        "than the Load Generator — use it to prove a service answers, not to stress it."),
+    "packet_view": (
+        "A Packet View is a Sink: it runs `tcpdump` inside its donor and streams the packets it "
+        "sees. Attach it to the RECEIVER and run a Source on the sender to watch traffic arrive. "
+        "Count 0 captures until stopped; Count N stops after N packets."),
+    "dns_probe": (
+        "A DNS Probe is a Source: it resolves the hostname in Target from inside its donor and "
+        "reports whether (and to what) it resolved. It uses the system resolver over the drawn "
+        "gini0 network (GINI writes peer names into /etc/hosts), so it returns the topology address "
+        "— not Docker's. (Target is the name to look up; Name is just this element's label.)"),
+    "traceroute_probe": (
+        "A Traceroute is a Source: it runs `traceroute` inside its donor to a Target and reports "
+        "the hop path. Pair it with a Packet View to watch each hop, or use it to see routing."),
+    "iperf_client": (
+        "An iPerf Client is a Source: it drives `iperf3 -c` at a Target running an iPerf Server "
+        "and reports measured throughput (Mbit/s). Use it to teach bandwidth and congestion."),
+    "iperf_server": (
+        "An iPerf Server is a Sink: it runs `iperf3 -s` inside its donor and reports the "
+        "throughput it receives from an iPerf Client. Pair the two across a link to measure it."),
+    "iface_stats": (
+        "Interface Stats is a Sink: it reads /proc/net/dev inside its donor and streams rx/tx "
+        "packet and byte counts, so you can watch traffic volume rise and fall on an interface."),
+    "xv6_shell": (
+        "A Shell Probe is a Source for the xv6 Machine: type a Command (e.g. `ls`, `cat README`) "
+        "and it types it into the kernel's console and streams the output back — the OS-course "
+        "counterpart of the HTTP Probe."),
+    "xv6_workload": (
+        "A Workload is a Source for the xv6 Machine: it spawns a Program (`spin`, `forktest`, "
+        "`usertests`) to drive the scheduler. Run it in the background so several compete, and "
+        "watch the effect in the Machine Lab — the OS-course load generator."),
+    "freedos": (
+        "FreeDOS is an OS Zoo element: a real, still-maintained MS-DOS-compatible operating "
+        "system running under QEMU in a container, its screen embedded in gBuilder over noVNC. "
+        "Double-click it to open the Zoo Lab and use it live — the single-tasking, real-mode "
+        "command-line PC of the DOS era. It boots out of the box; boots are ephemeral unless you "
+        "turn on Persist."),
+    "kolibri": (
+        "KolibriOS is an OS Zoo element: a tiny GUI operating system written entirely in assembly, "
+        "running under QEMU and embedded over noVNC. The whole system boots from a single 1.44 MB "
+        "floppy to a graphical desktop in seconds — even under software emulation — so it's the "
+        "fast OS Zoo guest to reach for. Double-click to open the Zoo Lab; ephemeral unless "
+        "Persist is on."),
+    "menuet": (
+        "MenuetOS is an OS Zoo element: the assembly GUI OS that KolibriOS forked from, running "
+        "under QEMU and embedded over noVNC. Like KolibriOS, the whole graphical desktop lives on "
+        "a single 1.44 MB floppy and boots in seconds under emulation (GINI ships the open-source "
+        "32-bit build). Double-click to open the Zoo Lab; ephemeral unless Persist is on."),
+    "msdos": (
+        "MS-DOS 6.22 is an OS Zoo preset: the real Microsoft MS-DOS, booted from a disk image under "
+        "QEMU and embedded over noVNC — so it's the genuine article (`VER` reports MS-DOS, not a "
+        "clone). Drag it on and Run; GINI downloads a public pre-installed MS-DOS 6.22 disk on first "
+        "boot (it ships nothing proprietary) and boots to the C:\\> prompt. Pair it with FreeDOS to "
+        "compare the original MS-DOS with the open re-implementation. Ephemeral unless Persist."),
+    "mac7": (
+        "Mac System 7 is an OS Zoo preset: classic Macintosh System 7.5.3 on an emulated 68k Mac "
+        "(Basilisk II), embedded over noVNC. Drag it on and Run — GINI downloads a Quadra ROM and a "
+        "bootable System 7 disk from a public archive on first boot (it ships nothing proprietary), "
+        "caches them, and boots to the Mac desktop. It's the 'Classic OS (your image)' element with "
+        "the Image/Rom URLs pre-filled; edit them to use your own files. Ephemeral unless Persist."),
+    "win31": (
+        "Windows 3.11 is an OS Zoo preset: Windows for Workgroups 3.11 under DOSBox (the fast "
+        "vintage-Windows path), embedded over noVNC. Drag it on and Run — GINI downloads a public "
+        "pre-installed Windows 3.11 on first boot (it ships nothing proprietary), mounts it as C:, "
+        "and starts Windows. It's the 'Classic OS (your image)' element with the Image URL "
+        "pre-filled; edit it to use your own folder or zip. Ephemeral unless Persist."),
+    "oszoo_byo": (
+        "Classic OS (your image) is the bring-your-own OS Zoo element for proprietary systems "
+        "GINI can't ship (Windows 95, Mac System 7, …). GINI provides the emulator and points to "
+        "where the image legally lives; you set Image to a disk image you own (and, for a 68k "
+        "Mac, choose the Basilisk emulator and supply a Mac ROM). GINI hosts nothing "
+        "copyrighted — you source the image, GINI runs it and embeds the screen over noVNC."),
 }
 
 

@@ -21,7 +21,7 @@ backend/                     The real gRouter (adopted C, modernized)
   src/grouter/               ~20k-line C router + the Z1/Z2 module seams
   include/                   gRouter headers
   build.zig                  build the router with Zig (`zig build`)
-  grouter-zig/
+  grouter-build/
     build.sh                 zig cc build (used by Docker)
     Dockerfile               `gini-grouter` image (libslack + readline + the router)
     run_grouter.py           entrypoint: ROUTER_CONFIG → ifconfig/route → grouter
@@ -53,10 +53,10 @@ can be deleted — it lives in git history regardless.
 cd frontend-ng && pip install -e . && python -m gini      # or: gbuilder
 
 # build the real router image once (so "Run" can launch real routers)
-cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .
+cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .
 
 # prove the router forwards (host build or in the image)
-GROUTER_BIN=/path/to/grouter python3 backend/grouter-zig/tests/forward_test.py
+GROUTER_BIN=/path/to/grouter python3 backend/grouter-build/tests/forward_test.py
 ```
 
 ## Graduating to a clean `gini6/`

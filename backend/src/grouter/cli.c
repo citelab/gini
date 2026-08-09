@@ -20,10 +20,12 @@
 #include "cli.h"
 #include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
 #include "gr_control.h" /* Z2: module-pipeline control surface */
+#include "gr_delay_ctl.h" /* link-delay lines */
 #include "gr_rctl.h"    /* remote control socket (interactive console) */
 #include "gnet.h"
 
 void gpipeCmd(void);    /* Z2: 'gpipe' command */
+void delayCmd(void);    /* link-delay command */
 #include "icmp.h"
 #include "grouter.h"
 #include <stdio.h>
@@ -112,6 +114,12 @@ int CLIInit(router_config *rarg)
                 "gpipe add acl <cidr>|nat <ip>|counter|block <ip>|lua <path> | list | clear | trace <a.b.c.d>"
                 " | cp add <name> [args] | cp list | cp stop",
                 "edit and inspect the gRouter's inline (data-plane) pipeline and control-plane modules");
+
+    registerCLI("delay", delayCmd,
+                "add link delay/jitter to this router (ingress and/or egress)",
+                "delay ingress|egress <base_ms> [jitter_ms] [corr] [limit] | ingress|egress off"
+                " | show | clear",
+                "hold packets in a per-router delay line to model link latency; correlated jitter, order-preserving");
 
     if (rarg->config_dir != NULL)
         chdir(rarg->config_dir);                  // change to the configuration directory
@@ -575,6 +583,64 @@ void gpipeCmd(void)
     char *rest = strtok(NULL, "\n");
     gr_control(rest ? rest : "", out, sizeof(out));
     printf("%s\n", out);
+}
+
+/*
+ * delay ingress|egress <base_ms> [jitter_ms] [corr] [limit] | ingress|egress off
+ * delay show | clear
+ * Sets a per-router link-delay line (shared across all interfaces on that side).
+ */
+void delayCmd(void)
+{
+    char *tok = strtok(NULL, " \n");
+
+    if (tok == NULL || !strcmp(tok, "show"))
+    {
+        char buf[512];
+        gr_delay_describe(buf, sizeof(buf));
+        printf("%s", buf);
+        return;
+    }
+    if (!strcmp(tok, "clear"))
+    {
+        gr_delay_off(0);
+        gr_delay_off(1);
+        printf("link delay cleared\n");
+        return;
+    }
+
+    int egress;
+    if (!strcmp(tok, "ingress"))     egress = 0;
+    else if (!strcmp(tok, "egress")) egress = 1;
+    else
+    {
+        printf("usage: delay ingress|egress <base_ms> [jitter_ms] [corr] [limit] | off ;"
+               " delay show | clear\n");
+        return;
+    }
+
+    char *a = strtok(NULL, " \n");
+    if (a == NULL)
+    {
+        printf("delay: missing <base_ms> (or 'off')\n");
+        return;
+    }
+    if (!strcmp(a, "off"))
+    {
+        gr_delay_off(egress);
+        printf("%s delay off\n", egress ? "egress" : "ingress");
+        return;
+    }
+
+    double base = atof(a);
+    char *b = strtok(NULL, " \n");  double jit  = b ? atof(b) : 0.0;
+    char *c = strtok(NULL, " \n");  double corr = c ? atof(c) : 0.0;
+    char *d = strtok(NULL, " \n");  int   limit = d ? atoi(d) : 0;
+
+    gr_delay_set(egress, base, jit, corr, limit);
+    printf("%s delay set: base %.1f ms  jitter %.1f ms  corr %.2f  limit %d\n",
+           egress ? "egress" : "ingress", base, jit, corr,
+           limit <= 0 ? GR_DELAY_DEFAULT_LIMIT : limit);
 }
 
 void routeCmd()

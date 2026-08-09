@@ -25,12 +25,16 @@ from typing import Protocol
 
 # probe kinds
 REACH, PING, HTTP, BALANCES, FLOW = "reach", "ping", "http", "balances", "flow_installed"
+MEASURE = "measure"
 
-_REACH_RE = re.compile(
-    r"^\s*(reach|ping|http)\(\s*(\w+)\s*->\s*(\w+)(?::(\d+))?\s*(?:,\s*(all|any)\s*)?\)"
+_REACH_RE = re.compile(                          # `\w+` or a slot-scoped `\w+@\w+` (e.g. host@A)
+    r"^\s*(reach|ping|http)\(\s*([\w@]+)\s*->\s*([\w@]+)(?::(\d+))?\s*(?:,\s*(all|any)\s*)?\)"
     r"\s*==\s*(ok|fail)\s*$")
 _BAL_RE = re.compile(r"^\s*balances\(\s*(\w+)\s*,\s*>=\s*(\d+)\s*\)\s*$")
 _FLOW_RE = re.compile(r"^\s*flow_installed\(\s*(\w+)\s*,\s*(.+?)\s*\)\s*$")
+# measure(<rider_type>, <metric>) <op> <value> — an output assertion on a Sink/Source measurement
+_MEASURE_RE = re.compile(
+    r"^\s*measure\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*(>=|<=|==|!=|>|<)\s*(-?\d+(?:\.\d+)?)\s*$")
 
 
 class ProbeError(ValueError):
@@ -47,6 +51,9 @@ class Probe:
     n: int = 0                  # for balances
     match: str = ""             # for flow_installed
     quant: str = "any"          # "any" = SOME pair satisfies it; "all" = EVERY pair must
+    metric: str = ""            # for measure: the rider metric (loss_pct, packets, mbps, …)
+    op: str = ">="              # for measure: comparison operator
+    value: float = 0.0          # for measure: the threshold
 
 
 class Runner(Protocol):
@@ -57,6 +64,7 @@ class Runner(Protocol):
     def http(self, src: str, dst: str, port: int) -> bool: ...
     def backends(self, lb: str) -> int: ...
     def flow(self, ovs: str, match: str) -> bool: ...
+    def measure(self, rider_type: str, metric: str) -> float | None: ...
 
 
 def parse(probe: str) -> Probe:
@@ -72,7 +80,15 @@ def parse(probe: str) -> Probe:
     m = _FLOW_RE.match(probe or "")
     if m:
         return Probe(kind=FLOW, src=m.group(1), match=m.group(2))
+    m = _MEASURE_RE.match(probe or "")
+    if m:
+        return Probe(kind=MEASURE, src=m.group(1), metric=m.group(2),
+                     op=m.group(3), value=float(m.group(4)))
     raise ProbeError(f"cannot parse probe: {probe!r}")
+
+
+_OPS = {">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b, ">": lambda a, b: a > b,
+        "<": lambda a, b: a < b, "==": lambda a, b: a == b, "!=": lambda a, b: a != b}
 
 
 def probe_ok(probe: str) -> bool:
@@ -103,6 +119,11 @@ def evaluate(probe: str, runner: Runner) -> bool:
         return runner.backends(p.src) >= p.n
     if p.kind == FLOW:
         return runner.flow(p.src, p.match)
+    if p.kind == MEASURE:
+        got = runner.measure(p.src, p.metric)
+        if got is None:
+            return False                    # no reading yet — treat as not-satisfied, not a crash
+        return _OPS[p.op](got, p.value)
     raise ProbeError(f"unknown probe kind {p.kind!r}")
 
 
@@ -123,10 +144,15 @@ class TypeRunner:
     def available(self) -> bool:
         return bool(self.base) and self.base.available()
 
-    def _names(self, type_key: str) -> list[str]:
+    def _names(self, spec: str) -> list[str]:
+        """Names of devices matching `type` or a slot-scoped `type@slot` (cross-slot reach). Slot
+        scope is hierarchical: `host@pods0` includes hosts nested in `pods0_lans1` (see slot_match)."""
+        from .objectives import slot_match
+        type_key, _, slot = str(spec).partition("@")
         t = self._get_topology()
         return [d.name for d in getattr(t, "devices", {}).values()
-                if getattr(d, "type_key", None) == type_key]
+                if getattr(d, "type_key", None) == type_key
+                and slot_match(getattr(d, "slot", ""), slot)]
 
     def _pairs(self, src: str, dst: str):
         """Every (src, dst) name pair — EXCLUDING a device paired with itself. When both tokens are
@@ -162,6 +188,12 @@ class TypeRunner:
     def flow(self, ovs: str, match: str) -> bool:
         return any(self.base.flow(n, match) for n in self._names(ovs))
 
+    def measure(self, rider_type: str, metric: str) -> float | None:
+        # measure is inherently type-based (you assert on "the packet_view" of the fragment) —
+        # delegate straight to the base, which finds a rider of that type and runs it.
+        fn = getattr(self.base, "measure", None)
+        return fn(rider_type, metric) if fn else None
+
 
 # -- a fake runner for tests + offline authoring ---------------------------- #
 class FakeRunner:
@@ -186,6 +218,9 @@ class FakeRunner:
 
     def backends(self, lb: str) -> int:
         return int(self.facts.get(("backends", lb), 0))
+
+    def measure(self, rider_type: str, metric: str) -> float | None:
+        return self.facts.get(("measure", rider_type, metric))
 
     def flow(self, ovs: str, match: str) -> bool:
         return bool(self.facts.get(("flow", ovs, match), False))

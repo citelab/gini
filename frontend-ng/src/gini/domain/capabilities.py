@@ -16,11 +16,15 @@ from __future__ import annotations
 # both a compute node and a traffic sink).
 PARENTS: dict[str, tuple[str, ...]] = {
     # F1 · network fabric
-    "l2-fabric": (),
+    # `network` is the recursion hinge: a slot that requires a `network` is satisfied by a LAN
+    # (l2-fabric) OR by another routed network (routed-network) — so routers nest to any depth.
+    "network": (),
+    "l2-fabric": ("network",),
     "switched-segment": ("l2-fabric",),
     "sdn-fabric": ("l2-fabric",),
+    "routed-network": ("network",),
     "l3-gateway": (),
-    "router-gateway": ("l3-gateway",),
+    "router-gateway": ("l3-gateway", "routed-network"),   # a router exposes the routed network it fronts
     "nat-gateway": ("l3-gateway",),
     "network-boundary": (),
     "vpc-boundary": ("network-boundary",),
@@ -69,7 +73,74 @@ PARENTS: dict[str, tuple[str, ...]] = {
     "link-break": ("fault-injector",),
     "misconfig": ("fault-injector",),
     "overload": ("fault-injector",),
+    # F10 · operating systems (xv6 track) — standalone machine, no fabric
+    "kernel-host": (),
+    "workload-source": ("traffic-source",),      # a process/syscall stimulus (a "source" for the OS)
+    "kernel-observer": ("visualizer",),
 }
+
+# Which domain each role belongs to (for presentation + so the composer knows the track). ONE
+# namespace, tagged three ways — a role like compute-node is shared, which is what lets fragments
+# compose ACROSS domains (a cloud app on a network, an OS reached over a link).
+NETWORKING, CLOUD, OS, SHARED = "networking", "cloud", "os", "shared"
+DOMAIN: dict[str, str] = {
+    **{r: NETWORKING for r in (
+        "network", "routed-network",
+        "l2-fabric", "switched-segment", "sdn-fabric", "l3-gateway", "router-gateway", "nat-gateway",
+        "network-boundary", "vpc-boundary", "subnet-boundary", "internet-egress", "public-entrypoint",
+        "traffic-source", "load-generator", "request-client", "traffic-sink", "load-distributor",
+        "inline-nf", "flow-control", "access-policy", "perimeter-filter", "micro-segmentation",
+        "packet-visualizer", "flow-inspector", "fault-injector", "link-break", "misconfig", "overload")},
+    **{r: CLOUD for r in (
+        "compute-node", "host-node", "pod-workload", "serverless-fn", "orchestrated-compute",
+        "web-tier", "web-endpoint", "api-endpoint", "service-endpoint", "datastore",
+        "relational-store", "cache-tier", "object-store", "message-broker")},
+    **{r: SHARED for r in ("metrics-source", "metrics-collector", "visualizer", "dashboard-view")},
+    **{r: OS for r in ("kernel-host", "workload-source", "kernel-observer")},
+}
+
+# Device type → the capability roles it can PLAY. Multi-role is deliberate: it gives the composer
+# more ways to satisfy a requirement (a host is both a compute-node and, when it pings, a source).
+DEVICE_ROLES: dict[str, tuple[str, ...]] = {
+    # networking fabric / edge
+    "router": ("router-gateway",), "switch": ("switched-segment",), "hub": ("switched-segment",),
+    "firewall": ("perimeter-filter",), "wap": ("switched-segment",), "vnf": ("inline-nf",),
+    "cloud": ("internet-egress",), "ovs": ("sdn-fabric",), "controller": ("flow-control",),
+    # compute
+    "host": ("host-node",), "container": ("compute-node",), "instance": ("compute-node",),
+    "kinstance": ("compute-node",), "web_app": ("web-endpoint", "compute-node"),
+    "pod": ("pod-workload",), "k8s_cluster": ("orchestrated-compute",), "k8s_node": ("compute-node",),
+    "instance_group": ("orchestrated-compute",),
+    # cloud networking
+    "vpc": ("vpc-boundary",), "cloud_subnet": ("subnet-boundary",),
+    "security_group": ("micro-segmentation",), "gateway": ("nat-gateway",),
+    "load_balancer": ("load-distributor",), "proxy": ("load-distributor",),
+    # data / serverless / streaming
+    "database": ("relational-store",), "nosql": ("datastore",), "cache": ("cache-tier",),
+    "object_store": ("object-store",), "function": ("serverless-fn",),
+    "api_gateway": ("api-endpoint", "public-entrypoint"),
+    "queue": ("message-broker",), "stream": ("message-broker",), "messaging": ("message-broker",),
+    # observability (sinks)
+    "metrics": ("metrics-collector",), "dashboard": ("dashboard-view",), "tracing": ("visualizer",),
+    # sources / sinks (riders)
+    "ping_probe": ("request-client",), "http_probe": ("request-client",),
+    "dns_probe": ("request-client",), "traceroute_probe": ("request-client",),
+    "iperf_client": ("load-generator",), "load_generator": ("load-generator",),
+    "iperf_server": ("traffic-sink",), "iface_stats": ("metrics-source",),
+    "packet_view": ("packet-visualizer",),
+    # operating systems (xv6)
+    "xv6": ("kernel-host",), "terminal": ("kernel-observer",), "storage_volume": ("kernel-observer",),
+    "xv6_shell": ("workload-source",), "xv6_workload": ("workload-source",),
+}
+
+
+def roles_for(device_key: str) -> tuple[str, ...]:
+    """The capability roles a device type can play (may be several)."""
+    return DEVICE_ROLES.get(device_key, ())
+
+
+def domain_of(role: str) -> str:
+    return DOMAIN.get(role, SHARED)
 
 
 def is_role(name: str) -> bool:

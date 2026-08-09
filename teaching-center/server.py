@@ -22,16 +22,70 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(os.environ.get("COURSE_ROOT", "./example")).resolve()
 PORT = int(os.environ.get("PORT", "8080"))
 
+# Uploaded (teacher-authored) fragments land in the course's own content layer, so the TC composes
+# from built-ins + these. Point GINI_HOME at the course root (before any gini.domain import) so the
+# content is COURSE-SCOPED, not in the server operator's ~/.gini.
+os.environ.setdefault("GINI_HOME_DIR", str(ROOT))
+
 _MANIFEST = re.compile(r"^/courses/([\w-]+)/manifest$")
 _PACK = re.compile(r"^/lessons/([\w-]+)/pack$")
 _PROFILE = re.compile(r"^/students/([\w-]+)/profile$")
 _SUBMIT = re.compile(r"^/courses/([\w-]+)/submissions$")
+
+# --- auth (Phase A) --------------------------------------------------------- #
+# Until now a Bearer token was accepted as "any non-empty string", which meant anyone could read any
+# student's profile, submit as anyone, and — worst — GET /api/roster, which hands out the enrolment
+# tokens for the WHOLE CLASS. That isn't a mild oversight, it's a master key sitting on an open port.
+import accounts as _accounts                                        # noqa: E402
+from store import Store as _Store                                   # noqa: E402
+
+_ACCTS = _accounts.Accounts(ROOT)
+_STORE = _Store(ROOT)
+COURSE = os.environ.get("COURSE", "cs4480-fall26")
+TEACHER_ID = os.environ.get("TEACHER_ID", "teacher")
+
+_SOCIAL_RE = {
+    "presence": re.compile(r"^/courses/([\w-]+)/presence$"),
+    "group": re.compile(r"^/courses/([\w-]+)/group$"),
+    "channels": re.compile(r"^/courses/([\w-]+)/channels$"),
+    "messages": re.compile(r"^/courses/([\w-]+)/messages$"),
+    "report": re.compile(r"^/courses/([\w-]+)/messages/report$"),
+    "delete": re.compile(r"^/courses/([\w-]+)/messages/delete$"),
+    "aipref": re.compile(r"^/courses/([\w-]+)/ai/pref$"),
+    "photo": re.compile(r"^/courses/([\w-]+)/photo$"),
+    "content": re.compile(r"^/courses/([\w-]+)/content$"),   # OTA: authored fragments to pull
+}
+
+_LAZY: dict = {}
+
+
+def _stack():
+    """course + social + ProfAI + StudentAI, built once. Imported lazily so the student endpoints
+    keep working even if the AI extras aren't importable."""
+    if not _LAZY:
+        import ai as _ai
+        import social as _social
+        import teacher as _teacher
+        c = _teacher.Course(ROOT, COURSE)
+        s = _social.Social(ROOT, c)
+        cap = _ai.Capacity()
+        llm = _ai.Ollama(os.environ.get("AI_URL", _ai.OLLAMA_URL),
+                         os.environ.get("AI_MODEL", _ai.MODEL))
+        _LAZY.update(course=c, social=s,
+                     prof=_ai.ProfAI(ROOT, c, s, llm=llm, capacity=cap),
+                     student_ai=_ai.StudentAI(ROOT, c, s, llm=llm, capacity=cap))
+    return _LAZY
+
+
+def _bearer(handler) -> str:
+    return handler.headers.get("Authorization", "").removeprefix("Bearer ").strip()
 
 _BAND_RANK = {"": 0, "incomplete": 1, "partial": 2, "pass": 3, "gold": 4}
 
@@ -67,8 +121,26 @@ def _course_api():
 
 
 class Handler(BaseHTTPRequestHandler):
+    # -- identity ------------------------------------------------------------ #
+    def _who(self) -> dict | None:
+        """Resolve the caller from their session token, or None."""
+        return _ACCTS.whoami(_bearer(self))
+
     def _authed(self) -> bool:
-        return bool(self.headers.get("Authorization", "").removeprefix("Bearer ").strip())
+        return self._who() is not None
+
+    def _is(self, who: str) -> bool:
+        """The caller IS this student (or is the teacher, who may act across the course). Without
+        this, a valid session for student A could read student B's profile — authentication without
+        authorization is just a nicer-looking hole."""
+        me = self._who()
+        if me is None:
+            return False
+        return me["role"] == "teacher" or me["who"] == who
+
+    def _teacher(self) -> bool:
+        me = self._who()
+        return me is not None and me["role"] == "teacher"
 
     def _send(self, status: int, obj=None, *, text: str | None = None,
               ctype: str = "application/json") -> None:
@@ -86,8 +158,119 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
-    # -- teacher console (UI + API). Auth is deliberately deferred: run it on your machine /
-    # behind your VPN for now; a real roster-backed login is the next security pass. ------------- #
+    # -- auth (open by necessity: you can't authenticate before you have a session) ------------- #
+    def _auth_routes(self) -> bool:
+        p = self.path.split("?")[0]
+        if not p.startswith("/auth/"):
+            return False
+        if self.command == "POST":
+            b = self._body()
+            if p == "/auth/claim":                  # first login: id + enrolment token + new password
+                self._send(200, _ACCTS.claim(b.get("id", ""), b.get("enrolment_token", ""),
+                                             b.get("password", "")))
+            elif p == "/auth/claim-teacher":
+                self._send(200, _ACCTS.claim_teacher(b.get("id", ""), b.get("setup_token", ""),
+                                                     b.get("password", "")))
+            elif p == "/auth/login":
+                self._send(200, _ACCTS.login(b.get("id", ""), b.get("password", "")))
+            elif p == "/auth/logout":
+                _ACCTS.logout(_bearer(self))
+                self._send(200, {"ok": True})
+            else:
+                self._send(404)
+            return True
+        if self.command == "GET" and p == "/auth/whoami":
+            me = self._who()
+            return self._send(200, me) if me else self._send(401)
+        self._send(404)
+        return True
+
+    # -- the social plane: presence, groups, chat (Phases B–E) ----------------- #
+    def _social_routes(self) -> bool:
+        p = self.path.split("?")[0]
+        if not any(rx.match(p) for rx in _SOCIAL_RE.values()):
+            return False
+        me = self._who()
+        if me is None:
+            self._send(401)
+            return True
+        S = _stack()
+        soc, course, prof, sai = S["social"], S["course"], S["prof"], S["student_ai"]
+        who, role = me["who"], me["role"]
+
+        if self.command == "GET":
+            if _SOCIAL_RE["group"].match(p):
+                self._send(200, soc.my_group(who))
+            elif _SOCIAL_RE["channels"].match(p):
+                self._send(200, soc.channels(who, role))
+            elif _SOCIAL_RE["messages"].match(p):
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                since = float((q.get("since") or ["0"])[0] or 0)
+                self._send(200, soc.inbox(who, role, since=since))
+            elif _SOCIAL_RE["content"].match(p):        # OTA channel — authored fragments to pull
+                self._send(200, _course_api().authored_content())
+            else:
+                self._send(404)
+            return True
+
+        if self.command == "POST":
+            b = self._body()
+            if _SOCIAL_RE["presence"].match(p):
+                self._send(200, soc.heartbeat(who, b.get("progress")))
+            elif _SOCIAL_RE["report"].match(p):
+                self._send(200, soc.report(who, b.get("message_id", ""), b.get("note", "")))
+            elif _SOCIAL_RE["aipref"].match(p):
+                if not sai.granted(who):
+                    self._send(200, {"ok": False, "error": "Your instructor hasn't enabled a hosted "
+                                                           "AI for you."})
+                else:
+                    self._send(200, sai.set_pref(who, bool(b.get("on")), b.get("blurb", "")))
+            elif _SOCIAL_RE["delete"].match(p):
+                self._send(200, soc.set_deleted(who, role, b.get("message_id", ""),
+                                                bool(b.get("deleted", True))))
+            elif _SOCIAL_RE["photo"].match(p):
+                self._send(200, _ACCTS.set_photo(who, b.get("photo", "")))
+            elif _SOCIAL_RE["messages"].match(p):
+                self._send(200, self._post_message(soc, course, prof, sai, who, role, b))
+            else:
+                self._send(404)
+            return True
+        return False
+
+    def _post_message(self, soc, course, prof, sai, who, role, b) -> dict:
+        """Send a message — and run THE REPLY LADDER, which is the design:
+
+            1. the human is present and answers        (a present human is never pre-empted)
+            2. the human is away and allows a proxy    → ProfAI / StudentAI answers, LABELLED
+            3. away, no proxy                          → it queues, and says so honestly
+
+        The AI reply is generated inline here for simplicity; it is bounded by the capacity queue, so
+        a lab full of students degrades into a line rather than a meltdown."""
+        to, body = b.get("to", ""), b.get("body", "")
+        res = soc.send(who, to, body, kind="human")
+        if not res.get("ok"):
+            return res
+        if role == "teacher":
+            return res                                  # the teacher speaking IS the human reply
+
+        # --- to the instructor -------------------------------------------------
+        if to == "teacher":
+            if not prof.should_answer(TEACHER_ID):
+                return {**res, "ai": None, "note": "Your instructor will see this."}
+            reply = prof.answer(who, body)
+            posted = soc.reply_to_student(who, reply["body"], from_label="ProfAI", kind="ai",
+                                          persona_version=reply.get("persona_version", ""))
+            prof.log_answer(who, body, reply, posted["message"]["id"])   # guardrail 3: always logged
+            return {**res, "ai": posted["message"]}
+
+        # --- to a groupmate ----------------------------------------------------
+        if to not in ("group",) and sai.should_answer(to):
+            reply = sai.answer(to, who, body)
+            posted = soc.send(to, who, reply["body"], kind="ai", from_label=f"{to}AI")
+            return {**res, "ai": posted.get("message")}
+        return res
+
+    # -- teacher console (UI + API) — TEACHER SESSION REQUIRED ---------------- #
     def _teacher_routes(self) -> bool:
         p = self.path.split("?")[0]
         if p in ("/", "/teacher", "/teacher/"):
@@ -96,60 +279,145 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if not p.startswith("/api/"):
             return False
+        # The console's API is the master key (it serves the class's enrolment tokens). Nothing here
+        # is readable without a TEACHER session — not even a listing.
+        if not self._teacher():
+            self._send(401, {"error": "Teacher sign-in required."})
+            return True
         t = _course_api()
         course = os.environ.get("COURSE", "cs4480-fall26")
         C = t.Course(ROOT, course)
         if self.command == "GET":
             if p == "/api/fragments":
                 self._send(200, t.fragment_library())
+            elif p == "/api/vocabulary":            # the discovery protocol (asset manifest)
+                self._send(200, t.vocabulary())
             elif p == "/api/lessons":
                 self._send(200, C.lessons())
             elif p == "/api/roster":
-                self._send(200, C.roster())
+                # enrich each row with a live-status + photo so the console can show real faces and
+                # who's on right now. Read-only join over presence + accounts.
+                S = _stack()
+                rows = []
+                for r in C.roster():
+                    pr = S["social"].presence_of(r["id"])
+                    rows.append({**r, "online": pr["online"], "last_seen": pr["last_seen"],
+                                 "progress": pr["progress"], "photo": _ACCTS.photo(r["id"]),
+                                 "claimed": _ACCTS.store.account(r["id"]) is not None})
+                self._send(200, rows)
             elif p == "/api/progress":
                 self._send(200, C.progress())
             elif p == "/api/insights":
                 self._send(200, C.insights())
+            elif p == "/api/groups":
+                self._send(200, C.groups())
+            elif p == "/api/review":                    # guardrail 3: every ProfAI answer, reviewable
+                self._send(200, _stack()["prof"].review_queue())
+            elif p == "/api/persona":
+                self._send(200, _stack()["prof"].persona.get())
+            elif p == "/api/digest":                    # the situation report, not a transcript
+                self._send(200, _stack()["prof"].digest())
+            elif p == "/api/reports":                   # messages students CHOSE to show you
+                self._send(200, _stack()["social"].reports())
+            elif p == "/api/messages":                  # the Gmail-style mailbox (incl. trash)
+                self._send(200, _stack()["social"].inbox(TEACHER_ID, "teacher", include_deleted=True))
             else:
                 self._send(404)
             return True
         if self.command == "POST":
             b = self._body()
+            S = _stack()
             if p == "/api/preview":
                 self._send(200, t.preview(b.get("spec") or {}))
+            elif p == "/api/fragments":             # author → TC upload (Build 3)
+                self._send(200, t.register_fragment(b.get("yaml", "")))
+            elif p == "/api/fragments/delete":      # remove an authored fragment from the library
+                self._send(200, t.delete_fragment(b.get("id", "")))
             elif p == "/api/lessons":
+                # save as a DRAFT by default (the approval gate); release_now skips it
                 self._send(200, C.save_lesson(b.get("spec") or {}, release=b.get("release", ""),
-                                              due=b.get("due", ""), attempts=b.get("attempts", 3)))
+                                              due=b.get("due", ""), attempts=b.get("attempts", 3),
+                                              release_now=bool(b.get("release_now", False))))
+            elif p == "/api/lessons/playtest":       # teacher confirmed a canvas playtest
+                self._send(200, C.mark_playtested(b.get("id", "")))
+            elif p == "/api/lessons/approve":
+                self._send(200, C.approve_lesson(b.get("id", ""), release=b.get("release", ""),
+                                                 due=b.get("due", ""), attempts=b.get("attempts")))
+            elif p == "/api/lessons/unrelease":
+                self._send(200, C.unrelease_lesson(b.get("id", "")))
             elif p == "/api/lessons/delete":
                 self._send(200, C.delete_lesson(b.get("id", "")))
             elif p == "/api/roster":
-                self._send(200, C.enrol(b.get("id", ""), b.get("name", "")))
+                self._send(200, C.enrol(b.get("id", ""), b.get("name", ""),
+                                        group=b.get("group", ""),
+                                        ai_hosted=bool(b.get("ai_hosted", False)),
+                                        sis_id=b.get("sis_id", "")))
             elif p == "/api/roster/delete":
                 self._send(200, C.unenrol(b.get("id", "")))
+            elif p == "/api/roster/group":
+                self._send(200, C.set_group(b.get("id", ""), b.get("group", "")))
+            elif p == "/api/roster/ai":                 # Phase E: grant hosted-AI capacity
+                self._send(200, C.set_ai_hosted(b.get("id", ""), bool(b.get("on"))))
+            elif p == "/api/roster/reset":              # un-claim an account (student forgot password)
+                self._send(200, _ACCTS.reset(b.get("id", "")))
+            elif p == "/api/persona":
+                self._send(200, S["prof"].persona.save(b))
+            elif p == "/api/review/correct":
+                self._send(200, self._correct(S, b))
+            elif p == "/api/reply":                     # a plain instructor reply from the mailbox
+                to = b.get("to", "") or f"teacher:{b.get('student', '')}"
+                self._send(200, S["social"].post_to_channel(to, b.get("body", ""),
+                                                            from_label="Prof", kind="human"))
+            elif p == "/api/messages/delete":
+                self._send(200, S["social"].set_deleted(TEACHER_ID, "teacher",
+                                                        b.get("message_id", ""),
+                                                        bool(b.get("deleted", True))))
             else:
                 self._send(404)
             return True
         return False
 
+    def _correct(self, S, b) -> dict:
+        """THE CORRECTION LOOP — how the persona improves without prompt engineering.
+
+        The teacher rewrites a ProfAI answer. The correction is posted to the student's thread **as
+        Prof** (so the student gets the real answer from the real authority), the AI answer is marked
+        reviewed, and — if asked — the correction is promoted into the persona as a standing answer,
+        so the next student who asks the same thing gets the teacher's words, not a guess."""
+        student = b.get("student", "")
+        correction = (b.get("correction") or "").strip()
+        if not (student and correction):
+            return {"ok": False, "error": "Need a student and a correction."}
+        # posted as HUMAN: this is the instructor speaking for themselves, and the student must be
+        # able to see that the real authority has now answered.
+        posted = S["social"].reply_to_student(student, correction, from_label="Prof", kind="human")
+        S["prof"].mark_reviewed(b.get("message_id", ""))
+        if b.get("promote") and b.get("question"):
+            S["prof"].persona.add_standing_answer(b["question"], correction)
+        return {"ok": True, "message": posted["message"]}
+
     def do_GET(self):  # noqa: N802
-        if self._teacher_routes():
+        if self._auth_routes() or self._teacher_routes() or self._social_routes():
             return
         if not self._authed():
             return self._send(401)
         m = _MANIFEST.match(self.path)
         if m:
+            # STUDENT-facing manifest: released lessons only. A draft experiment (awaiting the
+            # teacher's playtest + approval) is never sent to students.
             p = ROOT / "courses" / m.group(1) / "manifest.json"
-            return self._send(200, json.loads(p.read_text())) if p.exists() else self._send(404)
+            rows = json.loads(p.read_text()) if p.exists() else []
+            return self._send(200, [r for r in rows if r.get("status", "released") != "draft"])
         m = _PACK.match(self.path)
         if m:
             p = ROOT / "lessons" / m.group(1) / "lesson.yaml"
             return self._send(200, text=p.read_text()) if p.exists() else self._send(404)
         m = _PROFILE.match(self.path)
         if m:
-            p = ROOT / "data" / "profiles" / f"{m.group(1)}.json"
-            if p.exists():
-                return self._send(200, json.loads(p.read_text()))
-            return self._send(200, {"student_id": m.group(1), "lessons": {}})
+            if not self._is(m.group(1)):        # a session for A must not read B's profile
+                return self._send(403, {"error": "That isn't your profile."})
+            prof = _STORE.profile(m.group(1))
+            return self._send(200, prof or {"student_id": m.group(1), "lessons": {}})
         self._send(404)
 
     def do_PUT(self):  # noqa: N802
@@ -158,26 +426,31 @@ class Handler(BaseHTTPRequestHandler):
         m = _PROFILE.match(self.path)
         if not m:
             return self._send(404)
+        if not self._is(m.group(1)):            # …nor write it
+            return self._send(403, {"error": "That isn't your profile."})
         incoming = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        p = ROOT / "data" / "profiles" / f"{m.group(1)}.json"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        existing = json.loads(p.read_text()) if p.exists() else {"student_id": m.group(1), "lessons": {}}
-        p.write_text(json.dumps(_merge_profiles(existing, incoming)))
+        existing = _STORE.profile(m.group(1)) or {"student_id": m.group(1), "lessons": {}}
+        _STORE.put_profile(m.group(1), _merge_profiles(existing, incoming))
         self._send(204)
 
     def do_POST(self):  # noqa: N802
-        if self._teacher_routes():
+        if self._auth_routes() or self._teacher_routes() or self._social_routes():
             return
-        if not self._authed():
+        me = self._who()
+        if me is None:
             return self._send(401)
         m = _SUBMIT.match(self.path)
         if not m:
             return self._send(404)
         rec = self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
-        out = ROOT / "data" / "submissions.jsonl"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("a") as f:
-            f.write(rec.decode().strip() + "\n")
+        # A submission is a CLAIM ABOUT A PERSON, so the server decides who that person is — the
+        # client doesn't get to say. Otherwise anyone could file results under someone else's name.
+        try:
+            obj = json.loads(rec.decode() or "{}")
+        except json.JSONDecodeError:
+            return self._send(400, {"error": "malformed submission"})
+        obj["student"] = me["who"]
+        _STORE.add_submission(obj)
         self._send(201, {"ok": True})
 
     def log_message(self, *a):  # quiet
@@ -185,5 +458,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    setup = _ACCTS.ensure_teacher()
     print(f"GINI Teaching Center (reference) on :{PORT}, serving {ROOT}")
+    if setup:
+        tid = os.environ.get("TEACHER_ID", "teacher")
+        print("\n  ⚠  No teacher account yet. Claim it ONCE, from the console sign-in:")
+        print(f"       teacher id : {tid}")
+        print(f"       setup token: {setup}")
+        print("     (or set TEACHER_ID / TEACHER_PASSWORD in the environment)\n")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

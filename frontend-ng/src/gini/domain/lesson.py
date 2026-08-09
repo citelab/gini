@@ -89,9 +89,15 @@ class Lesson:
     genre: str = ""                     # experience | expedition | challenge (defaults from assembly)
     level: int | None = None            # quest level 0..3 (defaults from assembly; may be pinned)
     fragments: list = field(default_factory=list)   # fragment ids this lesson was assembled from
+    # optional difficulty FORKS (the golden-path model): each is
+    # {id, label, difficulty, kind, objectives: [Objective]}. Completing a fork lifts the band.
+    forks: list = field(default_factory=list)
 
     def behavioral_ids(self) -> list[str]:
-        return [o.id for o in self.objectives if o.is_behavioral()]
+        ids = [o.id for o in self.objectives if o.is_behavioral()]
+        for fk in self.forks:
+            ids += [o.id for o in fk.get("objectives", []) if o.is_behavioral()]
+        return ids
 
     @property
     def guided(self) -> bool:

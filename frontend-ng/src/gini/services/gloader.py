@@ -69,7 +69,7 @@ class GLoader:
 
     # -- launch ------------------------------------------------------------- #
     def up(self, spec, workdir: str | Path | None = None,
-           auto_internet: bool = True) -> tuple[bool, str]:
+           auto_internet: bool = True, laptop_id: str = "") -> tuple[bool, str]:
         """Compile and launch the topology on Docker.
 
         ``spec`` may be a live :class:`Topology`, a pre-compiled :class:`RuntimeConfig`,
@@ -78,7 +78,8 @@ class GLoader:
         """
         cfg = self._as_config(spec)
         workdir = workdir or tempfile.mkdtemp(prefix="gini-lab-")
-        return self._orch.up(cfg, workdir, auto_internet=auto_internet)
+        return self._orch.up(cfg, workdir, auto_internet=auto_internet,
+                             laptop_id=laptop_id)
 
     def redeploy_faas(self, spec, auto_internet: bool = True) -> tuple[bool, str]:
         """Re-deploy only the serverless runtime with the current function code (AWS-style

@@ -31,6 +31,13 @@ class DeviceInstance:
     # 0 = use the type's default; non-container elements ignore these.
     w: float = 0.0
     h: float = 0.0
+    # composition slot this device belongs to (a scaffold/bound dependency, e.g. "A"). Empty = the
+    # fragment's own delta. Predicates reference it as `type@slot`.
+    slot: str = ""
+    # WHICH fragment was materialized into that slot (e.g. "cap-lan"). Provenance only — no predicate
+    # reads it; it exists so the canvas can label a slot group with what actually fills it
+    # ("nets · cap-lan ×4") instead of just a count, and so a composed board is self-describing.
+    slot_source: str = ""
 
     @property
     def type(self) -> DeviceType:
@@ -43,6 +50,10 @@ class Link:
     source_id: str
     target_id: str
     label: str = ""
+    # "link" = a network cable (carries traffic, compiled to real wiring).
+    # "attach" = a rider→donor mount: a Source/Sink runs ON the donor. Carries no traffic and is
+    # NOT compiled as a cable — a "runs on" relationship, drawn dotted. source_id is the rider.
+    kind: str = "link"
 
 
 class Topology:
@@ -106,6 +117,15 @@ class Topology:
         self.links[link.id] = link
         return link
 
+    def add_attach(self, rider_id: str, donor_id: str, label: str = "") -> Link:
+        """Mount a rider (Source/Sink) onto its donor. Distinct from a network link: it carries no
+        traffic and is not compiled — the rider merely RUNS ON the donor. `rider_id` is source_id."""
+        if rider_id not in self.devices or donor_id not in self.devices:
+            raise KeyError("attach endpoints must be existing devices")
+        link = Link(self._new_id("attach-"), rider_id, donor_id, label, kind="attach")
+        self.links[link.id] = link
+        return link
+
     # -- mutation ----------------------------------------------------------- #
     def remove_device(self, device_id: str) -> None:
         self.devices.pop(device_id, None)
@@ -137,6 +157,24 @@ class Topology:
     def degree(self, device_id: str) -> int:
         return sum(1 for l in self.links.values()
                    if device_id in (l.source_id, l.target_id))
+
+    # -- riders / attach edges ---------------------------------------------- #
+    def net_links(self) -> list["Link"]:
+        """Only the network cables — what the compiler wires. Attach edges are excluded."""
+        return [l for l in self.links.values() if l.kind != "attach"]
+
+    def donor_of(self, rider_id: str) -> "DeviceInstance | None":
+        """The donor a rider is mounted on (the far end of its attach edge), or None."""
+        for l in self.links.values():
+            if l.kind == "attach" and l.source_id == rider_id:
+                return self.devices.get(l.target_id)
+        return None
+
+    def riders_on(self, donor_id: str) -> list["DeviceInstance"]:
+        """Every Source/Sink rider mounted on this donor."""
+        return [self.devices[l.source_id] for l in self.links.values()
+                if l.kind == "attach" and l.target_id == donor_id
+                and l.source_id in self.devices]
 
     def counts_by_category(self) -> dict[str, int]:
         out: dict[str, int] = {}

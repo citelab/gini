@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
+from .theme.manager import sp as _sp
 
 _CUE_DIR = Path(__file__).resolve().parent / "assets" / "cue"
 
@@ -125,7 +126,7 @@ class CardArt(QWidget):
             p.drawPixmap(target, self._pix, QRectF(0, 0, pw, ph))
         else:                                          # graceful fallback if an image is missing
             p.setPen(_qcolor(getattr(t, "muted", t.text)))
-            f = QFont(); f.setPointSize(13); p.setFont(f)
+            f = QFont(); f.setPointSize(_sp(13)); p.setFont(f)
             p.drawText(r, Qt.AlignCenter, self._kind)
         p.end()
 
@@ -156,7 +157,7 @@ class CueCards(QDialog):
         self.art = CardArt(theme)
         lay.addWidget(self.art, 1)
         self.title = QLabel()
-        tf = QFont(); tf.setBold(True); tf.setPointSize(21)
+        tf = QFont(); tf.setBold(True); tf.setPointSize(_sp(21))
         self.title.setFont(tf)
         lay.addWidget(self.title)
         self.body = QLabel(); self.body.setObjectName("Body"); self.body.setWordWrap(True)

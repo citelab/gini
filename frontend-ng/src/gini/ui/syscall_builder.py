@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..domain import syscall_builder as sb
 from .theme import ThemeManager, icons
+from .theme.manager import scale_css as _scss
 
 _ARG_LABELS = [("int", "int"), ("pointer (addr)", "addr"), ("string", "str")]
 
@@ -49,21 +50,21 @@ class SyscallBuilder(QDialog):
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("compile", t.accent_for("red"), 22))
         title = QLabel("  Add a system call to xv6")
-        title.setStyleSheet(f"color:{t.text};font-size:16px;font-weight:600;")
+        title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         root.addLayout(head)
         hint = QLabel("Declare it, write the C body, and GINI generates the five real xv6 "
                       "edits. Applying recompiles the kernel (desktop build).")
-        hint.setWordWrap(True); hint.setStyleSheet(f"color:{t.muted};font-size:11px;")
+        hint.setWordWrap(True); hint.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
         root.addWidget(hint)
 
     def _panel(self, title) -> tuple[QFrame, QVBoxLayout]:
         t = self.theme.theme
         f = QFrame(); f.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}")
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         h = QLabel(title); h.setStyleSheet(
-            f"color:{t.muted};font-size:11px;font-weight:600;border:none;")
+            _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         v.addWidget(h)
         return f, v
 
@@ -128,7 +129,7 @@ class SyscallBuilder(QDialog):
         t = self.theme.theme
         bar = QHBoxLayout()
         self.status = QLabel("")
-        self.status.setStyleSheet(f"color:{t.muted};font-size:12px;")
+        self.status.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
         bar.addWidget(self.status, 1)
         gen = QPushButton("  Generate"); gen.setIcon(icons.icon("compile", t.accent_for("blue"), 14))
         gen.setStyleSheet(self._btn_css()); gen.clicked.connect(self._on_generate)
@@ -143,7 +144,7 @@ class SyscallBuilder(QDialog):
     # -- helpers ---------------------------------------------------------- #
     def _lbl(self, text) -> QLabel:
         lb = QLabel(text)
-        lb.setStyleSheet(f"color:{self.theme.theme.muted};font-size:11px;border:none;")
+        lb.setStyleSheet(_scss(f"color:{self.theme.theme.muted};font-size:11px;border:none;"))
         return lb
 
     def _edit_css(self) -> str:
@@ -202,7 +203,7 @@ class SyscallBuilder(QDialog):
             self.apply_btn.setEnabled(False)
             self.preview.setPlainText("")
             self.status.setText("⚠ " + errs[0])
-            self.status.setStyleSheet(f"color:{t.danger};font-size:12px;")
+            self.status.setStyleSheet(_scss(f"color:{t.danger};font-size:12px;"))
             return
         cg = sb.generate(spec, number=sb.NEXT_FREE_NUMBER + self._added)
         self._codegen = cg
@@ -210,7 +211,7 @@ class SyscallBuilder(QDialog):
         self.apply_btn.setEnabled(True)
         self.status.setText(f"✓ Ready — SYS_{spec.name} = {cg.number}. "
                             "Review the 5 edits, then Apply.")
-        self.status.setStyleSheet(f"color:{t.success};font-size:12px;")
+        self.status.setStyleSheet(_scss(f"color:{t.success};font-size:12px;"))
 
     def _on_apply(self) -> None:
         t = self.theme.theme
@@ -223,12 +224,12 @@ class SyscallBuilder(QDialog):
                 self._added += 1
                 self._existing = self._existing + (name,)   # block re-using this name
                 self.status.setText("Applied — writing the 5 edits and recompiling xv6…")
-                self.status.setStyleSheet(f"color:{t.success};font-size:12px;")
+                self.status.setStyleSheet(_scss(f"color:{t.success};font-size:12px;"))
                 self.apply_btn.setEnabled(False)
             except Exception as e:
                 self.status.setText(f"⚠ Apply failed: {e}")
-                self.status.setStyleSheet(f"color:{t.danger};font-size:12px;")
+                self.status.setStyleSheet(_scss(f"color:{t.danger};font-size:12px;"))
         else:
             self.status.setText("Applying writes these 5 edits and recompiles xv6 — available "
                                 "on the desktop build. The generated code is shown at left.")
-            self.status.setStyleSheet(f"color:{t.muted};font-size:12px;")
+            self.status.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))

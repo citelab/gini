@@ -61,6 +61,23 @@ RECIPES: tuple[Recipe, ...] = (
         links=(("m1", "s1"), ("m2", "s1"), ("s1", "r1")),
     ),
     Recipe(
+        id="gui_desktop", name="A graphical Linux host",
+        summary="A headful Desktop machine on the LAN — open its screen and browse a web server "
+                "another machine is serving.",
+        intent=("desktop", "gui", "graphical", "headful", "browser", "x11", "vnc", "linux desktop",
+                "point and click"),
+        teaches="a graphical host on the network — point-and-click Linux inside a topology",
+        concept="networking-basics",
+        elements=(
+            _e("gui", "desktop", "The graphical host — double-click to open its desktop over noVNC.",
+               col=0, row=0),
+            _e("s1", "switch", "The LAN switch.", col=1, row=0),
+            _e("m1", "host", "A machine that can serve a page for the desktop's browser to fetch.",
+               col=2, row=0),
+        ),
+        links=(("gui", "s1"), ("m1", "s1")),
+    ),
+    Recipe(
         id="wifi_lan", name="A Wi-Fi LAN",
         summary="A wireless client joining the wired LAN through an access point.",
         intent=("wifi", "wireless", "access point", "wap", "mobile", "802.11"),
@@ -500,6 +517,198 @@ RECIPES: tuple[Recipe, ...] = (
                col=0, row=0, props={"Timeslice": "1"}),
         ),
         links=(),
+    ),
+    # ---- Sources / Sinks (riders: instruments that run inside a donor) ---- #
+    Recipe(
+        id="ping_capture", name="Ping and capture it",
+        summary="Ping one machine from another and watch the ICMP packets arrive on the receiver.",
+        intent=("ping", "icmp", "capture", "tcpdump", "packet", "rtt", "latency", "reachability",
+                "sniff", "packet view", "loss"),
+        teaches="how to inject ICMP traffic from a Source and observe it arrive with a Sink capture",
+        elements=(
+            _e("m1", "host", "The sender.", col=0, row=0),
+            _e("s1", "switch", "LAN switch.", col=1, row=0),
+            _e("m2", "host", "The receiver.", col=2, row=0),
+            _e("ping", "ping_probe", "Rides the sender — pings the receiver.", col=0, row=1),
+            _e("pcap", "packet_view", "Rides the receiver — watch the pings arrive.", col=2, row=1),
+        ),
+        links=(("m1", "s1"), ("m2", "s1"), ("m1", "ping"), ("m2", "pcap")),
+    ),
+    Recipe(
+        id="http_check", name="Probe a web service",
+        summary="Fire HTTP requests at a web app from a machine and read the success rate + latency.",
+        intent=("http", "curl", "web", "request", "probe", "2xx", "latency", "service"),
+        teaches="how an HTTP Source proves a service answers, reporting success rate and latency",
+        elements=(
+            _e("m1", "host", "The client machine.", col=0, row=0),
+            _e("web", "web_app", "The web service, reached by name (set it as the probe's Target).",
+               col=1, row=0),
+            _e("http", "http_probe", "Rides the client — requests the web app by name.",
+               col=0, row=1),
+        ),
+        links=(("m1", "http"),),
+    ),
+    Recipe(
+        id="throughput_test", name="Measure throughput (iPerf)",
+        summary="Drive iPerf traffic between two machines across a switch and read the bandwidth.",
+        intent=("iperf", "throughput", "bandwidth", "mbps", "congestion", "speed", "capacity"),
+        teaches="how to measure link throughput with an iPerf Client Source and Server Sink",
+        elements=(
+            _e("m1", "host", "The client.", col=0, row=0),
+            _e("s1", "switch", "Links the two machines.", col=1, row=0),
+            _e("m2", "host", "The server.", col=2, row=0),
+            _e("cli", "iperf_client", "Rides the client — drives traffic at the server.", col=0, row=1),
+            _e("srv", "iperf_server", "Rides the server — reports received throughput.", col=2, row=1),
+        ),
+        links=(("m1", "s1"), ("m2", "s1"), ("m1", "cli"), ("m2", "srv")),
+    ),
+    Recipe(
+        id="net_diagnostics", name="Diagnose a path (DNS · traceroute · counters)",
+        summary="Resolve a name, trace the path to the edge, and watch interface counters — the "
+                "classic diagnostic Sources and Sinks on one machine.",
+        intent=("dns", "dig", "resolve", "traceroute", "path", "hops", "interface", "counters",
+                "diagnostics", "iface"),
+        teaches="how DNS, traceroute and interface counters reveal what a machine sees on the network",
+        elements=(
+            _e("m1", "host", "The machine you diagnose from.", col=0, row=0),
+            _e("r1", "router", "The gateway to the edge.", col=1, row=0),
+            _e("net", "cloud", "The Internet.", col=2, row=0),
+            _e("dns", "dns_probe", "Rides the machine — resolves a name.", col=0, row=1),
+            _e("trace", "traceroute_probe", "Rides the machine — traces the path.", col=0, row=2),
+            _e("ifs", "iface_stats", "Rides the machine — streams rx/tx counters.", col=0, row=3),
+        ),
+        links=(("m1", "r1"), ("r1", "net"), ("m1", "dns"), ("m1", "trace"), ("m1", "ifs")),
+    ),
+    Recipe(
+        id="xv6_drive", name="Drive an xv6 kernel (shell + workload)",
+        summary="Run a custom command and spawn a scheduler workload on an xv6 Machine, over its "
+                "console.",
+        intent=("xv6", "shell", "command", "workload", "spin", "forktest", "scheduler", "process",
+                "os", "syscall"),
+        teaches="how to drive an xv6 kernel with a Shell Probe (a command) and a Workload (a process)",
+        concept="os-scheduling",
+        elements=(
+            _e("k", "xv6", "The xv6 Machine — open the Machine Lab to watch it react.", col=0, row=0),
+            _e("sh", "xv6_shell", "Rides the kernel — types a command into the console.", col=0, row=1),
+            _e("wl", "xv6_workload", "Rides the kernel — spawns a process to drive the scheduler.",
+               col=0, row=2),
+        ),
+        links=(("k", "sh"), ("k", "wl")),
+    ),
+    # ---- real hardware in the loop ---------------------------------------- #
+    Recipe(
+        id="gini32_phone", name="A real phone inside the emulated network",
+        summary="A GINI32 board carries a real phone (or Pi) into the topology, so it can "
+                "ping an emulated machine.",
+        intent=("gini32", "esp32", "board", "hardware", "physical", "phone", "real device",
+                "cyber-physical", "hardware in the loop", "wireless", "gbridge"),
+        teaches="hardware-in-the-loop: a real radio bridging physical devices into an "
+                "emulated topology over Ethernet-in-UDP",
+        concept="networking-basics",
+        elements=(
+            _e("gb", "gini32",
+               "The real board — set BoardID to the id on its label (`gini32 provision`).",
+               col=0, row=0, props={"Mode": "routed"}),
+            _e("r1", "router", "The board's devices arrive on this router's subnet.",
+               col=1, row=0),
+            _e("s1", "switch", "The LAN the emulated machine sits on.", col=2, row=0),
+            _e("m1", "host", "An emulated machine for the real phone to ping.",
+               col=3, row=0),
+        ),
+        links=(("gb", "r1"), ("r1", "s1"), ("s1", "m1")),
+    ),
+    # ---- OS Zoo — boot a real historical OS ------------------------------- #
+    Recipe(
+        id="os_zoo_freedos", name="Boot FreeDOS (OS Zoo)",
+        summary="A real MS-DOS-compatible OS you boot and drive from an embedded screen — the "
+                "command-line PC of the DOS era.",
+        intent=("freedos", "dos", "os zoo", "historical", "vintage", "retro", "command line",
+                "boot", "emulator", "old os"),
+        teaches="what a single-tasking, real-mode DOS PC looks like, live under emulation",
+        concept="os-zoo",
+        elements=(
+            _e("os", "freedos", "Double-click to open the Zoo Lab and use FreeDOS live.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_kolibri", name="Boot KolibriOS (OS Zoo)",
+        summary="A tiny GUI OS written in assembly that boots from a single floppy to a graphical "
+                "desktop in seconds — the fast OS Zoo guest.",
+        intent=("kolibri", "kolibrios", "assembly", "tiny", "fast", "gui", "os zoo", "floppy",
+                "desktop", "boot", "emulator"),
+        teaches="how small and fast an OS can be — a full GUI desktop in 1.44 MB of assembly",
+        concept="os-zoo",
+        elements=(
+            _e("os", "kolibri", "Double-click to open the Zoo Lab and use the KolibriOS desktop.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_menuet", name="Boot MenuetOS (OS Zoo)",
+        summary="The assembly GUI OS KolibriOS forked from — a whole desktop on one floppy, "
+                "booting in seconds.",
+        intent=("menuet", "menuetos", "assembly", "tiny", "fast", "gui", "os zoo", "floppy",
+                "desktop", "boot", "emulator"),
+        teaches="another take on a tiny, fast, all-assembly GUI OS (the root of KolibriOS)",
+        concept="os-zoo",
+        elements=(
+            _e("os", "menuet", "Double-click to open the Zoo Lab and use the MenuetOS desktop.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_msdos", name="Boot MS-DOS 6.22 (OS Zoo)",
+        summary="The real Microsoft MS-DOS 6.22, booted from a disk image under QEMU — drag on and "
+                "Run; the disk downloads on first boot.",
+        intent=("ms-dos", "msdos", "dos", "microsoft dos", "6.22", "real dos", "os zoo", "boot",
+                "emulator", "command prompt"),
+        teaches="the original Microsoft MS-DOS — compare it side by side with FreeDOS",
+        concept="os-zoo",
+        elements=(
+            _e("os", "msdos", "Double-click to open the Zoo Lab and use the MS-DOS C:\\> prompt.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_mac7", name="Boot Mac System 7 (OS Zoo)",
+        summary="Classic Macintosh System 7 on an emulated 68k Mac — drag on and Run; the ROM and "
+                "disk download on first boot.",
+        intent=("mac", "macintosh", "system 7", "mac os", "classic mac", "basilisk", "68k",
+                "apple", "os zoo", "boot", "emulator"),
+        teaches="what classic Mac OS (System 7) looked and felt like, on emulated 68k hardware",
+        concept="os-zoo",
+        elements=(
+            _e("os", "mac7", "Double-click to open the Zoo Lab and use the System 7 desktop.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_win31", name="Boot Windows 3.11 (OS Zoo)",
+        summary="Windows for Workgroups 3.11 under DOSBox — drag on and Run; a pre-installed image "
+                "downloads on first boot.",
+        intent=("windows", "windows 3.1", "windows 3.11", "win31", "dosbox", "program manager",
+                "wfw", "os zoo", "boot", "emulator", "vintage windows"),
+        teaches="what early graphical Windows (3.x) was like, running fast under DOSBox",
+        concept="os-zoo",
+        elements=(
+            _e("os", "win31", "Double-click to open the Zoo Lab and use Windows 3.11.",
+               col=0, row=0),
+        ),
+    ),
+    Recipe(
+        id="os_zoo_byo", name="Bring your own classic OS (OS Zoo)",
+        summary="Run a proprietary classic OS (Windows 95, Mac System 7, …) GINI can't ship: "
+                "supply a disk image you own and GINI provides the emulator.",
+        intent=("windows 95", "win95", "mac", "system 7", "classic mac", "bring your own",
+                "byo", "own image", "proprietary", "os zoo", "emulator", "rom", "disk image"),
+        teaches="how GINI runs a proprietary OS legally — you supply the image, GINI the emulator",
+        concept="os-zoo",
+        elements=(
+            _e("os", "oszoo_byo",
+               "Set Image to a disk image you legally own (and Arch/Emulator to match — 68k Mac "
+               "needs Basilisk and a ROM), then open the Zoo Lab.", col=0, row=0),
+        ),
     ),
 )
 

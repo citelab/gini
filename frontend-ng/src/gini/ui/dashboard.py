@@ -201,13 +201,14 @@ class Dashboard(QWidget):
 
     def _restyle(self) -> None:
         t = self.theme.theme
+        from .theme.manager import sp
         self.setStyleSheet(f"""
-            QLabel#DashValue {{ color: {t.text}; font-size: 17px; font-weight: 700; }}
-            QLabel#DashTotal {{ color: {t.accent}; font-size: 18px; font-weight: 800; }}
-            QLabel#DashCaption {{ color: {t.faint}; font-size: 9px;
+            QLabel#DashValue {{ color: {t.text}; font-size: {sp(17)}px; font-weight: 700; }}
+            QLabel#DashTotal {{ color: {t.accent}; font-size: {sp(18)}px; font-weight: 800; }}
+            QLabel#DashCaption {{ color: {t.faint}; font-size: {sp(9)}px;
                                   letter-spacing: 0.4px; text-transform: uppercase; }}
-            QLabel#DashChips {{ font-size: 12px; }}
-            QLabel#DashState {{ color: {t.muted}; font-size: 10px; }}
+            QLabel#DashChips {{ font-size: {sp(12)}px; }}
+            QLabel#DashState {{ color: {t.muted}; font-size: {sp(10)}px; }}
             QFrame#DashSep {{ color: {t.line2}; }}
             QPushButton#DashGrafana {{
                 background: {t.accent_soft}; color: {t.accent2};

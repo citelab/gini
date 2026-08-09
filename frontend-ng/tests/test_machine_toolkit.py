@@ -62,7 +62,7 @@ def test_the_lean_image_is_alpine_and_carries_no_mail_or_dns_server():
     assert df.startswith("FROM alpine:")
     for tool in ("tcpdump", "curl", "bind-tools", "iperf3", "nmap", "socat", "iproute2"):
         assert tool in df                              # what a student actually types
-    for heavy in ("postfix", "bind9", "ettercap", "haproxy", "dsniff", "tshark"):
+    for heavy in ("postfix", "bind9", "ettercap", "haproxy", "dsniff", "tshark", "squid"):
         assert heavy not in df                         # what made the old image huge
     assert "python3" in df                             # the dataplane shuttle (stdlib only)
 
@@ -90,4 +90,31 @@ def test_the_inspector_tells_the_truth_about_which_toolkit_a_host_has():
 
 def test_toolkit_renders_as_a_dropdown_not_a_free_text_box():
     dt = devices.get("host")
-    assert dt.property_choices["Toolkit"] == ("lean", "full")
+    assert dt.property_choices["Toolkit"] == ("lean", "full", "security")
+
+
+def test_security_tier_is_full_plus_engines_and_names_its_own_image():
+    """The security tier = full toolkit + the Part VI engines, in its own image so ordinary hosts
+    never carry it."""
+    from gini.services.compiler import _toolkit_for
+    t = Topology()
+    assert _toolkit_for(_host(t, "S", Toolkit="security")) == "security"
+    assert _toolkit_for(_host(t, "T", Toolkit="SeCurity")) == "security"   # case-insensitive
+    df = O._DOCKERFILE_MACHINE_SECURITY
+    for tool in ("openssl", "wireguard-tools", "isc-dhcp-server", "suricata", "tcpreplay"):
+        assert tool in df                              # the security engines
+    for full_tool in ("bind9", "postfix", "ettercap"):
+        assert full_tool in df                         # includes the full toolkit
+    assert O._MACHINE_IMAGE["security"] == ("gini-machine-security",
+                                            "docker/Dockerfile.machine-security")
+
+
+def test_a_security_host_names_the_security_image_once():
+    t = Topology()
+    sw = t.add_device("switch", name="S1")
+    for i in range(2):
+        h = _host(t, f"H{i}", Toolkit="security")
+        t.add_link(h.id, sw.id)
+    compose = O._compose(RuntimeCompiler().compile(t))
+    assert compose.count("image: gini-machine-security") == 2
+    assert "dockerfile: docker/Dockerfile.machine-security" in compose

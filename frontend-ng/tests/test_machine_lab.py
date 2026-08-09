@@ -27,6 +27,27 @@ def _theme(app):
     return ThemeManager(app)
 
 
+def _tree_items(tree):
+    """Every QTreeWidgetItem in the process tree, flattened."""
+    out = []
+
+    def walk(it):
+        out.append(it)
+        for i in range(it.childCount()):
+            walk(it.child(i))
+    for i in range(tree.topLevelItemCount()):
+        walk(tree.topLevelItem(i))
+    return out
+
+
+def _tree_count(tree):
+    return len(_tree_items(tree))
+
+
+def _tree_item(tree, pid):
+    return next(it for it in _tree_items(tree) if it.text(1) == str(pid))
+
+
 def test_demo_scheduler_round_robins_and_switches():
     sched = DemoScheduler(timeslice=1)
     pids = [sched.snapshot().running_pid]
@@ -39,7 +60,7 @@ def test_demo_scheduler_round_robins_and_switches():
 def test_lab_opens_and_steps(app):
     from gini.ui.machine_lab import MachineLab
     lab = MachineLab(None, _theme(app), _Dev(), state=None)
-    assert lab._proc_tbl.rowCount() == 5          # proc[] rendered
+    assert _tree_count(lab._proc_tree) == 5       # process tree rendered
     before = lab.state.timeline.switches()
     for _ in range(6):
         lab._on_step()
@@ -48,6 +69,40 @@ def test_lab_opens_and_steps(app):
     # per-CPU register table populated (pc is the first row, CPU 0 the first column)
     assert lab._reg_tbl.columnCount() >= 1
     assert lab._reg_tbl.item(0, 0).text().startswith("0x")
+    lab.close()
+
+
+def test_lab_opens_on_the_layered_overview(app):
+    # the front door is now the layered OS overview, NOT the dense scheduler view
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    assert lab._stack.currentWidget() is lab._overview
+    assert lab._back_btn.isHidden() is True      # hidden on the hub (never .show()n dialog)
+    # the layers expose the expected drill-down cards
+    for key in ("programs", "syscalls", "builder", "scheduler", "memory", "storage",
+                "journey", "cpu"):
+        assert key in lab._ov_cards
+    lab.close()
+
+
+def test_scheduler_card_drills_in_and_back(app):
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    lab._ov_cards["scheduler"].clicked.emit()          # click the Scheduler card
+    assert lab._stack.currentWidget() is lab._sched_page
+    assert lab._back_btn.isHidden() is False           # back button available on a sub-page
+    lab._show_overview()                               # ← Overview
+    assert lab._stack.currentWidget() is lab._overview
+    assert lab._back_btn.isHidden() is True
+    lab.close()
+
+
+def test_overview_cards_carry_live_mini_stats(app):
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    assert "procs" in lab._ov_cards["scheduler"].stat.text()      # e.g. "3 procs · 0.0 sw/s"
+    assert "switches" in lab._ov_cards["journey"].stat.text()
+    assert "core" in lab._ov_cards["cpu"].stat.text()
     lab.close()
 
 
@@ -122,9 +177,10 @@ def test_live_lab_has_launcher_and_kill_buttons(app):
     lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
     # the launcher dropdown is present with the long-running programs
     assert "spin" in [lab._prog_combo.itemText(i) for i in range(lab._prog_combo.count())]
-    # a kill button exists for the user process (pid 5) but NOT for init/sh (rows 0,1)
-    assert lab._proc_tbl.cellWidget(2, 3) is not None      # pid 5 row -> kill button
-    assert lab._proc_tbl.cellWidget(0, 3) is None          # init -> no kill
+    # a kill button exists for the user process (pid 5) but NOT for init/sh
+    tree = lab._proc_tree
+    assert tree.itemWidget(_tree_item(tree, 5), 3) is not None   # pid 5 -> kill button
+    assert tree.itemWidget(_tree_item(tree, 1), 3) is None       # init -> no kill
     lab.close()
 
 
@@ -177,9 +233,9 @@ class _Term(_FakeLive):
         self.interrupts += 1
 
 
-def _wait(app, cond, n=60):
-    import time
-    for _ in range(n):
+def _wait(app, cond, n=200):        # ~1s budget: absorbs cold-start jitter (font aliasing, first
+    import time                      # poll tick); early-exits the instant cond() is true, so warm
+    for _ in range(n):              # runs stay fast. Guards against first-run timing flakes.
         app.processEvents(); time.sleep(0.005)
         if cond():
             return

@@ -7,6 +7,7 @@ flow from the ThemeManager so Dark / Light / GINI Brand swap instantly.
 from __future__ import annotations
 
 import math
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup
@@ -82,6 +83,29 @@ _FAAS_INVOKE = (
 )
 
 
+def _photo_data_url(path: str, size: int = 128) -> str:
+    """Load an image, centre-crop to a square, downscale to a face-sized thumbnail, and encode it as
+    a PNG data-URL. QImage (not QPixmap) so it's CPU-only — safe off the GUI thread and headless.
+    Downscaling on the client keeps the DB tiny and means the original never leaves the machine.
+    Returns '' if the file isn't a readable image."""
+    import base64
+
+    from PySide6.QtCore import QBuffer, QByteArray, Qt
+    from PySide6.QtGui import QImage
+    img = QImage(path)
+    if img.isNull():
+        return ""
+    side = min(img.width(), img.height())
+    img = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+    img = img.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    ba = QByteArray()                    # MUST outlive the buffer — a temporary here crashes PySide
+    buf = QBuffer(ba)
+    buf.open(QBuffer.WriteOnly)
+    img.save(buf, "PNG")
+    buf.close()
+    return "data:image/png;base64," + base64.b64encode(bytes(ba)).decode()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, app) -> None:
         super().__init__()
@@ -108,6 +132,7 @@ class MainWindow(QMainWindow):
         self._workdir: str | None = None
         self._project_path: str | None = None
         self._project_dir: str | None = None       # active project folder (Projects)
+        self._experiment: str | None = None        # the experiment (topology) open within it
         self._router_programs: dict = {}        # device id -> RouterProgram (Router Lab)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
@@ -126,7 +151,15 @@ class MainWindow(QMainWindow):
         self.ctx.bus.k8s_metrics.connect(self._on_k8s_metrics)
         self.ctx.bus.llm_reachable.connect(self._on_llm_reachable)
         self.ctx.bus.enrolment_changed.connect(self._on_enrolment)
-        self.theme = ThemeManager(app, self.ctx.settings.theme)
+        self._chat_dock = None
+        self._force_new_signin = False             # one-shot: force the sign-in dialog (switch user)
+        self._beat = QTimer(self)                  # presence + group progress, while signed in
+        self._beat.setInterval(30_000)
+        self._beat.timeout.connect(self._heartbeat)
+        self._beat.start()
+        from .theme.manager import scale_for
+        self.theme = ThemeManager(app, self.ctx.settings.theme,
+                                  scale_for(getattr(self.ctx.settings, "text_size", "Normal")))
         self.theme.apply()
 
         self.setWindowTitle("gBuilder 6.0 — networks + cloud")
@@ -171,6 +204,11 @@ class MainWindow(QMainWindow):
         self.ctx.bus.device_console_requested.connect(self._open_console)
         self.ctx.bus.function_invoke_requested.connect(self._on_function_invoke)
         self.ctx.bus.function_deploy_requested.connect(self._on_function_deploy)
+        self.ctx.bus.rider_ran.connect(self._on_rider_state)
+        # xv6 riders run over the console (not docker); register the serial-path hooks
+        self._xv6_rider_sessions: dict = {}
+        self.ctx.xv6_rider_toggle = self._toggle_xv6_rider
+        self.ctx.xv6_rider_running = lambda rid: rid in self._xv6_rider_sessions
         self.ctx.bus.selection_changed.connect(self._on_selection_explain)
         self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self.palette.element_selected.connect(self._on_palette_explain)
@@ -202,14 +240,16 @@ class MainWindow(QMainWindow):
             return
         v = dlg.values()
         s = self.ctx.settings
-        # apply every value the dialog returned (a missing key must never abort the save)
-        for k in ("theme", "reduced_motion", "auto_internet",
-                  "llm_enabled", "llm_url", "llm_model", "llm_think",
-                  "name_prefixes", "prices", "show_help_on_launch",
-                  "tc_url", "tc_course", "tc_student", "tc_token"):
-            if k in v:
-                setattr(s, k, v[k])
+        # Apply EVERY value the dialog returned that is a real Settings field. This used to be a
+        # hand-maintained whitelist, which meant adding a control to the dialog silently did
+        # nothing until you remembered to add its key here too — the edit was read, then dropped,
+        # and Settings saved the old value back. `hasattr` still guards against a typo'd key.
+        for k, val in v.items():
+            if hasattr(s, k):
+                setattr(s, k, val)
         self.ctx.topology.prefix_overrides = dict(s.name_prefixes)   # apply to current topo
+        from .theme.manager import scale_for
+        self.theme.set_font_scale(scale_for(v.get("text_size", "Normal")))   # live text-size switch
         self.theme.set_theme(v["theme"])               # live theme switch
         self._wire_llm()                               # re-create / clear the LLM loop
         if getattr(self.ctx, "teaching_center", None) is not None:
@@ -227,7 +267,7 @@ class MainWindow(QMainWindow):
         took to answer (or to time out, which is worse). The pill is updated via a bus signal, the
         same way the LLM health probe reports back."""
         tc = self.ctx.connect_teaching_center()
-        if tc is None:                                 # not enrolled — a perfectly normal state
+        if tc is None or not tc.signed_in():           # not signed in — a perfectly normal state
             self.ctx.bus.enrolment_changed.emit("", False, 0)
             return
         import threading
@@ -236,8 +276,34 @@ class MainWindow(QMainWindow):
         def probe():
             try:
                 online = tc.online()
+                if not online and tc.session_expired():
+                    # the server ANSWERED and rejected us. Say "sign in again", not "you're offline"
+                    self.ctx.log("Teaching Center: your session expired — sign in again from the "
+                                 "user menu.", "info")
+                    self.ctx.bus.enrolment_changed.emit("", False, 0)
+                    return
             except Exception:                          # noqa: BLE001
                 online = False
+            # OTA: pull any teacher-authored fragments into the local content layer, so assigned
+            # experiments that reference them actually load. Version-gated on this end; a pack a newer
+            # engine authored is skipped-with-reason, never bricks the client.
+            if online:
+                try:
+                    res = tc.pull_content()
+                    if res["installed"] or res["skipped"] or res.get("removed"):
+                        note = f"Content synced: {len(res['installed'])} fragment(s)"
+                        if res.get("removed"):
+                            note += f", {len(res['removed'])} removed"
+                        if res["skipped"]:
+                            note += f", {len(res['skipped'])} skipped (needs a newer gBuilder)"
+                        self.ctx.log(note, "info")
+                except Exception:                      # noqa: BLE001 — a content pull never blocks sign-in
+                    pass
+            # a TEACHER has no "assignments due" — that's a student notion. Emit -1 as the sentinel;
+            # the pill renders it as the teacher role, not a count.
+            if tc.is_teacher():
+                self.ctx.bus.enrolment_changed.emit(student, online, -1)
+                return
             due = 0
             try:
                 lessons = tc.available_lessons()       # cached when offline — homework doesn't vanish
@@ -255,7 +321,10 @@ class MainWindow(QMainWindow):
         self.mode_indicator.set_enrolment(student, online, due)
         if not student:
             return
-        if online:
+        if due < 0:                                    # teacher
+            self.ctx.log(f"Teaching Center: signed in as {student} (teacher) to "
+                         f"{self.ctx.settings.tc_course}.", "ok")
+        elif online:
             self.ctx.log(f"Teaching Center: signed in as {student} to "
                          f"{self.ctx.settings.tc_course} — {due} mission"
                          f"{'s' if due != 1 else ''} due.", "ok")
@@ -265,20 +334,92 @@ class MainWindow(QMainWindow):
 
     # -- the User menu ------------------------------------------------------- #
     def _sign_in(self) -> None:
-        """Sign in to the course — the explicit act. Networked, so it runs off the GUI thread and
-        the pill updates when it reports back."""
+        """Sign in to the course — the explicit act.
+
+        A cached session means we can go straight through. Otherwise ask for a password (and, the
+        first time, the enrolment token that proves the account is yours to claim). The password is
+        exchanged for a session and never stored."""
+        from PySide6.QtWidgets import QMessageBox
+        from .signin_dialog import SignInDialog
+        from ..agent.teaching_center import InsecureTransport
+
+        force = self._force_new_signin           # one-shot: force the dialog (sign in as someone else)
+        self._force_new_signin = False
         s = self.ctx.settings
-        if not (s.tc_url and s.tc_course and s.tc_student):
-            self.ctx.log("Teaching Center: set the course server, course and student id in "
-                         "Settings → Teaching Center first.", "info")
+        if not (s.tc_url and s.tc_course):
+            self.ctx.log("Teaching Center: set the course server and course in Settings first.",
+                         "info")
             self._open_settings()
             return
-        self.ctx.log(f"Teaching Center: signing in as {s.tc_student}…", "info")
-        self._connect_teaching_center()
+        if not s.tc_student and not force:
+            self._open_settings()
+            return
+
+        tc = self.ctx.connect_teaching_center()
+        if tc is None:
+            return
+        if not self._force_new_signin and tc.signed_in():   # a live session — nothing to ask
+            self.ctx.log(f"Teaching Center: resuming your session as {s.tc_student}…", "info")
+            self._connect_teaching_center()
+            return
+
+        dlg = SignInDialog(self, s, first_time=bool(s.tc_token))
+        if not dlg.exec():
+            self.ctx.teaching_center = None
+            return
+        v = dlg.values()
+        s.tc_student = v["student"]
+        tc = self.ctx.connect_teaching_center()   # rebuild with the (possibly edited) student id
+        if tc is None:
+            return
+        try:
+            res = (tc.claim(v["password"], v["enrolment_token"]) if v["claim"]
+                   else tc.login(v["password"]))
+        except InsecureTransport as e:
+            self.ctx.teaching_center = None
+            QMessageBox.warning(self, "Unencrypted connection", str(e))
+            return
+        if not res.get("ok"):
+            self.ctx.teaching_center = None
+            QMessageBox.warning(self, "Sign-in failed",
+                                res.get("error") or "The course server rejected the sign-in.")
+            self.ctx.log(f"Teaching Center: sign-in failed — {res.get('error', '')}", "error")
+            return
+        if v["claim"]:
+            s.tc_token = ""                       # the enrolment token is spent; don't keep it around
+            self._persist_settings()
+        self.ctx.log(f"Teaching Center: signed in as {s.tc_student}.", "ok")
+        self._connect_teaching_center()           # pull the manifest / profile, update the pill
+
+    def _sign_in_as(self) -> None:
+        """Sign in as a DIFFERENT user without editing Settings first — type a username here.
+
+        Used to switch between accounts on one machine (e.g. a student account and the teacher
+        account). Forces the sign-in dialog (bypassing any cached session) so you always get to enter
+        the username + password of whoever you want to become."""
+        from PySide6.QtWidgets import QInputDialog
+        who, ok = QInputDialog.getText(self, "Sign in as another user",
+                                       "Username:", text="")
+        if not ok or not who.strip():
+            return
+        # switching identity: drop the current session and start fresh as the typed username
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is not None:
+            import threading
+            threading.Thread(target=tc.logout, daemon=True).start()
+        self.ctx.teaching_center = None
+        self.ctx.settings.tc_student = who.strip()
+        self.ctx.settings.tc_token = ""          # a different account's enrolment token isn't this one's
+        self._force_new_signin = True
+        self._sign_in()
 
     def _sign_out(self) -> None:
-        """Go local. Your credentials stay in Settings; you're simply not connected. Missions falls
-        back to the practice catalog, and anything unsent stays queued for the next sign-in."""
+        """Go local: drop the session (server-side too, so a shared machine doesn't stay signed in).
+        Your student id stays in Settings; anything unsent stays queued for the next sign-in."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is not None:
+            import threading
+            threading.Thread(target=tc.logout, daemon=True).start()   # network — never on the GUI thread
         self.ctx.teaching_center = None
         self.ctx.bus.enrolment_changed.emit("", False, 0)
         self.ctx.log("Teaching Center: signed out — Missions now offers the practice catalog.",
@@ -297,16 +438,25 @@ class MainWindow(QMainWindow):
         m.addSeparator()
 
         if tc is None:
-            a = m.addAction(f"Sign in as {s.tc_student}…" if s.tc_student else "Sign in…")
-            a.triggered.connect(self._sign_in)
+            self._add_signin_items(m)
         else:
-            self._add_mission_items(m, tc)
+            teacher = tc.is_teacher()
+            if not teacher:                            # 'Due / Completed' is a student view
+                self._add_mission_items(m, tc)
+                m.addSeparator()
+            self._add_teacher_items(m, tc)
+            m.addAction("Messages…").triggered.connect(self._open_messages)
+            m.addAction("Set my photo…").triggered.connect(self._set_photo)
+            if not teacher:                            # groups + AI-proxy are student notions
+                self._add_group_items(m, tc)
+                m.addAction("AI may answer for me…").triggered.connect(self._ai_proxy_consent)
             m.addSeparator()
             m.addAction("Sync now").triggered.connect(self._connect_teaching_center)
+            m.addAction("Sign in as another user…").triggered.connect(self._sign_in_as)
             m.addAction("Sign out").triggered.connect(self._sign_out)
 
         m.addSeparator()
-        m.addAction("Teaching Center settings…").triggered.connect(self._open_settings)
+        m.addAction("Settings…").triggered.connect(self._open_settings)
         m.exec(self.mode_indicator.mapToGlobal(
             self.mode_indicator.rect().bottomRight()))
 
@@ -344,6 +494,191 @@ class MainWindow(QMainWindow):
     def _play_assigned(self, lesson_id: str) -> None:
         if self.assistant.enter_missions():
             self.assistant._start_assigned_mission(lesson_id)
+
+    # -- groups, messages, AI consent (Phases B–E) ---------------------------- #
+    def _add_group_items(self, menu, tc) -> None:
+        """Your team, and where they are on the mission. A class with no groups simply has no group
+        section — absence, not an error."""
+        try:
+            g = tc.my_group()
+        except Exception:                                    # noqa: BLE001
+            return
+        if not g.get("group"):
+            return
+        cap = menu.addAction(f"Group {g['group']}")
+        cap.setEnabled(False)
+        gid = f"group:{g['group']}"
+        menu.addAction("   Open group chat").triggered.connect(
+            lambda _=False, c=gid: self.assistant.open_conversation(c))
+        for m in g.get("members", []):
+            pr = m.get("progress") or {}
+            where = (f"Level {pr['level']}" if pr.get("level") else "—")
+            dot = "●" if m.get("online") else "○"
+            label = f"   {dot}  {m['name']}" + ("  (you)" if m.get("me") else f"   ·   {where}")
+            act = menu.addAction(label)
+            if m.get("me"):
+                act.setEnabled(False)
+            else:                              # click a teammate → open the DM
+                peer = m["id"]
+                act.triggered.connect(
+                    lambda _=False, p=peer: self.assistant.open_conversation(
+                        "dm:" + "|".join(sorted((self.ctx.settings.tc_student, p)))))
+
+    def _open_messages(self) -> None:
+        """Messages live IN the Ask GINI panel now — one conversation surface, GINI and people
+        together. Jump to the instructor thread."""
+        student = self.ctx.settings.tc_student
+        self.assistant.open_conversation(f"teacher:{student}")
+
+    def _set_photo(self) -> None:
+        """Pick an image → downscale to a small square → upload as a data-URL. Downscaling on the
+        client keeps the DB tiny (a phone photo is megabytes; the roster needs a thumbnail), and it
+        means we never ship the original off the machine."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a profile photo", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp)")
+        if not path:
+            return
+        data_url = _photo_data_url(path)
+        if not data_url:
+            QMessageBox.warning(self, "Couldn't read that", "That file isn't an image I can read.")
+            return
+
+        import threading
+        def work():
+            res = tc.set_photo(data_url)
+            self.ctx.log("Photo updated — your instructor will see it." if res.get("ok")
+                         else f"Couldn't set photo: {res.get('error', 'unknown error')}",
+                         "ok" if res.get("ok") else "error")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _add_signin_items(self, menu) -> None:
+        """The signed-out user menu: sign in as the saved user, or type a different username."""
+        s = self.ctx.settings
+        if s.tc_student:
+            menu.addAction(f"Sign in as {s.tc_student}…").triggered.connect(self._sign_in)
+        menu.addAction("Sign in as another user…").triggered.connect(self._sign_in_as)
+
+    def _add_teacher_items(self, menu, tc) -> None:
+        """TEACHER MODE — author fragments. Unlocked only when signed in as a teacher; students never
+        see it. The TC session's role is the single source of truth."""
+        if not tc.is_teacher():
+            return
+        cap = menu.addAction("Teacher tools")
+        cap.setEnabled(False)
+        menu.addAction("Fragment Manager…").triggered.connect(self._fragment_manager)
+        menu.addAction("Playtest an experiment…").triggered.connect(self._playtest_experiment)
+        menu.addSeparator()
+
+    def _playtest_experiment(self) -> None:
+        """Teacher: play a DRAFT experiment before approving it — the approval gate's playtest half.
+        Lists all experiments (draft + released); playing one drops into it as a mission so the
+        teacher proves the whole composition is winnable against the real engine."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None or not tc.is_teacher():
+            return
+        lessons = tc.list_lessons()
+        if not lessons:
+            QMessageBox.information(self, "Playtest", "No experiments yet — compose one in the "
+                                                     "Teaching Center console first.")
+            return
+        labels = [f"{le.get('title', le['id'])}  ·  {le.get('status', 'released')}" for le in lessons]
+        pick, ok = QInputDialog.getItem(self, "Playtest an experiment",
+                                        "Draft experiments are only visible to you until approved:",
+                                        labels, 0, False)
+        if not ok:
+            return
+        lid = lessons[labels.index(pick)]["id"]
+        if self.assistant.enter_missions():
+            self.assistant._start_assigned_mission(lid)
+
+    def _fragment_manager(self) -> None:
+        """Open the Fragment Manager (teacher mode): list / create / edit / delete fragments, with a
+        recording editor that reads objectives off the live canvas.
+
+        Shown NON-MODALLY (show(), not exec()) — recording needs the canvas to stay interactive, and a
+        modal dialog would swallow every drag-and-drop into the board. Kept on `self` so it isn't
+        garbage-collected while it floats."""
+        from .fragment_manager import FragmentManager
+        existing = getattr(self, "_frag_mgr", None)
+        if existing is not None:
+            existing.raise_(); existing.activateWindow()
+            return
+        self._frag_mgr = FragmentManager(self, self.ctx, author=self.ctx.settings.tc_student)
+        self._frag_mgr.destroyed.connect(lambda *_: setattr(self, "_frag_mgr", None))
+        self._frag_mgr.show()
+        self._frag_mgr.raise_()
+
+    def _ai_proxy_consent(self) -> None:
+        """'May an AI answer on my behalf when I'm away?' — the student's own call, and only if the
+        instructor granted hosting. Either one alone is not consent."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        tc = getattr(self.ctx, "teaching_center", None)
+        if tc is None:
+            return
+        choice, ok = QInputDialog.getItem(
+            self, "AI may answer for me",
+            "When you're away, may an AI answer your groupmates on your behalf?\n"
+            "(It is always labelled as an AI. It never speaks for you about anything personal,\n"
+            "and it refuses deadlines, exams and grades.)",
+            ["No — my messages just wait for me", "Yes — let it answer about coursework"], 0, False)
+        if not ok:
+            return
+        on = choice.startswith("Yes")
+        blurb = ""
+        if on:
+            blurb, _ = QInputDialog.getText(
+                self, "Anything it should know?",
+                "One line about what you're working on (optional):")
+        res = tc.set_ai_proxy(on, blurb or "")
+        if not res.get("ok"):
+            QMessageBox.information(self, "Not available",
+                                    res.get("error", "Your instructor hasn't enabled this."))
+            return
+        self.ctx.log(f"AI proxy {'enabled' if on else 'disabled'}.", "ok")
+
+    def _heartbeat(self) -> None:
+        """Tell the course server we're here, and where we are on the current mission — that's what
+        makes a group view worth opening. Off the GUI thread; a failed beat is a non-event.
+
+        Defensive throughout, because this fires on a QTimer: an exception raised here lands in the
+        Qt event loop (noisy in the app, and fatal under pytest-qt, where it fails whichever test
+        happens to be running). A client that can't beat — no client, a stub, a half-built one — is
+        simply skipped."""
+        tc = getattr(self.ctx, "teaching_center", None)
+        signed_in = getattr(tc, "signed_in", None)
+        beat = getattr(tc, "heartbeat", None)
+        if not callable(signed_in) or not callable(beat):
+            return
+        try:
+            if not signed_in():
+                return
+        except Exception:                                    # noqa: BLE001 — an unreachable centre
+            return
+        progress = {}
+        try:
+            ctrl = getattr(self.assistant, "_mission_ctrl", None)
+            m = getattr(ctrl, "mission", None) if ctrl else None
+            if m is not None:
+                sc = m.score()
+                res = m.last_results or []
+                level = next((r.level for r in res if r.status != "met"), 4)
+                progress = {"lesson_id": m.lesson.id, "title": m.lesson.title, "level": level,
+                            "met": sc.met, "total": sc.total, "band": sc.band}
+        except Exception:                                    # noqa: BLE001
+            progress = {}
+
+        def _beat() -> None:                                 # swallow in the worker too — a dropped
+            try:                                             # beat must never surface as a warning
+                beat(progress)
+            except Exception:                                # noqa: BLE001
+                pass
+        import threading
+        threading.Thread(target=_beat, daemon=True).start()
 
     def _persist_settings(self) -> None:
         """Save the current Settings to ~/.gini/config.json (used by the Cue Cards tour
@@ -444,9 +779,12 @@ class MainWindow(QMainWindow):
             return a
 
         # build the actions (same wiring as before — checkable, enable/disable, slots)
-        act("new", "new", "New project", self._new_project)
-        act("open", "open", "Open project", self._open_project_dialog)
-        act("save", "save", "Save project", self._save_project)
+        # The LEFT tray works INSIDE the current project — the express menu for its experiments.
+        # (Project-level operations — switch/create/delete a project — live on the centred
+        # navigator, so the two surfaces mean different things instead of duplicating each other.)
+        act("new", "new", "New experiment in this project", self._new_experiment)
+        act("open", "open", "Open an experiment from this project", self._open_experiment)
+        act("save", "save", "Save this experiment", self._save_project)
         act("compile", "compile", "Compile", self._compile)
         act("layout", "layout", "Arrange", self._auto_layout)
         self._connect_act = act("connect", "link", "Connect", self._toggle_connect, checkable=True)
@@ -574,22 +912,26 @@ class MainWindow(QMainWindow):
         self._nav_btn.setMenu(menu)
 
     def _build_nav_menu(self, menu) -> None:
+        """The centred navigator is PROJECT-level: which project am I in, and switch/create/
+        delete/list them. Experiments inside the current project are the left tray's job."""
         from ..app.paths import projects_dir
         from ..services import list_projects
         menu.clear()
-        header = menu.addAction(f"● {self._nav_btn.text()}")
+        header = menu.addAction(f"● {self._project_name()}")
         header.setEnabled(False)
+        sub = menu.addAction(f"    {len(self._experiments())} experiment(s) · "
+                             f"now: {self._experiment or '—'}")
+        sub.setEnabled(False)
         menu.addSeparator()
         menu.addAction("New project…", self._new_project)
         menu.addAction("Open project…", self._open_project_dialog)
-        menu.addAction("Save", self._save_project)
-        menu.addAction("Save As…", self._save_project_as)
         menu.addSeparator()
-        recents = list_projects(projects_dir())[:6]
-        if recents:
-            r = menu.addAction("Recent projects"); r.setEnabled(False)
-            for info in recents:
-                act = menu.addAction("   " + info["name"])
+        projects = list_projects(projects_dir())[:8]
+        if projects:
+            r = menu.addAction("Switch project"); r.setEnabled(False)
+            for info in projects:
+                n = info.get("experiments", 0)
+                act = menu.addAction(f"   {info['name']}" + (f"  ({n})" if n else ""))
                 act.setCheckable(True)
                 act.setChecked(info["path"] == self._project_dir)
                 act.triggered.connect(lambda _=False, p=info["path"]: self._switch_project(p))
@@ -606,6 +948,131 @@ class MainWindow(QMainWindow):
     def _set_project_label(self, name: str) -> None:
         if hasattr(self, "_nav_btn"):
             self._nav_btn.setText(name or "Untitled")
+
+    def _project_name(self) -> str:
+        from pathlib import Path
+        return Path(self._project_dir).name if self._project_dir else "Untitled"
+
+    def _experiments(self) -> list[str]:
+        from ..services import list_experiments
+        if not self._project_dir:
+            return []
+        return [e["name"] for e in list_experiments(self._project_dir)]
+
+    def _show_where(self) -> None:
+        """The nav chip names the project; the title adds › experiment once there's a choice to
+        make. With a single experiment the suffix is noise, so it's left off."""
+        proj = self._project_name()
+        self._set_project_label(proj)
+        exp = self._experiment
+        many = len(self._experiments()) > 1
+        self.setWindowTitle(f"gBuilder 6.0 — {proj}" + (f" › {exp}" if exp and many else ""))
+
+    # -- experiments (inside the current project) ---------------------------- #
+    def _new_experiment(self) -> None:
+        """Add another experiment to this project. The brief and the Ask GINI conversation are
+        project-level, so they carry over — that's the whole point of grouping experiments."""
+        from PySide6.QtWidgets import QInputDialog
+        from ..services import experiment_path
+        if self._switch_blocked():
+            return
+        if not self._project_dir:
+            self._save_project_as()                  # no project yet — make one first
+            if not self._project_dir:
+                return
+        name, ok = QInputDialog.getText(self, "New experiment", "Experiment name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if experiment_path(self._project_dir, name).exists():
+            self.ctx.log(f"“{name}” already exists in this project.", "info")
+            return
+        self._persist_current_project()              # keep the outgoing experiment
+        self._router_programs.clear()
+        from ..domain.topology import Topology
+        self._experiment = name
+        self._set_topology(Topology(name))
+        self.assistant.note_experiment(name)         # the canvas changed — tell the tutor
+        self._persist_current_project()              # materialise the new file
+        self._show_where()
+        self.ctx.log(f"New experiment “{name}” in “{self._project_name()}”.", "ok")
+
+    def _open_experiment(self) -> None:
+        """Pick another experiment in this project (the left tray's express switcher)."""
+        from PySide6.QtWidgets import QInputDialog
+        if self._switch_blocked():
+            return
+        names = self._experiments()
+        if not names:
+            self.ctx.log("This project has no other experiments yet — press ＋ to add one.", "info")
+            return
+        cur = self._experiment if self._experiment in names else names[0]
+        name, ok = QInputDialog.getItem(self, "Open experiment",
+                                        f"Experiments in “{self._project_name()}”:",
+                                        names, names.index(cur), False)
+        if ok and name:
+            self._switch_experiment(name)
+
+    def _switch_experiment(self, name: str) -> None:
+        from ..services import load_experiment
+        if not self._project_dir or name == self._experiment or self._switch_blocked():
+            return
+        self._persist_current_project()              # save the one we're leaving
+        try:
+            topo = load_experiment(self._project_dir, name)
+        except Exception as e:                       # noqa: BLE001
+            self.ctx.log(f"Couldn't open “{name}”: {e}", "error")
+            return
+        self._router_programs.clear()
+        self._experiment = name
+        self._set_topology(topo)
+        self.assistant.note_experiment(name)         # conversation continues, canvas changed
+        self._persist_current_project()              # remember which one is current
+        self._show_where()
+        self.ctx.log(f"Opened experiment “{name}”.", "ok")
+
+    def _rename_experiment(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        from ..services import rename_experiment
+        if not (self._project_dir and self._experiment) or self._switch_blocked():
+            return
+        new, ok = QInputDialog.getText(self, "Rename experiment", "New name:",
+                                       text=self._experiment)
+        new = (new or "").strip()
+        if not ok or not new or new == self._experiment:
+            return
+        self._persist_current_project()
+        if not rename_experiment(self._project_dir, self._experiment, new):
+            self.ctx.log(f"Couldn't rename to “{new}” (does it already exist?).", "info")
+            return
+        self._experiment = new
+        self.ctx.topology.name = new
+        self._persist_current_project()
+        self._show_where()
+        self.ctx.log(f"Renamed experiment to “{new}”.", "ok")
+
+    def _delete_experiment(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        from ..services import delete_experiment
+        if not (self._project_dir and self._experiment) or self._switch_blocked():
+            return
+        names = self._experiments()
+        if len(names) <= 1:
+            self.ctx.log("This is the project's only experiment — delete the project instead.",
+                         "info")
+            return
+        if QMessageBox.question(self, "Delete experiment",
+                                f"Delete “{self._experiment}” from this project?\n"
+                                f"The project's brief and AI conversation are kept."
+                                ) != QMessageBox.Yes:
+            return
+        gone = self._experiment
+        delete_experiment(self._project_dir, gone)
+        nxt = next((n for n in self._experiments() if n != gone), None)
+        if nxt:
+            self._experiment = None                  # force the switch to actually load
+            self._switch_experiment(nxt)
+        self.ctx.log(f"Deleted experiment “{gone}”.", "ok")
 
     # -- project operations ------------------------------------------------- #
     def _switch_blocked(self) -> bool:
@@ -631,14 +1098,15 @@ class MainWindow(QMainWindow):
         if folder.exists():
             self.ctx.log(f"A project named “{name}” already exists.", "info")
             return
+        from ..services.project import FIRST_EXPERIMENT
         self._persist_current_project()          # save whatever we were on
         self._project_dir = str(folder)
         self._project_path = None
+        self._experiment = FIRST_EXPERIMENT      # neutral — never the project's own name
         self._router_programs.clear()
         self._set_topology(Topology(name))
-        self.assistant.clear_conversation()
-        self._set_project_label(name)
-        self.setWindowTitle(f"gBuilder 6.0 — {name}")
+        self.assistant.clear_conversation()      # a NEW project = a fresh context (unlike a
+        self._show_where()                       # new experiment, which keeps the conversation)
         self._persist_current_project()          # materialise the folder on disk
         self.ctx.log(f"New project “{name}”.", "ok")
 
@@ -737,25 +1205,35 @@ class MainWindow(QMainWindow):
         self._router_programs.clear()
         self._project_dir = data["path"]
         self._project_path = None
+        self._experiment = data.get("experiment")
         self._set_topology(data["topology"])
         self.assistant.set_brief(data["brief"])
         self.assistant.load_ai_state(data["ai_state"])   # swap the Ask GINI conversation
-        self._set_project_label(data["name"])
-        self.setWindowTitle(f"gBuilder 6.0 — {data['name']}")
+        self._show_where()
         remember_project(data["path"])
-        self.ctx.log(f"Opened project “{data['name']}”.", "ok")
+        n = len(data.get("experiments") or [])
+        self.ctx.log(f"Opened project “{data['name']}” ({n} experiment(s), "
+                     f"now “{self._experiment}”).", "ok")
 
     def _persist_current_project(self) -> None:
-        """Write the active project folder (topology + brief + AI conversation)."""
+        """Write the active project: the CURRENT experiment's topology, plus the project-level
+        brief and Ask GINI conversation (shared by every experiment in the project)."""
         if not self._project_dir:
             return
         from pathlib import Path
         from ..app.paths import remember_project
         from ..services import save_project_dir
+        from ..services.project import FIRST_EXPERIMENT
         name = Path(self._project_dir).name
-        self.ctx.topology.name = name
+        # Fall back to the neutral first-experiment name, NEVER the project's own. This used to be
+        # `self._experiment or name`, which meant any caller that forgot to set `_experiment` (the
+        # Default project, Save-As) silently produced an experiment named after its project — so
+        # the experiment list looked like it contained the project itself.
+        exp = self._experiment or FIRST_EXPERIMENT
+        self.ctx.topology.name = exp
         save_project_dir(self._project_dir, self.ctx.topology, name=name,
-                         brief=self.assistant.brief(), ai_state=self.assistant.ai_state())
+                         brief=self.assistant.brief(), ai_state=self.assistant.ai_state(),
+                         experiment=exp)
         remember_project(self._project_dir)
 
     def _save_project(self) -> None:
@@ -773,11 +1251,15 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "Save project as", "Project name:", text=default)
         if not ok or not name.strip():
             return
+        from ..services.project import FIRST_EXPERIMENT
         ensure_dirs()
         self._project_dir = str(projects_dir() / name.strip())
         self._project_path = None
-        self._set_project_label(name.strip())
-        self.setWindowTitle(f"gBuilder 6.0 — {name.strip()}")
+        # never name the first experiment after the project (same rule as _new_project) — it made
+        # the experiment list look like it contained the project, and it collided with the very
+        # next "New experiment…" if the student typed the same name.
+        self._experiment = self._experiment or FIRST_EXPERIMENT
+        self._show_where()
         self._persist_current_project()
         self.ctx.log(f"Saved project “{name.strip()}”.", "ok")
 
@@ -821,9 +1303,10 @@ class MainWindow(QMainWindow):
         if is_project_dir(d):
             self._load_project_folder(str(d))
             return
+        from ..services.project import FIRST_EXPERIMENT
         self._project_dir = str(d)           # adopt the current (empty) canvas as Default
-        self._set_project_label("Default")
-        self.setWindowTitle("gBuilder 6.0 — Default")
+        self._experiment = FIRST_EXPERIMENT
+        self._show_where()
         self._persist_current_project()      # materialise it so it's there next launch
         self.ctx.log("Working in the Default project — your topology and Ask GINI "
                      "conversation here are saved and restored across restarts.", "info")
@@ -841,6 +1324,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._persist_current_project()      # never lose the active project's work / chat
+        # Reap any hardware worker still talking to a board over USB. Quitting while one
+        # runs garbage-collects a live QThread, which Qt turns into an abort — so the app
+        # would "crash on exit" for anyone who closed the window mid-scan.
+        from .worker_host import drain
+        drain()
         super().closeEvent(e)
 
     def _refresh_icons(self) -> None:
@@ -870,6 +1358,9 @@ class MainWindow(QMainWindow):
 
         self.inspector = Inspector(self.ctx, self.api, self.theme)
         self.inspector.query_fn = self.element_query
+        # Boards report through the relay, not a container — see Inspector._board_live_text.
+        self.inspector.board_status_fn = self._gloader.orchestrator.board_status
+        self.inspector.board_action_fn = self.board_action
         self.inspector.stats_fn = self._element_stats
         self.inspector.stats_all_fn = self._element_stats_all
         insp = QDockWidget("Inspector", self)
@@ -931,10 +1422,17 @@ class MainWindow(QMainWindow):
             menu.addAction(a)
             return a
 
-        add(filem, "&New Project…", self._new_project, "Ctrl+N")
-        add(filem, "&Open Project…", self._open_project_dialog, "Ctrl+O")
-        add(filem, "&Save", self._save_project, "Ctrl+S")
-        add(filem, "Save &As…", self._save_project_as, "Ctrl+Shift+S")
+        # Experiments (inside the current project) — the everyday verbs get the shortcuts.
+        add(filem, "&New Experiment…", self._new_experiment, "Ctrl+N")
+        add(filem, "&Open Experiment…", self._open_experiment, "Ctrl+O")
+        add(filem, "&Save Experiment", self._save_project, "Ctrl+S")
+        add(filem, "&Rename Experiment…", self._rename_experiment)
+        add(filem, "&Delete Experiment…", self._delete_experiment)
+        filem.addSeparator()
+        # Projects (the container: brief + AI conversation + a family of experiments)
+        add(filem, "New &Project…", self._new_project, "Ctrl+Shift+N")
+        add(filem, "Open Pro&ject…", self._open_project_dialog, "Ctrl+Shift+O")
+        add(filem, "Save Project &As…", self._save_project_as, "Ctrl+Shift+S")
         add(filem, "Edit Project &Brief…", self._edit_brief)
         filem.addSeparator()
         add(filem, "&Import topology (.gini)…", self._open)   # legacy single-file import
@@ -948,18 +1446,126 @@ class MainWindow(QMainWindow):
         quit_act = add(filem, "&Quit", self.close, "Ctrl+Q")
         quit_act.setMenuRole(QAction.MenuRole.NoRole)
 
+        # Hardware: real GINI32 boards. Its own menu because setting a board up is an
+        # action a student takes repeatedly, not a preference — and because a first-time
+        # user has to be able to FIND it without being told where to look.
+        # Ordered as a board's life runs, not alphabetically: flash a new one, set it up,
+        # release it when it is someone else's turn, and list what is out there. Flashing
+        # comes FIRST because it is the only step a brand-new board can start with — Set
+        # Up talks to a console that does not exist until firmware is on the board.
+        hwm = mb.addMenu("Hard&ware")
+        flash_act = add(hwm, "&Flash a Board…", self._flash_board)
+        flash_act.setMenuRole(QAction.MenuRole.NoRole)
+        setup_act = add(hwm, "&Set Up a Board…", self._setup_board, "Ctrl+Shift+B")
+        setup_act.setMenuRole(QAction.MenuRole.NoRole)
+        reset_act = add(hwm, "&Reset a Board…", self._reset_board)
+        reset_act.setMenuRole(QAction.MenuRole.NoRole)
+        hwm.addSeparator()
+        add(hwm, "&List Boards…", self._show_boards)
+
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
         tour_act.setMenuRole(QAction.MenuRole.NoRole)
 
-    def _new(self) -> None:
-        from ..domain import Topology
-        self._project_path = None
-        self._router_programs.clear()
-        self._set_topology(Topology("untitled"))
-        self.setWindowTitle("gBuilder 6.0 — networks + cloud")
-        self.ctx.log("New topology.", "info")
+    # ---------------------------------------------------------------- GINI32 boards
 
+    def _known_board_ids(self) -> list[str]:
+        """Every board id we have reason to believe exists: ones on this canvas, and
+        ones a running relay has actually heard from."""
+        ids = []
+        for node in getattr(self.canvas.scene_, "nodes", {}).values():
+            if node.inst.type_key == "gini32":
+                bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
+                if bid:
+                    ids.append(bid)
+        for bid in (getattr(self, "_board_state", None) or {}):
+            if bid not in ids:
+                ids.append(bid)
+        return ids
+
+    def _flash_board(self) -> None:
+        """Put firmware on a board, then offer to set it up in the same sitting.
+
+        Chained deliberately: a freshly flashed board is useless until it has the lab
+        Wi-Fi, and making the student find the next menu item themselves is exactly the
+        kind of gap that turns a five-minute task into a support question.
+        """
+        from .flash_dialog import FlashBoardDialog
+        from PySide6.QtWidgets import QMessageBox
+        dlg = FlashBoardDialog(self)
+        if not dlg.exec():
+            return
+        self.ctx.log("GINI32: board flashed", "ok")
+        if QMessageBox.question(
+                self, "Set the board up now?",
+                "The board has firmware but no lab Wi-Fi yet, so it cannot reach "
+                "gBuilder.\n\nSet it up now?") == QMessageBox.StandardButton.Yes:
+            self._setup_board()
+
+    def _reset_board(self) -> None:
+        """Release a board's pairing over USB — see ui/reset_dialog.py for why USB."""
+        from .reset_dialog import ResetBoardDialog
+        dlg = ResetBoardDialog(self)
+        if dlg.exec():
+            self.ctx.log("GINI32: board released — any gBuilder may claim it now", "ok")
+
+    def _setup_board(self) -> None:
+        from .board_dialog import BoardSetupDialog
+        dlg = BoardSetupDialog(self, self.ctx.settings, self._known_board_ids())
+        if dlg.exec() and getattr(dlg, "applied_id", ""):
+            # The dialog put the lab Wi-Fi on Settings; persist it so the next board
+            # is a single click.
+            from ..app.paths import PERSISTED_KEYS, save_config
+            s = self.ctx.settings
+            # Remember the id so the canvas can offer it later. Without this the
+            # student has to retype it from memory, and a typo yields a board that
+            # is online and healthy yet invisible to the topology.
+            known = [b for b in (getattr(s, "known_boards", None) or [])
+                     if b != dlg.applied_id]
+            s.known_boards = ([dlg.applied_id] + known)[:32]
+            save_config({k: getattr(s, k) for k in PERSISTED_KEYS})
+            self.ctx.log(f"GINI32: board '{dlg.applied_id}' set up for Wi-Fi "
+                         f"'{s.board_wifi_ssid}'. Use that as the BoardID on the "
+                         f"canvas.", "ok")
+
+    def _show_boards(self) -> None:
+        """What the relay currently knows about real boards."""
+        from PySide6.QtWidgets import QMessageBox
+        st = None
+        try:
+            st = self._gloader.orchestrator.board_status()
+        except Exception:
+            st = None
+        if st is None:
+            QMessageBox.information(
+                self, "Boards",
+                "No running lab to ask.\n\nBoard status comes from the gbridge relay, "
+                "which runs while a topology containing a GINI32 element is up. Draw a "
+                "board, press Run, then look here.\n\nTo set a board up over USB, use "
+                "Hardware → Set Up a Board.")
+            return
+        boards = st.get("boards", [])
+        if not boards:
+            QMessageBox.information(self, "Boards",
+                                    "The lab is running but no GINI32 boards are drawn "
+                                    "on the canvas.")
+            return
+        lines = []
+        for b in boards:
+            where = b.get("addr") or "not seen yet"
+            state = "online" if b.get("online") else "OFFLINE"
+            lines.append(f"{b['board_id']}  —  {state}  ({where})\n"
+                         f"    fabric {b.get('ip') or '?'}   mode {b.get('mode') or '?'}"
+                         f"   clients {len(b.get('clients') or [])}")
+        foreign = st.get("foreign") or []
+        if foreign:
+            lines.append("\nHeard, but claimed by another computer:")
+            lines += [f"  {f['board_id']} (owner {f['owner']})" for f in foreign]
+        QMessageBox.information(self, "Boards", "\n".join(lines))
+
+    # Legacy single-file `.gini` import. Kept because older labs and shared files use it; the
+    # matching _new/_save/_save_as have been removed (nothing called them since projects became
+    # folders, and their separate `_project_path` tracker only invited confusion).
     def _open(self) -> None:
         from ..app.paths import projects_dir
         from ..services import PROJECT_EXT
@@ -969,25 +1575,6 @@ class MainWindow(QMainWindow):
             f"GINI project (*{PROJECT_EXT});;All files (*)")
         if path:
             self._load_from_path(path)
-
-    def _save(self) -> None:
-        if self._project_path:
-            self._save_to_path(self._project_path)
-        else:
-            self._save_as()
-
-    def _save_as(self) -> None:
-        from ..app.paths import ensure_dirs, projects_dir
-        from ..services import PROJECT_EXT
-        from PySide6.QtWidgets import QFileDialog
-        ensure_dirs()
-        default = str(projects_dir() / f"untitled{PROJECT_EXT}")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save project", default, f"GINI project (*{PROJECT_EXT})")
-        if path:
-            if not path.endswith(PROJECT_EXT):
-                path += PROJECT_EXT
-            self._save_to_path(path)
 
     def _save_to_path(self, path: str) -> None:
         from pathlib import Path
@@ -1094,6 +1681,7 @@ class MainWindow(QMainWindow):
     def _toggle_edge_style(self, bent: bool) -> None:
         self.ctx.settings.connector_style = "orthogonal" if bent else "straight"
         self.ctx.bus.edges_restyled.emit()
+        self._persist_settings()          # a toolbar toggle is still a preference — remember it
         self.ctx.log(f"Connectors: {'bent (rounded)' if bent else 'straight'}.", "info")
 
     def _toggle_manual_addr(self, on: bool) -> None:
@@ -1229,7 +1817,10 @@ class MainWindow(QMainWindow):
                          "(Settings → Backend) to run VM-isolated workloads.", "info")
             return
         self._last_services = list(cfg.services)
+        self._last_machines = list(cfg.machines)     # headful Desktops carry a noVNC port here
         self._last_k8s = list(cfg.k8s)
+        self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
+        self._board_state = {}          # board_id -> live state, refreshed by the poller
         self._workdir = tempfile.mkdtemp(prefix="gini-lab-")
         self.ctx.log(f"Launching {len(cfg.machines)} machines + {len(cfg.routers)} "
                      f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
@@ -1243,8 +1834,8 @@ class MainWindow(QMainWindow):
 
         self.run_button.set_state("booting")        # ring fills as containers come up
 
-        def worker(workdir=self._workdir, ai=auto_internet):
-            ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai)
+        def worker(workdir=self._workdir, ai=auto_internet, lid=self._laptop_id()):
+            ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai, laptop_id=lid)
             self.ctx.bus.run_state.emit(ok, msg)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1258,7 +1849,26 @@ class MainWindow(QMainWindow):
             self._set_runtime_status("running")
             self._poll.start()                  # reconcile with real container state
             self.ctx.log("Topology running on Docker.", "ok")
+            # GINI32: say out loud whether real boards can find this lab, and on which
+            # address. Discovery failing silently is indistinguishable from a board
+            # being broken, and it sends people debugging the wrong end of the link.
+            if getattr(self, "_last_gbridge", None):
+                where = getattr(self._gloader.orchestrator, "advertising", None)
+                boards = ", ".join(b.board_id for b in self._last_gbridge)
+                if where:
+                    self.ctx.log(f"GINI32: announcing this lab at {where} — boards "
+                                 f"expected: {boards}", "ok")
+                    self.ctx.log("GINI32: a board must be on the SAME Wi-Fi as this Mac; "
+                                 "if it never finds the lab, use `set server "
+                                 f"{where.split(':')[0]}` on the board.", "info")
+                else:
+                    why = getattr(self._gloader.orchestrator, "advertise_error", "")
+                    self.ctx.log("GINI32: could NOT announce on the network — boards will "
+                                 "not discover this lab. Set the address by hand on the "
+                                 "board: `set server <this Mac's IP>`."
+                                 + (f"  ({why})" if why else ""), "warn")
             self._wire_xv6_providers()          # attach live GDB bridges to any xv6 kernels
+            self._populate_overlay_hosts()      # names resolve over gini0, not the Docker bridge
             grafana = None
             for s in getattr(self, "_last_services", []):   # surface web consoles
                 for p in s.ports:
@@ -1298,6 +1908,7 @@ class MainWindow(QMainWindow):
         self._update_status()
 
         def worker():
+            self.ctx.stop_all_riders()             # kill rider processes while the stack is still up
             ok, msg = self._remote.stop() if self._remote is not None else self._gloader.down()
             if not ok:
                 self.ctx.log(f"Stop issue: {msg}", "error")
@@ -1328,6 +1939,10 @@ class MainWindow(QMainWindow):
                 self._set_runtime_status("idle")
                 self.dashboard.stop()           # freeze the session's GINI $ bill
                 self.dashboard.set_grafana_url(None)
+                # Devices on a board's radio are facts about a RUNNING lab. With the
+                # lab down we no longer know anything, so stop claiming we do.
+                self.canvas.clear_live_clients()
+                self._board_state = {}
                 self._fabric_poll.stop()
                 self._k8s_poll.stop()
                 self.dashboard.set_fabric({})
@@ -1356,8 +1971,10 @@ class MainWindow(QMainWindow):
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
             elif role in ("router", "ovs", "controller", "service", "compute", "k8scluster",
-                          "xv6"):
+                          "xv6", "oszoo"):
                 st = states.get(_svc(node.inst.name))            # each its own container
+                # OS Zoo card tracks its emulator: the container stays up while QEMU/DOSBox/
+                # Basilisk runs, so "running" here means the guest is actually up.
                 node.set_status("running" if st == "running"
                                 else "error" if st else "idle")
             elif role in ("k8sworkload", "hpa", "k8snode"):      # live inside the cluster
@@ -1374,6 +1991,138 @@ class MainWindow(QMainWindow):
                 xid = self._xv6_for_peripheral(node.inst.id)
                 st = states.get(_svc(self.ctx.topology.devices[xid].name)) if xid else None
                 node.set_status("running" if st == "running" else "idle")
+            elif role == "rider":                   # Source/Sink: 'ready' when its donor is up
+                donor = self.ctx.topology.donor_of(node.inst.id)
+                if donor is None:
+                    node.set_status("idle")
+                else:
+                    dst = fabric if _role(donor.type_key) == "switch" \
+                        else states.get(_svc(donor.name))
+                    node.set_status("ready" if dst == "running"
+                                    else "error" if dst else "idle")
+            elif role == "gini32":
+                # A board has no container: it is real hardware, so the only thing that
+                # means "connected" is that it actually checked in. Distinguish "the lab
+                # is up and we are waiting for hardware" from "nothing is running" —
+                # they look identical otherwise, and only one of them is a problem.
+                bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
+                st = (getattr(self, "_board_state", None) or {}).get(bid)
+                if st and st.get("online"):
+                    node.set_status("running")            # -> chip reads "connected"
+                elif not bid:
+                    node.set_status("error")              # -> "no board": nothing can attach
+                else:
+                    node.set_status("searching")
+
+        self._poll_boards()
+
+    def _laptop_id(self) -> str:
+        """This install's identity to a board, minted once and then stable.
+
+        A board records the id of the laptop that claimed it and ignores every other
+        laptop — which is what stops thirty students in one room from taking each
+        other's hardware. It must therefore survive restarts.
+        """
+        lid = getattr(self.ctx.settings, "laptop_id", "") or ""
+        if not lid:
+            import uuid
+            lid = f"gb-{uuid.uuid4().hex[:12]}"
+            self.ctx.settings.laptop_id = lid
+            self._persist_settings()
+        return lid
+
+    def _persist_settings(self) -> None:
+        from ..app.paths import PERSISTED_KEYS, save_config
+        save_config({k: getattr(self.ctx.settings, k) for k in PERSISTED_KEYS})
+
+    def board_action(self, action: str, board: str) -> bool:
+        """Claim / release / blink a board, and remember what we own."""
+        ok = self._gloader.orchestrator.board_action(action, board)
+        if not ok:
+            return False
+        claimed = dict(getattr(self.ctx.settings, "claimed_boards", None) or {})
+        if action == "claim":
+            claimed[board] = {"claimed_at": time.time()}
+            self.ctx.log(f"GINI32: claimed {board} — it now ignores other laptops", "ok")
+        elif action == "release":
+            claimed.pop(board, None)
+            self.ctx.log(f"GINI32: released {board} — anyone may claim it now", "info")
+        else:
+            self.ctx.log(f"GINI32: {board} should be blinking — look at the bench", "info")
+        if action in ("claim", "release"):
+            self.ctx.settings.claimed_boards = claimed
+            self._persist_settings()
+        return True
+
+    @staticmethod
+    def _ap_gateway(subnet: str) -> str:
+        """The board's own address on its hotspot: the .1 of the physical subnet.
+
+        The firmware takes .1 and DHCPs the rest (gb_ap_configure), so this is derived
+        rather than reported — one fact, one place. Returns "" for anything unparsable,
+        because a wrong address on the canvas is worse than none.
+        """
+        head = (subnet or "").split("/")[0].strip()
+        parts = head.split(".")
+        if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            return ""
+        return ".".join(parts[:3] + ["1"])
+
+    def _poll_boards(self) -> None:
+        """Refresh real GINI32 board state, and the devices attached to their radios.
+
+        Devices are OBSERVED, not drawn: a phone joining a board's hotspot is a fact
+        about the physical world, so it appears as an ephemeral node and disappears
+        when it leaves. It is never written into the saved topology.
+        """
+        if not getattr(self, "_last_gbridge", None):
+            return
+        st = self._gloader.orchestrator.board_status()
+        if st is None:
+            return
+        boards = {b["board_id"]: b for b in st.get("boards", [])}
+        was_online = {k: bool(v.get("online"))
+                      for k, v in (getattr(self, "_board_state", None) or {}).items()}
+        self._board_state = boards
+
+        # element id -> the devices its board currently carries
+        live: dict[str, list[dict]] = {}
+        for node in self.canvas.scene_.nodes.values():
+            if node.inst.type_key != "gini32":
+                continue
+            bid = str((node.inst.properties or {}).get("BoardID", "")).strip()
+            b = boards.get(bid)
+            if not b:
+                node.set_board_addr("")
+                continue
+            # Channel is reported by the hardware, never set here (APSTA forces it).
+            ch = b.get("channel") or 0
+            shown = f"{ch} (from '{b.get('uplink') or '?'}')" if ch else ""
+            if (node.inst.properties or {}).get("Channel") != shown:
+                node.inst.properties["Channel"] = shown
+            if b.get("online"):
+                live[node.inst.id] = list(b.get("clients") or [])
+                # The hotspot's own address, so the node says WHERE the board is and not
+                # merely that it exists — every other element on the canvas shows its
+                # address, and a board was the one thing you had to go and look up.
+                # Cleared below the moment it goes quiet: a stale address on a board that
+                # is not there is worse than no address, because it looks reachable.
+                node.set_board_addr(self._ap_gateway(b.get("physical_subnet") or ""))
+            else:
+                node.set_board_addr("")
+
+        # Tell the Inspector, which otherwise keeps showing a board that has gone away —
+        # it reads board state once, when the panel is built.
+        now_online = {k: bool(v.get("online")) for k, v in boards.items()}
+        if now_online != was_online:
+            self.ctx.bus.boards_changed.emit()
+
+        changed = self.canvas.set_live_clients(live)
+        if changed:
+            for gone in changed.get("left", []):
+                self.ctx.log(f"GINI32: device {gone} left the radio", "info")
+            for came in changed.get("joined", []):
+                self.ctx.log(f"GINI32: device {came} joined the radio", "ok")
 
     def _set_runtime_status(self, status: str) -> None:
         from ..services.compiler import _role
@@ -1381,7 +2130,7 @@ class MainWindow(QMainWindow):
             if _role(node.inst.type_key) in ("machine", "switch", "router", "ovs",
                                              "controller", "service", "compute", "function",
                                              "k8scluster", "k8sworkload", "hpa", "k8snode",
-                                             "xv6", "peripheral"):
+                                             "xv6", "oszoo", "peripheral"):
                 node.set_status(status)
 
     def _do_recompute(self) -> None:
@@ -1390,6 +2139,44 @@ class MainWindow(QMainWindow):
         self._recompute_addressing()
         self._revalidate()
         self._rebill()
+
+    def _populate_overlay_hosts(self) -> None:
+        """Write peer name→overlay-IP lines into each machine's /etc/hosts, so name resolution
+        (getent/DNS Probe) and ping/reach ride the DRAWN gini0 network instead of Docker's bridge.
+        Off the GUI thread — it's a docker exec per machine. Containers are fresh each run, so no
+        accumulation. This is the 'small Phase-2.x': it makes reachability follow the topology."""
+        import shlex
+        import subprocess
+        import threading
+        from ..services.compiler import _role, _svc, overlay_hosts
+        orch = getattr(self.ctx, "orchestrator", None)
+        if orch is None:
+            return
+        hosts = overlay_hosts(getattr(self.ctx, "addressing", {}) or {})
+        if len(hosts) < 2:
+            return
+        dc = list(getattr(orch, "_dc", ["docker", "compose"]))
+        wd = getattr(orch, "workdir", None)
+        devs = [d for d in self.ctx.topology.devices.values()
+                if _role(d.type_key) in ("machine", "router", "compute")]
+
+        # include SELF, and PREPEND — Docker puts the container's own name→bridge line at the TOP of
+        # /etc/hosts, so a getent/ping for the machine's own name would hit the bridge unless our
+        # overlay line comes first. `> /etc/hosts` truncates-in-place (works on the bind mount; `mv`
+        # wouldn't). Docker's original lines stay below, so nothing that needs the bridge id breaks.
+        block = "\n".join(f"{ip}\t{nm}" for nm, ip in hosts.items())
+
+        def work():
+            for dev in devs:
+                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc",
+                       "{ printf '%%s\\n' %s; cat /etc/hosts; } > /tmp/gini_hosts && "
+                       "cat /tmp/gini_hosts > /etc/hosts" % shlex.quote(block)]
+                try:
+                    subprocess.run(cmd, cwd=str(wd) if wd else None,
+                                   capture_output=True, timeout=8)
+                except Exception:                # noqa: BLE001 — best-effort; a slow box just misses
+                    pass
+        threading.Thread(target=work, daemon=True).start()
 
     def _recompute_addressing(self) -> None:
         from ..services.compiler import address_map
@@ -1712,7 +2499,7 @@ class MainWindow(QMainWindow):
             if is_router:
                 # the real C gRouter: run one CLI command over its control socket
                 cmd = ["docker", "compose", "exec", "-T", svc, "python3",
-                       "/build/grouter-zig/grconsole.py", f"/run/{svc}.ctl",
+                       "/build/grouter-build/grconsole.py", f"/run/{svc}.ctl",
                        "--once", command]
             else:
                 cmd = ["docker", "compose", "exec", "-T", "fabric",
@@ -1805,8 +2592,17 @@ class MainWindow(QMainWindow):
         if dev.type_key == "xv6":                # xv6 Machine -> the OS workbench
             self._open_machine_lab(device_id)
             return
+        if _role(dev.type_key) == "oszoo":       # OS Zoo -> the historical OS in an embedded screen
+            self._open_zoo_lab(device_id)
+            return
+        if dev.type_key == "desktop":            # headful Machine -> its graphical desktop over noVNC
+            self._open_desktop_console(device_id)
+            return
         if dev.type_key in ("terminal", "storage_volume"):
             self._open_peripheral(device_id)     # Terminal / disk view on its xv6
+            return
+        if getattr(dev.type, "rider", False):    # a Source/Sink -> toggle it on/off on its donor
+            self._toggle_rider(device_id)
             return
         # a running service with a web dashboard -> open it (Grafana, MinIO, …)
         if self._running and _role(dev.type_key) == "service":
@@ -1817,6 +2613,88 @@ class MainWindow(QMainWindow):
                 self._open_console(device_id)
                 return
         self._open_terminal(device_id)
+
+    def _toggle_rider(self, device_id: str) -> None:
+        """Double-click a Source/Sink → start it (runs continuously, output streams to its Live tab)
+        or stop it. Off the GUI thread since the start/kill exec can block briefly."""
+        import threading
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        threading.Thread(target=lambda: self.ctx.toggle_rider(device_id), daemon=True).start()
+
+    def _toggle_xv6_rider(self, rider_id: str) -> dict:
+        """Start/stop an xv6 rider (Shell Probe / Workload) over the machine's console. Called by
+        ctx.toggle_rider for qemu-serial riders, so double-click and the inspector both reach here."""
+        import threading
+        dev = self.ctx.topology.devices.get(rider_id)
+        if dev is None:
+            return {"ok": False}
+        if rider_id in self._xv6_rider_sessions:              # running -> stop
+            self._xv6_rider_sessions[rider_id]["stop"] = True
+            return {"ok": True, "running": False}
+        donor = self.ctx.topology.donor_of(rider_id)
+        provider = getattr(self, "_xv6_providers", {}).get(donor.id) if donor else None
+        if provider is None:
+            self.ctx.log(f"{dev.name}: run the xv6 Machine first (press Run).", "info")
+            self.ctx.bus.rider_ran.emit(rider_id, {"ok": False, "running": False})
+            return {"ok": False, "error": "xv6 not running"}
+        from ..domain import riders as R
+        try:
+            cmd = R.xv6_command(dev.type_key, dev.properties)
+        except R.RiderError as e:
+            self.ctx.log(f"{dev.name}: {e}", "info")
+            self.ctx.bus.rider_ran.emit(rider_id, {"ok": False, "running": False})
+            return {"ok": False, "error": str(e)}
+        sess = self._xv6_rider_sessions[rider_id] = {"stop": False}
+        self.ctx.log(f"{dev.name} → xv6: {cmd}", "info")
+        threading.Thread(target=self._xv6_reader, args=(rider_id, provider, cmd, sess),
+                         daemon=True).start()
+        return {"ok": True, "running": True}
+
+    def _xv6_reader(self, rider_id: str, provider, cmd: str, sess: dict) -> None:
+        """Type the command into the xv6 console and stream the new output back as rider snapshots
+        (reusing the same rider_ran path the inspector Live tab renders)."""
+        import time
+        lines: list[str] = []
+
+        def emit(running: bool) -> None:
+            raw = "\n".join(lines[-300:])
+            snap = {"ok": True, "running": running, "raw": raw,
+                    "measurement": {"ok": bool(raw), "lines": len(lines)},
+                    "summary": f"{len(lines)} lines"}
+            self.ctx.rider_results[rider_id] = snap
+            self.ctx.bus.rider_ran.emit(rider_id, snap)
+
+        try:
+            _, cur = provider.console_since(0)               # start after the current console tail
+            provider.send_input(cmd + "\n")
+            emit(True)
+            deadline = time.time() + 12                      # stream a while, or until stopped
+            while not sess.get("stop") and time.time() < deadline:
+                try:
+                    text, cur = provider.console_since(cur)
+                except Exception:                            # noqa: BLE001 — bridge dropped
+                    break
+                if text:
+                    lines.extend(text.split("\n"))
+                    emit(True)
+                time.sleep(0.3)
+        except Exception as e:                               # noqa: BLE001
+            self.ctx.log(f"xv6 rider error: {e}", "info")
+        self._xv6_rider_sessions.pop(rider_id, None)
+        emit(False)
+
+    def _on_rider_state(self, rider_id: str, snap) -> None:
+        """Reflect a rider's live state on its node chip: green 'running' while it streams, back to
+        'ready' (donor up) or 'idle' (topology down) when it stops."""
+        node = self.canvas.scene_.nodes.get(rider_id)
+        if node is None:
+            return
+        if snap and snap.get("running"):
+            node.set_status("running")
+        else:
+            node.set_status("ready" if self._running else "idle")
 
     def _open_router_lab(self, device_id: str) -> None:
         from ..domain.router_modules import RouterProgram
@@ -1944,11 +2822,98 @@ class MainWindow(QMainWindow):
         from .machine_lab import MachineLab
         dev = self.ctx.topology.devices[device_id]
         ms = self._machine_state_for(device_id)
-        self._machine_lab = MachineLab(
-            self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
-            on_console=lambda: self._open_terminal(device_id))
+        try:
+            self._machine_lab = MachineLab(
+                self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
+                on_console=lambda: self._open_terminal(device_id))
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.ctx.bus.log.emit("error", f"Machine Lab failed to open: {e}\n{tb}")
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                box = QMessageBox(self)
+                box.setWindowTitle("Machine Lab failed to open")
+                box.setIcon(QMessageBox.Warning)
+                box.setText(f"The Machine Lab could not open:\n{e}")
+                box.setDetailedText(tb)      # expandable, selectable traceback to copy
+                box.exec()
+            except Exception:
+                pass
+            return
         self._machine_lab.show()
         self._machine_lab.raise_()
+
+    def _open_desktop_console(self, device_id: str) -> None:
+        """Open a headful Desktop machine's graphical screen (X served over noVNC) embedded in a
+        window — the same viewer the OS Zoo uses. Falls back to the system browser if QtWebEngine
+        isn't available. Needs the topology running (the container publishes the noVNC port)."""
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        if not self._running:
+            self.ctx.log("Start the topology first (Run), then open the Desktop screen.", "info")
+            return
+        from ..services.compiler import _svc
+        svc = _svc(dev.name)
+        port = next((getattr(m, "novnc_port", 0) for m in getattr(self, "_last_machines", [])
+                     if _svc(m.name) == svc and getattr(m, "novnc_port", 0)), 0)
+        if not port:
+            self.ctx.log(f"{dev.name}: no desktop console — is it running as a Desktop (gui) host?",
+                         "info")
+            return
+        url = f"http://localhost:{port}/vnc.html?autoconnect=1&resize=remote"
+        try:
+            from .zoo_lab import ZooLab
+        except Exception as e:                    # QtWebEngine missing -> browser fallback
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(url))
+            self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
+                         f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
+            return
+        self._desktop_lab = ZooLab(self, self.theme, dev, url)
+        self._desktop_lab.show()
+        self._desktop_lab.raise_()
+        self.ctx.log(f"Opening {dev.name} desktop: {url}", "ok")
+
+    def _open_zoo_lab(self, device_id: str) -> None:
+        """Open the Zoo Lab on an OS Zoo element — the historical OS running under emulation,
+        its screen embedded over noVNC. Needs the topology running (the container serves the
+        framebuffer). If QtWebEngine isn't available, fall back to the system browser so the
+        feature still works with no extra dependency."""
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        if not self._running:
+            self.ctx.log("Start the topology first (Run), then open the OS Zoo screen.", "info")
+            return
+        from ..services.compiler import _svc
+        svc = _svc(dev.name)
+        screen = None
+        for s in getattr(self, "_last_services", []):
+            if _svc(s.name) == svc:
+                screen = next((p for p in s.ports
+                               if p.get("web") and p.get("label") == "screen"), None)
+                break
+        if screen is None:
+            self.ctx.log(f"{dev.name}: no OS Zoo screen port — rebuild the image (gini-oszoo).",
+                         "info")
+            return
+        url = f"http://localhost:{screen['host']}{screen.get('path', '')}"
+        try:
+            from .zoo_lab import ZooLab
+        except Exception as e:                    # QtWebEngine missing -> browser fallback
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(url))
+            self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
+                         f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
+            return
+        self._zoo_lab = ZooLab(self, self.theme, dev, url)
+        self._zoo_lab.show()
+        self._zoo_lab.raise_()
+        self.ctx.log(f"Opening {dev.name} (OS Zoo): {url}", "ok")
 
     def _open_console(self, device_id: str) -> None:
         """Open a service's web dashboard (Grafana, MinIO, RabbitMQ, …) in the browser.
@@ -2042,7 +3007,7 @@ class MainWindow(QMainWindow):
             kind = "shell"
         elif role in ("router", "ovs"):   # real C gRouter CLI over its control socket
             cmd = (f"docker compose exec {svc} python3 "
-                   f"/build/grouter-zig/grconsole.py /run/{svc}.ctl")
+                   f"/build/grouter-build/grconsole.py /run/{svc}.ctl")
             kind = "OpenFlow switch console" if role == "ovs" else "router console"
         elif role == "controller":   # POX container — a shell to inspect it / tail logs
             cmd = f"docker compose exec {svc} sh"
@@ -2157,6 +3122,9 @@ class MainWindow(QMainWindow):
         self._persist_settings()
         self.canvas.scene_.set_theme(self.theme.theme)
         self._refresh_icons()
+        # the pill widget paints its own font — nudge it to re-measure/repaint at the new text size
+        if getattr(self, "mode_indicator", None) is not None:
+            self.mode_indicator.updateGeometry(); self.mode_indicator.update()
         self._update_status()
 
     def _on_log(self, level: str, message: str) -> None:

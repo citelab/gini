@@ -19,12 +19,13 @@ from dataclasses import dataclass, field
 
 # The stock xv6-riscv system calls (numbers 1..21), used to reject name collisions and to
 # compute the next free syscall number.
+# current xv6-riscv: fork=1 .. sync=22 (note `pause`, not `sleep`, and `sync` at 22)
 STOCK_SYSCALLS = (
     "fork", "exit", "wait", "pipe", "read", "kill", "exec", "fstat", "chdir", "dup",
-    "getpid", "sbrk", "sleep", "uptime", "open", "write", "mknod", "unlink", "link",
-    "mkdir", "close",
+    "getpid", "sbrk", "pause", "uptime", "open", "write", "mknod", "unlink", "link",
+    "mkdir", "close", "sync",
 )
-NEXT_FREE_NUMBER = len(STOCK_SYSCALLS) + 1        # 22
+NEXT_FREE_NUMBER = len(STOCK_SYSCALLS) + 1        # 23
 
 ARG_TYPES = ("int", "addr", "str")               # how the arg is fetched in the kernel
 RET_TYPES = ("int", "uint64", "void")

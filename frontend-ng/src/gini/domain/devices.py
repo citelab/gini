@@ -33,8 +33,11 @@ class Category(str, Enum):
     STREAMING = "Streaming & Messaging"
     OBSERVABILITY = "Observability"
     WORKLOAD = "Workload & Testing"
+    SOURCE = "Sources"                # stimulus riders — inject inputs into a donor element
+    SINK = "Sinks"                    # observer riders — read outputs off a donor element
     SERVERLESS = "Serverless"
     EXTERNAL = "External"
+    OS_ZOO = "OS Zoo"                 # play with real historical OSes (emulated, embedded noVNC)
 
 
 # Within the Machines section, order is the ISOLATION LADDER — lightest first. This is the lesson:
@@ -76,6 +79,10 @@ class DeviceType:
     default_properties: dict[str, str] = field(default_factory=dict)
     # properties that should render as a dropdown in the inspector: name -> choices
     property_choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Properties the element REPORTS rather than accepts: shown in the inspector but
+    # not editable, because the value is observed from the real world (e.g. a GINI32
+    # board's radio channel, which APSTA forces to match the uplink).
+    readonly_properties: tuple[str, ...] = ()
     max_links: int | None = None             # None = unlimited
     hidden: bool = False                     # kept in the registry but off the palette
     # Is this a CLOUD element (a managed service you rent) rather than a networking primitive you
@@ -83,6 +90,14 @@ class DeviceType:
     # section silently changes what the AI is told about an element, which is how a Message Queue
     # ends up "not a cloud thing" because someone moved it next to Pub/Sub.
     is_cloud: bool | None = None             # None = fall back to the category default
+    # --- rider elements (Sources / Sinks) ------------------------------------ #
+    # A rider has NO container of its own: it runs as a process INSIDE a donor element (a Machine,
+    # Router, OVS…) via the donor's runtime. On the canvas it hangs off its donor by a dotted
+    # *attach* edge, not a network cable. `role` is stated, not inferred from the palette section.
+    rider: bool = False                      # True = runs on a donor, spawns no container
+    role: str = ""                           # "source" (injects input) | "sink" (reads output)
+    attaches_to: tuple[str, ...] = ()        # donor type_keys this rider may ride
+    driver: str = ""                         # how it runs: "docker-exec" | "grouter-cli" | "qemu-serial"
 
     @property
     def cloud(self) -> bool:
@@ -134,8 +149,20 @@ _DEVICES: list[DeviceType] = [
         # heavy servers — bind9 (DNS), postfix (mail), ettercap/dsniff (spoofing), haproxy.
         # NOTE: unrelated to the element's SIZE tier, which sets CPU and cost, not contents.
         default_properties={"Name": "", "OS": "linux", "Interfaces": "1", "Toolkit": "lean"},
-        property_choices={"Toolkit": ("lean", "full")},
+        property_choices={"Toolkit": ("lean", "full", "security")},
         is_cloud=False,   # stated, not inferred from the palette section
+    ),
+    DeviceType(
+        "desktop", "Desktop", Category.MACHINES, "host", Accent.PINK,
+        "A HEADFUL machine — a real Linux host on the fabric (pingable, routable, all the usual "
+        "networking tools) that also runs a light graphical desktop (fluxbox, a file manager, a "
+        "terminal, and the Dillo browser). Double-click to open its screen in an embedded window "
+        "over noVNC. Use it when you want a GUI in the topology — e.g. browse a web server another "
+        "machine is serving. Heavier than a plain Machine (it carries an X stack), so reach for it "
+        "when you actually want the desktop.",
+        backend_kind="vm",
+        default_properties={"Name": "", "OS": "linux", "Interfaces": "1"},
+        is_cloud=False,
     ),
     DeviceType(
         "xv6", "xv6 Machine", Category.MACHINES, "host", Accent.RED,
@@ -192,7 +219,38 @@ _DEVICES: list[DeviceType] = [
     DeviceType(
         "cloud", "Internet", Category.EXTERNAL, "cloud", Accent.SLATE,
         "External network / the Internet.",
-        default_properties={"Name": "Internet"},
+        # DNS lives HERE rather than on the things that use it, because name resolution
+        # is a property of "the outside world is reachable" — which is precisely what
+        # this element represents. Remove the element and DNS goes with it, which is the
+        # honest behaviour: there is nothing left to resolve names against.
+        # Handed to real devices on a GINI32 board's hotspot via DHCP; editable because
+        # some campus networks block public resolvers.
+        default_properties={"Name": "Internet", "DNS": "8.8.8.8"},
+    ),
+    # A real ESP32 board (GINI32) running the gBridge firmware: the one element on
+    # the palette that is not emulated at all. It stands for a physical radio on
+    # your desk that carries real devices — a phone, a Raspberry Pi, a sensor —
+    # into the drawn topology. The board finds the lab through the `gbridge` relay
+    # and is handed its fabric address from here, so the canvas stays the source of
+    # truth. BoardID must match the id flashed into the board (serial: `set id`).
+    DeviceType(
+        "gini32", "GINI32 Board", Category.EXTERNAL, "gini32", Accent.GREEN,
+        "A real ESP32 gateway board: carries physical devices into the emulated "
+        "topology over Wi-Fi (Ethernet-in-UDP via the gbridge relay).",
+        # BoardID names a PHYSICAL object, so it is never auto-generated: it is the
+        # sticker on the board (`gini32 provision --id gini-5`). Empty by default so
+        # two boards cannot silently collide on a shared default — an unset id is a
+        # visible error rather than one board vanishing from the relay's table.
+        # Everything else is per-RUN and assigned by the canvas: blank PhysicalSubnet
+        # and ApSSID mean "allocate me one". Channel is REPORTED, not set — in APSTA
+        # the hotspot is forced onto the uplink's channel.
+        default_properties={"Name": "", "BoardID": "", "Mode": "routed",
+                            "ApSSID": "", "ApPassword": "gini12345",
+                            "PhysicalSubnet": "", "Channel": ""},
+        property_choices={"Mode": ("routed", "nat")},
+        readonly_properties=("Channel",),
+        max_links=1,
+        is_cloud=False,
     ),
 
     # ---- Software-defined networking ----------------------------------------
@@ -405,27 +463,217 @@ _DEVICES: list[DeviceType] = [
     ),
 
     # ---- Observability ------------------------------------------------------
+    # Observability elements are SINKS (they observe outputs) — they live in the Sinks section now,
+    # but unlike the rider sinks they are real services with their own container (rider=False).
     DeviceType(
-        "metrics", "Metrics", Category.OBSERVABILITY, "metrics", Accent.ORANGE,
-        "Prometheus metrics collection + PromQL query UI.",
+        "metrics", "Metrics", Category.SINK, "metrics", Accent.ORANGE,
+        "Prometheus metrics collection + PromQL query UI. A Sink: it scrapes and stores the numbers "
+        "your services emit. Its own container (not a rider) — wire it to the targets it scrapes.",
+        role="sink", is_cloud=True,
         default_properties={"Name": ""},
     ),
     DeviceType(
-        "dashboard", "Dashboards", Category.OBSERVABILITY, "dashboard", Accent.ORANGE,
-        "Grafana dashboards over metrics and logs.",
+        "dashboard", "Dashboards", Category.SINK, "dashboard", Accent.ORANGE,
+        "Grafana dashboards over metrics and logs. A Sink that visualizes what Metrics collected — "
+        "wire it to a Metrics source. Its own container (not a rider).",
+        role="sink", is_cloud=True,
         default_properties={"Name": ""},
     ),
     DeviceType(
-        "tracing", "Tracing", Category.OBSERVABILITY, "tracing", Accent.ORANGE,
-        "Jaeger distributed tracing (request timelines across services).",
+        "tracing", "Tracing", Category.SINK, "tracing", Accent.ORANGE,
+        "Jaeger distributed tracing (request timelines across services). A Sink: it observes request "
+        "flow across services. Its own container (not a rider).",
+        role="sink", is_cloud=True,
         default_properties={"Name": ""},
     ),
 
-    # ---- Workload & testing -------------------------------------------------
+    # ---- Load generation (a heavyweight Source: its own container) ----------
     DeviceType(
-        "load_generator", "Load Generator", Category.WORKLOAD, "load_generator", Accent.RED,
-        "Fortio HTTP/gRPC load generator with a web UI to launch experiments.",
+        "load_generator", "Load Generator", Category.SOURCE, "load_generator", Accent.RED,
+        "Fortio HTTP/gRPC load generator with a web UI to launch experiments. A Source that injects "
+        "sustained traffic — heavier than the HTTP Probe rider, with its own container. Wire it to "
+        "the backend/gateway you want to load.",
+        role="source", is_cloud=True,
         default_properties={"Name": "", "QPS": "100", "Connections": "8"},
+    ),
+
+    # ---- Sources (stimulus riders — run ON a donor, no container of their own) ----
+    DeviceType(
+        "ping_probe", "Ping Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "A ping (ICMP) stimulus. Attach it to a Machine or Router — its donor — and give it a "
+        "Target; double-click to start pinging INSIDE the donor (live RTT / loss in its Live tab), "
+        "double-click again to stop. It rides the donor (dotted attach edge, not a cable). "
+        "Count 0 = ping continuously until stopped; Count N = send N and stop.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Count": "0"},
+    ),
+    DeviceType(
+        "http_probe", "HTTP Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "An HTTP request stimulus (curl). Attach it to a Machine / Router donor and give it a "
+        "Target and Path; double-click to start requesting from inside the donor (live 2xx + "
+        "latency), double-click again to stop. Count 0 = request continuously; Count N = do N. "
+        "Rides the donor — no container of its own. For heavy sustained load use the Load Generator.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Path": "/", "Count": "0"},
+    ),
+
+    # ---- Sinks (observer riders — run ON a donor, render its output) ----
+    DeviceType(
+        "packet_view", "Packet View", Category.SINK, "tracing", Accent.ORANGE,
+        "A live packet capture (tcpdump). Attach it to a Machine or Router — its donor; double-click "
+        "to start sniffing the donor's interface (live packet stream in its Live tab), double-click "
+        "again to stop. Count 0 = capture until stopped; Count N = stop after N packets. Captures "
+        "the GINI overlay (gini0) by default — set Interface to eth0/any for the Docker bridge. "
+        "Rides the donor — no container of its own.",
+        rider=True, role="sink", driver="docker-exec",
+        attaches_to=("host", "router", "ovs", "instance", "container"),
+        default_properties={"Name": "", "Interface": "gini0", "Filter": "", "Count": "0"},
+    ),
+    DeviceType(
+        "dns_probe", "DNS Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "A name-resolution stimulus. Attach it to a Machine/Router donor, put the hostname to "
+        "resolve in Target (e.g. 'M2' or 'web'), and double-click to start; it resolves the name "
+        "from inside the donor — over the DRAWN network (gini0), because GINI writes peer names into "
+        "/etc/hosts — and reports the answer + resolve rate. Count 0 = query continuously; Count N = "
+        "do N. Rides the donor.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Count": "0"},
+    ),
+    DeviceType(
+        "traceroute_probe", "Traceroute", Category.SOURCE, "load_generator", Accent.RED,
+        "A path-discovery stimulus (traceroute). Attach it to a Machine/Router donor and give it a "
+        "Target; it traces the hops to the target from inside the donor and reports the hop count. "
+        "Rides the donor — a good pair with a Packet View to watch each hop.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": "", "Target": ""},
+    ),
+    DeviceType(
+        "iperf_client", "iPerf Client", Category.SOURCE, "load_generator", Accent.RED,
+        "A throughput generator (iperf3 -c). Attach it to a Machine donor and point Target at a "
+        "donor running an iPerf Server; it drives traffic and reports the measured bandwidth. "
+        "Seconds sets the test length; Bitrate caps the rate (e.g. 100M) so it doesn't saturate the "
+        "software fabric — set '0' for unlimited. Rides the donor.",
+        rider=True, role="source", driver="docker-exec",
+        attaches_to=("host", "instance", "container"),
+        default_properties={"Name": "", "Target": "", "Seconds": "10", "Bitrate": "100M"},
+    ),
+    DeviceType(
+        "iperf_server", "iPerf Server", Category.SINK, "tracing", Accent.ORANGE,
+        "A throughput endpoint (iperf3 -s). Attach it to a Machine donor; it listens for an iPerf "
+        "Client and reports the bandwidth it receives. Runs until stopped. Rides the donor.",
+        rider=True, role="sink", driver="docker-exec",
+        attaches_to=("host", "instance", "container"),
+        default_properties={"Name": ""},
+    ),
+    DeviceType(
+        "iface_stats", "Interface Stats", Category.SINK, "metrics", Accent.ORANGE,
+        "A live interface counter (reads /proc/net/dev). Attach it to a Machine/Router donor; it "
+        "streams rx/tx packet and byte counts so you can watch traffic volume. Rides the donor.",
+        rider=True, role="sink", driver="docker-exec",
+        attaches_to=("host", "router", "instance", "container"),
+        default_properties={"Name": ""},
+    ),
+
+    # ---- xv6 Sources (OS course) — ride the xv6 Machine over its console -----
+    DeviceType(
+        "xv6_shell", "Shell Probe", Category.SOURCE, "load_generator", Accent.RED,
+        "Launch a custom command into an xv6 Machine. Attach it to an xv6 Machine, put the command "
+        "in Command (e.g. 'ls', 'echo hi', 'cat README'); it types the command into the kernel's "
+        "console and streams the output back. The OS-course counterpart of the HTTP Probe.",
+        rider=True, role="source", driver="qemu-serial",
+        attaches_to=("xv6",),
+        default_properties={"Name": "", "Command": ""},
+    ),
+    DeviceType(
+        "xv6_workload", "Workload", Category.SOURCE, "load_generator", Accent.RED,
+        "Spawn a program on an xv6 Machine to drive the scheduler (the OS-course load generator). "
+        "Attach it to an xv6 Machine; set Program (e.g. 'spin', 'forktest', 'usertests') and Args. "
+        "Background = run with '&' so several can compete. Watch the effect in the Machine Lab.",
+        rider=True, role="source", driver="qemu-serial",
+        attaches_to=("xv6",),
+        default_properties={"Name": "", "Program": "spin", "Args": "", "Background": "true"},
+        property_choices={"Background": ("true", "false")},
+    ),
+
+    # ---- OS Zoo — real historical OSes under emulation, embedded via noVNC ------
+    DeviceType(
+        "freedos", "FreeDOS", Category.OS_ZOO, "host", Accent.ORANGE,
+        "The open, still-maintained MS-DOS-compatible OS — the command-line PC of the DOS era. "
+        "Boots out of the box; double-click to use it in an embedded screen.",
+        default_properties={"Name": "", "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "kolibri", "KolibriOS", Category.OS_ZOO, "host", Accent.ORANGE,
+        "A tiny GUI operating system written entirely in assembly — the whole thing boots from a "
+        "single 1.44 MB floppy to a full graphical desktop in seconds, even under emulation. The "
+        "fast one to reach for.",
+        default_properties={"Name": "", "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "menuet", "MenuetOS", Category.OS_ZOO, "host", Accent.ORANGE,
+        "The assembly GUI OS that KolibriOS forked from — a complete graphical desktop with apps "
+        "on a single 1.44 MB floppy (the 32-bit build is open source). Boots in seconds under "
+        "emulation, just like KolibriOS.",
+        default_properties={"Name": "", "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "msdos", "MS-DOS 6.22", Category.OS_ZOO, "host", Accent.PURPLE,
+        "The real Microsoft MS-DOS 6.22, booted from a disk image under QEMU (so it's the genuine "
+        "article — `VER` reports MS-DOS, not a clone). Drag it on and Run — GINI downloads a public "
+        "pre-installed MS-DOS 6.22 disk on first boot (GINI ships nothing proprietary) and boots to "
+        "the C:\\> prompt. Put it next to FreeDOS to compare the original with the open re-creation. "
+        "The Image URL is pre-filled and editable. Ephemeral unless Persist is on.",
+        default_properties={
+            "Name": "", "Emulator": "qemu", "Arch": "x86",
+            "Image": "https://archive.org/download/pre-installed-ms-dos-622-disk-image/"
+                     "Installed%20MS-DOS%206.22.img",
+            "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "mac7", "Mac System 7", Category.OS_ZOO, "host", Accent.PURPLE,
+        "Classic Macintosh System 7 on an emulated 68k Mac (Basilisk II). Just drag it on and Run — "
+        "GINI downloads a Quadra ROM and a bootable System 7.5.3 disk from a public archive on first "
+        "boot (GINI ships nothing proprietary) and boots to the Mac desktop. The Image/Rom URLs are "
+        "pre-filled; change them to point at files you prefer. Ephemeral unless Persist is on.",
+        default_properties={
+            "Name": "", "Emulator": "basilisk", "Arch": "68k",
+            "Image": "https://archive.org/download/system-753/System753.dsk",
+            "Rom": "https://archive.org/download/mac_rom_archive_-_as_of_8-19-2011/"
+                   "mac_rom_archive_-_as_of_8-19-2011.zip/"
+                   "F1ACAD13%20-%20Quadra%20610%2C650%2Cmaybe%20800.ROM",
+            "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "win31", "Windows 3.11", Category.OS_ZOO, "host", Accent.PURPLE,
+        "Windows for Workgroups 3.11 under DOSBox — the fast vintage-Windows path. Just drag it on "
+        "and Run — GINI downloads a public, pre-installed Windows 3.11, mounts it as C:, and starts "
+        "Windows (GINI ships nothing proprietary). The Image URL is pre-filled; change it to point "
+        "at a folder or zip you prefer. Ephemeral unless Persist is on.",
+        default_properties={
+            "Name": "", "Emulator": "dosbox", "Arch": "x86",
+            "Image": "https://archive.org/download/win3_stock/win311-stock.zip",
+            "Persist": "false"},
+        property_choices={"Persist": ("false", "true")},
+    ),
+    DeviceType(
+        "oszoo_byo", "Classic OS (your image)", Category.OS_ZOO, "host", Accent.SLATE,
+        "Bring your own OS: run a proprietary classic OS that GINI can't legally ship. Pick the "
+        "emulator — QEMU (Windows 95/98, or any bootable x86 disk), DOSBox (DOS and Windows 3.x, "
+        "the fast path), or Basilisk II (classic 68k Mac — System 7 / Mac OS 8). Set 'Image' to a "
+        "disk image (or folder for DOSBox) you own, and 'Rom' to a Macintosh ROM for Basilisk. "
+        "GINI provides the emulator and hosts nothing — you supply the image.",
+        default_properties={"Name": "", "Emulator": "qemu", "Image": "", "Rom": "", "Arch": "x86"},
+        property_choices={"Emulator": ("qemu", "dosbox", "basilisk"),
+                          "Arch": ("x86", "x86_64", "68k")},
     ),
 ]
 
@@ -438,7 +686,7 @@ REGISTRY: dict[str, DeviceType] = {d.key: d for d in _DEVICES}
 DEFAULT_PREFIXES: dict[str, str] = {
     # networking
     "router": "R", "switch": "S", "hub": "H", "host": "M", "firewall": "FW",
-    "wap": "AP", "cloud": "NET", "vnf": "VNF",
+    "wap": "AP", "cloud": "NET", "vnf": "VNF", "gini32": "GB",
     # sdn
     "ovs": "OVS", "controller": "OFC",
     # compute / containers
@@ -457,6 +705,11 @@ DEFAULT_PREFIXES: dict[str, str] = {
     "metrics": "PROM", "dashboard": "GRAF", "tracing": "JGR",
     # workload / serverless
     "load_generator": "LG", "function": "FN", "api_gateway": "AGW",
+    # sources / sinks (riders)
+    "ping_probe": "PING", "http_probe": "HTTP", "packet_view": "PCAP",
+    "dns_probe": "DNS", "traceroute_probe": "TRACE", "iperf_client": "IPERFC",
+    "iperf_server": "IPERFS", "iface_stats": "IFSTAT",
+    "xv6_shell": "SH", "xv6_workload": "WL",
 }
 
 

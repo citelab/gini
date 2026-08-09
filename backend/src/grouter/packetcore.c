@@ -33,6 +33,8 @@
 #include "filter.h"
 #include "arp.h"
 #include "ip.h"
+#include "sdn.h"
+#include "gr_delay_ctl.h"
 
 extern classlist_t *classifier;
 extern filtertab_t *filter;
@@ -463,7 +465,7 @@ char *tagPacket(pktcore_t *pcore, gpacket_t *in_pkt)
 }
 
 
-int enqueuePacket(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
+static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 	uint8_t openflow)
 {
 	if (openflow)
@@ -530,6 +532,36 @@ int enqueuePacket(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 		writeQueue(thisq, in_pkt, pktsize);
 		return EXIT_SUCCESS;
 	}
+}
+
+
+/*
+ * Ingress link delay (optional). When an ingress delay line is configured, every arriving
+ * packet is parked in the holding queue and re-injected -- in order -- when its sampled hold
+ * time expires. When no line is set, this is a plain call through to the queuer, so the
+ * forwarding path is unchanged. See gr_delay_ctl.h.
+ */
+static pktcore_t *g_ingress_pcore = NULL;
+
+int enqueuePacket(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize, uint8_t openflow)
+{
+	gr_delayline_t *dl = gr_ingress_line;   /* read once off the fast path */
+	if (dl != NULL)
+	{
+		g_ingress_pcore = pcore;
+		if (gr_delay_push(dl, in_pkt))
+			return EXIT_SUCCESS;            /* held; re-injected later, in order */
+		free(in_pkt);                       /* holding queue full -> drop */
+		return EXIT_FAILURE;
+	}
+	return enqueuePacket_now(pcore, in_pkt, pktsize, openflow);
+}
+
+/* Release callback: the delay line calls this (on its own thread) when a held packet is due. */
+void gr_ingress_emit(void *pkt)
+{
+	enqueuePacket_now(g_ingress_pcore, (gpacket_t *)pkt, sizeof(gpacket_t),
+			  (sdn_mode() == SDN_MODE_OPENFLOW));
 }
 
 

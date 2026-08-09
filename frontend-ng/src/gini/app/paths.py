@@ -23,12 +23,37 @@ def projects_dir() -> Path:
     return gini_home() / "projects"
 
 
+def captures_dir() -> Path:
+    """Host directory for packet captures. Bind-mounted into each gRouter container at
+    ``/captures``, so a ``tap`` inline VNF's ``.pcap`` lands here on the host machine and
+    opens directly in Wireshark. Survives topology teardown (the compose workdir does not)."""
+    return gini_home() / "captures"
+
+
+def oszoo_cache_dir() -> Path:
+    """Host directory for OS Zoo guest images. Bind-mounted into each OS Zoo container at
+    ``/zoo/cache``, so a historical OS's ISO/disk downloads once and is reused across runs
+    (an anonymous volume would be discarded on recreate, forcing a re-download every Run).
+    Survives topology teardown."""
+    return gini_home() / "oszoo-cache"
+
+
+def scripts_dir() -> Path:
+    """Host directory for student-written router modules. Bind-mounted (read-only) into each
+    gRouter container at ``/scripts``, so a Lua data-plane VNF edited on the host machine loads
+    with ``gpipe add lua /scripts/<name>.lua`` from the router console (Chapter on designing and
+    implementing protocols). Survives topology teardown."""
+    return gini_home() / "scripts"
+
+
 def config_path() -> Path:
     return gini_home() / "config.json"
 
 
 def ensure_dirs() -> None:
     projects_dir().mkdir(parents=True, exist_ok=True)
+    captures_dir().mkdir(parents=True, exist_ok=True)
+    scripts_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_config() -> dict:
@@ -78,10 +103,19 @@ def remember_project(path: str, *, limit: int = 8) -> None:
 
 # settings fields that are persisted to / loaded from config.json
 PERSISTED_KEYS = (
-    "theme", "reduced_motion",
+    "theme", "reduced_motion", "text_size",
     "llm_enabled", "llm_url", "llm_model", "llm_think",
-    "auto_internet", "name_prefixes", "prices",
+    "auto_internet", "name_prefixes", "prices", "autobuild_images",
+    "connector_style",                  # bent ↔ straight, toggled from the toolbar
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
     "show_help_on_launch",
     "tc_url", "tc_course", "tc_student", "tc_token",   # Teaching Center enrolment
+    "tc_allow_insecure",                              # the conscious plaintext-password override
+    # GINI32 hardware. `laptop_id` must be stable or every claimed board orphans at
+    # once; `claimed_boards` is a property of this laptop, never of a topology, so a
+    # colleague's .gini file cannot hand you their hardware.
+    "laptop_id", "claimed_boards",
+    # The lab Wi-Fi written to a board over USB. Remembered so setting up the second
+    # and subsequent boards is one click — it is the same network for a whole class.
+    "board_wifi_ssid", "board_wifi_password", "known_boards",
 )

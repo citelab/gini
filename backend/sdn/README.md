@@ -49,7 +49,7 @@ dotted name (`gini.samples.<app>`). Each one clears the Flow Switch's match-all
 Build the two images once:
 
 ```sh
-cd backend && docker build -f grouter-zig/Dockerfile -t gini-grouter .   # OVS datapath
+cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .   # OVS datapath
 cd backend/sdn && docker build -t gini-pox .                             # POX controller
 ```
 

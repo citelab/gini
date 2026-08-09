@@ -83,6 +83,12 @@ class Mission:
         completes or the clock expires — including from an already-WITNESSED attempt, so a band can
         still be *upgraded* if the student pushes on and finishes."""
         self.last_results = _obj.evaluate_all(self.lesson.objectives, world, runner)
+        # difficulty forks are evaluated too, but they NEVER block completion — they only lift the
+        # band. Kept in a side channel so the core ladder the panel shows is unchanged.
+        self._fork_results = {}
+        for fk in getattr(self.lesson, "forks", []) or []:
+            objs = fk.get("objectives", [])
+            self._fork_results[fk.get("id", "")] = _obj.evaluate_all(objs, world, runner) if objs else []
         if self.state in (PLAYING, WITNESSED) and self._should_finish():
             self._witness()
         return self.last_results
@@ -118,8 +124,13 @@ class Mission:
             self.state = DONE
 
     def score(self) -> "_scoring.Score":
+        forks = getattr(self.lesson, "forks", []) or []
+        fr = getattr(self, "_fork_results", {})
+        # a fork is "done" only when every objective in it is met (an empty fork can't count)
+        done = sum(1 for fk in forks
+                   if fr.get(fk.get("id", "")) and all(r.met for r in fr[fk.get("id", "")]))
         return _scoring.score(self.last_results, complete_when=self.lesson.complete_when,
-                              on_time=self.on_time())
+                              on_time=self.on_time(), forks_done=done, forks_total=len(forks))
 
     # -- attempts ----------------------------------------------------------- #
     def lives_left(self) -> int:

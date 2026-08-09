@@ -163,9 +163,9 @@ int gr_parse_ipv4(const char *s, uint32_t *out)
 
 /* ---- native module registry ----------------------------------------------- *
  * Maps a name to a constructor so `gpipe add <name> [arg]` can build any registered
- * module -- a built-in, or a student-written native module (see gr_mod_block.zig).
+ * module -- a built-in, or a student-written native module (see gr_mod_block.c).
  * Adding a native module = write it, then add one line here.                    */
-extern gr_module_t *gr_mod_block(const char *ip);   /* native example, written in Zig */
+extern gr_module_t *gr_mod_block(const char *ip);   /* native example, in C (gr_mod_block.c) */
 
 static gr_module_t *ctor_counter(const char *a) { (void)a; return gr_mod_counter(); }
 #ifdef GR_LEGACY_MODULES
@@ -181,11 +181,14 @@ typedef struct {
 static const gr_modreg_t REGISTRY[] = {
     { "acl",     gr_mod_acl,   1 },
     { "nat",     gr_mod_nat,   1 },
+    { "rate",     gr_mod_rate,     1 },   /* native (C): token-bucket policer */
+    { "classify", gr_mod_classify, 1 },   /* native (C): DSCP marker */
+    { "tap",      gr_mod_tap,      1 },   /* native (C): pcap capture */
     { "counter", ctor_counter, 0 },
 #ifdef GR_LEGACY_MODULES
     { "filter",  ctor_filter,  0 },
 #endif
-    { "block",   gr_mod_block, 1 },   /* native (Zig): drop by destination IP */
+    { "block",   gr_mod_block, 1 },   /* native (C): drop by destination IP */
 };
 
 static const gr_modreg_t *reg_find(const char *name)

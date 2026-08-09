@@ -41,8 +41,13 @@ BASE: list[ModuleType] = [
     ModuleType("rewrite", "Rewrite", "send", "blue", "base", "Dec TTL, checksum, next-hop MAC"),
 ]
 
-# Inline VNFs (service functions). `gpipe` marks the ones with a REAL gRouter data-plane
-# backend (acl/nat/counter/block); classify/tap are illustrative until a backend exists.
+# Inline VNFs (service functions). `gpipe` names the gRouter data-plane function that
+# actually runs, so a module carrying one is REAL — it is programmed into the router and
+# moves packets. Every inline VNF now qualifies: classify and tap were the last two
+# illustrative entries, and the QoS and Tap work gave both a backend.
+#
+# The illustrative modules are now the CUSTOM ones below: a Lua or native VNF is real
+# only once you have written and compiled it, which is the point of that tier.
 INLINE: list[ModuleType] = [
     ModuleType("acl", "ACL / Firewall", "firewall", "amber", "inline",
                "Stateless packet filter (drop a CIDR)", {"deny": "10.0.3.0/24"},
@@ -53,20 +58,26 @@ INLINE: list[ModuleType] = [
     ModuleType("block", "Block IP", "firewall", "red", "inline",
                "Drop packets to a destination IP (native Zig module)", {"ip": "10.0.3.5"},
                gpipe=("block", "ip")),
-    ModuleType("rate", "Rate / meter", "queue", "green", "inline",
-               "Per-packet counter / token-bucket meter", {}, gpipe=("counter", None)),
+    ModuleType("rate", "Rate limit", "queue", "green", "inline",
+               "Token-bucket policer — drops packets that exceed a set rate",
+               {"spec": "100/200"}, gpipe=("rate", "spec")),
     ModuleType("classify", "QoS classifier", "layout", "teal", "inline",
-               "Tag traffic into classes (illustrative)", {}),
+               "Mark matching traffic with a DSCP class", {"spec": "10.0.3.0/24:ef"},
+               gpipe=("classify", "spec")),
     ModuleType("tap", "Tap / capture", "link", "purple", "inline",
-               "Mirror to a collector (illustrative)", {}),
+               "Mirror matching packets to a .pcap under /captures "
+               "(host: ~/.gini/captures) — open it in Wireshark",
+               {"path": "/captures/cap.pcap"}, gpipe=("tap", "path")),
 ]
 
+# Inline VNFs you write yourself — a Lua script (interpreted per packet) or a native module you
+# compile in. Both share the same gpipe seam as the built-in native functions once implemented.
 CUSTOM: list[ModuleType] = [
     ModuleType("lua", "Lua VNF", "compile", "cyan", "custom",
-               "Per-packet Lua hook (a function you write)",
+               "Per-packet Lua hook — a `process(pkt, ctx)` function you write",
                {"script": "function process(pkt, ctx)\n  return CONTINUE\nend"}),
     ModuleType("native", "Native VNF", "controller", "purple", "custom",
-               "Zig / C module you write", {}),
+               "A native (Zig / C) data-plane module you compile in", {}),
 ]
 
 MODULE_BY_KEY: dict[str, ModuleType] = {m.key: m for m in (*BASE, *INLINE, *CUSTOM)}
@@ -91,6 +102,19 @@ class Stage:
     accent: str
     locked: bool
     index: int | None    # index into program.inline (for inline stages), else None
+
+
+def _ip_in_cidr(ip: str, cidr: str) -> bool:
+    """True if dotted-quad `ip` falls inside `cidr` (e.g. '10.0.2.0/24'). Mirrors the C ACL's
+    mask-and-compare, so the offline trace agrees with what the real gRouter would drop."""
+    try:
+        net, _, bits = cidr.partition("/")
+        bits = int(bits) if bits else 32
+        to_int = lambda a: sum(int(o) << (24 - 8 * i) for i, o in enumerate(a.split(".")))
+        mask = (0xffffffff << (32 - bits)) & 0xffffffff if bits else 0
+        return (to_int(ip) & mask) == (to_int(net) & mask)
+    except Exception:
+        return False
 
 
 class RouterProgram:
@@ -171,17 +195,30 @@ class RouterProgram:
                 verdicts.append("sent ✓")
             elif st.key == "acl":
                 deny = self.inline[st.index].params.get("deny", "")
-                if deny and dst.split(".")[:2] == deny.split(".")[:2]:
+                if deny and _ip_in_cidr(dst, deny):
                     verdicts.append(f"DROP (matches deny {deny})")
                     dropped = True
                 else:
                     verdicts.append("pass")
+            elif st.key == "block":
+                tgt = self.inline[st.index].params.get("ip", "")
+                if tgt and dst == tgt:
+                    verdicts.append(f"DROP (blocks {tgt})")
+                    dropped = True
+                else:
+                    verdicts.append("pass")
+            elif st.key == "nat":
+                verdicts.append("rewrite source · continue")
             elif st.key == "route":
                 verdicts.append("→ next-hop eth1")
             elif st.key == "rewrite":
                 verdicts.append("ttl-- · checksum")
+            elif st.key == "rate":
+                verdicts.append("policer · within rate → pass")
+            elif st.key == "classify":
+                verdicts.append("mark DSCP · continue")
             elif st.key == "tap":
-                verdicts.append("mirror → collector, continue")
+                verdicts.append("mirror → pcap · continue")
             else:
                 verdicts.append("pass")
         return verdicts

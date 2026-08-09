@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 _THEMES = ("Dark", "Light", "GINI Brand", "High Contrast", "Sand", "Blue", "Green")
+_TEXT_SIZES = ("Normal", "Large", "Extra Large")
 
 
 def _page(tabs: QTabWidget, title: str) -> QFormLayout:
@@ -53,6 +54,13 @@ class SettingsDialog(QDialog):
         names = [t.lower() for t in _THEMES]
         self.theme.setCurrentIndex(names.index(cur) if cur in names else 0)
         appf.addRow("Theme", self.theme)
+        self.text_size = QComboBox(); self.text_size.addItems(_TEXT_SIZES)
+        cur_sz = (getattr(settings, "text_size", "Normal") or "Normal").strip().lower()
+        sizes = [s.lower() for s in _TEXT_SIZES]
+        self.text_size.setCurrentIndex(sizes.index(cur_sz) if cur_sz in sizes else 0)
+        appf.addRow("Text size", self.text_size)
+        appf.addRow("", _note("Scales the whole interface — handy on large or high-resolution "
+                              "displays. Applies instantly."))
         self.reduced = QCheckBox("Reduce motion / animations")
         self.reduced.setChecked(settings.reduced_motion)
         appf.addRow("", self.reduced)
@@ -64,6 +72,13 @@ class SettingsDialog(QDialog):
         netf.addRow("", self.auto_internet)
         netf.addRow("", _note("Off = faithful mode: a machine reaches the internet only via "
                               "a drawn Internet element, routed through your network."))
+        self.autobuild = QCheckBox("Build missing lab images automatically")
+        self.autobuild.setChecked(bool(getattr(settings, "autobuild_images", False)))
+        netf.addRow("", self.autobuild)
+        netf.addRow("", _note("The gRouter and SDN controller run from images built on this machine. "
+                              "With this on, GINI builds one the first time you Run without it, "
+                              "instead of printing a docker build command and stopping. The first "
+                              "build takes a couple of minutes; after that it's instant."))
 
         # --- GINI AI ------------------------------------------------------ #
         aif = _page(tabs, "GINI AI")
@@ -122,16 +137,43 @@ class SettingsDialog(QDialog):
         self.tc_course.setPlaceholderText("cs4480-fall26")
         tcf.addRow("Course", self.tc_course)
         self.tc_student = QLineEdit(settings.tc_student)
-        self.tc_student.setPlaceholderText("your student id")
-        tcf.addRow("Student id", self.tc_student)
+        self.tc_student.setPlaceholderText("your username — e.g. ravi")
+        tcf.addRow("Username", self.tc_student)
         self.tc_token = QLineEdit(settings.tc_token)
-        self.tc_token.setPlaceholderText("enrollment token")
+        self.tc_token.setPlaceholderText("one-time token from your instructor")
         self.tc_token.setEchoMode(QLineEdit.Password)
-        tcf.addRow("Enrollment token", self.tc_token)
-        tcf.addRow("", _note("Enrol in a course to receive your instructor's assigned missions. "
-                             "Leave the server blank to work offline — Missions then offers the "
-                             "local practice catalog. Results sync back when you're online; they "
-                             "queue when you're not."))
+        tcf.addRow("Enrolment token", self.tc_token)
+        self.tc_insecure = QCheckBox("Allow insecure (plain HTTP) connection")
+        self.tc_insecure.setChecked(bool(getattr(settings, "tc_allow_insecure", False)))
+        tcf.addRow("", self.tc_insecure)
+        tcf.addRow("", _note("Your password is never stored — signing in exchanges it for a session. "
+                             "The enrolment token is used ONCE, to claim your account.\n\n"
+                             "GINI refuses to send a password over plain HTTP to a remote server: on "
+                             "shared wifi anyone could read it. Tick the box above only for a demo on "
+                             "a network you trust (localhost is always allowed).\n\n"
+                             "Leave the server blank to work offline — Missions then offers the local "
+                             "practice catalog."))
+
+        # --- Hardware (GINI32 boards) ------------------------------------- #
+        # The one thing a board cannot discover for itself. It is the same network for
+        # every board in a class, so it is entered here once and then written to each
+        # board over USB by Hardware → Set Up a Board.
+        hwf = _page(tabs, "Hardware")
+        self.board_ssid = QLineEdit(getattr(settings, "board_wifi_ssid", "") or "")
+        self.board_ssid.setPlaceholderText("the Wi-Fi this laptop is on — 2.4 GHz")
+        hwf.addRow("Lab Wi-Fi name", self.board_ssid)
+        self.board_pw = QLineEdit(getattr(settings, "board_wifi_password", "") or "")
+        self.board_pw.setEchoMode(QLineEdit.Password)
+        hwf.addRow("Lab Wi-Fi password", self.board_pw)
+        hwf.addRow("", _note(
+            "A GINI32 board joins this network to reach gBuilder, so it must be the SAME "
+            "network this laptop is on. ESP32 radios are 2.4 GHz only — a 5 GHz-only "
+            "network will never be found.\n\n"
+            "Set boards up from Hardware → Set Up a Board with the board plugged in over "
+            "USB. That is the only step that needs a cable; everything afterwards is "
+            "wireless.\n\n"
+            "This password is stored in the config file so boards can be set up without "
+            "retyping it. Use the shared lab network here, not a personal account."))
 
         # --- Help & Tour -------------------------------------------------- #
         hf = _page(tabs, "Help")
@@ -167,8 +209,10 @@ class SettingsDialog(QDialog):
                 prices[key] = val
         return {
             "theme": self.theme.currentText(),
+            "text_size": self.text_size.currentText(),
             "reduced_motion": self.reduced.isChecked(),
             "auto_internet": self.auto_internet.isChecked(),
+            "autobuild_images": self.autobuild.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),
             "llm_url": self.llm_url.text().strip() or "http://localhost:11434",
             "llm_model": self.llm_model.text().strip() or "llama3.1",
@@ -180,4 +224,11 @@ class SettingsDialog(QDialog):
             "tc_course": self.tc_course.text().strip(),
             "tc_student": self.tc_student.text().strip(),
             "tc_token": self.tc_token.text().strip(),
+            "tc_allow_insecure": self.tc_insecure.isChecked(),
+            # GINI32: the lab Wi-Fi written to boards over USB. Not stripped of case —
+            # SSIDs are case-sensitive — but surrounding whitespace is, because a name
+            # pasted from a slide routinely carries a trailing space and the board would
+            # then hunt forever for a network that does not exist.
+            "board_wifi_ssid": self.board_ssid.text().strip(),
+            "board_wifi_password": self.board_pw.text(),
         }

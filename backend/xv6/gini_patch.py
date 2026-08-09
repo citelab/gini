@@ -158,7 +158,8 @@ vmprint(pagetable_t pt)
 }
 """ % {"P": PRINT}, "GINI-xv6: print a page table")
 
-# 4) defs.h — prototypes for the non-static additions.
+# 4) defs.h — prototypes for the non-static additions. The syscall counter/ring types + externs
+# live here (declared BEFORE syscall() uses them; defined in syscall.c).
 append_once("kernel/defs.h", """
 // GINI-xv6 additions
 void            vmprint(pagetable_t);
@@ -166,10 +167,15 @@ void            gini_dump(void);
 void            gini_vmdump(void);
 void            gini_fsdump(void);
 void            gini_logdump(void);
+void            gini_scdump(void);
 void            gini_break(void);
 struct proc*    gini_pick(void);
 extern int      sched_policy;
 extern int      sched_quantum;
+struct gini_sc { int pid; int num; uint64 a0; uint64 ret; };
+extern uint64   gini_sccount[64];
+extern struct gini_sc gini_ring[64];
+extern int      gini_ring_i;
 """, "GINI-xv6 additions")
 
 # 4b) gini_dump(): the process table PLUS the running process's saved registers (from its
@@ -196,7 +202,9 @@ gini_dump(void)
       continue;
     int s = p->state;
     char *st = (s >= 0 && s <= ZOMBIE && states[s]) ? states[s] : "???";
-    PRINTF("%d %s %s\\n", p->pid, st, p->name);
+    // pid state name ppid  (ppid drives the process TREE; proc[] slots are never freed so
+    // p->parent is always a valid pointer — best-effort read, no wait_lock needed for a dump).
+    PRINTF("%d %s %s %d\\n", p->pid, st, p->name, p->parent ? p->parent->pid : 0);
   }
   PRINTF("SCHED policy %d quantum %d\\n", sched_policy, sched_quantum);
   // per-CPU: which pid each core runs (Gantt strips) + that proc's live registers (from its
@@ -218,6 +226,13 @@ gini_dump(void)
 '''
 append_once("kernel/proc.c", _GINI_DUMP.replace("PRINTF", PRINT),
             "GINI-xv6: like procdump, plus")
+
+# 4b') add the ppid column to STOCK procdump too (Ctrl-P / `ps`), so the console view matches
+# the tree. Matches whichever print fn this xv6 uses (printf or printk); `state` var, no \\n here.
+regex_once("kernel/proc.c",
+           r'(print[kf])\("%d %s %s", p->pid, state, p->name\);',
+           r'\1("%d %s %s %d", p->pid, state, p->name, p->parent ? p->parent->pid : 0);',
+           '"%d %s %s %d", p->pid, state')
 
 # 4d) gini_vmdump(): the running process's page table (via vmprint) to the console — the
 # Memory face reads this over the serial instead of asking gdb to walk the page table.
@@ -311,10 +326,49 @@ regex_once("kernel/console.c",
            "// GINI: running-proc page table\n"
            f"  case C('F'): {PRINT}(\"%c\",30); gini_fsdump(); {PRINT}(\"%c\",31); break;  "
            "// GINI: superblock + write-ahead log\n"
+           f"  case C('S'): {PRINT}(\"%c\",30); gini_scdump(); {PRINT}(\"%c\",31); break;  "
+           "// GINI: syscall counts + trace ring\n"
            r"  case C('C'): gini_break(); break;  // GINI: break a hung foreground (no SIGINT in xv6)\n"
            r"  case C(']'): if(sched_quantum < 100) sched_quantum++; break; // GINI: quantum up\n"
            r"  case C('\\\\'): sched_quantum = 1; break;  // GINI: quantum reset to 1",
            "gini_dump();")
+
+# 4g) syscall.c — per-syscall counters (histogram) + a recent-call trace ring (strace view).
+#     The definitions + gini_scdump go at end-of-file (types/externs are declared in defs.h so
+#     syscall() can use them above); Ctrl-S dumps them.
+_SCDUMP = '''
+// GINI-xv6: per-syscall counters + recent-call trace ring (Machine Lab histogram + strace).
+uint64 gini_sccount[64];
+struct gini_sc gini_ring[64];
+int gini_ring_i;
+
+void
+gini_scdump(void)
+{
+  for(int i = 0; i < 64; i++)
+    if(gini_sccount[i])
+      PRINTF("SC %d %d\\n", i, (int)gini_sccount[i]);
+  int total = gini_ring_i;
+  int start = total > 64 ? total - 64 : 0;
+  for(int k = start; k < total; k++){
+    struct gini_sc *e = &gini_ring[k % 64];
+    PRINTF("TRACE %d %d %p %p\\n", e->pid, e->num, (void*)e->a0, (void*)e->ret);
+  }
+}
+'''
+append_once("kernel/syscall.c", _SCDUMP.replace("PRINTF", PRINT),
+            "GINI-xv6: per-syscall counters")
+
+# hook the dispatch: count the syscall + record it in the ring (arg0 captured before the call).
+regex_once("kernel/syscall.c",
+           r"p->trapframe->a0 = syscalls\[num\]\(\);",
+           "uint64 gsc_a0 = p->trapframe->a0;                 // GINI: arg0 before dispatch\n"
+           "    p->trapframe->a0 = syscalls[num]();\n"
+           "    if(num >= 0 && num < 64) gini_sccount[num]++;   // GINI: histogram\n"
+           "    int gsi = gini_ring_i++ % 64;                    // GINI: trace ring\n"
+           "    gini_ring[gsi].pid = p->pid; gini_ring[gsi].num = num;\n"
+           "    gini_ring[gsi].a0 = gsc_a0; gini_ring[gsi].ret = p->trapframe->a0;",
+           "GINI: histogram")
 
 
 # 5) launchable long-running user programs, so the Machine Lab can spawn real work to watch

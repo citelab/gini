@@ -43,7 +43,7 @@ def test_private_db_needs_the_run_to_complete():
 
 
 def test_behavioral_probes_are_validated_on_load():
-    loaded = FY.load_dir(os.path.join(os.path.dirname(F.__file__), "missions", "networking"))
+    loaded, _ = FY.load_dir(os.path.join(os.path.dirname(F.__file__), "missions", "networking"))
     rb = loaded["reachability-boundary"]
     kinds = {o.kind for o in rb.objectives}
     assert "behavioral" in kinds

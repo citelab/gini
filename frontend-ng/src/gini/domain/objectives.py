@@ -43,9 +43,31 @@ class Objective:
     check: str = ""          # structural predicate expression
     probe: str = ""          # behavioral probe (opaque in Phase 1)
     level: int | None = None  # explicit ladder tier; None = derived from the predicate
+    stars: int = 0           # difficulty PASS: 0 = base experiment, 1+ = harder progressive passes
 
     def is_behavioral(self) -> bool:
         return self.kind == "behavioral"
+
+
+def _stars_of(o) -> int:
+    """Star rating of an objective given as either an Objective or a plain dict."""
+    v = o.get("stars", 0) if isinstance(o, dict) else getattr(o, "stars", 0)
+    try:
+        return max(0, int(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def objectives_for_pass(objectives, pass_level: int) -> list:
+    """The objectives active at star-pass `pass_level` — everything rated at or below it. Pass 0 is
+    the base experiment; each higher pass switches on the next tier of harder (starred) steps, so the
+    student walks the experiment progressively rather than facing it all at once."""
+    return [o for o in objectives if _stars_of(o) <= pass_level]
+
+
+def max_stars(objectives) -> int:
+    """The deepest star-pass this set defines (0 = no harder passes, just the base)."""
+    return max((_stars_of(o) for o in objectives), default=0)
 
 
 @dataclass
@@ -69,12 +91,25 @@ _CMP = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Gt: operator.gt,
 # predicates are what missions should use, so an objective matches what the student built
 # regardless of the (auto-generated) device names.
 _PREDICATES = {"exists", "count", "linked", "connected", "contains", "property", "prop",
-               "link", "path", "contains_type", "through"}
-_TYPE_ARG_FUNCS = {"exists", "count", "link", "path", "contains_type", "through"}  # args are type_keys
+               "link", "path", "contains_type", "through", "all_linked"}
+_TYPE_ARG_FUNCS = {"exists", "count", "link", "path", "contains_type", "through",
+                   "all_linked"}  # args are type_keys
 
 
 class PredicateError(ValueError):
     """A structural check that doesn't parse or uses an unknown function."""
+
+
+def slot_match(dev_slot: str, spec_slot: str) -> bool:
+    """Does a device tagged `dev_slot` fall under the scope `spec_slot`? An empty scope matches any
+    device (unscoped type predicate). Otherwise it matches the exact label OR anything NESTED beneath
+    it: composition labels are hierarchical with '_' segments (`pods0_lans1` is inside `pods0`), so a
+    `host@pods0` predicate reaches every host in pod 0's sub-networks. This is what makes recursive,
+    multi-level compositions gradable by the same `type@slot` oracle."""
+    dev_slot = dev_slot or ""
+    if not spec_slot:
+        return True
+    return dev_slot == spec_slot or dev_slot.startswith(spec_slot + "_")
 
 
 # ---- the progressive ladder ------------------------------------------------ #
@@ -85,7 +120,7 @@ PLACEMENT, CONNECTION, CONTAINMENT, LIVE = 1, 2, 3, 4
 
 _PRED_LEVEL = {
     "exists": PLACEMENT, "count": PLACEMENT, "property": PLACEMENT, "prop": PLACEMENT,
-    "link": CONNECTION, "path": CONNECTION, "through": CONNECTION,
+    "link": CONNECTION, "path": CONNECTION, "through": CONNECTION, "all_linked": CONNECTION,
     "linked": CONNECTION, "connected": CONNECTION,
     "contains": CONTAINMENT, "contains_type": CONTAINMENT,
 }
@@ -127,11 +162,16 @@ def by_level(objectives) -> list:
 
 
 def _arg(node) -> object:
-    """A predicate argument is a bare identifier (element name/type) or a literal."""
+    """A predicate argument is a bare identifier (element name/type), a literal, or a SLOT-scoped
+    type `type@slot`. We reuse Python's `@` (matmul) operator for scoping, so `switch@A` parses as
+    BinOp(Name, MatMult, Name) and we render it back to the string 'switch@A' for the World."""
     if isinstance(node, ast.Constant):
         return node.value
     if isinstance(node, ast.Name):
         return node.id
+    if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.MatMult)
+            and isinstance(node.left, ast.Name) and isinstance(node.right, ast.Name)):
+        return f"{node.left.id}@{node.right.id}"
     raise PredicateError(f"unsupported argument: {ast.dump(node)}")
 
 
@@ -183,6 +223,8 @@ def _call(fn: str, args: list, world) -> object:
         return world.contains_types(str(args[0]), str(args[1]))
     if fn == "through":                 # every src->dst path crosses a gate (a chokepoint)
         return world.through_types(str(args[0]), str(args[1]), str(args[2]))
+    if fn == "all_linked":              # EVERY type_a device has a direct link to SOME type_b device
+        return world.all_linked_types(str(args[0]), str(args[1]))
     raise PredicateError(f"unknown predicate: {fn}")
 
 
@@ -256,11 +298,17 @@ class TopologyWorld:
                 return d
         return None
 
+    @staticmethod
+    def _match(d, spec: str) -> bool:
+        """A device matches `type` or a slot-scoped `type@slot` (a scaffold/bound-dependency tag)."""
+        type_key, _, slot = str(spec).partition("@")
+        return d.type_key == type_key and slot_match(getattr(d, "slot", ""), slot)
+
     def exists(self, type_key: str) -> bool:
-        return any(d.type_key == type_key for d in self.t.devices.values())
+        return any(self._match(d, type_key) for d in self.t.devices.values())
 
     def count(self, type_key: str) -> int:
-        return sum(1 for d in self.t.devices.values() if d.type_key == type_key)
+        return sum(1 for d in self.t.devices.values() if self._match(d, type_key))
 
     def _adjacency(self) -> dict:
         adj: dict[str, set] = {}
@@ -325,24 +373,37 @@ class TopologyWorld:
 
     # -- type-based (name-agnostic) predicates: match what the student built, not the names -- #
     def link_types(self, type_a: str, type_b: str) -> bool:
-        """Is there a link directly connecting some device of type_a to some device of type_b?"""
+        """A link directly connecting some device matching `type_a` to some matching `type_b`
+        (each may be slot-scoped as `type@slot`)."""
         for l in self.t.links.values():
             s = self.t.devices.get(l.source_id)
             d = self.t.devices.get(l.target_id)
             if s is None or d is None:
                 continue
-            st, dt = s.type_key, d.type_key
-            if (st == type_a and dt == type_b) or (st == type_b and dt == type_a):
+            if ((self._match(s, type_a) and self._match(d, type_b))
+                    or (self._match(s, type_b) and self._match(d, type_a))):
                 return True
         return False
 
+    def all_linked_types(self, type_a: str, type_b: str) -> bool:
+        """EVERY device matching `type_a` has a direct link to SOME device matching `type_b` — the
+        universal that makes an open-N win condition N-independent ("every LAN is wired to the
+        router", any number of LANs). Vacuously true with no type_a devices; a `count(...)>=K` floor
+        guards emptiness separately. Each arg may be slot-scoped as `type@slot`."""
+        a_devs = [d for d in self.t.devices.values() if self._match(d, type_a)]
+        b_ids = {d.id for d in self.t.devices.values() if self._match(d, type_b)}
+        if not a_devs or not b_ids:
+            return not a_devs                    # no A → vacuously true; A but no B → false
+        adj = self._adjacency()
+        return all(any(peer in b_ids for peer in adj.get(da.id, ())) for da in a_devs)
+
     def path_types(self, type_a: str, type_b: str) -> bool:
         """Is there a path (over links) between some device of type_a and some device of type_b?"""
-        dsts = {d.id for d in self.t.devices.values() if d.type_key == type_b}
+        dsts = {d.id for d in self.t.devices.values() if self._match(d, type_b)}
         if not dsts:
             return False
         adj = self._adjacency()
-        for src in [d.id for d in self.t.devices.values() if d.type_key == type_a]:
+        for src in [d.id for d in self.t.devices.values() if self._match(d, type_a)]:
             seen, frontier = {src}, [src]
             while frontier:
                 nxt = []

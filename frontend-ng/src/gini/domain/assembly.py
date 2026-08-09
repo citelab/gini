@@ -109,6 +109,16 @@ def default_level(chosen: list, *, faults: int = 0, guided: bool = False) -> int
     return max(0, min(3, score))
 
 
+def _forks_of(primary) -> list:
+    """The primary core's difficulty forks, instantiated into live Objectives, carried onto the
+    lesson. Forks come from the CORE fragment only — a composition's difficulty is the core's."""
+    out = []
+    for fk in getattr(primary, "forks", ()) or ():
+        out.append({"id": fk.id, "label": fk.label, "difficulty": fk.difficulty,
+                    "kind": fk.kind, "objectives": fk.instantiate()})
+    return out
+
+
 def _merge_objectives(chosen: list) -> list[Objective]:
     objs: list[Objective] = []
     seen_checks: set[str] = set()
@@ -122,7 +132,7 @@ def _merge_objectives(chosen: list) -> list[Objective]:
             oid = o.id if o.id not in seen_ids else f"{f.id}-{o.id}"
             seen_ids.add(oid)
             objs.append(Objective(id=oid, say=o.say, kind=o.kind, check=o.check, probe=o.probe,
-                                  level=o.level))
+                                  level=o.level, stars=getattr(o, "stars", 0)))
     from .objectives import by_level
     return by_level(objs)        # progressive ladder: place → connect → group → prove live
 
@@ -184,7 +194,7 @@ def assemble(core_ids, *, genre: str | None = None, level: int | None = None, le
         time_limit_s=_lesson.parse_duration(overrides.get("time_limit", "20m")),
         attempts=int(overrides.get("attempts", 3)), help=help_level, persona=persona,
         intent=intent, archetype=primary.id, genre=genre, level=level,
-        fragments=[f.id for f in chosen])
+        fragments=[f.id for f in chosen], forks=_forks_of(primary))
 
     if not _lesson.is_valid(lesson):                 # guardrail: fall back to the primary core alone
         objs = _merge_objectives([primary])

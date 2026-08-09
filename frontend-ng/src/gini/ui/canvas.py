@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import (
-    QEasingCurve, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation,
+    QEasingCurve, QPointF, QRect, QRectF, QSizeF, Qt, QTimer, QVariantAnimation,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF,
@@ -24,6 +24,7 @@ from ..app import AppContext
 from ..domain import grouping, pricing
 from ..domain.topology import DeviceInstance, Link
 from .theme import icons
+from .theme.manager import sp as _sp, ui_scale as _uiscale   # scale text + node cards by the UI setting
 from .theme.tokens import Theme
 
 MIME = "application/x-gini-device"
@@ -58,11 +59,13 @@ def _ortho_waypoints(a: "NodeItem", b: "NodeItem") -> list[QPointF]:
     Exits perpendicular to the nearer face and turns at the midline, giving a tidy
     two-bend 'Z' that the rounded-path builder softens into smooth elbows.
     """
+    s = _uiscale()                               # cards are drawn at this scale — use scaled extents
+    nw = NODE_W * s
     ax, ay = a.pos().x(), a.pos().y()
     bx, by = b.pos().x(), b.pos().y()
-    ah, bh = a.node_h(), b.node_h()              # per-node heights (size tiers differ)
-    ca = QPointF(ax + NODE_W / 2, ay + ah / 2)
-    cb = QPointF(bx + NODE_W / 2, by + bh / 2)
+    ah, bh = a.node_h() * s, b.node_h() * s      # per-node heights (size tiers differ) × card scale
+    ca = QPointF(ax + nw / 2, ay + ah / 2)
+    cb = QPointF(bx + nw / 2, by + bh / 2)
     dx, dy = cb.x() - ca.x(), cb.y() - ca.y()
     if abs(dy) >= abs(dx):                       # stacked-ish -> exit top/bottom
         if dy >= 0:
@@ -73,9 +76,9 @@ def _ortho_waypoints(a: "NodeItem", b: "NodeItem") -> list[QPointF]:
         return [ex, QPointF(ex.x(), mid), QPointF(en.x(), mid), en]
     else:                                        # side-by-side -> exit left/right
         if dx >= 0:
-            ex, en = QPointF(ax + NODE_W, ca.y()), QPointF(bx, cb.y())
+            ex, en = QPointF(ax + nw, ca.y()), QPointF(bx, cb.y())
         else:
-            ex, en = QPointF(ax, ca.y()), QPointF(bx + NODE_W, cb.y())
+            ex, en = QPointF(ax, ca.y()), QPointF(bx + nw, cb.y())
         mid = (ex.x() + en.x()) / 2
         return [ex, QPointF(mid, ex.y()), QPointF(mid, en.y()), en]
 
@@ -166,13 +169,13 @@ class GroupItem(QGraphicsObject):
         p.drawRoundedRect(self.box_rect(), 14, 14)
         # title + subtitle (the VPC's CIDR / subnet's tier)
         p.setPen(accent)
-        f = QFont(); f.setBold(True); f.setPointSize(10); p.setFont(f)
+        f = QFont(); f.setBold(True); f.setPointSize(_sp(10)); p.setFont(f)
         p.drawText(QRectF(14, 7, self.inst.w - 28, 16), Qt.AlignVCenter,
                    f"{dt.label}: {self.inst.name or dt.label}")
         sub = self._subtitle()
         if sub:
             p.setPen(_qcolor(t.muted))
-            f2 = QFont(); f2.setPointSize(8); p.setFont(f2)
+            f2 = QFont(); f2.setPointSize(_sp(8)); p.setFont(f2)
             p.drawText(QRectF(14, 23, self.inst.w - 28, 13), Qt.AlignVCenter, sub)
         # resize grip (three corner ticks)
         g = self._grip_rect()
@@ -238,12 +241,16 @@ class NodeItem(QGraphicsObject):
         self._scene = scene
         self.inst = inst
         self.status = "idle"
+        # GINI32 only: the hotspot address of the real board currently checked in, or ""
+        # when none is. Observed hardware state, so it is never saved with the topology.
+        self.board_addr = ""
         self.setFlags(
             QGraphicsItem.ItemIsMovable
             | QGraphicsItem.ItemIsSelectable
             | QGraphicsItem.ItemSendsGeometryChanges
         )
         self.setPos(inst.x, inst.y)
+        self.setScale(_uiscale())          # the whole card (art + text) grows with the text-size setting
         self.setZValue(10)
         self.setAcceptHoverEvents(True)
         self._hover = 0.0
@@ -339,6 +346,11 @@ class NodeItem(QGraphicsObject):
         dt = self.inst.type
         accent = _qcolor(t.accent_for(dt.accent.value))
         p.setRenderHint(QPainter.Antialiasing, True)
+        # A SLOT-TAGGED element is scaffolding — a stand-in for a composition parameter, not part of
+        # the fragment being authored. Render it recessive so the canvas tells the truth: the bright,
+        # un-hulled elements are YOUR delta; the faded ones get replaced at compose time.
+        if getattr(self.inst, "slot", ""):
+            p.setOpacity(0.55)
 
         H = self.node_h()
         rect = QRectF(0.5, 0.5, NODE_W - 1, H - 1)
@@ -391,21 +403,31 @@ class NodeItem(QGraphicsObject):
 
         # name + type
         p.setPen(_qcolor(t.text))
-        f = QFont(); f.setPointSize(11); f.setWeight(QFont.DemiBold); p.setFont(f)
+        f = QFont(); f.setPointSize(_sp(11)); f.setWeight(QFont.DemiBold); p.setFont(f)
         p.drawText(QRectF(48, 10, NODE_W - 56, 18), Qt.AlignVCenter, self.inst.name)
         p.setPen(_qcolor(t.faint))
-        f2 = QFont(); f2.setPointSize(8); p.setFont(f2)
+        f2 = QFont(); f2.setPointSize(_sp(8)); p.setFont(f2)
         p.drawText(QRectF(48, 27, NODE_W - 56, 14), Qt.AlignVCenter, dt.label)
 
         # primary IP (once compiled) — at-a-glance addressing on the node
         addr = self._scene.ctx.addressing.get(self.inst.name)
+        ip = ""
         if addr and addr.get("interfaces"):
             ifaces = addr["interfaces"]
             ip = ifaces[0]["ip"].split("/")[0]
             if len(ifaces) > 1:
                 ip += f"  +{len(ifaces) - 1}"
+        elif getattr(self, "board_addr", ""):
+            # A GINI32 board is not in the compiled addressing table — it has no
+            # container and the canvas never assigns it a machine address. Its meaningful
+            # address is the hotspot gateway it raises for real devices, which only
+            # exists while the hardware is actually checked in. Set (and cleared) by
+            # _poll_boards, so an unplugged board stops advertising an address it no
+            # longer answers on.
+            ip = self.board_addr
+        if ip:
             p.setPen(_qcolor(t.accent))
-            fip = QFont(); fip.setStyleHint(QFont.Monospace); fip.setPointSize(8)
+            fip = QFont(); fip.setStyleHint(QFont.Monospace); fip.setPointSize(_sp(8))
             p.setFont(fip)
             p.drawText(QRectF(48, 41, NODE_W - 56, 13), Qt.AlignVCenter, ip)
 
@@ -415,15 +437,25 @@ class NodeItem(QGraphicsObject):
             "booting": (_qcolor(t.warning), "booting"),
             "stopping": (_qcolor(t.warning), "stopping"),
             "error": (_qcolor(t.danger), "error"),
+            "ready": (_qcolor(t.accent), "ready"),      # a rider whose donor is up — runnable
         }.get(self.status, (_qcolor(t.muted), "idle"))
+        # Real hardware does not "run" — it is either there or it is not. Saying
+        # "running" about a board on someone's desk invites the wrong mental model,
+        # and "idle" reads as "fine, just quiet" when it actually means "absent".
+        if self.inst.type_key == "gini32":
+            chip_col, label = {
+                "running":  (_qcolor(t.success), "connected"),
+                "searching": (_qcolor(t.warning), "searching"),
+                "error":    (_qcolor(t.danger), "no board"),
+            }.get(self.status, (_qcolor(t.muted), "offline"))
         chip_bg = QColor(chip_col); chip_bg.setAlpha(38)
-        cr = QRectF(12, H - 24, 58, 16)
+        cr = QRectF(12, H - 24, 62, 16)
         p.setBrush(chip_bg); p.setPen(Qt.NoPen)
         p.drawRoundedRect(cr, 8, 8)
         p.setBrush(chip_col)
         p.drawEllipse(QRectF(cr.left() + 7, cr.center().y() - 3, 6, 6))
         p.setPen(chip_col)
-        f3 = QFont(); f3.setPointSize(8); p.setFont(f3)
+        f3 = QFont(); f3.setPointSize(_sp(8)); p.setFont(f3)
         p.drawText(cr.adjusted(20, 0, -2, 0), Qt.AlignVCenter, label)
 
         # size tier: capacity gauge + label in the grown body, and a + / - stepper
@@ -436,7 +468,7 @@ class NodeItem(QGraphicsObject):
             p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(bx, by, 18, 18))
             p.setPen(QColor("#ffffff"))
-            fb = QFont(); fb.setPointSize(11); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(11)); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "!")
 
         # advisory-lint warning badge (top-right) — clickable to ask GINI about it
@@ -447,7 +479,7 @@ class NodeItem(QGraphicsObject):
             p.setBrush(warn); p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(bx, by, 14, 14))
             p.setPen(QColor("#1a1205"))
-            fb = QFont(); fb.setPointSize(9); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(9)); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by, 14, 14), Qt.AlignCenter, "!")
 
         # Wizard: flag an element that isn't part of the active goal (click ✕ to remove)
@@ -456,7 +488,7 @@ class NodeItem(QGraphicsObject):
             p.setBrush(_qcolor(t.danger)); p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(bx, by, 18, 18))
             p.setPen(QColor("#ffffff"))
-            fb = QFont(); fb.setPointSize(10); fb.setBold(True); p.setFont(fb)
+            fb = QFont(); fb.setPointSize(_sp(10)); fb.setBold(True); p.setFont(fb)
             p.drawText(QRectF(bx, by - 1, 18, 18), Qt.AlignCenter, "✕")
 
     def _paint_size(self, p: QPainter, t, accent: QColor, H: float) -> None:
@@ -472,14 +504,14 @@ class NodeItem(QGraphicsObject):
             p.setPen(QPen(accent if on else _qcolor(t.line2), 1.2))
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 5, 5)
             p.setPen(accent if on else _qcolor(t.faint))
-            fs = QFont(); fs.setPointSize(12); fs.setBold(True); p.setFont(fs)
+            fs = QFont(); fs.setPointSize(_sp(12)); fs.setBold(True); p.setFont(fs)
             p.drawText(r, Qt.AlignCenter, glyph)
 
         # capacity caption + vertical gauge in the body the taller node opens up
         body_top, body_bot = 58.0, H - 30
         if body_bot - body_top >= 16:
             p.setPen(_qcolor(t.muted))
-            fc = QFont(); fc.setPointSize(8); fc.setBold(True); p.setFont(fc)
+            fc = QFont(); fc.setPointSize(_sp(8)); fc.setBold(True); p.setFont(fc)
             p.drawText(QRectF(14, body_top, NODE_W - 30, 14),
                        Qt.AlignVCenter | Qt.AlignLeft, f"{label} · {vcpu:g} vCPU")
             gx, gw, gtop, gbot = NODE_W - 16.0, 6.0, body_top + 16, body_bot
@@ -597,6 +629,15 @@ class NodeItem(QGraphicsObject):
         self.status = status
         self.update()
 
+    def set_board_addr(self, addr: str) -> None:
+        """Show (or clear) a real board's hotspot address. Repaints only on change —
+        this is called from a 3 s poll, and repainting every node every tick would put
+        the canvas under constant needless load."""
+        if addr == self.board_addr:
+            return
+        self.board_addr = addr
+        self.update()
+
     def set_spotlight(self, on: bool) -> None:
         self._spot = on
         self.update()
@@ -618,8 +659,18 @@ class EdgeItem(QGraphicsObject):
         self._flow_anim: QVariantAnimation | None = None
         self.refresh()
 
+    def _is_attach(self) -> bool:
+        return getattr(self.link, "kind", "link") == "attach"
+
+    def _rider_role(self) -> str:
+        """'source' | 'sink' | '' — read from the rider end (source_id) of an attach edge."""
+        dev = self._scene.ctx.topology.devices.get(self.link.source_id)
+        return getattr(dev.type, "role", "") if dev is not None else ""
+
     def flow(self, color: str | None = None, duration: int = 900) -> None:
         """Animate a packet dot travelling along the edge (tutor + 'alive' feedback)."""
+        if self._is_attach():
+            return                                   # attach edges carry no traffic — never animate
         self._packet_color = _qcolor(color) if color else None
         if self._scene.ctx.settings.reduced_motion:
             return
@@ -647,8 +698,9 @@ class EdgeItem(QGraphicsObject):
         self.prepareGeometryChange()
         style = getattr(self._scene.ctx.settings, "connector_style", "orthogonal")
         if style == "straight":
-            ca = a.pos() + QPointF(NODE_W / 2, a.node_h() / 2)
-            cb = b.pos() + QPointF(NODE_W / 2, b.node_h() / 2)
+            s = _uiscale()
+            ca = a.pos() + QPointF(NODE_W * s / 2, a.node_h() * s / 2)
+            cb = b.pos() + QPointF(NODE_W * s / 2, b.node_h() * s / 2)
             path = QPainterPath(ca)
             path.lineTo(cb)
             self._path = path
@@ -667,6 +719,9 @@ class EdgeItem(QGraphicsObject):
         t = self._scene.theme
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setBrush(Qt.NoBrush)                    # open path: stroke only, never fill
+        if self._is_attach():
+            self._paint_attach(p, t)
+            return
         p.setPen(QPen(_qcolor(t.line2), 2))
         p.drawPath(self._path)
         if self._packet_t is not None:
@@ -675,6 +730,43 @@ class EdgeItem(QGraphicsObject):
             p.setBrush(col)
             p.setPen(Qt.NoPen)
             p.drawEllipse(pt, 5, 5)
+
+    def _paint_attach(self, p: QPainter, t) -> None:
+        """A rider mount: a DOTTED tether with a bold, accent-coloured polarity glyph at the MIDPOINT
+        (always on the visible line, whatever the length) — a big arrowhead pointing toward the donor
+        for a source (it injects INTO it), a diamond for a sink (it observes). Reads as an annotation
+        ('runs on'), never a cable."""
+        import math
+        dev = self._scene.ctx.topology.devices.get(self.link.source_id)
+        role = getattr(dev.type, "role", "") if dev is not None else ""
+        gcol = _qcolor(t.line)                   # match the dotted tether — big shape, subtle colour
+
+        pen = QPen(_qcolor(t.line), 2.4)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setDashPattern([1.4, 2.4])
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(self._path)
+
+        c = self._path.pointAtPercent(0.5)                   # glyph at the midpoint of the tether
+        a0 = self._path.pointAtPercent(0.42)
+        a1 = self._path.pointAtPercent(0.58)
+        ang = math.atan2(a1.y() - a0.y(), a1.x() - a0.x())   # tangent, pointing toward the donor
+        dx, dy = math.cos(ang), math.sin(ang)
+        px, py = -math.sin(ang), math.cos(ang)               # perpendicular
+        p.setPen(QPen(_qcolor(t.bg), 1.4))                   # thin bg halo so it reads on any node
+        p.setBrush(gcol)
+        if role == "sink":                                   # a bold diamond (observer)
+            r = 8.0
+            p.drawPolygon(QPolygonF([
+                QPointF(c.x() + r * dx, c.y() + r * dy), QPointF(c.x() + r * px, c.y() + r * py),
+                QPointF(c.x() - r * dx, c.y() - r * dy), QPointF(c.x() - r * px, c.y() - r * py)]))
+        else:                                                # a big arrowhead into the donor
+            L, W = 16.0, 9.0
+            tip = QPointF(c.x() + (L / 2) * dx, c.y() + (L / 2) * dy)
+            bx, by = c.x() - (L / 2) * dx, c.y() - (L / 2) * dy
+            p.drawPolygon(QPolygonF([tip, QPointF(bx + W * px, by + W * py),
+                                     QPointF(bx - W * px, by - W * py)]))
 
 
 class CalloutItem(QGraphicsObject):
@@ -687,7 +779,7 @@ class CalloutItem(QGraphicsObject):
         self.text = text
         self.setZValue(60)
         self._font = QFont()
-        self._font.setPointSize(10)
+        self._font.setPointSize(_sp(10))
         fm = QFontMetrics(self._font)
         self._pad = 11
         self._w = 200
@@ -787,30 +879,86 @@ class CanvasScene(QGraphicsScene):
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme
         self.update()
+        scale = _uiscale()
         for n in self.nodes.values():
             n.refresh_theme()
+            n.setScale(scale)              # follow the current text-size setting (card grows with text)
             n.update()
         for g in self.groups.values():
             g.update()
         for e in self.edges.values():
+            e.refresh()                    # re-route: node extents changed with the scale
             e.update()
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         painter.fillRect(rect, _qcolor(self.theme.bg))
-        if not self.ctx.settings.grid:
+        if self.ctx.settings.grid:
+            painter.setPen(QPen(_qcolor(self.theme.grid), 1))
+            left = int(rect.left()) - (int(rect.left()) % GRID)
+            top = int(rect.top()) - (int(rect.top()) % GRID)
+            x = left
+            while x < rect.right():
+                painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
+                x += GRID
+            y = top
+            while y < rect.bottom():
+                painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+                y += GRID
+            self._draw_vignette(painter, rect)
+        self._draw_slot_hulls(painter)
+
+    def _draw_slot_hulls(self, painter: QPainter) -> None:
+        """Draw a labelled hull around each group of slot-tagged elements.
+
+        A fragment's slot is a *parameter*: while authoring, the canvas holds a stand-in provider so
+        you can wire your delta to something real. Without this, that scaffolding is indistinguishable
+        from the fragment itself — you see a whole network and can't tell which third is yours. The
+        hull is DERIVED (the bounding box of everything sharing a slot tag), so nothing is positioned
+        by hand and it stays right when nodes move. Label = slot · what fills it · how many."""
+        groups: dict[str, list] = {}
+        for n in self.nodes.values():
+            s = getattr(n.inst, "slot", "")
+            if s:
+                groups.setdefault(s, []).append(n)
+        if not groups:
             return
-        painter.setPen(QPen(_qcolor(self.theme.grid), 1))
-        left = int(rect.left()) - (int(rect.left()) % GRID)
-        top = int(rect.top()) - (int(rect.top()) % GRID)
-        x = left
-        while x < rect.right():
-            painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-            x += GRID
-        y = top
-        while y < rect.bottom():
-            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
-            y += GRID
-        self._draw_vignette(painter, rect)
+        t = self.theme
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        f = QFont(); f.setPointSize(9); f.setBold(True)
+        painter.setFont(f)
+        for name, items in sorted(groups.items()):
+            box = None
+            source = ""
+            for n in items:
+                source = source or getattr(n.inst, "slot_source", "")
+                r = QRectF(n.pos(), QSizeF(NODE_W * n.scale(), n.node_h() * n.scale()))
+                box = r if box is None else box.united(r)
+            if box is None:
+                continue
+            box = box.adjusted(-18, -26, 18, 18)
+            col = _qcolor(t.line)
+            fill = QColor(col); fill.setAlpha(16)
+            painter.setBrush(fill)
+            pen = QPen(col, 1.4)
+            pen.setStyle(Qt.DashLine)          # dashed = a placeholder, not a real boundary
+            painter.setPen(pen)
+            painter.drawRoundedRect(box, 12, 12)
+            lbl = QColor(col); lbl.setAlpha(210)
+            painter.setPen(QPen(lbl, 1))
+            painter.drawText(QRectF(box.left() + 10, box.top() + 4, box.width() - 20, 18),
+                             Qt.AlignLeft | Qt.AlignVCenter,
+                             self._slot_label(name, len(items), source))
+
+    def _slot_label(self, name: str, n_items: int, source: str = "") -> str:
+        """`nets · cap-lan · 3 elements` — the slot, WHAT is filling it, and the group's size.
+
+        The composer labels members `root_lans0`, `root_lans1`, … — the trailing index is the member
+        number, so strip it for display and show the slot's own name."""
+        import re
+        base = name.split("_")[-1] if "_" in name else name
+        base = re.sub(r"\d+$", "", base) or base
+        head = f"{base} · {source}" if source else base
+        return f"{head}   ·   {n_items} element(s)"
 
     def _draw_vignette(self, painter: QPainter, rect: QRectF) -> None:
         """A soft radial shade toward the viewport edges so the board reads as a
@@ -1018,6 +1166,81 @@ class CanvasScene(QGraphicsScene):
         self._callouts = []
 
 
+class LiveClientItem(QGraphicsObject):
+    """A real device sitting on a GINI32 board's radio, right now.
+
+    This is the one thing on the canvas that nobody drew. It is OBSERVED: the board
+    reports which devices are associated to its hotspot, and each becomes one of
+    these, hanging off the board. It is never part of the topology, never saved, and
+    cannot be selected or moved — because the person holding the phone owns it, not
+    the person editing the diagram. It vanishes when the device walks away.
+    """
+    W, H = 118.0, 40.0
+
+    def __init__(self, theme, mac: str, ip: str) -> None:
+        super().__init__()
+        self._theme = theme
+        self.mac = mac
+        self.ip = ip
+        self.setZValue(-0.5)                 # behind real elements
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        # "?" is a real value here, not a missing key: a stock-built firmware cannot read
+        # the DHCP leases (that needs GB_HAVE_STA_IPS) and reports every station as
+        # `mac/?`. Rendering the sentinel straight into the sentence produced "on this
+        # board's Wi-Fi as ?", which reads like a bug in the canvas rather than a
+        # limitation of the board. Say what is actually known instead.
+        where = (f"on this board's Wi-Fi as {ip}" if ip and ip != "?"
+                 else "on this board's Wi-Fi (address not reported by the board)")
+        self.setToolTip(f"{mac}\n{where}\n"
+                        f"(a real device — not part of the saved topology)")
+        self.setOpacity(0.0)
+        self._fade(0.96)
+
+    def _fade(self, to: float) -> None:
+        anim = QVariantAnimation(self)
+        anim.setStartValue(self.opacity())
+        anim.setEndValue(to)
+        anim.setDuration(220)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(self.setOpacity)
+        anim.start(QVariantAnimation.DeleteWhenStopped)
+        self._anim = anim
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-2, -2, self.W + 4, self.H + 4)
+
+    def paint(self, p: QPainter, *_) -> None:
+        t = self._theme                       # in canvas.py `theme` IS the palette
+        p.setRenderHint(QPainter.Antialiasing, True)
+        accent = QColor(t.accent_for("green"))
+
+        # dashed = "here now, not drawn": visually distinct from every real element
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, self.W, self.H), 9, 9)
+        p.fillPath(path, QBrush(QColor(t.panel2)))
+        pen = QPen(accent, 1.2, Qt.DashLine)
+        pen.setDashPattern([4, 3])
+        p.setPen(pen)
+        p.drawPath(path)
+
+        # a small radio glyph, so it reads as "arrived over the air"
+        p.setPen(QPen(accent, 1.4))
+        cx, cy = 15.0, self.H / 2
+        for r in (3.5, 7.0):
+            p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2), -50 * 16, 100 * 16)
+        p.setBrush(QBrush(accent))
+        p.drawEllipse(QPointF(cx - 1, cy), 1.6, 1.6)
+
+        f = QFont(p.font()); f.setPointSizeF(8.4); f.setBold(True)
+        p.setFont(f); p.setPen(QPen(QColor(t.text)))
+        p.drawText(QRectF(28, 5, self.W - 34, 15), Qt.AlignVCenter | Qt.AlignLeft, self.ip)
+        f.setBold(False); f.setPointSizeF(7.2)
+        p.setFont(f); p.setPen(QPen(QColor(t.muted)))
+        fm = QFontMetrics(f)
+        p.drawText(QRectF(28, 20, self.W - 34, 14), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(self.mac, Qt.ElideMiddle, int(self.W - 36)))
+
+
 class GhostItem(QGraphicsObject):
     """A translucent preview of a placeable neighbour, drawn during X-ray. Tap it and the
     view turns it into a real element wired to the long-pressed node. A ghost with
@@ -1069,7 +1292,7 @@ class GhostItem(QGraphicsObject):
             p.setPen(QPen(_qcolor(t.line2), 1.4, Qt.DashLine))
             p.drawRoundedRect(rect, 10, 10)
             p.setPen(_qcolor(t.muted))
-            f = QFont(); f.setPointSize(10); f.setBold(True); p.setFont(f)
+            f = QFont(); f.setPointSize(_sp(10)); f.setBold(True); p.setFont(f)
             p.drawText(rect, Qt.AlignCenter, self.why)
             return
 
@@ -1087,17 +1310,17 @@ class GhostItem(QGraphicsObject):
         p.drawPixmap(14, 16, icons.render_pixmap(dt.icon, t.accent_for(dt.accent.value), size=20))
 
         p.setPen(_qcolor(t.text))
-        f = QFont(); f.setPointSize(10); f.setWeight(QFont.DemiBold); p.setFont(f)
+        f = QFont(); f.setPointSize(_sp(10)); f.setWeight(QFont.DemiBold); p.setFont(f)
         p.drawText(QRectF(46, 7, self.W - 52, 16), Qt.AlignVCenter, dt.label)
 
         sub = QRectF(46, 26, self.W - 52, 16)
         if self._hover:
             p.setPen(accent)
-            fh = QFont(); fh.setPointSize(8); fh.setBold(True); p.setFont(fh)
+            fh = QFont(); fh.setPointSize(_sp(8)); fh.setBold(True); p.setFont(fh)
             p.drawText(sub, Qt.AlignVCenter, "＋  tap to add")
         else:
             p.setPen(_qcolor(t.faint))
-            fw = QFont(); fw.setPointSize(8); p.setFont(fw)
+            fw = QFont(); fw.setPointSize(_sp(8)); p.setFont(fw)
             fm = p.fontMetrics()
             txt = ("needed · " if self.required else "") + self.why
             p.drawText(sub, Qt.AlignVCenter, fm.elidedText(txt, Qt.ElideRight, int(self.W - 54)))
@@ -1170,6 +1393,62 @@ class CanvasView(QGraphicsView):
         ctx.bus.wizard_ghosts_requested.connect(self._on_wizard_requested)
         ctx.bus.wizard_ghosts_ready.connect(self._on_wizard_ghosts)
         ctx.bus.mission_changed.connect(lambda m: m is None and self.clear_xray())
+
+    def set_live_clients(self, live: dict) -> dict:
+        """Reconcile the devices currently on each board's radio with what is drawn.
+
+        `live` maps a GINI32 element id -> [{mac, ip}, ...]. Returns
+        {'joined': [...], 'left': [...]} so the caller can narrate the change.
+        These items are ephemeral by construction: nothing here touches the topology.
+        """
+        existing = getattr(self, "_live_clients", None)
+        if existing is None:
+            existing = self._live_clients = {}        # (device_id, mac) -> item
+
+        want: dict[tuple, dict] = {}
+        for did, clients in (live or {}).items():
+            for c in clients:
+                want[(did, c.get("mac", ""))] = c
+
+        joined, left = [], []
+
+        for key in list(existing):
+            if key not in want:
+                item = existing.pop(key)
+                if item.scene() is not None:
+                    item.scene().removeItem(item)
+                left.append(f"{key[1]}")
+
+        for key, c in want.items():
+            if key in existing:
+                continue
+            did, mac = key
+            node = self.scene_.nodes.get(did)
+            if node is None:
+                continue
+            item = LiveClientItem(self.scene_.theme, mac, c.get("ip", "?"))
+            self.scene_.addItem(item)
+            existing[key] = item
+            joined.append(f"{mac} ({c.get('ip', '?')})")
+
+        # lay each board's devices out beneath it, stacked
+        for did in {k[0] for k in existing}:
+            node = self.scene_.nodes.get(did)
+            if node is None:
+                continue
+            mine = [existing[k] for k in sorted(existing) if k[0] == did]
+            for i, item in enumerate(mine):
+                item.setPos(node.x() + (NODE_W - LiveClientItem.W) / 2,
+                            node.y() + NODE_H + 16 + i * (LiveClientItem.H + 6))
+
+        return {"joined": joined, "left": left}
+
+    def clear_live_clients(self) -> None:
+        """Drop every observed device — the lab stopped, so we know nothing."""
+        for item in getattr(self, "_live_clients", {}).values():
+            if item.scene() is not None:
+                item.scene().removeItem(item)
+        self._live_clients = {}
 
     def _show_narration(self, text: str) -> None:
         th = self.scene_.theme
@@ -1327,7 +1606,7 @@ class CanvasView(QGraphicsView):
             return
         try:
             inst = self.ctx.add_device(type_key, x=pos.x(), y=pos.y())
-            self.ctx.add_link(target_id, inst.id)
+            self.ctx.connect(target_id, inst.id)
             self.ctx.select(inst.id)
         except Exception as ex:                  # noqa: BLE001
             self.ctx.log(f"Couldn't add element: {ex}", "info")
@@ -1660,7 +1939,7 @@ class CanvasView(QGraphicsView):
                 target = self._node_at(e.pos(), slack=_HIT_SLACK)   # …and slack on the DROP too
                 if target is not None and target.inst.id != src.inst.id:
                     try:
-                        self.ctx.add_link(src.inst.id, target.inst.id)
+                        self.ctx.connect(src.inst.id, target.inst.id)
                     except Exception as ex:          # noqa: BLE001
                         self.ctx.log(f"Couldn't connect: {ex}", "info")
             else:                                    # plain right-click -> context menu
@@ -1672,7 +1951,7 @@ class CanvasView(QGraphicsView):
     # -- one implementation of "draw a wire from a node to the cursor" -------- #
     def _link(self, src_id: str, dst_id: str) -> None:
         try:
-            self.ctx.add_link(src_id, dst_id)
+            self.ctx.connect(src_id, dst_id)
         except Exception as ex:                  # noqa: BLE001 — grammar refusals land here
             self.ctx.log(f"Couldn't connect: {ex}", "info")
 
