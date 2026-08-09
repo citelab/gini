@@ -245,7 +245,7 @@ CMD ["python", "-m", "dataplane.shuttle"]
 # foreground — so the container is a real fabric node (networking) that also has a GUI.
 _GUI_START = (
     "Xvfb :0 -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 & sleep 1; "
-    "fluxbox >/dev/null 2>&1 & pcmanfm --desktop >/dev/null 2>&1 & xterm >/dev/null 2>&1 & "
+    "fluxbox >/dev/null 2>&1 & pcmanfm --desktop >/dev/null 2>&1 & "
     "x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -bg -quiet -noxdamage >/dev/null 2>&1; "
     "websockify --web=/usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 & "
     "exec python3 -m dataplane.shuttle"
@@ -253,7 +253,13 @@ _GUI_START = (
 _DOCKERFILE_MACHINE_GUI = f"""FROM alpine:3.20
 RUN apk add --no-cache {_MACHINE_TOOLS_LEAN} \\
         xvfb x11vnc fluxbox xterm pcmanfm dillo novnc websockify font-dejavu
-ENV DISPLAY=:0
+# Ready-made desktop shortcuts so students see a Terminal and Dillo on the desktop at startup
+# (pcmanfm --desktop shows ~/Desktop/*.desktop as clickable icons; +x avoids a trust prompt).
+RUN mkdir -p /root/Desktop \\
+ && printf '[Desktop Entry]\\nType=Application\\nName=Terminal\\nExec=xterm\\nTerminal=false\\n' > /root/Desktop/Terminal.desktop \\
+ && printf '[Desktop Entry]\\nType=Application\\nName=Dillo Browser\\nExec=dillo\\nTerminal=false\\n' > /root/Desktop/Dillo.desktop \\
+ && chmod +x /root/Desktop/*.desktop
+ENV DISPLAY=:0 HOME=/root
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
 CMD ["sh", "-c", "{_GUI_START}"]
