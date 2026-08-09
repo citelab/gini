@@ -93,6 +93,14 @@ GUIDE: dict[str, str] = {
         "time. It is standalone by default (no fabric wiring); you drive it from its own serial "
         "console. Use it to teach processes, scheduling, virtual memory, traps and file "
         "systems on a kernel small enough to read end to end."),
+    "desktop": (
+        "A Desktop is a headful Machine — a real Linux host on the fabric (it has an IP, is "
+        "pingable and routable, and carries the usual networking tools) that also runs a light "
+        "graphical desktop: a fluxbox window manager, a file manager, a terminal, and the Dillo "
+        "browser. Double-click it to open its screen in an embedded window over noVNC. Reach for it "
+        "when you want a GUI in the topology — for example, to point a browser at a web server "
+        "another machine is serving. It carries an X stack, so it's heavier than a plain Machine; "
+        "use a plain Machine when you only need a shell."),
     "terminal": (
         "A Terminal is an xv6 Machine's console — a screen and keyboard in one, like a real tty "
         "(xv6's console is a single bidirectional UART, so output and input share one stream). "

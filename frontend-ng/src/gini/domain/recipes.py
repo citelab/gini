@@ -61,6 +61,23 @@ RECIPES: tuple[Recipe, ...] = (
         links=(("m1", "s1"), ("m2", "s1"), ("s1", "r1")),
     ),
     Recipe(
+        id="gui_desktop", name="A graphical Linux host",
+        summary="A headful Desktop machine on the LAN — open its screen and browse a web server "
+                "another machine is serving.",
+        intent=("desktop", "gui", "graphical", "headful", "browser", "x11", "vnc", "linux desktop",
+                "point and click"),
+        teaches="a graphical host on the network — point-and-click Linux inside a topology",
+        concept="networking-basics",
+        elements=(
+            _e("gui", "desktop", "The graphical host — double-click to open its desktop over noVNC.",
+               col=0, row=0),
+            _e("s1", "switch", "The LAN switch.", col=1, row=0),
+            _e("m1", "host", "A machine that can serve a page for the desktop's browser to fetch.",
+               col=2, row=0),
+        ),
+        links=(("gui", "s1"), ("m1", "s1")),
+    ),
+    Recipe(
         id="wifi_lan", name="A Wi-Fi LAN",
         summary="A wireless client joining the wired LAN through an access point.",
         intent=("wifi", "wireless", "access point", "wap", "mobile", "802.11"),

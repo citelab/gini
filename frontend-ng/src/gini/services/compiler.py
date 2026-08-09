@@ -110,9 +110,11 @@ def _toolkit_for(device) -> str:
     bind9 for the DNS chapter, postfix for mail, ettercap/dsniff for the spoofing labs.
 
     Anything unrecognised means lean: a typo must not silently pull in the 10x image."""
+    if getattr(device, "type_key", "") == "desktop":     # the headful Desktop element is always gui
+        return "gui"
     props = getattr(device, "properties", None) or {}
     want = str(props.get("Toolkit", "")).strip().lower()
-    return want if want in ("full", "security") else "lean"
+    return want if want in ("full", "security", "gui") else "lean"
 
 
 def _xv6_harts(device) -> int:
@@ -220,6 +222,7 @@ class MachineSpec:
     # DIFFERENT axis from the size tier above: size = how much CPU it gets and what it costs;
     # toolkit = what software is installed in it. A lean host with an XL cap is perfectly valid.
     toolkit: str = "lean"
+    novnc_port: int = 0            # headful ("gui") host: published host port for its noVNC console
     # --- inline VNF (NFV service function) ----------------------------------- #
     forward: bool = False          # IP-forward between its interfaces (a transit node)
     nf: str = ""                   # the network function kind: firewall|block|ids|cache|shaper
@@ -479,6 +482,7 @@ class RuntimeConfig:
                 {"name": _svc(m.name), "hostname": _hostname(m.name), "gw": m.gw,
                  "gateway": m.gateway, "fabric_default": m.fabric_default,
                  "fabric_gw": m.fabric_gw, "cpus": m.cpus, "toolkit": m.toolkit,
+                 "novnc_port": m.novnc_port,
                  "forward": m.forward, "nf": m.nf, "nf_rules": m.nf_rules,
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "tap": f"gini{idx}",
                              "port": i.ep.wiring(docker)}
@@ -1034,6 +1038,12 @@ class RuntimeCompiler:
         # managed cloud services — each backed by an off-the-shelf image. Web consoles
         # get a unique published host port so several services can coexist.
         host_port = 38000
+        # headful ("gui") machines publish their noVNC console on a unique host port too, so the
+        # Desktop element can open the embedded screen (the machine dict carries the port).
+        for m in cfg.machines:
+            if m.toolkit == "gui":
+                m.novnc_port = host_port
+                host_port += 1
         for d in topo.devices.values():
             if role.get(d.id) != "service":
                 continue

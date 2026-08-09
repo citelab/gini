@@ -54,8 +54,14 @@ class ZooLab(QDialog):
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
 
-        tier = QLabel("bring your own image" if self.device.type_key == "oszoo_byo"
-                      else "boots out of the box")
+        tk = self.device.type_key
+        try:
+            from ..domain import os_zoo
+            chip = ("bring your own image" if tk == "oszoo_byo"
+                    else "boots out of the box" if os_zoo.get(tk) else "over noVNC")
+        except Exception:
+            chip = "over noVNC"
+        tier = QLabel(chip)
         tier.setStyleSheet(
             f"color:{t.muted};background:{t.panel2};border:1px solid {t.line};"
             "border-radius:9px;padding:2px 10px;font-size:11px;")
@@ -77,16 +83,26 @@ class ZooLab(QDialog):
         root.addLayout(head)
 
     def _label(self) -> str:
+        tk = self.device.type_key
         try:
             from ..domain import os_zoo
-            if self.device.type_key != "oszoo_byo":
-                o = os_zoo.get(self.device.type_key)
+            if tk != "oszoo_byo":
+                o = os_zoo.get(tk)
                 if o:
                     return o.label
-            img = (self.device.properties or {}).get("Image", "")
-            return f"classic OS ({img})" if img else "classic OS (set an image)"
+            elif tk == "oszoo_byo":
+                img = (self.device.properties or {}).get("Image", "")
+                return f"classic OS ({img})" if img else "classic OS (set an image)"
         except Exception:
-            return self.device.type_key
+            pass
+        try:                                       # generic (e.g. a Desktop machine): element label
+            from ..domain.devices import REGISTRY
+            dt = REGISTRY.get(tk)
+            if dt:
+                return dt.label
+        except Exception:
+            pass
+        return tk
 
     def _btn_css(self) -> str:
         t = self.theme.theme

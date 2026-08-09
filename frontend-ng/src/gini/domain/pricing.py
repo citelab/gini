@@ -17,6 +17,7 @@ DEFAULT_RATES: dict[str, float] = {
     "kinstance": 14.0,       # Kata Instance — a real microVM, so it costs more than a VM image
     "container": 5.0,
     "host": 2.0,             # a plain Machine / end host
+    "desktop": 3.0,          # a headful Machine (lean host + a light X desktop over noVNC)
     "xv6": 2.0,              # xv6 teaching kernel under QEMU-RISC-V (a single-CPU learning VM)
     # --- OS Zoo (emulated historical OSes; each is a QEMU/emulator VM) --------- #
     "freedos": 2.0,
@@ -102,7 +103,7 @@ def resizable(type_key: str) -> bool:
 
 # Dashboard breakdown groups. Order is the display order.
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "Compute": ("instance", "kinstance", "container", "host", "xv6"),
+    "Compute": ("instance", "kinstance", "container", "host", "desktop", "xv6"),
     "Serverless": ("function", "api_gateway"),
     "Kubernetes": ("k8s_cluster", "pod", "k8s_node", "instance_group", "registry"),
     "Networking": ("router", "ovs", "controller", "firewall", "vnf", "switch",

@@ -146,6 +146,7 @@ def simulate(config: RuntimeConfig) -> Sim:
 # must not be conflated: size = how much it gets, toolkit = what's installed in it.
 # --------------------------------------------------------------------------- #
 MACHINE_LEAN, MACHINE_FULL, MACHINE_SECURITY = "lean", "full", "security"
+MACHINE_GUI = "gui"                       # a HEADFUL machine: lean tools + a light X desktop
 MACHINE_TOOLKIT_DEFAULT = MACHINE_LEAN
 
 # Alpine package names (musl). Deliberately NOT: bind9, postfix, ettercap, haproxy, dsniff, lynx,
@@ -198,9 +199,20 @@ MACHINE_TOOLS_SECURITY_HUMAN = (MACHINE_TOOLS_HUMAN +
                        "suricata (IDS), isc-dhcp-server, tcpreplay")
 
 
+# The GUI toolkit = the lean Alpine host PLUS a light X desktop, served to gBuilder over noVNC:
+# Xvfb (a virtual screen), fluxbox (window manager), PCManFM (desktop + file manager), an xterm,
+# and Dillo (a tiny browser to hit web servers in the topology). x11vnc + noVNC publish the screen.
+# It's a REAL fabric host (runs dataplane.shuttle), so it also has the lean networking tools.
+MACHINE_TOOLS_GUI_HUMAN = (MACHINE_TOOLS_LEAN_HUMAN +
+                       "; plus a graphical desktop (fluxbox WM, PCManFM file manager, xterm, "
+                       "Dillo browser) opened over noVNC")
+
+
 def machine_tools(toolkit: str) -> str:
     if toolkit == MACHINE_SECURITY:
         return MACHINE_TOOLS_SECURITY_HUMAN
+    if toolkit == MACHINE_GUI:
+        return MACHINE_TOOLS_GUI_HUMAN
     return MACHINE_TOOLS_HUMAN if toolkit == MACHINE_FULL else MACHINE_TOOLS_LEAN_HUMAN
 
 
@@ -228,12 +240,32 @@ COPY dataplane/ /app/dataplane/
 CMD ["python", "-m", "dataplane.shuttle"]
 """
 
+# The HEADFUL machine: lean Alpine host + a light X desktop, served over noVNC on :6080. The
+# entrypoint starts the desktop stack in the background, then execs dataplane.shuttle in the
+# foreground — so the container is a real fabric node (networking) that also has a GUI.
+_GUI_START = (
+    "Xvfb :0 -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 & sleep 1; "
+    "fluxbox >/dev/null 2>&1 & pcmanfm --desktop >/dev/null 2>&1 & xterm >/dev/null 2>&1 & "
+    "x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -bg -quiet -noxdamage >/dev/null 2>&1; "
+    "websockify --web=/usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 & "
+    "exec python3 -m dataplane.shuttle"
+)
+_DOCKERFILE_MACHINE_GUI = f"""FROM alpine:3.20
+RUN apk add --no-cache {_MACHINE_TOOLS_LEAN} \\
+        xvfb x11vnc fluxbox xterm pcmanfm dillo novnc websockify font-dejavu
+ENV DISPLAY=:0
+WORKDIR /app
+COPY dataplane/ /app/dataplane/
+CMD ["sh", "-c", "{_GUI_START}"]
+"""
+
 # toolkit -> (compose image name, dockerfile path). Explicit image names so N hosts of one tier
 # resolve to ONE image and compose builds it once.
 _MACHINE_IMAGE = {
     MACHINE_LEAN:     ("gini-machine-lean",     "docker/Dockerfile.machine-lean"),
     MACHINE_FULL:     ("gini-machine-full",     "docker/Dockerfile.machine"),
     MACHINE_SECURITY: ("gini-machine-security", "docker/Dockerfile.machine-security"),
+    MACHINE_GUI:      ("gini-machine-gui",      "docker/Dockerfile.machine-gui"),
 }
 
 _DOCKERFILE_FABRIC = """FROM python:3.12-slim
@@ -561,6 +593,7 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     (work / "docker" / "Dockerfile.machine").write_text(_DOCKERFILE_MACHINE)
     (work / "docker" / "Dockerfile.machine-lean").write_text(_DOCKERFILE_MACHINE_LEAN)
     (work / "docker" / "Dockerfile.machine-security").write_text(_DOCKERFILE_MACHINE_SECURITY)
+    (work / "docker" / "Dockerfile.machine-gui").write_text(_DOCKERFILE_MACHINE_GUI)
     (work / "docker" / "Dockerfile.fabric").write_text(_DOCKERFILE_FABRIC)
     (work / "docker" / "Dockerfile.cloudfabric").write_text(_DOCKERFILE_CLOUDFABRIC)
     (work / "docker" / "Dockerfile.faas").write_text(_DOCKERFILE_FAAS)
@@ -829,6 +862,8 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
             from ..app.paths import captures_dir
             lines += ['    volumes:', f'      - "{str(captures_dir())}:/captures"']
+        if tk == MACHINE_GUI and m.get("novnc_port"):   # headful host: publish its noVNC console
+            lines += ['    ports:', f'      - "{m["novnc_port"]}:6080"']
         lines += _cpu_limit_lines(m.get("cpus"))
     return "\n".join(lines) + "\n"
 

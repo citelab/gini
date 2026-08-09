@@ -1817,6 +1817,7 @@ class MainWindow(QMainWindow):
                          "(Settings → Backend) to run VM-isolated workloads.", "info")
             return
         self._last_services = list(cfg.services)
+        self._last_machines = list(cfg.machines)     # headful Desktops carry a noVNC port here
         self._last_k8s = list(cfg.k8s)
         self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
         self._board_state = {}          # board_id -> live state, refreshed by the poller
@@ -2594,6 +2595,9 @@ class MainWindow(QMainWindow):
         if _role(dev.type_key) == "oszoo":       # OS Zoo -> the historical OS in an embedded screen
             self._open_zoo_lab(device_id)
             return
+        if dev.type_key == "desktop":            # headful Machine -> its graphical desktop over noVNC
+            self._open_desktop_console(device_id)
+            return
         if dev.type_key in ("terminal", "storage_volume"):
             self._open_peripheral(device_id)     # Terminal / disk view on its xv6
             return
@@ -2839,6 +2843,39 @@ class MainWindow(QMainWindow):
             return
         self._machine_lab.show()
         self._machine_lab.raise_()
+
+    def _open_desktop_console(self, device_id: str) -> None:
+        """Open a headful Desktop machine's graphical screen (X served over noVNC) embedded in a
+        window — the same viewer the OS Zoo uses. Falls back to the system browser if QtWebEngine
+        isn't available. Needs the topology running (the container publishes the noVNC port)."""
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        if not self._running:
+            self.ctx.log("Start the topology first (Run), then open the Desktop screen.", "info")
+            return
+        from ..services.compiler import _svc
+        svc = _svc(dev.name)
+        port = next((getattr(m, "novnc_port", 0) for m in getattr(self, "_last_machines", [])
+                     if _svc(m.name) == svc and getattr(m, "novnc_port", 0)), 0)
+        if not port:
+            self.ctx.log(f"{dev.name}: no desktop console — is it running as a Desktop (gui) host?",
+                         "info")
+            return
+        url = f"http://localhost:{port}/vnc.html?autoconnect=1&resize=remote"
+        try:
+            from .zoo_lab import ZooLab
+        except Exception as e:                    # QtWebEngine missing -> browser fallback
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl(url))
+            self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
+                         f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
+            return
+        self._desktop_lab = ZooLab(self, self.theme, dev, url)
+        self._desktop_lab.show()
+        self._desktop_lab.raise_()
+        self.ctx.log(f"Opening {dev.name} desktop: {url}", "ok")
 
     def _open_zoo_lab(self, device_id: str) -> None:
         """Open the Zoo Lab on an OS Zoo element — the historical OS running under emulation,

@@ -153,6 +153,18 @@ _DEVICES: list[DeviceType] = [
         is_cloud=False,   # stated, not inferred from the palette section
     ),
     DeviceType(
+        "desktop", "Desktop", Category.MACHINES, "host", Accent.PINK,
+        "A HEADFUL machine — a real Linux host on the fabric (pingable, routable, all the usual "
+        "networking tools) that also runs a light graphical desktop (fluxbox, a file manager, a "
+        "terminal, and the Dillo browser). Double-click to open its screen in an embedded window "
+        "over noVNC. Use it when you want a GUI in the topology — e.g. browse a web server another "
+        "machine is serving. Heavier than a plain Machine (it carries an X stack), so reach for it "
+        "when you actually want the desktop.",
+        backend_kind="vm",
+        default_properties={"Name": "", "OS": "linux", "Interfaces": "1"},
+        is_cloud=False,
+    ),
+    DeviceType(
         "xv6", "xv6 Machine", Category.MACHINES, "host", Accent.RED,
         "A real teaching kernel: xv6 (MIT 6.1810) running on QEMU-RISC-V. Not a container — a "
         "genuine OS you can watch and steer. Double-click it to open the Machine Lab: observe the "
