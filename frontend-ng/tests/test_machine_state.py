@@ -50,6 +50,27 @@ def test_watcher_flags_starvation_once_per_episode():
     assert any(e.pid == 4 for e in events if e.kind == "starvation")
 
 
+def test_watcher_active_flags_persist_while_true():
+    # the scheduler-face badge needs the CURRENTLY-active condition, not just the one-shot event
+    w = StateWatcher(starve=3)
+    for _ in range(5):
+        w.observe(_snap([(3, "running", "spin"), (4, "runnable", "spin")], run=3))
+    assert w.active("starvation") == {4}
+    # once pid 4 gets to run, the condition clears and the badge goes away
+    w.observe(_snap([(3, "runnable", "spin"), (4, "running", "spin")], run=4))
+    assert w.active("starvation") == set()
+
+
+def test_machine_state_scheduling_flags():
+    ms = MachineState(DemoScheduler(timeslice=1), device_id="d1")
+    ms.watcher = StateWatcher(starve=3)
+    for _ in range(5):                          # drive a starvation condition through the state
+        ms._ingest(_snap([(3, "running", "spin"), (4, "runnable", "spin")], run=3))
+    flags = ms.scheduling_flags()
+    assert flags["starvation"] == {4}
+    assert set(flags) == {"starvation", "cpu_monopoly", "zombie_leak"}
+
+
 def test_watcher_flags_cpu_monopoly():
     w = StateWatcher(monopoly=3)
     ev = []
@@ -161,3 +182,61 @@ def test_os_coach_prompt_is_socratic_and_grounded():
     assert "do NOT dump" in p.lower() or "one nudge" in p.lower()
     assert "pid 3 hogging" in p          # grounded in the detected event
     assert "3 Coach hint" in p           # budget surfaced
+
+
+# -- Real/Demo mode (explicit user action, never auto-fallback) ------------- #
+class _FakeBridge:
+    """A live-shaped provider: real Snapshots + vm/fs readers, so it can be the Real plane."""
+    timeslice = 1
+    source = "real"
+    def __init__(self):
+        self.vm = object()
+        self.fs = object()
+    def snapshot(self):
+        return Snapshot(procs=[Proc(1, "sleeping", "init"), Proc(2, "sleeping", "sh")],
+                        running_pid=1, ticks=1, source="real")
+    def step(self):
+        return self.snapshot()
+
+
+def test_mode_toggle_swaps_real_and_demo_planes():
+    real = _FakeBridge()
+    ms = MachineState(real, device_id="d", mode="real", vm=real.vm, fs=real.fs)
+    assert ms.has_real() and ms.mode == "real"
+    assert ms.latest is not None and ms.latest.source == "real"
+    ms.set_mode("demo")                                   # user flips to Demo
+    assert ms.mode == "demo"
+    assert isinstance(ms.provider, DemoScheduler) and ms.latest.source == "demo"
+    ms.set_mode("real")                                   # ...and back
+    assert ms.provider is real and ms.latest.source == "real"
+
+
+def test_real_mode_with_no_running_kernel_is_empty_not_demo():
+    # started in Demo (nothing running); switching to Real shows NO data, never fake data
+    ms = MachineState(DemoScheduler(), device_id="d", mode="demo")
+    assert not ms.has_real()
+    ms.set_mode("real")
+    assert ms.provider is None and ms.latest is None      # honest emptiness, not a demo swap
+    assert ms.refresh() is None
+
+
+def test_attach_real_brings_an_open_lab_live():
+    ms = MachineState(DemoScheduler(), device_id="d", mode="demo")   # opened while stopped
+    ms.set_mode("real")                                   # user asks for Real -> no data yet
+    assert ms.provider is None and ms.latest is None
+    real = _FakeBridge()
+    ms.attach_real(real, vm=real.vm, fs=real.fs)          # the topology starts
+    assert ms.has_real() and ms.provider is real          # in Real mode -> goes live immediately
+    assert ms.latest is not None and ms.latest.source == "real"
+
+
+def test_real_read_failure_never_becomes_demo():
+    class _Dead:
+        timeslice = 1
+        def snapshot(self):
+            return Snapshot(procs=[], source="real")      # empty = failed read
+        def step(self):
+            return self.snapshot()
+    ms = MachineState(_Dead(), device_id="d", mode="real", vm=object(), fs=object())
+    assert ms.mode == "real" and ms.latest is None        # empty, and NOT swapped to demo
+    assert not isinstance(ms.provider, DemoScheduler)

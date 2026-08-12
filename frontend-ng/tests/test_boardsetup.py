@@ -125,12 +125,20 @@ class FakeBoard:
         self._w("gini> ")
 
     def close(self) -> None:
+        # Close the SLAVE first: that makes the reader thread's blocking os.read(master) return
+        # EOF so it exits. Closing the MASTER while that read is still in flight DEADLOCKS on macOS
+        # (close() waits on the pending read that never returns). Then join the reader, then close
+        # the master — no read is outstanding, so it can't hang.
         self._stop.set()
-        for fd in (self.master, self.slave):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        try:
+            os.close(self.slave)
+        except OSError:
+            pass
+        self._t.join(timeout=1.0)
+        try:
+            os.close(self.master)
+        except OSError:
+            pass
 
 
 @pytest.fixture

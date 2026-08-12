@@ -16,13 +16,17 @@ import json
 import urllib.request
 
 from ..domain.xv6 import (
-    Snapshot, parse_backtrace, parse_cpu_lines, parse_cpu_regs, parse_procdump, parse_registers,
-    parse_regs_line, parse_sched, running_pid,
+    Snapshot, apply_proc_sched, parse_backtrace, parse_cpu_lines, parse_cpu_regs, parse_procdump,
+    parse_registers, parse_regs_line, parse_sched, parse_shadow_manifest, running_pid,
 )
-from ..domain.xv6_fs import DemoDisk, FsSnapshot, Superblock, layout, parse_logheader, parse_superblock
-from ..domain.xv6_vm import DemoVm, PhysMem, parse_vmprint
+from ..domain.xv6_fs import FsSnapshot, Superblock, layout, parse_logheader, parse_superblock
+from ..domain.xv6_vm import VmSnapshot, parse_faults, parse_vmall, parse_vmprint
 
-POLICY_ID = {"round-robin": 0, "priority": 1, "mlfq": 2, "lottery": 3}
+# must match gini_pick() in gini_patch.py: 0=round-robin 1=priority 2=lottery. Custom student
+# policies (MLFQ, stride, …) get their own ids when added via the Scheduler Builder.
+POLICY_ID = {"round-robin": 0, "priority": 1, "lottery": 2}
+# each shadow overrides the policy at this index (the kernel toggles the CURRENT policy's shadow).
+SHADOW_POLICY = {"rr_sched": 0, "prio_sched": 1, "lottery_sched": 2}
 
 
 class AgentClient:
@@ -71,16 +75,39 @@ class _VmReader:
         self.agent = agent
 
     def snapshot(self):
-        base = DemoVm().snapshot()                      # regions/allocator shape (demo fallback)
+        # REAL only: return the live page table, or an explicit no-data VmSnapshot. Never fake.
+        # The region map + physical-allocator bar aren't dumped for real yet, so they're left
+        # empty (not in `have`) rather than borrowed from the demo.
         try:
             vm = parse_vmprint(self.agent.get_text("/vm"))
-            if vm.leaves:                               # got real mappings -> use them
-                vm.regions = base.regions
-                vm.phys = PhysMem(base.phys.total_pages, base.phys.free_pages)
+            if vm.leaves:                               # got real mappings
+                vm.source, vm.ok, vm.have = "real", True, ("pagetable",)
                 return vm
         except Exception:
             pass
-        return base                                     # live read failed -> demo, dialog still opens
+        return VmSnapshot(source="real", ok=False, have=())
+
+    def all_procs(self):
+        """Every user process's page table (gini_vmdump_all) -> {pid: ProcVm}, for the two-proc
+        COW / sharing view. REAL only: empty dict if the read fails (the face shows an error)."""
+        try:
+            procs = parse_vmall(self.agent.get_text("/vmall"))
+            if procs:
+                return procs
+        except Exception:
+            pass
+        return {}
+
+    def faults(self):
+        """The live page-fault ring (gini_faultdump) -> [PageFault]. REAL only: empty list if the
+        read fails. Classification happens in the Memory face against the all-procs picture."""
+        try:
+            f = parse_faults(self.agent.get_text("/faults"))
+            if f:
+                return f
+        except Exception:
+            pass
+        return []
 
 
 class _FsReader:
@@ -88,15 +115,19 @@ class _FsReader:
         self.agent = agent
 
     def snapshot(self):
+        # REAL only: superblock + log are dumped for real today; inodes/dir/bcache are NOT, so
+        # they stay empty and out of `have` (the face marks them "not available", never fakes).
+        # A failed read returns ok=False so the face shows an error instead of demo data.
         try:
             txt = self.agent.get_text("/fs")            # gini_fsdump over the serial (no gdb)
             sb = parse_superblock(txt)
             if sb.size:
                 log = parse_logheader(txt, start=sb.logstart, size=sb.nlog)
-                return FsSnapshot(sb=sb, regions=layout(sb), inodes=[], tree=[], bufs=[], log=log)
+                return FsSnapshot(sb=sb, regions=layout(sb), log=log,
+                                  source="real", ok=True, have=("layout", "log"))
         except Exception:
             pass
-        return DemoDisk().snapshot()                    # fallback so the Storage dialog opens
+        return FsSnapshot(sb=Superblock(), source="real", ok=False, have=())
 
 
 class Xv6Bridge:
@@ -112,6 +143,7 @@ class Xv6Bridge:
         self._last_cpu = None       # register/stack detail (from gdb) — reused between fast reads
         self._last_stack: list = []
         self.kernel_quantum = None  # the kernel's ACTUAL sched_quantum (from the SCHED line)
+        self.kernel_policy = None   # the kernel's ACTUAL sched_policy id (from the SCHED line)
 
     def snapshot(self) -> Snapshot:
         """The Run/observe read: gini_dump() over the serial gives BOTH the process table AND
@@ -120,10 +152,11 @@ class Xv6Bridge:
         still needs gdb, so it's only refreshed on Step; here we reuse the last one."""
         self._seq += 1
         txt = self.agent.get_text("/procs")
-        procs = parse_procdump(txt)
-        sched = parse_sched(txt)                     # the kernel's ACTUAL quantum (confirms slider)
+        procs = apply_proc_sched(parse_procdump(txt), txt)   # procs + priority/tickets/level/aging
+        sched = parse_sched(txt)                     # the kernel's ACTUAL quantum + policy
         if sched:
             self.kernel_quantum = sched.get("quantum")
+            self.kernel_policy = sched.get("policy")
         cpu = parse_regs_line(txt)                  # live registers from the same no-halt dump
         if cpu.regs:
             self._last_cpu = cpu
@@ -156,6 +189,51 @@ class Xv6Bridge:
         self.policy = policy
         self.agent.post(f"/control?policy={POLICY_ID.get(policy, 0)}")
 
+    # -- shadows + control-plane operations (NOT system calls) --------------------- #
+    def shadows(self) -> dict:
+        """The shadow manifest -> {name: ShadowStatus}: which student shadows are present, enabled,
+        active, and fault-free. The liveness signal the assignment oracle checks first."""
+        return parse_shadow_manifest(self.agent.get_text("/shadows"))
+
+    def set_shadow(self, name: str, on: bool) -> None:
+        """Enable/disable a shadow. The kernel only knows how to toggle the CURRENT policy's shadow,
+        so we make that policy active, then toggle iff its state doesn't already match — all the
+        naming/targeting logic lives here (testable) and the kernel stays dumb."""
+        idx = SHADOW_POLICY.get(name)
+        if idx is None:
+            return
+        self.agent.post(f"/control?policy={idx}")            # make that policy active
+        cur = self.shadows().get(name)
+        if cur is None or bool(cur.enabled) != bool(on):
+            self.agent.post("/shadow/toggle")                # flip the current policy's shadow
+
+    def set_priority(self, pid: int, value: int) -> None:
+        """Control-plane op (not a syscall): set a process's scheduling priority so the workload
+        has real differences to schedule on."""
+        self.agent.post(f"/control/priority?pid={int(pid)}&v={int(value)}")
+
+    def set_tickets(self, pid: int, n: int) -> None:
+        """Control-plane op (not a syscall): set a process's lottery ticket count."""
+        self.agent.post(f"/control/tickets?pid={int(pid)}&n={int(n)}")
+
+    def load(self) -> tuple[bool, str]:
+        """The Load loop: rebuild the kernel in the container (incremental make) and restart QEMU
+        with the new kernel. Returns (ok, log) — log carries compile errors scoped to the student's
+        shadow file on failure."""
+        try:
+            d = json.loads(self.agent.post("/rebuild"))
+            return bool(d.get("ok")), str(d.get("log", ""))
+        except Exception as e:
+            return False, f"load failed: {e}"
+
+    def revert(self) -> tuple[bool, str]:
+        """Restore the shipped stub shadow and rebuild — one click back to a known-good kernel."""
+        try:
+            d = json.loads(self.agent.post("/revert"))
+            return bool(d.get("ok")), str(d.get("log", ""))
+        except Exception as e:
+            return False, f"revert failed: {e}"
+
     # -- programs (launch / kill / console) via the in-container agent's serial ---- #
     def programs(self) -> list:
         return self.agent.get_json("/programs").get("programs", [])
@@ -172,6 +250,23 @@ class Xv6Bridge:
     def sc(self) -> str:
         """Raw gini_scdump text (SC counts + TRACE ring) for the histogram + strace panels."""
         return self.agent.get_text("/sc")
+
+    def traps(self) -> str:
+        """Raw gini_trapdump text (TC per-kind counters + TR trap ring) for the Traps face."""
+        return self.agent.get_text("/traps")
+
+    def catch_trap(self):
+        """Freeze the next live user trap (gdb /trapcatch) and parse it into a TrapFrame — the
+        real scause/sepc/stval + saved user registers that seed the CPU journey. Returns a
+        not-ok TrapFrame on timeout/idle, so the journey falls back to its authored captions."""
+        from ..domain.xv6 import parse_trapframe
+        raw = self.agent.post("/trapcatch")
+        txt = ""
+        try:
+            txt = json.loads(raw).get("out", "")
+        except Exception:
+            txt = raw or ""
+        return parse_trapframe(txt)
 
     def console(self) -> str:
         return self.agent.get_text("/console")

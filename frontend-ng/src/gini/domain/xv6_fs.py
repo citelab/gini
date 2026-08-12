@@ -94,6 +94,14 @@ class FsSnapshot:
     log: LogState = field(default_factory=LogState)
     hits: int = 0
     misses: int = 0
+    # Provenance so the UI never passes off demo data as real. `source` is "real" (from the
+    # running kernel) or "demo" (the DemoDisk stand-in). `ok` is False when a REAL read was
+    # attempted but produced nothing — the face must show an error, NOT silently fall to demo.
+    source: str = "real"
+    ok: bool = True
+    # Which real panels this build can actually populate (the rest render "not available (real)"
+    # instead of fake data). Superblock + log are dumped today; inodes/dir/bcache are not yet.
+    have: tuple = ("layout", "log")
 
     @property
     def hit_rate(self) -> float:
@@ -221,7 +229,8 @@ class DemoDisk:
     def snapshot(self) -> FsSnapshot:
         return FsSnapshot(sb=self.sb, regions=list(self._regions), inodes=list(self.inodes),
                           tree=list(self.tree), bufs=list(self.bufs), log=self.log,
-                          hits=self.hits, misses=self.misses)
+                          hits=self.hits, misses=self.misses, source="demo",
+                          have=("layout", "log", "inodes", "dir", "bcache"))
 
     def simulate_write(self) -> FsSnapshot:
         """Advance the write-ahead log: idle -> building -> committing -> installed(idle)."""

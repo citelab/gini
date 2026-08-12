@@ -1,0 +1,19 @@
+id: xv6-lottery-fix
+layer: core
+teaches: os-scheduling
+spirit: the shipped lottery scheduler ignores tickets (it picks uniformly at random); a correct
+  shadow makes each process's CPU share track its ticket count.
+summary: Make lottery scheduling give CPU share proportional to tickets.
+parent: os-scheduling
+objectives:
+- id: shadow-wired
+  say: Your lottery_sched shadow is running
+  kind: behavioral
+  probe: measure(shadow_active, lottery_sched) == 1
+- id: share-tracks-tickets
+  say: CPU share matches the ticket ratio
+  kind: behavioral
+  probe: measure(share_ratio, tickets) <= 0.15
+misconceptions:
+- A lottery that ignores tickets is just randomized round-robin.
+- Equal ticket counts should give equal share; unequal counts should not.

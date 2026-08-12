@@ -18,15 +18,18 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..domain.machine_state import MachineState
-from ..domain.xv6 import DemoScheduler
+from ..domain.xv6 import DemoScheduler, policy_name, ready_queue
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+
+# scheduler policies the selector offers (must match domain POLICY_NAMES / kernel gini_pick)
+_POLICIES = ["round-robin", "priority", "lottery"]
 
 # long-running programs the launcher offers (must match the agent's PROGRAMS list)
 _LAUNCHABLE = ["spin", "busy", "alloc", "writer", "grind", "forktest"]
@@ -88,6 +91,54 @@ class LayerCard(QFrame):
         super().mouseReleaseEvent(e)
 
 
+class SchedulingPanel(QWidget):
+    """The scheduler's decision, made legible: the READY QUEUE (who's waiting, ordered the way the
+    policy favours) plus the CPU SHARE each process actually got. The Gantt shows who-ran-over-time;
+    this shows who's-next-and-why + how fairly the CPU was split — the evidence a lottery/priority
+    assignment is graded on. Read-only: students change priority/tickets from their own program."""
+
+    def __init__(self, theme: ThemeManager) -> None:
+        super().__init__()
+        self.theme = theme
+        t = theme.theme
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
+        self._tbl = QTableWidget(0, 6)
+        self._tbl.setHorizontalHeaderLabels(["pid", "name", "pri", "tickets", "wait", "CPU share"])
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._tbl.setSelectionMode(QTableWidget.NoSelection)
+        self._tbl.horizontalHeader().setStretchLastSection(True)
+        self._tbl.setStyleSheet(
+            f"QTableWidget{{background:{t.panel};color:{t.text};border:none;"
+            f"gridline-color:{t.line};font-family:monospace;font-size:11px;}}"
+            f"QHeaderView::section{{background:{t.panel2};color:{t.muted};border:none;"
+            "padding:3px;font-family:sans-serif;}")
+        v.addWidget(self._tbl)
+
+    @staticmethod
+    def _bar(frac: float, width: int = 8) -> str:
+        fill = max(0, min(width, round(frac * width)))
+        return "█" * fill + "░" * (width - fill) + f"  {frac * 100:.0f}%"
+
+    def update_view(self, procs, shares) -> None:
+        t = self.theme.theme
+        running = [p for p in procs if p.state == "running"]
+        rows = running + ready_queue(procs)         # running first, then the ready queue
+        self._tbl.setRowCount(len(rows))
+        for i, p in enumerate(rows):
+            share = shares.get(p.pid, 0.0)
+            vals = [str(p.pid), p.name,
+                    "—" if p.priority is None else str(p.priority),
+                    "—" if p.tickets is None else str(p.tickets),
+                    "—" if p.wait_ticks is None else str(p.wait_ticks),
+                    self._bar(share)]
+            for c, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                if p.state == "running":
+                    item.setForeground(QColor(t.accent_for("green")))
+                self._tbl.setItem(i, c, item)
+
+
 class GanttStrip(QWidget):
     """A horizontal strip of recent scheduling slots — one cell per snapshot, coloured by the
     running pid, so context switches read as colour changes across time."""
@@ -138,19 +189,26 @@ class MachineLab(QDialog):
     """Scheduler face of an xv6 Machine (the only face today; linux/kata later)."""
 
     snap_ready = Signal(object)   # a Snapshot pushed from a worker thread (live mode)
+    load_result = Signal(bool, str, str)   # (ok, log, action) from a Load/Revert worker thread
+    shadows_ready = Signal(object)         # {name: ShadowStatus} from a worker thread
 
     def __init__(self, parent, theme: ThemeManager, device, state: MachineState | None = None,
-                 live=False, on_console=None) -> None:
+                 live=False, on_console=None, on_log=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.on_console = on_console
+        self.on_log = on_log                  # (level, message) -> mirror to the GINI Console
+        self._shadows: dict = {}              # last shadow manifest (name -> ShadowStatus)
+        self._shadow_present_seen = False     # for the "shadow detected" one-shot console line
         # The shared MachineState is the bridge (owns provider + timeline + watcher); the Lab
-        # only renders from it. Offline we spin up a demo-backed one so the lab is explorable.
+        # only renders from it. With no state we spin up a demo-backed one so the lab is explorable.
         self.state = state or MachineState(
             DemoScheduler(timeslice=int((device.properties or {}).get("Timeslice", "1") or "1")),
-            device_id=getattr(device, "id", ""))
-        self.live = live
+            device_id=getattr(device, "id", ""), mode="demo")
+        # `live` (behaviour: async reads, launcher, poll-vs-step) follows the DATA MODE, which is
+        # a user choice on the state — Real means live kernel, Demo means the stand-in feed.
+        self.live = (self.state.mode == "real")
         self._running = False
 
         t = theme.theme
@@ -169,9 +227,11 @@ class MachineLab(QDialog):
 
         self._sched_page = QWidget()
         spl = QVBoxLayout(self._sched_page); spl.setContentsMargins(0, 0, 0, 0)
+        self._build_banner(spl)          # shown in Real mode when there's no live data (never fake)
         self._build_controls(spl)
         if self.live:
             self._build_launcher(spl)   # launch/kill programs to give the scheduler real work
+            self._build_shadow_bar(spl)  # the shadow: toggle + Load/Revert + inline result
         self._build_panels(spl)
 
         self._overview = self._build_overview()
@@ -181,10 +241,14 @@ class MachineLab(QDialog):
         self._busy = False
         self._closed = False                      # set on close; guards worker-thread callbacks
         self.snap_ready.connect(self._on_snap)
+        self.load_result.connect(self._on_load_result)
+        self.shadows_ready.connect(self._on_shadows)
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._on_poll)
         self._ov_poll = QTimer(self)              # slow refresh so overview mini-stats stay live
         self._ov_poll.timeout.connect(self._on_ov_poll)
+        self._shadow_poll = QTimer(self)          # slow poll for shadow status (catches file edits)
+        self._shadow_poll.timeout.connect(self._on_shadow_poll)
 
         self._show_overview()
         self._render()   # initial paint (state's first snapshot is taken when it's created)
@@ -204,13 +268,62 @@ class MachineLab(QDialog):
         self._title_lbl = QLabel(f"  Machine Lab — {self.device.name}")
         self._title_lbl.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(self._title_lbl); head.addStretch(1)
-        mode = QLabel("live (GDB)" if self.live else "offline demo")
-        mode.setStyleSheet(
-            f"color:{t.success if self.live else t.muted};"
-            f"background:{t.panel2};border:1px solid {t.line};border-radius:9px;"
-            "padding:2px 10px;font-size:11px;")
-        head.addWidget(mode)
+        # Real/Demo is a user choice (never auto-switched). Real = live kernel; Demo = the stand-in
+        # feed for exploring the interface with nothing running.
+        from PySide6.QtWidgets import QButtonGroup
+        dlbl = QLabel("data"); dlbl.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
+        head.addWidget(dlbl)
+        self._mode_group = QButtonGroup(self); self._mode_group.setExclusive(True)
+        self._mode_btns = {}
+        for key, label in (("real", "Real"), ("demo", "Demo")):
+            b = QPushButton(label); b.setCheckable(True)
+            b.setChecked(self.state.mode == key)
+            b.setStyleSheet(self._mode_btn_css())
+            b.clicked.connect(lambda _c=False, k=key: self._set_data_mode(k))
+            self._mode_group.addButton(b); self._mode_btns[key] = b
+            head.addWidget(b)
         root.addLayout(head)
+
+    def _build_banner(self, root) -> None:
+        """A 'no live data' banner for Real mode with nothing running — an explicit error that
+        offers Demo, instead of silently painting fake data."""
+        t = self.theme.theme
+        self._banner = QFrame()
+        self._banner.setStyleSheet(
+            f"QFrame{{background:{t.panel2};border:1px solid {t.accent_for('amber')};"
+            "border-radius:10px;}")
+        lay = QHBoxLayout(self._banner); lay.setContentsMargins(12, 8, 12, 8)
+        self._banner_lbl = QLabel()
+        self._banner_lbl.setWordWrap(True)
+        self._banner_lbl.setStyleSheet(_scss(f"color:{t.text};font-size:12px;border:none;"))
+        lay.addWidget(self._banner_lbl, 1)
+        use_demo = QPushButton("  Use Demo")
+        use_demo.setStyleSheet(self._btn_css())
+        use_demo.clicked.connect(lambda: self._set_data_mode("demo"))
+        lay.addWidget(use_demo)
+        self._banner.setVisible(False)
+        root.addWidget(self._banner)
+
+    def _mode_btn_css(self) -> str:
+        t = self.theme.theme
+        return (f"QPushButton{{color:{t.muted};background:{t.panel2};border:1px solid {t.line};"
+                f"border-radius:8px;padding:4px 12px;font-size:12px;}}"
+                f"QPushButton:checked{{color:{t.accent_for('green')};border-color:{t.accent};"
+                f"background:{t.panel};font-weight:600;}}"
+                f"QPushButton:hover{{border-color:{t.accent};}}")
+
+    def _set_data_mode(self, mode: str) -> None:
+        """User flipped Real/Demo. Swap the state's data plane, realign behaviour, and repaint.
+        NEVER called automatically — the state also never auto-falls-back, so Real stays Real."""
+        if self._running:
+            self._toggle_run()                    # stop the poll loop before swapping the source
+        self.state.set_mode(mode)
+        self.live = (mode == "real")
+        for k, b in self._mode_btns.items():
+            b.setChecked(k == mode)
+        self._render()
+        if self.live and self.state.has_real():
+            self._fetch(step=False)               # kick a live read on entering Real
 
     # -- overview: the layered OS stack of drill-down cards --------------- #
     def _build_overview(self) -> QWidget:
@@ -250,8 +363,8 @@ class MachineLab(QDialog):
              "purple", self._open_memory_lab),
             ("storage", "File System", "Inodes, buffer cache, and the write-ahead log.",
              "cyan", self._open_storage_lab),
-            ("journey", "Traps & Context Switches", "Step a syscall (trap) vs a switch (swtch).",
-             "amber", self._open_journey)]))
+            ("journey", "Traps & Interrupts", "Live trap mix (syscall/fault/timer) + step one.",
+             "amber", self._open_trap_lab)]))
         col.addWidget(self._boundary("registers · trapframe · timer interrupts"))
         # the hardware the kernel drives
         col.addWidget(self._layer_band("HARDWARE", [
@@ -289,6 +402,7 @@ class MachineLab(QDialog):
 
     # -- page navigation -------------------------------------------------- #
     def _show_overview(self) -> None:
+        self._shadow_poll.stop()
         self._stack.setCurrentWidget(self._overview)
         self._back_btn.setVisible(False)
         self._title_lbl.setText(f"  Machine Lab — {self.device.name}")
@@ -301,13 +415,27 @@ class MachineLab(QDialog):
         self._stack.setCurrentWidget(self._sched_page)
         self._back_btn.setVisible(True)
         self._title_lbl.setText(f"  Process scheduler — {self.device.name}")
+        if self.live:
+            self._shadow_poll.start(3000)     # keep the shadow status fresh; catch external edits
+            self._refresh_shadows()
 
     def _on_ov_poll(self) -> None:
         """Slow overview refresh: read current state (live) so the cards' mini-stats update."""
         if self.live and not self._closed:
             self._fetch(step=False)
 
+    def _require_data(self) -> bool:
+        """Guard the data-driven faces: in Real mode with nothing running there's no provider to
+        read, so surface the banner (on the scheduler page) instead of opening an empty dialog."""
+        if self.state.mode == "real" and not self.state.has_real():
+            self._show_scheduler()       # the banner lives here and explains + offers Demo
+            self._update_banner()
+            return False
+        return True
+
     def _open_syscall_lab(self) -> None:
+        if not self._require_data():
+            return
         from .syscall_lab import SyscallLab
         # live /sc over the serial when running; DemoScheduler.sc() offline
         src = getattr(self.state.provider, "sc", None)
@@ -315,22 +443,40 @@ class MachineLab(QDialog):
                                  sc_source=src if callable(src) else None)
         self._sclab.show(); self._sclab.raise_()
 
-    def _open_journey(self) -> None:
+    def _open_trap_lab(self) -> None:
+        # The Traps room: the live trap-cause histogram + feed (observational front), with a
+        # "Step a trap" button into the frame-by-frame journey. Not gated on live data — the
+        # histogram shows an empty state, but the (authored) journey is always reachable.
+        from .trap_lab import TrapLab
+        src = getattr(self.state.provider, "traps", None)
+        catch = getattr(self.state.provider, "catch_trap", None)   # live gdb freeze (Phase 2)
+        self._traplab = TrapLab(self, self.theme, device=self.device,
+                                traps_source=src if callable(src) else None,
+                                catch_source=catch if callable(catch) else None,
+                                on_step=self._open_journey)
+        self._traplab.show(); self._traplab.raise_()
+
+    def _open_journey(self, frame=None) -> None:
+        # Seed the journey with a frozen trap (real scause/sepc/stval + saved regs) when we have
+        # one; otherwise fall back to the running proc's registers at the dispatch stage.
         from .cpu_journey import CpuJourney
-        # seed the syscall path with the running proc's live registers, if we have them
         cpu = self.state.latest.cpu if (self.state.latest and self.state.latest.cpu) else None
-        self._journey = CpuJourney(self, self.theme, device=self.device, cpu=cpu)
+        self._journey = CpuJourney(self, self.theme, device=self.device, cpu=cpu, frame=frame)
         self._journey.show(); self._journey.raise_()
 
     def _open_memory_lab(self) -> None:
+        if not self._require_data():
+            return
         from .memory_lab import MemoryLab
-        # render from the shared MachineState's VM reader (offline demo or the Mac GDB bridge),
+        # render from the shared MachineState's VM reader (demo stand-in or the Mac GDB bridge),
         # so the Memory face and the Ask GINI card see one source.
         self._memory = MemoryLab(self, self.theme, device=self.device, provider=self.state.vm)
         self._memory.show()
         self._memory.raise_()
 
     def _open_storage_lab(self) -> None:
+        if not self._require_data():
+            return
         from .storage_lab import StorageLab
         self._storage = StorageLab(self, self.theme, device=self.device, provider=self.state.fs)
         self._storage.show()
@@ -381,6 +527,24 @@ class MachineLab(QDialog):
         self._slice_lbl = QLabel(); self._slice_lbl.setStyleSheet(
             _scss(f"color:{t.text};font-size:12px;min-width:64px;"))
         lay.addWidget(self._slice_lbl)
+
+        # scheduler policy selector — switches RR/priority/lottery LIVE (over the serial). The
+        # kernel confirmation next to it shows the policy the kernel actually reports.
+        plbl = QLabel("   Policy"); plbl.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
+        lay.addWidget(plbl)
+        self._policy_combo = QComboBox()
+        self._policy_combo.addItems(_POLICIES)
+        cur = getattr(self.state, "policy", "round-robin")
+        if cur in _POLICIES:
+            self._policy_combo.setCurrentText(cur)
+        self._policy_combo.setStyleSheet(
+            f"QComboBox{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
+            "border-radius:6px;padding:3px 8px;}")
+        self._policy_combo.currentTextChanged.connect(self._apply_policy)   # connect AFTER setting
+        lay.addWidget(self._policy_combo)
+        self._policy_kernel_lbl = QLabel()
+        self._policy_kernel_lbl.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
+        lay.addWidget(self._policy_kernel_lbl)
         lay.addStretch(1)
 
         self._step_btn = QPushButton("  Step switch")
@@ -468,8 +632,10 @@ class MachineLab(QDialog):
         # per-CPU tables: one column per CPU (so both cores' registers/memory show on SMP)
         self._reg_tbl = self._make_cpu_table(self._REG_ROWS)
         grid.addWidget(self._panel("CPU registers  ·  per core", self._reg_tbl, fill=True), 0, 1)
-        self._mem_tbl = self._make_cpu_table(self._MEM_ROWS)
-        grid.addWidget(self._panel("Memory  ·  address space (per core)", self._mem_tbl,
+        # the scheduler flagship: ready queue + CPU share (the per-core memory view lives behind
+        # the Memory card on the hub, so it doesn't need a duplicate mini-panel here).
+        self._sched_panel = SchedulingPanel(self.theme)
+        grid.addWidget(self._panel("Scheduling  ·  ready queue & CPU share", self._sched_panel,
                                    fill=True), 1, 0)
         self._stack_lbl = QLabel(); self._stack_lbl.setAlignment(Qt.AlignTop)
         self._stack_lbl.setTextFormat(Qt.RichText)
@@ -592,6 +758,178 @@ class MachineLab(QDialog):
         else:
             self.state.set_timeslice(v)
 
+    def _apply_policy(self, name) -> None:
+        """Switch the scheduler policy live. For the live bridge the write goes over the serial
+        off the GUI thread; offline it re-picks against the demo so the change is visible at once."""
+        if self.live:
+            self._bg(lambda: self.state.set_policy(name))
+        else:
+            self.state.set_policy(name)
+            self._render()
+        if hasattr(self, "_shadow_status"):
+            self._update_shadow_bar()             # the bar tracks the CURRENT policy's shadow
+
+    # -- the shadow bar: toggle + Load/Revert + inline result (live only) --------- #
+    _POLICY_SHADOW = {"round-robin": "rr_sched", "priority": "prio_sched",
+                      "lottery": "lottery_sched"}
+
+    def _build_shadow_bar(self, root) -> None:
+        t = self.theme.theme
+        bar = QFrame(); bar.setStyleSheet(
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
+        lay = QVBoxLayout(bar); lay.setContentsMargins(12, 8, 12, 8); lay.setSpacing(6)
+        row = QHBoxLayout()
+        lbl = QLabel("Shadow"); lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
+        row.addWidget(lbl)
+        self._shadow_status = QLabel("—")
+        self._shadow_status.setStyleSheet(
+            _scss(f"color:{t.text};font-size:12px;font-family:monospace;"))
+        row.addWidget(self._shadow_status); row.addStretch(1)
+        self._shadow_toggle = QCheckBox("Use my shadow")
+        self._shadow_toggle.setStyleSheet(_scss(f"color:{t.text};font-size:12px;"))
+        self._shadow_toggle.toggled.connect(self._toggle_shadow)
+        row.addWidget(self._shadow_toggle)
+        self._load_btn = QPushButton("  Load")
+        self._load_btn.setIcon(icons.icon("compile", t.accent_for("green"), 14))
+        self._load_btn.setToolTip("Rebuild the kernel with your shadow and restart")
+        self._load_btn.clicked.connect(self._load_shadow)
+        self._load_btn.setStyleSheet(self._btn_css())
+        row.addWidget(self._load_btn)
+        self._revert_btn = QPushButton("  Revert")
+        self._revert_btn.setToolTip("Restore the shipped shadow and rebuild")
+        self._revert_btn.clicked.connect(self._revert_shadow)
+        self._revert_btn.setStyleSheet(self._btn_css())
+        row.addWidget(self._revert_btn)
+        lay.addLayout(row)
+        self._shadow_result = QPlainTextEdit(); self._shadow_result.setReadOnly(True)
+        self._shadow_result.setVisible(False)
+        lay.addWidget(self._shadow_result)
+        root.addWidget(bar)
+
+    def _current_shadow_name(self) -> str:
+        combo = getattr(self, "_policy_combo", None)
+        pol = combo.currentText() if combo else "priority"
+        return self._POLICY_SHADOW.get(pol, "prio_sched")
+
+    def _refresh_shadows(self) -> None:
+        if not self.live:
+            return
+        self._bg(self._fetch_shadows)
+
+    def _fetch_shadows(self) -> None:
+        try:
+            sh = self.state.shadows()
+        except (Exception, RuntimeError):
+            return
+        if not self._closed:
+            self.shadows_ready.emit(sh)
+
+    def _on_shadow_poll(self) -> None:
+        if self.live and not self._closed:
+            self._refresh_shadows()
+
+    def _on_shadows(self, sh) -> None:
+        if self._closed:
+            return
+        self._shadows = sh or {}
+        self._update_shadow_bar()
+
+    def _update_shadow_bar(self) -> None:
+        if not hasattr(self, "_shadow_status"):
+            return
+        t = self.theme.theme
+        name = self._current_shadow_name()
+        s = self._shadows.get(name)
+        if s is None:
+            self._shadow_status.setText(f"{name}: (not reported)")
+        else:
+            if s.active:
+                txt, col = f"{name}: active ✓", t.success
+            elif s.faults:
+                txt, col = f"{name}: faulted {s.faults}×", t.accent_for("red")
+            elif s.enabled:
+                txt, col = f"{name}: on (stub → primary)", t.muted
+            else:
+                txt, col = f"{name}: off (primary running)", t.muted
+            if s.hash and s.hash != "baseline":
+                txt += f"  [{s.hash}]"
+            self._shadow_status.setText(txt)
+            self._shadow_status.setStyleSheet(
+                _scss(f"color:{col};font-size:12px;font-family:monospace;"))
+            self._shadow_toggle.blockSignals(True)
+            self._shadow_toggle.setChecked(bool(s.enabled))
+            self._shadow_toggle.blockSignals(False)
+        # "shadow detected" — one-shot console line when the file first differs from the stub
+        present = any(getattr(v, "is_student", False) for v in self._shadows.values())
+        if present and not self._shadow_present_seen:
+            self._log("info", "xv6 shadow detected — gini_sched.c edited (Load to run it)")
+        self._shadow_present_seen = present
+
+    def _toggle_shadow(self, on) -> None:
+        name = self._current_shadow_name()
+        self._bg(lambda: self._provider_call("set_shadow", name, bool(on)))
+        self._refresh_shadows()
+
+    def _provider_call(self, method, *args) -> None:
+        fn = getattr(self.state.provider, method, None)
+        if callable(fn):
+            try:
+                fn(*args)
+            except Exception:
+                pass
+
+    def _load_shadow(self) -> None:
+        self._run_build("load", "Building your shadow…")
+
+    def _revert_shadow(self) -> None:
+        self._run_build("revert", "Reverting to the shipped shadow…")
+
+    def _run_build(self, action, busy_msg) -> None:
+        self._load_btn.setEnabled(False); self._revert_btn.setEnabled(False)
+        self._show_result(busy_msg, "muted")
+
+        def work():
+            fn = getattr(self.state.provider, action, None)
+            ok, log = (fn() if callable(fn) else (False, "no live kernel"))
+            if not self._closed:
+                self.load_result.emit(bool(ok), str(log), action)
+        self._bg(work)
+
+    def _on_load_result(self, ok, log, action) -> None:
+        if self._closed:
+            return
+        self._load_btn.setEnabled(True); self._revert_btn.setEnabled(True)
+        verb = "Loaded" if action == "load" else "Reverted"
+        if ok:
+            what = "your shadow" if action == "load" else "the shipped shadow"
+            self._show_result(f"✓ {verb} — running {what}", "green")
+            self._log("info", f"xv6: {verb.lower()} — {what} is now running")
+        else:
+            self._show_result(log or "build failed", "red")
+            self._log("error", f"xv6 shadow {action} failed — compile error (see Machine Lab)")
+        if self.live:
+            self._fetch(step=False)      # QEMU restarted -> read fresh state
+            self._refresh_shadows()
+
+    def _show_result(self, text, tone) -> None:
+        t = self.theme.theme
+        col = {"green": t.success, "red": t.accent_for("red"),
+               "muted": t.muted}.get(tone, t.text)
+        self._shadow_result.setPlainText(text)
+        self._shadow_result.setVisible(True)
+        multiline = ("\n" in text) or tone == "red"
+        self._shadow_result.setFixedHeight(130 if multiline else 30)
+        self._shadow_result.setStyleSheet(
+            f"QPlainTextEdit{{background:{t.panel};color:{col};border:1px solid {t.line};"
+            "border-radius:6px;font-family:monospace;font-size:11px;padding:4px;}")
+
+    def _log(self, level, msg) -> None:
+        if self.on_log:
+            try:
+                self.on_log(level, msg)
+            except Exception:
+                pass
+
     def _on_poll(self) -> None:
         """The Run loop = OBSERVE the free-running kernel: just read current state on a timer.
         Crucially NOT step() — on a live idle kernel, stepping waits for a context switch that
@@ -656,30 +994,33 @@ class MachineLab(QDialog):
 
     # -- render from the shared state ------------------------------------- #
     def _render(self, *_a) -> None:
+        self._update_banner()
         snap = self.state.latest
         if snap is None:
+            self._update_overview()      # keep the hub's mini-stats honest (blank) with no data
             return
         t = self.theme.theme
         # process TREE — highlight whatever is running on any CPU (SMP-aware)
         run = snap.running_pid
         running_pids = set(snap.cpus.values()) if snap.cpus else ({run} if run else set())
-        self._proc_tree.set_procs(snap.procs, running_pids)
-        # per-CPU registers + memory (a column per core; falls back to one column single-CPU)
+        # scheduling badges: mark starving / CPU-monopolising procs in the tree
+        sf = self.state.scheduling_flags()
+        flags = {pid: "starving" for pid in sf.get("starvation", ())}
+        for pid in sf.get("cpu_monopoly", ()):
+            flags.setdefault(pid, "monopolising CPU")
+        self._proc_tree.set_procs(snap.procs, running_pids, flags=flags)
+        # per-CPU registers (a column per core; falls back to one column single-CPU)
         cpu_regs = snap.cpu_regs or ({0: snap.cpu} if snap.cpu else {})
         cids = sorted(cpu_regs)
         self._reg_tbl.setColumnCount(len(cids))
-        self._mem_tbl.setColumnCount(len(cids))
         heads = [f"CPU {c} · pid {cpu_regs[c].key('pid')}" for c in cids]
         self._reg_tbl.setHorizontalHeaderLabels(heads)
-        self._mem_tbl.setHorizontalHeaderLabels(heads)
         for col, c in enumerate(cids):
             cs = cpu_regs[c]
             for row, key in enumerate(self._REG_ROWS):
                 self._reg_tbl.setItem(row, col, QTableWidgetItem(cs.key(key)))
-            mem_vals = [cs.key("satp"), cs.key("pc"), cs.key("sp"),
-                        f"pid {cs.key('pid')} · asid {cs.key('satp')[-3:]}"]
-            for row, val in enumerate(mem_vals):
-                self._mem_tbl.setItem(row, col, QTableWidgetItem(val))
+        # scheduling panel: ready queue + CPU share (share from the aggregate timeline)
+        self._sched_panel.update_view(snap.procs, self.state.timeline.shares())
         # kernel stack (from gdb on Step; user procs are in user mode during Run)
         if snap.stack:
             rows = "<br>".join(
@@ -707,7 +1048,25 @@ class MachineLab(QDialog):
         kq = getattr(self.state.provider, "kernel_quantum", None)   # the kernel's ACTUAL quantum
         qtxt = f" · Q{kq}" if kq else ""
         self._switch_lbl.setText(f"{n} sw · {self._switch_rate:.1f}/s{qtxt}")
+        # policy confirmation: what the kernel actually reports (live id) or the demo's policy
+        kp = getattr(self.state.provider, "kernel_policy", None)
+        kp_name = policy_name(kp) if kp is not None else getattr(
+            self.state.provider, "policy", None) or self.state.policy
+        self._policy_kernel_lbl.setText(f"kernel: {kp_name}")
         self._update_overview()
+
+    def _update_banner(self) -> None:
+        if not hasattr(self, "_banner"):
+            return
+        no_data = (self.state.mode == "real" and self.state.latest is None)
+        self._banner.setVisible(no_data)
+        if no_data:
+            self._banner_lbl.setText(
+                "No live data from the xv6 machine. It doesn't look like it's running — start the "
+                "topology (Run), or switch to Demo to explore the interface."
+                if not self.state.has_real()
+                else "Real mode is selected but no data has arrived yet — waiting for the xv6 "
+                     "machine…")
 
     def _update_overview(self) -> None:
         """Refresh the overview cards' live mini-stats from the (cheap) scheduler snapshot.
@@ -746,6 +1105,7 @@ class MachineLab(QDialog):
         self._closed = True            # stop any in-flight worker from signalling a dead dialog
         self._poll.stop()
         self._ov_poll.stop()
+        self._shadow_poll.stop()
         try:
             self.snap_ready.disconnect(self._on_snap)
         except (RuntimeError, TypeError):

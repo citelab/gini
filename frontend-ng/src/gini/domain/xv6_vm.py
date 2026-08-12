@@ -29,12 +29,38 @@ def perms(pte: int) -> str:
     return out
 
 
+def rsw_bits(flags: int) -> int:
+    """The two reserved-for-software bits (8,9) of a PTE. xv6's COW lab parks its COW flag here,
+    so a non-zero RSW on a user page is our (design-agnostic) 'this page is marked by the student'
+    signal — we badge it without needing to know which bit they chose."""
+    return (flags >> 8) & 0x3
+
+
 @dataclass
 class Pte:
     va: int
     pa: int
     perms: str = "----"
     valid: bool = True
+    flags: int = 0                 # raw low-10 PTE bits (V R W X U G A D + RSW8/9); 0 if unknown
+
+    @property
+    def writable(self) -> bool:
+        return "w" in self.perms
+
+    @property
+    def user(self) -> bool:
+        return "u" in self.perms
+
+    @property
+    def rsw(self) -> int:
+        return rsw_bits(self.flags)
+
+    @property
+    def cow(self) -> bool:
+        """A COW candidate: a user page that is present, NOT writable, and carries an RSW mark —
+        the exact shape xv6's COW fork leaves behind (shared, write-protected, COW-tagged)."""
+        return self.user and not self.writable and self.rsw != 0
 
 
 @dataclass
@@ -70,6 +96,42 @@ class Fault:
     pid: int | None = None
 
 
+# scause codes for the three page-fault kinds (RISC-V privileged spec)
+SCAUSE_NAMES = {12: "instruction page fault", 13: "load page fault", 15: "store page fault"}
+
+
+@dataclass
+class PageFault:
+    """One captured page fault from the kernel's live fault ring (gini_faultdump)."""
+    pid: int
+    scause: int
+    va: int
+    epc: int
+    kind: str = ""                 # filled by classify_faults: lazy / cow-write / stack / illegal
+
+    @property
+    def cause(self) -> str:
+        return SCAUSE_NAMES.get(self.scause, f"scause {self.scause}")
+
+
+@dataclass
+class ProcVm:
+    """One process's address space from the all-procs dump (gini_vmdump_all)."""
+    pid: int
+    name: str = ""
+    sz: int = 0                    # p->sz — the *virtual* size (top of the heap/brk)
+    leaves: list = field(default_factory=list)   # [Pte]
+
+    @property
+    def resident_pages(self) -> int:
+        """User pages actually backed by physical frames (excludes kernel trampoline/trapframe)."""
+        return sum(1 for p in self.leaves if p.user)
+
+    @property
+    def virtual_pages(self) -> int:
+        return max((self.sz + PGSIZE - 1) // PGSIZE, 0)
+
+
 @dataclass
 class VmSnapshot:
     satp: int = 0
@@ -77,6 +139,12 @@ class VmSnapshot:
     regions: list = field(default_factory=list)    # [Region]
     phys: PhysMem = field(default_factory=PhysMem)
     faults: list = field(default_factory=list)     # [Fault]
+    # Provenance (see FsSnapshot): "real" from the kernel vs "demo" stand-in; ok=False means a
+    # real read yielded nothing (show an error, don't fake). Page-table leaves + faults are
+    # dumped for real; the region map + physical allocator bar are not yet (so not in `have`).
+    source: str = "real"
+    ok: bool = True
+    have: tuple = ("pagetable", "faults")
 
 
 # -- parser: xv6 vmprint() -------------------------------------------------- #
@@ -108,6 +176,91 @@ def parse_vmprint(text: str) -> VmSnapshot:
             va = (path.get(1, 0) << 30) | (path.get(2, 0) << 21) | (idx << 12)
             leaves.append(Pte(va=va, pa=pa, perms=perms(pte), valid=bool(pte & 1)))
     return VmSnapshot(satp=satp, leaves=leaves)
+
+
+# -- parser: live fault ring (gini_faultdump) ------------------------------- #
+# `FLT <pid> <scause> <va_hex> <epc_hex>` — one per captured page fault, oldest first.
+_FLT = re.compile(r"^FLT\s+(-?\d+)\s+(\d+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)")
+
+
+def parse_faults(text: str) -> list:
+    out: list = []
+    for line in (text or "").splitlines():
+        m = _FLT.match(line.strip())
+        if m:
+            out.append(PageFault(pid=int(m.group(1)), scause=int(m.group(2)),
+                                 va=int(m.group(3), 16), epc=int(m.group(4), 16)))
+    return out
+
+
+# -- parser: all-procs page tables (gini_vmdump_all) ------------------------ #
+# `VP <pid> <name> <sz_hex>` header, then `VL <pid> <va_hex> <pa_hex> <flags_int>` per leaf.
+_VP = re.compile(r"^VP\s+(\d+)\s+(\S+)\s+(0x[0-9a-fA-F]+)")
+_VL = re.compile(r"^VL\s+(\d+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\d+)")
+
+
+def parse_vmall(text: str) -> dict:
+    """Parse every user process's leaf mappings into {pid: ProcVm}. Leaves carry the raw PTE
+    flag bits, so permissions AND the student's RSW/COW mark survive to the UI."""
+    procs: dict = {}
+    for line in (text or "").splitlines():
+        s = line.strip()
+        mp = _VP.match(s)
+        if mp:
+            pid = int(mp.group(1))
+            procs[pid] = ProcVm(pid=pid, name=mp.group(2), sz=int(mp.group(3), 16))
+            continue
+        ml = _VL.match(s)
+        if ml:
+            pid = int(ml.group(1))
+            flags = int(ml.group(4))
+            pte = Pte(va=int(ml.group(2), 16), pa=int(ml.group(3), 16),
+                      perms=perms(flags), valid=bool(flags & 1), flags=flags)
+            procs.setdefault(pid, ProcVm(pid=pid)).leaves.append(pte)
+    return procs
+
+
+def shared_frames(vmall: dict) -> dict:
+    """Physical pages mapped by MORE THAN ONE process — i.e. sharing, derived directly from the
+    page tables (no kernel refcount needed). Restricted to USER pages so the trampoline/trapframe
+    kernel mappings (shared by everyone by construction) don't drown out the COW signal.
+
+    Returns {pa: sorted [pids]} for every physically-shared user frame — this is what makes
+    'parent and child share pages until one writes' visible: watch a pa's pid-list shrink from
+    [parent, child] to [parent] on the first write."""
+    owners: dict = {}
+    for pid, pv in vmall.items():
+        for pte in pv.leaves:
+            if pte.user and pte.valid:
+                owners.setdefault(pte.pa, set()).add(pid)
+    return {pa: sorted(pids) for pa, pids in owners.items() if len(pids) > 1}
+
+
+def classify_faults(faults: list, vmall: dict | None = None,
+                    regions: list | None = None) -> list:
+    """Best-effort label for each fault, using whatever address-space picture we have at read
+    time. Heuristic (the kernel stays dumb, the classification is improvable pure Python):
+
+      • store to a present, non-writable user page   -> cow-write (the write that triggers a copy)
+      • fault on an unmapped VA below p->sz           -> lazy-alloc (demand paging the heap)
+      • fault on an unmapped VA inside a valid region -> lazy-alloc / stack-growth
+      • otherwise                                     -> illegal (out of any region -> segfault)
+    """
+    for f in faults:
+        pv = (vmall or {}).get(f.pid)
+        page_va = f.va & ~(PGSIZE - 1)
+        leaf = next((p for p in pv.leaves if p.va == page_va), None) if pv else None
+        if leaf is not None and not leaf.writable and f.scause == 15:
+            f.kind = "cow-write"
+        elif leaf is None and pv is not None and page_va < pv.sz:
+            f.kind = "lazy-alloc"
+        elif leaf is None and regions and region_for(f.va, regions) not in ("?",):
+            f.kind = "stack-growth" if region_for(f.va, regions) == "stack" else "lazy-alloc"
+        elif leaf is None:
+            f.kind = "illegal"
+        else:
+            f.kind = f.cause
+    return faults
 
 
 def memory_summary(vm: VmSnapshot) -> str:
@@ -148,7 +301,7 @@ class DemoVm:
         self.satp = 0x8000000000087f6e
         self._sp = 0x4000                          # top of a one-page user stack region
         self.phys = PhysMem(total_pages=32768, free_pages=32510)
-        self.faults: list = []
+        self._fault_log: list = []                 # simulated demand-fault log (NOT the faults() ring)
         self._leaves = [
             Pte(0x0000, 0x87f6b000, "r-x-"),       # text
             Pte(0x1000, 0x87f6a000, "rw--"),       # data
@@ -173,15 +326,60 @@ class DemoVm:
 
     def snapshot(self) -> VmSnapshot:
         return VmSnapshot(satp=self.satp, leaves=list(self._leaves), regions=self._regions(),
-                          phys=self.phys, faults=list(self.faults))
+                          phys=self.phys, faults=list(self._fault_log), source="demo",
+                          have=("pagetable", "regions", "phys", "faults"))
 
     def simulate_fault(self) -> VmSnapshot:
         """Grow the stack by one page on a fault (lazy/demand allocation): record the fault,
         allocate a physical page, and add the new leaf mapping."""
-        new_va = 0x4000 + len(self.faults) * PGSIZE + PGSIZE
-        self.faults.append(Fault(new_va, "store page fault (stack growth)", pid=3))
+        new_va = 0x4000 + len(self._fault_log) * PGSIZE + PGSIZE
+        self._fault_log.append(Fault(new_va, "store page fault (stack growth)", pid=3))
         if self.phys.free_pages > 0:
             self.phys.free_pages -= 1
             self._sp = new_va + PGSIZE
-            self._leaves.insert(5, Pte(new_va, 0x87f60000 - len(self.faults) * PGSIZE, "rw-u"))
+            self._leaves.insert(5, Pte(new_va, 0x87f60000 - len(self._fault_log) * PGSIZE, "rw-u"))
         return self.snapshot()
+
+    # -- COW / all-procs demo (offline) ------------------------------------- #
+    _COW = 1 | 2 | 16 | 0x100       # V R U + RSW8 : present, read-only, user, COW-tagged
+    _RW = 1 | 2 | 4 | 16            # V R W U       : present, writable, user (private after copy)
+    _RX = 1 | 2 | 8 | 16            # V R X U       : text
+
+    def __post_cow(self):
+        if not hasattr(self, "_cow_written"):
+            self._cow_written = False
+
+    def all_procs(self) -> dict:
+        """A parent+child pair right after fork(): they SHARE the data/stack physical pages,
+        write-protected and COW-tagged, until `simulate_cow_write()` copies the child's data page.
+        This is the observable heart of the COW assignment."""
+        self.__post_cow()
+        text = Pte(0x0000, 0x87001000, perms(self._RX), True, self._RX)
+        # shared, COW-marked pages (same PA in both procs)
+        data_shared = Pte(0x1000, 0x87002000, perms(self._COW), True, self._COW)
+        stack_shared = Pte(0x3000, 0x87003000, perms(self._COW), True, self._COW)
+        parent = ProcVm(3, "forktest", 0x6000, [text, data_shared, stack_shared,
+                        Pte(TRAPFRAME, 0x87f10000, perms(self._RW & ~16), True, self._RW & ~16)])
+        child_data = (Pte(0x1000, 0x87005000, perms(self._RW), True, self._RW)   # copied -> private
+                      if self._cow_written else data_shared)
+        child = ProcVm(4, "forktest", 0x6000, [text, child_data, stack_shared,
+                       Pte(TRAPFRAME, 0x87f11000, perms(self._RW & ~16), True, self._RW & ~16)])
+        return {3: parent, 4: child}
+
+    def simulate_cow_write(self) -> dict:
+        """The child writes its shared data page -> the store page-fault copies it: a fresh
+        physical frame, now writable and no longer COW-tagged. The shared PA's owner list shrinks
+        from [parent, child] to [parent]."""
+        self.__post_cow()
+        self._cow_written = True
+        if self.phys.free_pages > 0:
+            self.phys.free_pages -= 1
+        return self.all_procs()
+
+    def faults(self) -> list:
+        """A representative fault stream: a COW write, a lazy heap fault, and an illegal access."""
+        return [
+            PageFault(4, 15, 0x1000, 0x0000000000001abc),      # store to the shared data page -> cow
+            PageFault(3, 15, 0x5000, 0x0000000000001de0),      # unmapped, below sz -> lazy-alloc
+            PageFault(3, 13, 0x40000000, 0x0000000000002100),  # way out of range -> illegal
+        ]

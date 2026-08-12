@@ -5,22 +5,34 @@ bridge only makes plain HTTP calls (no gdb or symbols needed on the host).
 
 Endpoints (GET unless noted):
   /snapshot  -> {"registers": <text>, "bt": <text>, "procs": <text>, "ticks": <text>}
-  /vm        -> vmprint-format text (page-table leaf mappings)
+  /vm        -> vmprint-format text (running proc's page-table leaf mappings)
+  /vmall     -> all user procs' page tables (`VP pid name sz` + `VL pid va pa flags`) for COW view
+  /faults    -> live page-fault ring (`FLT pid scause va epc`)
+  /traps     -> trap-taxonomy counters + ring (`TC kind name count` + `TR pid kind cause epc tval`)
   /fs        -> {"sb": <text>, "log": <text>}
   /step      (POST) -> break swtch; continue; delete   (advance one context switch)
+  /trapcatch (POST) -> freeze the next user trap: CSRs (scause/sepc/stval) + saved user registers
   /control   (POST ?quantum=N | ?policy=N) -> write the kernel knob over gdb
 
 The kernel-side parsing stays on the Mac (already unit-tested); this agent just returns raw
 gdb output. It talks to :1234 (gdb stub) and reads proc[] via a small gdb-python walk.
 """
 import collections
+import hashlib
 import json
+import os
+import re
+import shutil
 import socket
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
+
+XV6_DIR = "/opt/xv6-riscv"
+SHADOW_FILE = XV6_DIR + "/kernel/shadows/gini_sched.c"
+SHADOW_REF = "/opt/gini_sched_ref.c"    # pristine stub (outside the bind-mount) for present/hash
 
 # The kernel brackets every GINI dump (Ctrl-T/V/F, machine-readable) with these control bytes, so
 # the reader can split the single serial stream into TWO logical streams at ingest time: a CLEAN
@@ -174,6 +186,108 @@ class SerialLink:
 
 _SERIAL = SerialLink(SERIAL)
 
+
+# --------------------------------------------------------------------------- #
+# QEMU lifecycle — the agent owns QEMU so the Load loop can rebuild + relaunch it.
+# --------------------------------------------------------------------------- #
+def _qemu_cmd():
+    cpus = os.environ.get("XV6_CPUS", "1")
+    return ["qemu-system-riscv64", "-machine", "virt", "-bios", "none",
+            "-kernel", "kernel/kernel", "-m", "128M", "-smp", str(cpus),
+            "-display", "none", "-monitor", "none",
+            "-global", "virtio-mmio.force-legacy=false",
+            "-drive", "file=fs.img,if=none,format=raw,id=x0",
+            "-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
+            "-serial", "tcp::4444,server,nowait", "-gdb", "tcp::1234"]
+
+
+class Qemu:
+    """Owns the QEMU child process. start/stop/restart; the reconnecting SerialLink + fresh gdb
+    connections re-attach automatically after a restart, so a Load just cycles this."""
+
+    def __init__(self):
+        self.proc = None
+        self._lock = threading.Lock()
+
+    def start(self):
+        with self._lock:
+            if self.proc and self.proc.poll() is None:
+                return
+            self.proc = subprocess.Popen(_qemu_cmd(), cwd=XV6_DIR)
+
+    def stop(self):
+        with self._lock:
+            p = self.proc
+            self.proc = None
+        if p and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                p.kill()
+
+    def restart(self):
+        self.stop()
+        time.sleep(0.3)          # let :4444/:1234 free up before QEMU re-listens
+        self.start()
+
+
+_QEMU = Qemu()
+
+
+def _scope_errors(log: str) -> str:
+    """Keep the gcc lines that name the student's shadow file (or say 'error:'), so a compile
+    failure is legible instead of a wall of kernel build output."""
+    keep = [ln for ln in log.splitlines() if "gini_sched" in ln or "error:" in ln]
+    return "\n".join(keep[-40:]) or log[-2000:]
+
+
+def _rebuild():
+    """Incremental `make` (recompiles the changed shadow file + relinks), then restart QEMU with the
+    new kernel. Returns (ok, log). The bind-mounted gini_sched.c is newer, so make rebuilds just it."""
+    try:
+        r = subprocess.run(["make", "kernel/kernel", "fs.img"], cwd=XV6_DIR,
+                           capture_output=True, text=True, timeout=180)
+    except Exception as e:
+        return False, f"build error: {e}"
+    if r.returncode != 0:
+        return False, _scope_errors(r.stdout + r.stderr)
+    _QEMU.restart()
+    return True, "loaded"
+
+
+def _revert():
+    """Restore the shipped stub, then rebuild — one-click back to a known-good kernel."""
+    try:
+        shutil.copyfile(SHADOW_REF, SHADOW_FILE)
+    except Exception as e:
+        return False, f"revert error: {e}"
+    return _rebuild()
+
+
+def _md5(path: str):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except Exception:
+        return None
+
+
+def _stamp_manifest(text: str) -> str:
+    """Rewrite the kernel's `hash=baseline present=0` into the agent-computed file hash + present
+    (does the student's shadow file differ from the shipped stub?), so the manifest carries a real
+    version. `active`/`enabled`/`faults` stay as the kernel emitted them."""
+    fh = _md5(SHADOW_FILE)
+    present = "1" if (fh and fh != _md5(SHADOW_REF)) else "0"
+    short = (fh or "baseline")[:8]
+    out = []
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("SHADOW "):
+            ln = re.sub(r"hash=\S+", f"hash={short}", ln)
+            ln = re.sub(r"present=\d+", f"present={present}", ln)
+        out.append(ln)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
 # gdb-python: walk proc[] and print `pid <state> <name>` for every active slot (the Mac's
 # parse_procdump accepts these full state words).
 _PROC_WALK = r"""python
@@ -236,6 +350,29 @@ def gdb_run(commands, timeout=TIMEOUT):
             return f"gdb-error: {e}"
 
 
+# Freeze the NEXT user trap: break at usertrap entry, then read the trap CSRs (scause/sepc/stval —
+# the trap facts, live at entry) plus the user registers uservec saved into the trapframe. The
+# current proc is cpus[$tp].proc ($tp = hartid in xv6). On an idle kernel with no user proc this
+# times out and the frontend falls back to the authored journey. gdb_run appends `detach`.
+_TF = "cpus[$tp].proc->trapframe"
+_TRAP_CATCH = [
+    "tbreak usertrap",
+    "continue",
+    "echo ===TRAP===\\n",
+    "printf \"scause %p\\n\", $scause",
+    "printf \"sepc %p\\n\", $sepc",
+    "printf \"stval %p\\n\", $stval",
+    "printf \"pid %d\\n\", (cpus[$tp].proc ? cpus[$tp].proc->pid : -1)",
+    f"printf \"epc %p\\n\", {_TF}->epc",
+    f"printf \"ra %p\\n\", {_TF}->ra",
+    f"printf \"sp %p\\n\", {_TF}->sp",
+    f"printf \"a0 %p\\n\", {_TF}->a0",
+    f"printf \"a1 %p\\n\", {_TF}->a1",
+    f"printf \"a2 %p\\n\", {_TF}->a2",
+    f"printf \"a7 %p\\n\", {_TF}->a7",
+]
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -280,6 +417,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x06"), ctype="text/plain")   # Ctrl-F -> gini_fsdump()
         elif path == "/sc":
             self._send(_SERIAL.dump(b"\x13"), ctype="text/plain")   # Ctrl-S -> gini_scdump()
+        elif path == "/shadows":                                    # Ctrl-W -> gini_shadowdump(),
+            self._send(_stamp_manifest(_SERIAL.dump(b"\x17")), ctype="text/plain")  # hash-stamped
+        elif path == "/vmall":
+            self._send(_SERIAL.dump(b"\x01"), ctype="text/plain")   # Ctrl-A -> gini_vmdump_all()
+        elif path == "/faults":
+            self._send(_SERIAL.dump(b"\x05"), ctype="text/plain")   # Ctrl-E -> gini_faultdump()
+        elif path == "/traps":
+            self._send(_SERIAL.dump(b"\x12"), ctype="text/plain")   # Ctrl-R -> gini_trapdump()
         else:
             self._send({"error": "not found"})
 
@@ -297,6 +442,9 @@ class Handler(BaseHTTPRequestHandler):
             # temporary breakpoint auto-deletes on hit; if the kernel is idle (no context
             # switch) this times out harmlessly and the next read resumes the guest.
             self._send({"out": gdb_run(["tbreak swtch", "continue"])})
+        elif u.path == "/trapcatch":
+            # freeze the next live user trap and read its CSRs + saved user registers (Phase 2).
+            self._send({"out": gdb_run(_TRAP_CATCH)})
         elif u.path == "/control":
             # set the time-slice quantum over the SERIAL (no gdb): Ctrl-\ resets it to 1, then
             # Ctrl-] bumps it up to the target. Reliable console input, unlike the gdb write.
@@ -310,6 +458,17 @@ class Handler(BaseHTTPRequestHandler):
                 for _ in range(n - 1):
                     _SERIAL.write("\x1d")             # Ctrl-]  -> sched_quantum++
                 out = f"quantum={n}"
+            if "policy" in q:
+                # set sched_policy over the serial: Ctrl-B resets to 0 (round-robin), then Ctrl-G
+                # bumps up to the target (0=RR 1=priority 2=lottery). Same pattern as the quantum.
+                try:
+                    pv = max(0, min(2, int(q["policy"][0])))
+                except ValueError:
+                    pv = 0
+                _SERIAL.write("\x02")                 # Ctrl-B  -> sched_policy = 0
+                for _ in range(pv):
+                    _SERIAL.write("\x07")             # Ctrl-G  -> sched_policy++
+                out = (out + f" policy={pv}").strip()
             self._send({"ok": True, "out": out})
         elif u.path == "/run":                       # launch a program in the background
             prog = (q.get("prog", [""])[0] or "").strip()
@@ -326,6 +485,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": _SERIAL.write(self._body())})
         elif u.path in ("/interrupt", "/break"):      # Ctrl-C: kernel breaks a hung foreground
             self._send({"ok": _SERIAL.write("\x03")})  # console driver handles it, not sh
+        elif u.path == "/shadow/toggle":              # flip the CURRENT policy's shadow on/off
+            self._send({"ok": _SERIAL.write("\x0b")})  # Ctrl-K (the bridge sets policy first)
+        elif u.path == "/rebuild":                    # Load: incremental make + restart QEMU
+            ok, log = _rebuild()
+            self._send({"ok": ok, "log": log})
+        elif u.path == "/revert":                     # restore the shipped stub, then rebuild
+            ok, log = _revert()
+            self._send({"ok": ok, "log": log})
         elif u.path == "/console/clear":              # blank the Screen (baseline to now)
             _SERIAL.clear_console()
             self._send({"ok": True})
@@ -334,4 +501,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # Seed the shadow file if the bind-mounted host folder is empty (Load loop): the mount hides the
+    # image's kernel/shadows/gini_sched.c, so copy the pristine stub back in — the pre-built
+    # kernel/kernel still boots, and the student's edits + Load rebuild from this file.
+    if not os.path.exists(SHADOW_FILE) and os.path.exists(SHADOW_REF):
+        try:
+            os.makedirs(os.path.dirname(SHADOW_FILE), exist_ok=True)
+            shutil.copyfile(SHADOW_REF, SHADOW_FILE)
+        except Exception:
+            pass
+    _QEMU.start()                                     # launch the kernel; the agent stays PID 1
     HTTPServer(("0.0.0.0", 5000), Handler).serve_forever()

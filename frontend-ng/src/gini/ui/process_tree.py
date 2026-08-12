@@ -48,10 +48,12 @@ class ProcessTree(QTreeWidget):
     def set_live(self, live: bool) -> None:
         self._live = live
 
-    def set_procs(self, procs, running_pids=()) -> None:
-        """Rebuild the tree from the current process list. `running_pids` are highlighted."""
+    def set_procs(self, procs, running_pids=(), flags=None) -> None:
+        """Rebuild the tree from the current process list. `running_pids` are highlighted; `flags`
+        maps pid -> a short reason string (e.g. 'starving') that badges the process."""
         t = self.theme.theme
         running = set(running_pids or [])
+        flags = flags or {}
         self.clear()
         items: dict = {}          # pid -> QTreeWidgetItem
         for node in build_process_tree(procs):
@@ -69,6 +71,11 @@ class ProcessTree(QTreeWidget):
             elif p.state == "zombie":
                 for c in (0, 1, 2):
                     it.setForeground(c, QColor(t.faint))
+            if p.pid in flags:                        # scheduling badge (e.g. starvation)
+                reason = flags[p.pid]
+                it.setText(2, f"{p.state}  ⚠ {reason}")
+                it.setForeground(2, QColor(t.accent_for("red")))
+                it.setToolTip(2, reason)
             items[p.pid] = it
             if self._live and p.pid > 2:          # kill affordance (never init/sh)
                 b = QPushButton("✕")

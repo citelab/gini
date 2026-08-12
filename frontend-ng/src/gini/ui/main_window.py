@@ -2739,11 +2739,17 @@ class MainWindow(QMainWindow):
             try:
                 from ..runtime.xv6_bridge import connect
                 q = int((self.ctx.topology.devices[did].properties or {}).get("Timeslice", "1"))
-                providers[did] = connect(agent, quantum=q)      # HTTP to the in-container agent
+                bridge = connect(agent, quantum=q)              # HTTP to the in-container agent
+                providers[did] = bridge
             except Exception as e:
                 self.ctx.log(f"xv6 live bridge unavailable for {s.name}: {e}", "info")
                 continue
-            self.ctx.machine_states.pop(did, None)     # rebuilt live on next open
+            # Attach the live plane to any already-open state so its Real toggle now works (and a
+            # Lab already in Real mode goes live immediately). Never force a demo user to Real.
+            ms = self.ctx.machine_states.get(did)
+            if ms is not None and hasattr(ms, "attach_real"):
+                ms.attach_real(bridge, vm=getattr(bridge, "vm", None),
+                               fs=getattr(bridge, "fs", None))
         self._xv6_providers = providers
 
     def _machine_state_for(self, device_id: str):
@@ -2756,20 +2762,20 @@ class MainWindow(QMainWindow):
         states = self.ctx.machine_states
         ms = states.get(device_id)
         if ms is None:
-            provider = None
+            bridge = None
             if self._running:
-                provider = getattr(self, "_xv6_providers", {}).get(device_id)
-            live = provider is not None
-            if provider is None:
+                bridge = getattr(self, "_xv6_providers", {}).get(device_id)
+            # Default DATA MODE (a user choice thereafter, never auto-switched): Real when a live
+            # bridge exists at open, Demo otherwise. The bridge is the Real plane; the demo feed
+            # is built lazily by MachineState when the user toggles to Demo.
+            if bridge is not None:
+                ms = MachineState(bridge, device_id=device_id, mode="real",
+                                  vm=getattr(bridge, "vm", None), fs=getattr(bridge, "fs", None))
+            else:
                 dev = self.ctx.topology.devices[device_id]
-                provider = DemoScheduler(
+                demo = DemoScheduler(
                     timeslice=int((dev.properties or {}).get("Timeslice", "1") or "1"))
-            # a live bridge brings its own vm/fs readers; the demo feed lets MachineState default
-            # them to DemoVm/DemoDisk.
-            ms = MachineState(provider, device_id=device_id,
-                              vm=getattr(provider, "vm", None),
-                              fs=getattr(provider, "fs", None))
-            ms.live = live
+                ms = MachineState(demo, device_id=device_id, mode="demo")
             # new teachable kernel events -> notify the assistant (proactive Coach)
             ms.on_event = lambda s, did=device_id: self.ctx.bus.machine_events.emit(did)
             states[device_id] = ms
@@ -2825,7 +2831,8 @@ class MainWindow(QMainWindow):
         try:
             self._machine_lab = MachineLab(
                 self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
-                on_console=lambda: self._open_terminal(device_id))
+                on_console=lambda: self._open_terminal(device_id),
+                on_log=lambda lvl, msg: self.ctx.bus.log.emit(lvl, msg))  # mirror to GINI Console
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
