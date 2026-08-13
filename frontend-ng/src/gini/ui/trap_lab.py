@@ -15,11 +15,17 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout,
+    QWidget,
 )
 
-from ..domain.xv6 import TRAP_KINDS, TrapRate, parse_trapcounts, parse_traptrace, trap_kind_name
+from ..domain.xv6 import (
+    TRAP_KINDS, TrapRate, parse_alarms, parse_trapcounts, parse_traptrace, trap_kind_name,
+)
 from .theme import ThemeManager
+
+# trap kinds the "Step a trap" catcher can target (conditioned gdb breakpoint); "any" = next trap
+_CATCH_KINDS = ["any", "pagefault", "syscall", "timer", "illegal", "device"]
 
 # one colour per trap kind, so the histogram reads at a glance
 _KIND_ACCENT = {0: "blue", 1: "purple", 2: "amber", 3: "cyan", 4: "red", 5: "slate"}
@@ -65,16 +71,19 @@ class TrapBars(QWidget):
 
 class TrapLab(QDialog):
     traps_ready = Signal(str)          # raw /traps text pushed from the poll worker
+    alarms_ready = Signal(str)         # raw gini_dump text (ALARM lines) from the poll worker
     caught = Signal(object)            # a TrapFrame from a live catch (or None), off the worker
 
     def __init__(self, parent, theme: ThemeManager, device=None, traps_source=None,
-                 on_step=None, catch_source=None) -> None:
+                 on_step=None, catch_source=None, alarm_source=None, on_play=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self._src = traps_source or (lambda: "")
         self._on_step = on_step
-        self._catch = catch_source          # callable() -> TrapFrame (live gdb freeze); may be None
+        self._on_play = on_play             # callable() opening the decode-the-trap game; may be None
+        self._catch = catch_source          # callable(kind) -> TrapFrame (live gdb freeze); may be None
+        self._alarm_src = alarm_source      # callable() -> gini_dump text with ALARM lines; may be None
         self._rate = TrapRate(window=60.0)
         self._busy = False
         self._closed = False
@@ -100,9 +109,36 @@ class TrapLab(QDialog):
             "border-radius:6px;font-family:monospace;font-size:12px;}")
         root.addWidget(self._panel("Feed · recent traps  (pid  kind  epc  addr)", self._feed), 1)
 
-        row = QHBoxLayout(); row.addStretch(1)
+        # the sigalarm-lab strip — only shown when an alarm source is wired (Phase 3). It's the
+        # live proof a student's periodic handler works: the countdown ticks, `on` flips on fire.
+        self._alarms = QLabel()
+        self._alarms.setWordWrap(True)
+        self._alarms.setStyleSheet(
+            f"color:{t.text};background:{t.panel2};border:1px solid {t.line};border-radius:8px;"
+            "padding:6px 10px;font-family:monospace;font-size:12px;")
+        self._alarms.setVisible(self._alarm_src is not None)
+        root.addWidget(self._alarms)
+
+        row = QHBoxLayout()
+        if self._on_play is not None:                 # in-lab game: decode the trap from its scause
+            play = QPushButton("  Play: decode the trap")
+            play.setStyleSheet(
+                f"QPushButton{{color:{t.accent_for('purple')};background:{t.panel2};"
+                f"border:1px solid {t.line};border-radius:8px;padding:6px 12px;}}"
+                f"QPushButton:hover{{border-color:{t.accent};}}")
+            play.clicked.connect(lambda: self._on_play())
+            row.addWidget(play)
+        row.addStretch(1)
+        self._kind = QComboBox(); self._kind.addItems(_CATCH_KINDS)
+        self._kind.setToolTip("Which kind of trap to freeze")
+        self._kind.setStyleSheet(
+            f"QComboBox{{color:{t.text};background:{t.panel2};border:1px solid {t.line};"
+            "border-radius:6px;padding:4px 8px;}")
+        catch_lbl = QLabel("catch:"); catch_lbl.setStyleSheet(f"color:{t.muted};font-size:12px;")
+        row.addWidget(catch_lbl)
+        row.addWidget(self._kind)
         self._step_btn = QPushButton("  Step a trap ▸")
-        self._step_btn.setToolTip("Dissect a single trap frame-by-frame in the CPU journey")
+        self._step_btn.setToolTip("Freeze a real trap of this kind and dissect it in the CPU journey")
         self._step_btn.setStyleSheet(
             f"QPushButton{{color:{t.text};background:{t.panel2};border:1px solid {t.line};"
             f"border-radius:8px;padding:6px 12px;}}QPushButton:hover{{border-color:{t.accent};}}")
@@ -111,6 +147,7 @@ class TrapLab(QDialog):
         root.addLayout(row)
 
         self.traps_ready.connect(self._apply)
+        self.alarms_ready.connect(self._apply_alarms)
         self.caught.connect(self._on_caught)
         self._poll = QTimer(self); self._poll.timeout.connect(self._fetch)
         self._poll.start(1500)
@@ -135,13 +172,14 @@ class TrapLab(QDialog):
         if not callable(self._on_step):
             return
         if callable(self._catch):
+            kind = self._kind.currentText()
             self._step_btn.setEnabled(False)
             self._step_btn.setText("  freezing a trap…")
             import threading
 
             def work():
                 try:
-                    fr = self._catch()
+                    fr = self._catch(kind)
                 except Exception:
                     fr = None
                 if not self._closed:
@@ -167,9 +205,33 @@ class TrapLab(QDialog):
                 txt = self._src()
             except Exception:
                 txt = ""
+            atxt = ""
+            if callable(self._alarm_src):
+                try:
+                    atxt = self._alarm_src() or ""
+                except Exception:
+                    atxt = ""
             if not self._closed:                # don't signal a dialog that's being torn down
                 self.traps_ready.emit(txt or "")
+                if callable(self._alarm_src):
+                    self.alarms_ready.emit(atxt)
         threading.Thread(target=work, daemon=True).start()
+
+    def _apply_alarms(self, txt) -> None:
+        if self._closed:
+            return
+        alarms = parse_alarms(txt)
+        if not alarms:
+            self._alarms.setText("⏰ no alarm set — a process calls sigalarm(interval, handler) to "
+                                 "run a periodic user-level handler (the sigalarm lab).")
+            return
+        lines = []
+        for pid in sorted(alarms):
+            a = alarms[pid]
+            state = " · handler RUNNING" if a.on else ""
+            lines.append(f"⏰ pid {pid} · every {a.interval} ticks · fires in {a.remaining} · "
+                         f"handler {a.handler}{state}")
+        self._alarms.setText("\n".join(lines))
 
     def _apply(self, txt) -> None:
         self._busy = False

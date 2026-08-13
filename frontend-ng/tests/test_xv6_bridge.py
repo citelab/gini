@@ -51,7 +51,7 @@ class FakeAgent:
 
     def post(self, url):
         self.posts.append(url)
-        if url.endswith("/trapcatch"):
+        if "/trapcatch" in url:
             return json.dumps({"out": (
                 "===TRAP===\nscause 0x000000000000000f\nsepc 0x1080\nstval 0x4000\n"
                 "pid 5\na7 0x000000000000000f\n")})
@@ -90,6 +90,21 @@ def test_catch_trap_parses_a_frozen_frame():
     assert "/trapcatch" in fa.posts[-1]
     assert fr.ok and fr.kind == 1 and fr.pid == 5        # scause 15 -> store page fault
     assert fr.stval == "0x4000" and fr.regs.get("a7") == "0x000000000000000f"
+
+
+def test_catch_trap_passes_the_kind_predicate():
+    br, fa = _bridge()
+    br.catch_trap("pagefault")                           # Phase 4: conditioned catch
+    assert fa.posts[-1].endswith("/trapcatch?kind=pagefault")
+
+
+def test_alarms_reads_the_dump_lines():
+    from gini.domain.xv6 import parse_alarms
+    from gini.runtime.xv6_bridge import AgentClient, Xv6Bridge
+    dump = "1 sleep init 0\nALARM 5 10 3 0x1120 0\nSCHED policy 0 quantum 1\n"
+    br = Xv6Bridge(AgentClient("http://x:5000", get=lambda u: dump, post=lambda u: "{}"))
+    al = parse_alarms(br.alarms())                       # alarms() returns the gini_dump text
+    assert al[5].interval == 10 and al[5].remaining == 7
 
 
 def test_real_vm_reader_never_fakes_on_empty_read():
@@ -204,6 +219,24 @@ def test_set_policy_posts_mapped_id():
     br.set_policy("lottery")
     assert any("/control?policy=2" in u for u in fa.posts)
     assert br.policy == "lottery"
+
+
+def test_policy_roster_drives_set_policy_for_a_new_policy():
+    # the kernel roster (POLICY lines) makes a NEW policy selectable — set_policy maps its name to
+    # the kernel-reported id even though it's not in the built-in POLICY_ID.
+    dump = ("\n3 run spin 2\nSCHED policy 0 quantum 1\n"
+            "POLICY 0 round-robin\nPOLICY 1 priority\nPOLICY 2 lottery\nPOLICY 3 sjf\n"
+            "REGS pid 3 pc 0x1 sp 0x2 satp 0x3 sz 0x4\n")
+
+    class Ros(FakeAgent):
+        def get(self, url):
+            return dump if url.endswith("/procs") else super().get(url)
+    fa = Ros()
+    br = Xv6Bridge(AgentClient("http://x", get=fa.get, post=fa.post))
+    br.snapshot()
+    assert br.kernel_policies == {0: "round-robin", 1: "priority", 2: "lottery", 3: "sjf"}
+    br.set_policy("sjf")                               # not in POLICY_ID; resolved via the roster
+    assert any("/control?policy=3" in u for u in fa.posts)
 
 
 def test_kernel_policy_and_proc_sched_read():

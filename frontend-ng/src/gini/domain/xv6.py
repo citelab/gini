@@ -62,6 +62,8 @@ class Snapshot:
     stack: list = field(default_factory=list)   # [Frame]
     cpus: dict = field(default_factory=dict)    # cpu_index -> running pid (SMP; {} = single CPU)
     cpu_regs: dict = field(default_factory=dict)  # cpu_index -> CpuState (per-CPU registers)
+    modetime: dict = field(default_factory=dict)  # {"user","kernel","idle"} cumulative timer ticks
+    csr: dict = field(default_factory=dict)       # dumping hart's control CSRs {name: int}
     source: str = "real"                        # "real" (live kernel) or "demo" (DemoScheduler)
 
 
@@ -156,6 +158,16 @@ def policy_name(num) -> str:
     return POLICY_NAMES.get(num, f"policy{num}")
 
 
+_POLICY_ROSTER_RE = re.compile(r"POLICY\s+(\d+)\s+(\S+)")
+
+
+def parse_policies(text: str) -> dict:
+    """gini_dump's `POLICY <id> <name>` roster lines -> {id: name}. Lets the UI populate the policy
+    selector from whatever the KERNEL ships (a new policy auto-appears), instead of a hardcoded
+    list. Empty on an older build (the UI then falls back to POLICY_NAMES)."""
+    return {int(m.group(1)): m.group(2) for m in _POLICY_ROSTER_RE.finditer(text or "")}
+
+
 _PROC_SCHED_RE = re.compile(
     r"PROC\s+(\d+)\s+pri\s+(-?\d+)\s+tk\s+(-?\d+)\s+lv\s+(-?\d+)\s+wait\s+(-?\d+)")
 
@@ -167,6 +179,122 @@ def parse_proc_sched(text: str) -> dict:
     for m in _PROC_SCHED_RE.finditer(text or ""):
         out[int(m.group(1))] = {"priority": int(m.group(2)), "tickets": int(m.group(3)),
                                 "level": int(m.group(4)), "wait_ticks": int(m.group(5))}
+    return out
+
+
+# -- mode-time + control CSRs (the CPU face) --------------------------------------------------- #
+_MODETIME_RE = re.compile(r"MODETIME\s+user\s+(\d+)\s+kernel\s+(\d+)\s+idle\s+(\d+)")
+_CSR_RE = re.compile(
+    r"CSR\s+sstatus\s+(0x[0-9a-fA-F]+)\s+sie\s+(0x[0-9a-fA-F]+)\s+sip\s+(0x[0-9a-fA-F]+)"
+    r"\s+stvec\s+(0x[0-9a-fA-F]+)\s+scause\s+(0x[0-9a-fA-F]+)\s+sepc\s+(0x[0-9a-fA-F]+)")
+
+
+def parse_modetime(text: str) -> dict:
+    """gini_dump's `MODETIME user U kernel K idle I` — cumulative timer-tick counts by privilege
+    source. {} on an older build. The CPU face diffs two samples to get the last-second split."""
+    m = _MODETIME_RE.search(text or "")
+    return {"user": int(m.group(1)), "kernel": int(m.group(2)), "idle": int(m.group(3))} if m else {}
+
+
+def parse_csr(text: str) -> dict:
+    """gini_dump's `CSR sstatus .. sie .. sip .. stvec .. scause .. sepc ..` -> {name: int}. These
+    are the DUMPING hart's control CSRs (read inside the trap handler). {} on an older build."""
+    m = _CSR_RE.search(text or "")
+    if not m:
+        return {}
+    keys = ("sstatus", "sie", "sip", "stvec", "scause", "sepc")
+    return {k: int(m.group(i + 1), 16) for i, k in enumerate(keys)}
+
+
+def mode_split(prev: dict | None, cur: dict | None) -> dict:
+    """Fraction of timer ticks spent in each mode between two MODETIME samples. `prev=None` (or an
+    empty/zero baseline) yields the since-boot ratio — a sane first frame before a delta exists.
+    Always sums to 1.0 (or all-zero when there's no motion yet)."""
+    cur = cur or {}
+    prev = prev or {}
+    d = {k: max(0, cur.get(k, 0) - prev.get(k, 0)) for k in ("user", "kernel", "idle")}
+    total = sum(d.values())
+    if total == 0:
+        return {"user": 0.0, "kernel": 0.0, "idle": 0.0}
+    return {k: v / total for k, v in d.items()}
+
+
+# RISC-V sstatus / sie / sip bit positions (privileged spec).
+SSTATUS_SIE, SSTATUS_SPIE, SSTATUS_SPP = 1 << 1, 1 << 5, 1 << 8
+SSTATUS_SUM, SSTATUS_MXR = 1 << 18, 1 << 19
+_INT_BITS = (("software", 1 << 1), ("timer", 1 << 5), ("external", 1 << 9))   # S-mode xIE/xIP
+
+
+def sstatus_flags(v: int) -> dict:
+    """Decode sstatus into the flags a student cares about. SPP = the privilege the current trap
+    interrupted (U for a running user program, S for a kernel-path trap) — our honest 'where the
+    CPU came from', since the live mode is always S while the dump runs."""
+    return {"SIE": bool(v & SSTATUS_SIE), "SPIE": bool(v & SSTATUS_SPIE),
+            "SPP": "S" if v & SSTATUS_SPP else "U",
+            "SUM": bool(v & SSTATUS_SUM), "MXR": bool(v & SSTATUS_MXR)}
+
+
+_SCAUSE_INT = {1: "software int", 5: "timer int", 9: "external int"}
+_SCAUSE_EXC = {0: "instruction misaligned", 2: "illegal instruction", 8: "ecall (syscall)",
+               12: "instruction page fault", 13: "load page fault", 15: "store page fault"}
+
+
+def short_pid(pid: int) -> str:
+    """Last two digits of a pid, unpadded — a compact Gantt label. Small pids print as-is
+    (6->'6', 10->'10', 11->'11'); longer ones take the last two (230->'30', 3615->'15', 3613->'13'),
+    so pids that share a middle stay distinct (a centre-clipped full pid showed '61' for both)."""
+    return str(pid % 100)
+
+
+def scause_str(v: int) -> str:
+    """Decode the last-trap cause CSR. Top bit set = interrupt, else exception; low bits = code."""
+    if v is None:
+        return "—"
+    code = v & 0xFF
+    if v >> 63:
+        return _SCAUSE_INT.get(code, f"interrupt {code}")
+    return _SCAUSE_EXC.get(code, f"exception {code}")
+
+
+def interrupt_sources(sie: int, sip: int) -> list:
+    """The three S-mode interrupt sources with their enabled (sie) + pending (sip) bits — the honest
+    'interrupt state', read from the enable CONFIG rather than the momentary global bit."""
+    return [{"name": name, "enabled": bool(sie & bit), "pending": bool(sip & bit)}
+            for name, bit in _INT_BITS]
+
+
+# -- alarm state (the sigalarm lab; gini_dump `ALARM …` lines) --------------------------------- #
+@dataclass
+class AlarmState:
+    pid: int
+    interval: int       # alarm period in timer ticks (0 = no alarm set)
+    ticks: int          # ticks elapsed since the last fire
+    handler: str = "0x0"  # handler VA (hex)
+    on: int = 0         # 1 while the handler is running (the re-entrancy guard)
+
+    @property
+    def active(self) -> bool:
+        return self.interval > 0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.interval - self.ticks)
+
+
+_ALARM_RE = re.compile(
+    r"ALARM\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(0x[0-9a-fA-F]+)\s+(-?\d+)")
+
+
+def parse_alarms(text: str) -> dict:
+    """gini_dump's `ALARM <pid> <interval> <ticks> <handler> <on>` lines -> {pid: AlarmState},
+    for processes that actually have an alarm set (interval > 0). Absent on a kernel where the
+    student hasn't wired sigalarm yet (the fields are all zero -> nothing returned)."""
+    out: dict = {}
+    for m in _ALARM_RE.finditer(text or ""):
+        a = AlarmState(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                       m.group(4), int(m.group(5)))
+        if a.active:
+            out[a.pid] = a
     return out
 
 
@@ -312,6 +440,11 @@ class SyscallRate:
                 base = c
             else:
                 break
+        # On the very first snapshot there's no earlier baseline (oldest == now), so a delta would
+        # be 0 across the board. Treat pre-observation as empty -> the histogram shows counts-so-far
+        # immediately (the "calls-so-far" the docstring promises) instead of a blank first read.
+        if len(self.snaps) == 1:
+            base = {}
         out = {num: now[num] - base.get(num, 0) for num in now}
         return {k: v for k, v in out.items() if v > 0}
 
@@ -580,15 +713,32 @@ class DemoScheduler:
               "TR 5 2 0x8000000000000005 0x0000000000001054 0x0"]
         return "\n".join(tc + tr) + "\n"
 
-    def catch_trap(self) -> "TrapFrame":
-        """Offline demo of /trapcatch — a plausible frozen store page fault, so the CPU journey
-        can be seeded with real-looking values without a container."""
-        return TrapFrame(
+    def catch_trap(self, kind: str = "any") -> "TrapFrame":
+        """Offline demo of /trapcatch — a plausible frozen trap, so the CPU journey can be seeded
+        with real-looking values without a container. Honours the requested `kind` where it can."""
+        if kind == "syscall":
+            return TrapFrame(scause="0x0000000000000008", sepc="0x0000000000001d3c", stval="0x0",
+                             pid=2, regs={"epc": "0x1d3c", "a0": "0x0", "a7": "0x7"},
+                             kind=0, kind_name="ecall from U-mode (syscall)", ok=True)
+        if kind == "timer":
+            return TrapFrame(scause="0x8000000000000005", sepc="0x0000000000001050", stval="0x0",
+                             pid=5, regs={"epc": "0x1050", "sp": "0x3fffff9000"},
+                             kind=2, kind_name="supervisor timer interrupt", ok=True)
+        return TrapFrame(                                    # default / "pagefault": a store fault
             scause="0x000000000000000f", sepc="0x0000000000001080",
             stval="0x0000000000004000", pid=5,
             regs={"epc": "0x0000000000001080", "ra": "0x0000000000001d3c",
                   "sp": "0x0000003fffff9000", "a0": "0x0000000000000005", "a7": "0x000000000000000f"},
             kind=1, kind_name="store page fault", ok=True)
+
+    def alarms(self) -> str:
+        """Offline demo of the ALARM dump lines — one process with a periodic alarm whose
+        countdown advances each call, so the alarm strip animates without a container."""
+        self._al_t = getattr(self, "_al_t", 0) + 1
+        interval = 10
+        ticks = self._al_t % (interval + 1)
+        on = 1 if ticks == 0 else 0
+        return f"ALARM 5 {interval} {ticks} 0x0000000000001120 {on}\n"
 
     def _pick(self) -> int:
         """Choose the next running pid per policy — the offline mirror of kernel gini_pick()."""
@@ -640,11 +790,19 @@ class DemoScheduler:
         pc = 0x80001000 + (run_pid * 0x40) + (self._ticks & 0xF)
         cpu = CpuState(regs={
             "pc": hex(pc), "sp": hex(0x3FFFFF9000 - run_pid * 0x1000),
-            "ra": hex(0x80001D3C), "satp": hex(0x8000000000080000 + run_pid),
+            "ra": hex(0x80001D3C), "s0": hex(0x3FFFFF9F00 - run_pid * 0x1000),
+            "satp": hex(0x8000000000080000 + run_pid),
             "a0": hex(run_pid), "a7": "0x7"})
         stack = [Frame("swtch", "kernel/swtch.S:20"),
                  Frame("sched", "kernel/proc.c:493"),
                  Frame("yield", "kernel/proc.c:515"),
                  Frame("usertrap", "kernel/trap.c:67")]
+        # a plausible, advancing mode-time (≈70% user / 20% kernel / 10% idle) so the CPU face's
+        # bar animates offline; + representative CSRs: SPP=U (came from a user proc), all three
+        # S-interrupts enabled, a timer scause. Grounded in real bit layouts, not the wire.
+        modetime = {"user": self._ticks * 7, "kernel": self._ticks * 2, "idle": self._ticks}
+        csr = {"sstatus": SSTATUS_SPIE, "sie": (1 << 1) | (1 << 5) | (1 << 9),
+               "sip": 1 << 5, "stvec": 0x80001BB4,
+               "scause": 0x8000000000000005, "sepc": pc}
         return Snapshot(procs=procs, running_pid=run_pid, ticks=self._ticks,
-                        cpu=cpu, stack=stack, source="demo")
+                        cpu=cpu, stack=stack, modetime=modetime, csr=csr, source="demo")

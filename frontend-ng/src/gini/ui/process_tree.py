@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QHeaderView, QPushButton, QTreeWidget, QTreeWidget
 
 from ..domain.xv6 import build_process_tree
 from .theme import ThemeManager
+from .theme.manager import scale_css as _scss
 
 _STATE_ACCENT = {"running": "green", "runnable": "amber", "sleeping": "slate",
                  "zombie": "red", "used": "slate", "unused": "slate"}
@@ -28,6 +29,7 @@ class ProcessTree(QTreeWidget):
         super().__init__()
         self.theme = theme
         self._live = False
+        self._killing: set = set()      # pids with a kill in flight -> show a pending state
         self.setColumnCount(4)
         self.setHeaderLabels(["process", "pid", "state", ""])
         self.setRootIsDecorated(True)
@@ -35,7 +37,7 @@ class ProcessTree(QTreeWidget):
         self.setSelectionMode(QTreeWidget.NoSelection)
         self.setFocusPolicy(Qt.NoFocus)
         self.setColumnWidth(1, 48)
-        self.setColumnWidth(3, 40)
+        self.setColumnWidth(3, 84)
         self.header().setSectionResizeMode(0, QHeaderView.Stretch)
         t = theme.theme
         self.setStyleSheet(
@@ -54,6 +56,7 @@ class ProcessTree(QTreeWidget):
         t = self.theme.theme
         running = set(running_pids or [])
         flags = flags or {}
+        self._killing &= {p.pid for p in procs}   # drop pending marks for procs that are now gone
         self.clear()
         items: dict = {}          # pid -> QTreeWidgetItem
         for node in build_process_tree(procs):
@@ -78,12 +81,50 @@ class ProcessTree(QTreeWidget):
                 it.setToolTip(2, reason)
             items[p.pid] = it
             if self._live and p.pid > 2:          # kill affordance (never init/sh)
-                b = QPushButton("✕")
-                b.setToolTip(f"kill pid {p.pid}")
-                b.setFixedSize(26, 20)
-                b.setStyleSheet(
-                    f"QPushButton{{color:{t.muted};background:transparent;border:none;}}"
-                    f"QPushButton:hover{{color:{t.accent_for('red')};}}")
-                b.clicked.connect(lambda _c=False, pid=p.pid: self.kill_requested.emit(pid))
-                self.setItemWidget(it, 3, b)
+                self.setItemWidget(it, 3, self._kill_button(p.pid))
         self.expandAll()
+
+    def _kill_button(self, pid: int) -> QPushButton:
+        """A proper labelled Kill button (the old bare ✕ was easy to miss), with a persistent
+        'killing…' pending state so the click visibly registers even while the kill lands."""
+        t = self.theme.theme
+        pending = pid in self._killing
+        red = t.accent_for("red")
+        b = QPushButton("killing…" if pending else "Kill")
+        b.setFixedHeight(20)
+        b.setToolTip(f"kill pid {pid}")
+        b.setCursor(Qt.PointingHandCursor)
+        if pending:
+            b.setEnabled(False)
+            b.setStyleSheet(_scss(
+                f"QPushButton{{color:{t.faint};background:transparent;border:1px solid {t.line};"
+                "border-radius:5px;padding:0 8px;font-size:11px;}"))
+        else:
+            b.setStyleSheet(_scss(
+                f"QPushButton{{color:{red};background:transparent;border:1px solid {red};"
+                "border-radius:5px;padding:0 8px;font-size:11px;font-weight:600;}"
+                f"QPushButton:hover{{color:#ffffff;background:{red};}}"))
+            b.clicked.connect(lambda _c=False, p=pid: self._on_kill_clicked(p))
+        return b
+
+    def _on_kill_clicked(self, pid: int) -> None:
+        self._killing.add(pid)                 # mark pending; survives the ~0.5s tree rebuilds
+        it = self._find_item(pid)
+        if it is not None:                     # flip THIS button to the pending state immediately
+            self.setItemWidget(it, 3, self._kill_button(pid))
+        self.kill_requested.emit(pid)
+
+    def _find_item(self, pid: int):
+        def walk(it):
+            if it.text(1) == str(pid):
+                return it
+            for i in range(it.childCount()):
+                r = walk(it.child(i))
+                if r is not None:
+                    return r
+            return None
+        for i in range(self.topLevelItemCount()):
+            r = walk(self.topLevelItem(i))
+            if r is not None:
+                return r
+        return None

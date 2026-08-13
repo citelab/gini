@@ -111,6 +111,14 @@ def test_parse_and_apply_proc_sched():
     assert parse_procdump("3 run spin 2")[0].priority is None
 
 
+def test_parse_policies_roster():
+    from gini.domain.xv6 import parse_policies
+    txt = ("SCHED policy 1 quantum 3\nPOLICY 0 round-robin\nPOLICY 1 priority\n"
+           "POLICY 2 lottery\nPOLICY 3 sjf\n")
+    assert parse_policies(txt) == {0: "round-robin", 1: "priority", 2: "lottery", 3: "sjf"}
+    assert parse_policies("no roster here") == {}      # older build -> UI falls back to POLICY_NAMES
+
+
 def test_policy_names_match_kernel_ids():
     from gini.domain.xv6 import POLICY_IDS, POLICY_NAMES, policy_name
     assert POLICY_NAMES == {0: "round-robin", 1: "priority", 2: "lottery"}
@@ -219,6 +227,32 @@ def test_demo_catch_trap_is_a_seedable_frame():
     assert fr.ok and fr.kind == 1 and fr.regs.get("a7")      # a usable frozen page fault
 
 
+def test_parse_alarms_only_returns_active():
+    from gini.domain.xv6 import parse_alarms
+    txt = ("ALARM 1 0 0 0x0 0\n"                          # init: no alarm set -> dropped
+           "ALARM 5 10 3 0x0000000000001120 0\n"          # a periodic handler, 7 ticks to fire
+           "ALARM 7 4 4 0x0000000000002000 1\n")          # firing NOW (on=1)
+    al = parse_alarms(txt)
+    assert set(al) == {5, 7}                               # only processes with interval > 0
+    assert al[5].remaining == 7 and al[5].on == 0
+    assert al[7].on == 1 and al[7].handler == "0x0000000000002000"
+
+
+def test_demo_alarms_counts_down():
+    from gini.domain.xv6 import DemoScheduler, parse_alarms
+    d = DemoScheduler()
+    seen = [parse_alarms(d.alarms())[5].ticks for _ in range(4)]
+    assert seen == [1, 2, 3, 4]                            # the countdown advances each read
+
+
+def test_demo_catch_trap_honours_kind():
+    from gini.domain.xv6 import DemoScheduler
+    d = DemoScheduler()
+    assert d.catch_trap("syscall").kind == 0              # ecall
+    assert d.catch_trap("timer").kind == 2               # timer interrupt
+    assert d.catch_trap("pagefault").kind == 1           # store fault (default)
+
+
 def test_parse_cpu_lines():
     from gini.domain.xv6 import parse_cpu_lines
     txt = "1 sleep init\nSCHED policy 0 quantum 3\nCPU 0 pid 5\nCPU 1 pid 6\n"
@@ -257,6 +291,55 @@ def test_timeline_shares_track_cpu_occupancy():
     sh = tl.shares()
     assert abs(sh[5] - 0.5) < 1e-9 and abs(sh[4] - 1 / 3) < 1e-9 and abs(sh[3] - 1 / 6) < 1e-9
     assert abs(sum(sh.values()) - 1.0) < 1e-9                    # idle excluded, fractions sum to 1
+
+
+def test_short_pid_keeps_similar_pids_distinct():
+    from gini.domain.xv6 import short_pid
+    # the reported case: a centre-clipped full pid shows '61' for BOTH; last-two-digits disambiguates
+    assert short_pid(3615) == "15" and short_pid(3613) == "13"
+    assert short_pid(230) == "30"                             # last two digits
+    assert short_pid(6) == "6" and short_pid(10) == "10" and short_pid(11) == "11"  # small: as-is
+
+
+def test_parse_modetime_and_mode_split():
+    from gini.domain.xv6 import mode_split, parse_modetime
+    txt = "MODETIME user 700 kernel 200 idle 100\nCSR sstatus 0x2 sie 0x0 sip 0x0 stvec 0x0 " \
+          "scause 0x0 sepc 0x0"
+    mt = parse_modetime(txt)
+    assert mt == {"user": 700, "kernel": 200, "idle": 100}
+    assert parse_modetime("no such line") == {}
+    # delta between two cumulative samples -> last-window fractions (summing to 1)
+    s = mode_split({"user": 650, "kernel": 190, "idle": 95}, mt)
+    assert round(s["user"], 2) == 0.77 and abs(sum(s.values()) - 1.0) < 1e-9
+    # no prior sample -> since-boot ratio; no motion -> all zero
+    assert round(mode_split(None, mt)["user"], 2) == 0.70
+    assert mode_split(mt, mt) == {"user": 0.0, "kernel": 0.0, "idle": 0.0}
+
+
+def test_parse_csr_and_decoders():
+    from gini.domain.xv6 import interrupt_sources, parse_csr, scause_str, sstatus_flags
+    txt = "CSR sstatus 0x22 sie 0x222 sip 0x20 stvec 0x80001bb4 scause 0x8000000000000005 " \
+          "sepc 0x14"
+    c = parse_csr(txt)
+    assert c["sstatus"] == 0x22 and c["sie"] == 0x222 and c["stvec"] == 0x80001bb4
+    assert parse_csr("nope") == {}
+    f = sstatus_flags(c["sstatus"])
+    assert f["SIE"] and f["SPIE"] and f["SPP"] == "U"          # came from user
+    assert sstatus_flags(0x122)["SPP"] == "S"                 # SPP set -> came from kernel
+    src = {d["name"]: d for d in interrupt_sources(c["sie"], c["sip"])}
+    assert src["timer"]["enabled"] and src["timer"]["pending"]    # sie bit5 + sip bit5
+    assert src["external"]["enabled"] and not src["external"]["pending"]
+    assert scause_str(c["scause"]) == "timer int" and scause_str(15) == "store page fault"
+
+
+def test_demo_scheduler_emits_modetime_and_csr():
+    from gini.domain.xv6 import DemoScheduler, mode_split, sstatus_flags
+    d = DemoScheduler(timeslice=1)
+    a = d.snapshot(); b = d.step(); c = d.step()
+    assert a.modetime and c.modetime["user"] > a.modetime["user"]     # advances
+    split = mode_split(b.modetime, c.modetime)
+    assert round(split["user"], 2) == 0.70                    # ≈70/20/10 offline
+    assert sstatus_flags(b.csr["sstatus"])["SPP"] == "U"      # demo came-from user
 
 
 def test_timeline_records_context_switches():

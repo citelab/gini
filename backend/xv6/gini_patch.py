@@ -130,20 +130,21 @@ gini_pick(void)
     return 0;
   }
 
-  if(sched_policy == 2){                  // LOTTERY: draw a random ticket, weighted by p->tickets
-    int total = 0;
+  if(sched_policy == 2){                  // LOTTERY — shipped version is DELIBERATELY FLAWED: it
+                                          // picks UNIFORMLY at random and IGNORES p->tickets. The
+                                          // lottery assignment is to weight the draw by tickets.
+    int n = 0;
     for(p = proc; p < &proc[NPROC]; p++)
       if(p->state == RUNNABLE)
-        total += p->tickets > 0 ? p->tickets : 1;
-    if(total == 0)
+        n++;
+    if(n == 0)
       return 0;
     lseed ^= lseed << 13; lseed ^= lseed >> 17; lseed ^= lseed << 5;   // xorshift PRNG
-    int win = lseed % total, acc = 0;
+    int win = lseed % n, i = 0;
     for(p = proc; p < &proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
-      acc += p->tickets > 0 ? p->tickets : 1;
-      if(win < acc)
+      if(i++ == win)                      // uniform: ignores tickets (the bug to fix)
         return p;
     }
     return 0;
@@ -224,6 +225,24 @@ regex_once("kernel/proc.c",
            r'// GINI-xv6 sched defaults\n',
            "GINI-xv6 sched defaults")
 
+# 1d) per-proc ALARM state (proc.h) for the sigalarm lab. GINI OWNS these fields so gini_dump
+#     always compiles; the STUDENT writes sigalarm/sigreturn (scaffolded by the Syscall Builder)
+#     that set/read them, plus the usertrap countdown that fires the handler. Inserted after the
+#     name field, same as the scheduling fields.
+regex_once("kernel/proc.h",
+           r'(char name\[16\];[^\n]*\n)',
+           r'\1  uint64 gini_alarm_handler;  // GINI-xv6: alarm handler VA (0 = none) — sigalarm lab\n'
+           r'  int gini_alarm_interval;   // GINI-xv6: alarm period in timer ticks\n'
+           r'  int gini_alarm_ticks;      // GINI-xv6: ticks since the last fire\n'
+           r'  int gini_alarm_on;         // GINI-xv6: a handler is running now (re-entrancy guard)\n',
+           "GINI-xv6: alarm handler VA")
+
+regex_once("kernel/proc.c",
+           r'(p->state = USED;\n)',
+           r'\1  p->gini_alarm_handler = 0; p->gini_alarm_interval = 0; p->gini_alarm_ticks = 0; '
+           r'p->gini_alarm_on = 0;  // GINI-xv6 alarm defaults\n',
+           "GINI-xv6 alarm defaults")
+
 # 2) trap.c — the settable time-slice: preempt only every sched_quantum timer ticks. The
 #    counter is PER-CPU (indexed by cpuid()) — a single global would be shared across harts, so
 #    on SMP every core's timer bumps it and slices come out 1/ncpu too short. Declared before
@@ -231,7 +250,12 @@ regex_once("kernel/proc.c",
 regex_once("kernel/trap.c",
            r'(#include "defs.h"\n)',
            r'\1\n// GINI-xv6: PER-CPU time-slice counter (see the which_dev==2 guards below).\n'
-           r'int gini_qticks[NCPU];\nextern int sched_quantum;\n',
+           r'int gini_qticks[NCPU];\nextern int sched_quantum;\n'
+           r'// GINI-xv6: mode-time ticks — sampled at each timer interrupt by privilege source\n'
+           r'// (user-entry trap => user, kernel-entry => kernel, or idle when no proc runs). The\n'
+           r'// CPU face reads the delta as a user/kernel/idle split, like top\'s us/sy. No CSR\n'
+           r'// reads needed: the trap entry path already tells us where the CPU was.\n'
+           r'uint64 gini_ut, gini_kt, gini_it;\n',
            "GINI-xv6: PER-CPU time-slice counter")
 
 # 2a) trap.c — the LIVE PAGE-FAULT RING. Every user page fault (scause 12 instruction / 13 load /
@@ -279,8 +303,9 @@ append_once("kernel/trap.c", _GINI_FAULT.replace("PRINTF", PRINT),
 # are off at this point, so cpuid() is safe.
 regex_once("kernel/trap.c",
            r"if\s*\(which_dev == 2\)\s*\n\s*yield\(\);",
-           "if (which_dev == 2 && (++gini_qticks[cpuid()] >= sched_quantum)) "
-           "{ gini_qticks[cpuid()] = 0; yield(); } // GINI-xv6 quantum",
+           "if (which_dev == 2) { gini_ut++; "        # GINI-xv6: this timer tick hit user code
+           "if (++gini_qticks[cpuid()] >= sched_quantum) "
+           "{ gini_qticks[cpuid()] = 0; yield(); } } // GINI-xv6 quantum",
            "GINI-xv6 quantum")
 
 # usertrap(): capture page faults into the ring — right after the saved user PC is set, so it runs
@@ -359,11 +384,23 @@ regex_once("kernel/trap.c",
            r"\1\n  gini_traprec(); // GINI-xv6: record the trap into the taxonomy ring",
            "GINI-xv6: record the trap into the taxonomy ring")
 
+# 2a3) kerneltrap(): also record traps taken while the CPU is in the kernel — DEVICE interrupts
+#      (UART rx while sh sleeps in read(), virtio disk completion) arrive here, not in usertrap, so
+#      without this hook the "device" bucket stays empty. Anchored on `uint64 scause = r_scause();`,
+#      which is UNIQUE to kerneltrap (usertrap reads r_scause() inline). gini_traprec classifies
+#      from scause alone, so it doesn't need which_dev here.
+regex_once("kernel/trap.c",
+           r"(uint64 scause = r_scause\(\);)",
+           r"\1\n  gini_traprec(); // GINI-xv6: record kernel-mode traps (device interrupts)",
+           "GINI-xv6: record kernel-mode traps")
+
 # kerneltrap(): `if (which_dev == 2 && myproc() != 0[ && ...])\n    yield();` — trailing
 # `&& myproc()->state == RUNNING` was dropped in current xv6, so match it optionally.
 regex_once("kernel/trap.c",
            r"if\s*\(which_dev == 2 && myproc\(\) != 0"
            r"(?: && myproc\(\)->state == RUNNING)?\)\s*\n\s*yield\(\);",
+           "if (which_dev == 2) { if (myproc() == 0) gini_it++; else gini_kt++; } "  # GINI modetime
+           "// GINI-xv6 modetime\n  "
            "if (which_dev == 2 && myproc() != 0 && (++gini_qticks[cpuid()] >= sched_quantum)) "
            "{ gini_qticks[cpuid()] = 0; yield(); } // GINI-xv6 quantum k",
            "GINI-xv6 quantum k")
@@ -412,6 +449,7 @@ void            gini_fsdump(void);
 void            gini_logdump(void);
 void            gini_scdump(void);
 void            gini_break(void);
+void            gini_kill(int);
 struct proc*    gini_pick(void);
 extern int      sched_policy;
 extern int      sched_quantum;
@@ -472,6 +510,10 @@ _SHADOW_STUB = '''// GINI-xv6 SHADOW FILE — the one file you edit for a schedu
 // below and return a proc; do NOT take locks. The scheduler re-checks your choice is RUNNABLE under
 // its lock, so a wrong pick is safe.
 //
+// Each function below MIRRORS the shipped scheduler for that policy. Some are DELIBERATELY FLAWED —
+// that IS the assignment: the Machine Lab shows the misbehaviour; find the bug and fix it here,
+// then click Load. `round-robin` is correct, included as a worked example of the contract.
+//
 // Fields available on each proc (iterate proc[0..NPROC-1]):
 //   p->state      : UNUSED / USED / SLEEPING / RUNNABLE / RUNNING / ZOMBIE
 //   p->priority   : scheduling priority (lower number = higher priority)
@@ -489,22 +531,62 @@ _SHADOW_STUB = '''// GINI-xv6 SHADOW FILE — the one file you edit for a schedu
 
 extern struct proc proc[NPROC];
 
+// ROUND-ROBIN — correct. A worked example of the pick contract; nothing to fix here.
 struct proc *
 pick_rr_shadow(void)
 {
-  return 0;   // not implemented -> the round-robin primary runs. Write your version here.
+  static int rr = 0;
+  for(int i = 0; i < NPROC; i++){
+    struct proc *p = &proc[(rr + i) % NPROC];
+    if(p->state == RUNNABLE){ rr = (rr + i + 1) % NPROC; return p; }
+  }
+  return 0;
 }
 
+// PRIORITY — DELIBERATELY FLAWED. Ties go to the lowest-slot (≈lowest pid) proc and the aging is
+// weak (wait_ticks / 8), so one process hogs the CPU and the others starve (watch the ⚠ badge).
+// Your job: make it fair — e.g. round-robin among the highest-priority runnable procs, and/or age
+// strongly enough that a starved proc is promoted. Lower priority NUMBER = higher priority.
 struct proc *
 pick_prio_shadow(void)
 {
-  return 0;   // assignment: fix priority starvation with aging (replace the primary).
+  struct proc *p, *best = 0;
+  int best_eff = 0;
+  for(p = proc; p < &proc[NPROC]; p++){
+    if(p->state != RUNNABLE)
+      continue;
+    p->wait_ticks++;
+    int eff = p->priority - p->wait_ticks / 8;
+    if(best == 0 || eff < best_eff){ best = p; best_eff = eff; }
+  }
+  if(best){ best->wait_ticks = 0; return best; }
+  return 0;
 }
 
+// LOTTERY — DELIBERATELY FLAWED. Picks UNIFORMLY at random and ignores p->tickets, so CPU share is
+// even no matter how many tickets a proc holds. Your job: weight the draw by tickets so a proc with
+// N tickets is N× as likely to be chosen (sum tickets, draw in [0,total), walk until the running
+// total passes the draw).
 struct proc *
 pick_lottery_shadow(void)
 {
-  return 0;   // assignment: make CPU share track tickets.
+  static uint lseed = 88172645u;
+  struct proc *p;
+  int n = 0;
+  for(p = proc; p < &proc[NPROC]; p++)
+    if(p->state == RUNNABLE)
+      n++;
+  if(n == 0)
+    return 0;
+  lseed ^= lseed << 13; lseed ^= lseed >> 17; lseed ^= lseed << 5;
+  int win = lseed % n, i = 0;
+  for(p = proc; p < &proc[NPROC]; p++){
+    if(p->state != RUNNABLE)
+      continue;
+    if(i++ == win)
+      return p;
+  }
+  return 0;
 }
 '''
 if (ROOT / "kernel").exists():
@@ -562,8 +644,27 @@ gini_dump(void)
     // procdump parser is untouched; the scheduler face reads these to show policy behaviour.
     PRINTF("PROC %d pri %d tk %d lv %d wait %d\\n",
            p->pid, p->priority, p->tickets, p->level, p->wait_ticks);
+    // per-proc alarm state (the sigalarm lab): period, ticks-since, handler VA, in-handler flag.
+    // GINI owns these fields so the dump always compiles; the student writes sigalarm/sigreturn
+    // (via the Syscall Builder) that DRIVE them, and this line is the live proof it works.
+    PRINTF("ALARM %d %d %d %p %d\\n", p->pid, p->gini_alarm_interval, p->gini_alarm_ticks,
+           (void*)p->gini_alarm_handler, p->gini_alarm_on);
   }
   PRINTF("SCHED policy %d quantum %d\\n", sched_policy, sched_quantum);
+  // policy roster (id -> display name) so the UI's selector is DATA-DRIVEN: add a policy in the
+  // kernel and it auto-appears in the dropdown with no frontend change. Keep this list in step with
+  // gini_shadow[]/gini_pick() when you add a policy (e.g. shortest-job-first).
+  { static char *gpn[] = { "round-robin", "priority", "lottery" };
+    for(int gp = 0; gp < 3; gp++) PRINTF("POLICY %d %s\\n", gp, gpn[gp]); }
+  // GINI-xv6: mode-time counters (user/kernel/idle timer ticks) so the CPU face can show the
+  // us/sy/idle split, + this hart's control CSRs (trap vector, interrupt-enable config, last
+  // trap cause). SIE reads 0 here (we're inside a handler) — the UI leans on `sie` (the enabled
+  // sources) for the honest interrupt state, not the momentary global bit.
+  { extern uint64 gini_ut, gini_kt, gini_it;
+    PRINTF("MODETIME user %d kernel %d idle %d\\n", (int)gini_ut, (int)gini_kt, (int)gini_it); }
+  PRINTF("CSR sstatus %p sie %p sip %p stvec %p scause %p sepc %p\\n",
+         (void*)r_sstatus(), (void*)r_sie(), (void*)r_sip(),
+         (void*)r_stvec(), (void*)r_scause(), (void*)r_sepc());
   // per-CPU: which pid each core runs (Gantt strips) + that proc's live registers (from its
   // trapframe) — so every CPU has its own register/memory view, not just one.
   for(int ci = 0; ci < NCPU; ci++){
@@ -572,8 +673,8 @@ gini_dump(void)
       PRINTF("CPU %d pid %d\\n", ci, rp->pid);
       if(rp->trapframe){
         struct trapframe *tf = rp->trapframe;
-        PRINTF("REGS cpu %d pid %d pc %p sp %p ra %p a0 %p a7 %p satp %p sz %p\\n",
-               ci, rp->pid, (void*)tf->epc, (void*)tf->sp, (void*)tf->ra,
+        PRINTF("REGS cpu %d pid %d pc %p sp %p ra %p s0 %p a0 %p a7 %p satp %p sz %p\\n",
+               ci, rp->pid, (void*)tf->epc, (void*)tf->sp, (void*)tf->ra, (void*)tf->s0,
                (void*)tf->a0, (void*)tf->a7,
                (void*)MAKE_SATP(rp->pagetable), (void*)rp->sz);
       }
@@ -673,6 +774,25 @@ gini_break(void)
     PRINTF("[gini] break: nothing to interrupt\\n");
   }
 }
+
+// GINI-xv6: CONTROL-PLANE kill. The UI's Kill button used to type `kill <pid>` at the shell, so the
+// kill had to be SCHEDULED (sh wakes, forks, execs kill) — under load it waited behind the very
+// workload it was killing (looked unresponsive). This kills a specific pid straight from the console
+// interrupt (like gini_break/Ctrl-C): immediate, load-independent. Only flips killed 0->1 (no
+// p->lock; cons.lock is held) — the victim exits at its next timer trap. Sleeping victims see it on
+// wake. The shell `kill` still works (typed in the Terminal); this is just the responsive button.
+void
+gini_kill(int pid)
+{
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p->pid == pid && p->pid > 2){
+      p->killed = 1;
+      PRINTF("[gini] killed pid %d\\n", pid);
+      return;
+    }
+  }
+  PRINTF("[gini] kill: no pid %d\\n", pid);
+}
 '''
 append_once("kernel/proc.c", _GINI_BREAK.replace("PRINTF", PRINT),
             "GINI-xv6: interrupt a hung foreground")
@@ -738,6 +858,25 @@ regex_once("kernel/console.c",
            f"  case C('W'): {PRINT}(\"%c\",30); gini_shadowdump(); {PRINT}(\"%c\",31); break;  "
            "// GINI: shadow manifest (0x1e/0x1f-bracketed)",
            "gini_dump();")
+
+# 4f2) console.c — CONTROL-PLANE kill (pid-carrying). The switch above handles single control chars;
+# a kill needs a pid, so we add a tiny state machine BEFORE the switch: Ctrl-Y (C('Y')) starts pid
+# entry, subsequent digits accumulate, and any terminator (e.g. '\n') fires gini_kill() straight from
+# the UART interrupt — no shell scheduling, so the Kill button can't be starved by the workload it's
+# killing (the old `kill <pid>` typed at the shell could). Digits are consumed here so they never
+# echo or reach the shell line buffer. cons.lock is held across consoleintr, so release before the
+# early return. Anchored on consoleintr's `switch(c)` (unique in console.c).
+regex_once("kernel/console.c",
+           r"(switch\s*\(c\)\s*\{)",
+           "static int gini_killpid = -1;  // GINI: control-plane kill pid-entry (-1 = idle)\n"
+           "  if(gini_killpid >= 0){\n"
+           "    if(c >= '0' && c <= '9') gini_killpid = gini_killpid * 10 + (c - '0');\n"
+           "    else { gini_kill(gini_killpid); gini_killpid = -1; }\n"
+           "    release(&cons.lock); return;\n"
+           "  }\n"
+           "  if(c == C('Y')){ gini_killpid = 0; release(&cons.lock); return; }\n"
+           r"  \1",
+           "GINI: control-plane kill pid-entry")
 
 # 4g) syscall.c — per-syscall counters (histogram) + a recent-call trace ring (strace view).
 #     The definitions + gini_scdump go at end-of-file (types/externs are declared in defs.h so

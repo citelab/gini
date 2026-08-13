@@ -340,6 +340,11 @@ class MachineState:
                 return {}
         return {}
 
+    def policies(self) -> dict:
+        """The kernel's policy roster {id: name} (from the POLICY lines) — drives the UI selector,
+        so a policy the kernel ships auto-appears. Empty on an older build / offline."""
+        return dict(getattr(self.provider, "kernel_policies", {}) or {})
+
     # -- controls ------------------------------------------------------------ #
     def set_timeslice(self, ticks: int) -> None:
         old = self.timeslice

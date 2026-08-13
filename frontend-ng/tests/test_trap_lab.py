@@ -56,7 +56,7 @@ def test_trap_lab_step_button_invokes_callback(app):
     from gini.ui.trap_lab import TrapLab
     fired = []
     lab = TrapLab(None, _theme(app), _Dev(), traps_source=lambda: "",
-                  on_step=lambda: fired.append(1))
+                  on_step=lambda fr=None: fired.append(1))   # on_step receives the frame (or None)
     lab._step()
     assert fired == [1]                                     # "Step a trap" opens the journey
     lab.close()
@@ -126,3 +126,41 @@ def test_journey_without_frame_still_works(app):
     assert j._live.isHidden() or not j._live.text()        # banner hidden when there's no frame
     j._render()                                            # renders without a frame, no crash
     j.close()
+
+
+def test_trap_lab_alarm_strip_renders_countdown(app):
+    # Phase 3: the sigalarm strip shows an active alarm's countdown when an alarm source is wired
+    from gini.domain.xv6 import DemoScheduler
+    from gini.ui.trap_lab import TrapLab
+    d = DemoScheduler()
+    lab = TrapLab(None, _theme(app), _Dev(), traps_source=lambda: "", alarm_source=d.alarms)
+    assert lab._alarms.isVisibleTo(lab)                    # the strip shows (alarm source present)
+    _wait(app, lambda: "pid 5" in lab._alarms.text())
+    assert "every 10 ticks" in lab._alarms.text() and "fires in" in lab._alarms.text()
+    lab.close()
+
+
+def test_trap_lab_no_alarm_source_hides_strip(app):
+    from gini.ui.trap_lab import TrapLab
+    lab = TrapLab(None, _theme(app), _Dev(), traps_source=lambda: "", alarm_source=None)
+    assert lab._alarms.isHidden()                          # no sigalarm strip when unavailable
+    lab.close()
+
+
+def test_trap_lab_kind_selector_passes_kind_to_catch(app):
+    # Phase 4: the "catch" selector feeds the chosen kind into the freeze call
+    from gini.ui.trap_lab import TrapLab
+    seen = []
+    lab = TrapLab(None, _theme(app), _Dev(), traps_source=lambda: "",
+                  catch_source=lambda kind: seen.append(kind) or _mk_frame(),
+                  on_step=lambda fr: None)
+    lab._kind.setCurrentText("timer")
+    lab._step()
+    _wait(app, lambda: bool(seen))
+    assert seen == ["timer"]
+    lab.close()
+
+
+def _mk_frame():
+    from gini.domain.xv6 import TrapFrame
+    return TrapFrame(scause="0x8000000000000005", kind=2, kind_name="timer", ok=True)

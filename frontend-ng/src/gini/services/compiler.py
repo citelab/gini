@@ -13,11 +13,18 @@ dropped, with a note). Cloud endpoints (instances, containers, LBs, …) run as 
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..domain import devices as _dev
 from ..domain.topology import Topology
+
+
+def _gini_home() -> Path:
+    # Same rule as app.paths.gini_home, replicated so this service avoids an `app` import cycle.
+    return Path(os.environ.get("GINI_HOME_DIR") or (Path.home() / ".gini")).expanduser()
 from .cloud_catalog import is_service, service_for
 
 ROUTERS = {"router", "firewall"}
@@ -1103,9 +1110,15 @@ class RuntimeCompiler:
             # the Load loop: bind-mount a host folder over kernel/shadows/ so the student edits
             # gini_sched.c in their own editor and Load rebuilds in-container. The folder can start
             # empty — the agent seeds the shipped stub into it on boot (see gini_agent.py). Mount a
-            # DIRECTORY (editors save via rename, which breaks a single-file mount).
+            # DIRECTORY (editors save via rename, which breaks a single-file mount). It lives under
+            # the GINI home (~/.gini/xv6-shadows/<name>/) so it's stable + discoverable and the
+            # student's edits PERSIST across Stop/Run (unlike the ephemeral compose workdir).
             _sane = "".join(c if (c.isalnum() or c in "_.-") else "-" for c in d.name)
-            _shadows_host = f"./xv6-shadows-{_sane}"
+            _shadows_host = _gini_home() / "xv6-shadows" / _sane
+            try:
+                _shadows_host.mkdir(parents=True, exist_ok=True)   # exists + user-owned before `up`
+            except OSError:
+                pass
             cfg.services.append(ServiceSpec(
                 name=d.name, type_key="xv6", image="gini-xv6:latest",
                 summary="xv6 teaching kernel (QEMU-RISC-V); in-container agent serves live state.",

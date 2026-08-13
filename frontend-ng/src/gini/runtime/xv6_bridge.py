@@ -16,8 +16,9 @@ import json
 import urllib.request
 
 from ..domain.xv6 import (
-    Snapshot, apply_proc_sched, parse_backtrace, parse_cpu_lines, parse_cpu_regs, parse_procdump,
-    parse_registers, parse_regs_line, parse_sched, parse_shadow_manifest, running_pid,
+    Snapshot, apply_proc_sched, parse_backtrace, parse_cpu_lines, parse_cpu_regs, parse_csr,
+    parse_modetime, parse_policies, parse_procdump, parse_registers, parse_regs_line, parse_sched,
+    parse_shadow_manifest, running_pid,
 )
 from ..domain.xv6_fs import FsSnapshot, Superblock, layout, parse_logheader, parse_superblock
 from ..domain.xv6_vm import VmSnapshot, parse_faults, parse_vmall, parse_vmprint
@@ -144,6 +145,7 @@ class Xv6Bridge:
         self._last_stack: list = []
         self.kernel_quantum = None  # the kernel's ACTUAL sched_quantum (from the SCHED line)
         self.kernel_policy = None   # the kernel's ACTUAL sched_policy id (from the SCHED line)
+        self.kernel_policies = {}   # {id: name} roster (POLICY lines) — drives the UI selector
 
     def snapshot(self) -> Snapshot:
         """The Run/observe read: gini_dump() over the serial gives BOTH the process table AND
@@ -157,6 +159,9 @@ class Xv6Bridge:
         if sched:
             self.kernel_quantum = sched.get("quantum")
             self.kernel_policy = sched.get("policy")
+        roster = parse_policies(txt)                  # {id: name}; drives the UI policy selector
+        if roster:
+            self.kernel_policies = roster
         cpu = parse_regs_line(txt)                  # live registers from the same no-halt dump
         if cpu.regs:
             self._last_cpu = cpu
@@ -164,7 +169,8 @@ class Xv6Bridge:
             cpu = self._last_cpu                     # CPU idle / no REGS line -> keep last
         return Snapshot(procs=procs, running_pid=running_pid(procs), ticks=self._seq,
                         cpu=cpu, stack=self._last_stack, cpus=parse_cpu_lines(txt),
-                        cpu_regs=parse_cpu_regs(txt))
+                        cpu_regs=parse_cpu_regs(txt),
+                        modetime=parse_modetime(txt), csr=parse_csr(txt))
 
     def _detail_snapshot(self) -> Snapshot:
         """A full gdb read (halts the guest briefly): registers + kernel stack + a proc walk.
@@ -187,7 +193,11 @@ class Xv6Bridge:
 
     def set_policy(self, policy: str) -> None:
         self.policy = policy
-        self.agent.post(f"/control?policy={POLICY_ID.get(policy, 0)}")
+        # map the display name -> id via the live kernel roster (so a NEW policy works), falling
+        # back to the built-in ids for the shipped three.
+        by_name = {name: pid for pid, name in self.kernel_policies.items()}
+        pid = by_name.get(policy, POLICY_ID.get(policy, 0))
+        self.agent.post(f"/control?policy={pid}")
 
     # -- shadows + control-plane operations (NOT system calls) --------------------- #
     def shadows(self) -> dict:
@@ -255,18 +265,23 @@ class Xv6Bridge:
         """Raw gini_trapdump text (TC per-kind counters + TR trap ring) for the Traps face."""
         return self.agent.get_text("/traps")
 
-    def catch_trap(self):
+    def catch_trap(self, kind: str = "any"):
         """Freeze the next live user trap (gdb /trapcatch) and parse it into a TrapFrame — the
-        real scause/sepc/stval + saved user registers that seed the CPU journey. Returns a
-        not-ok TrapFrame on timeout/idle, so the journey falls back to its authored captions."""
+        real scause/sepc/stval + saved user registers that seed the CPU journey. `kind` conditions
+        the breakpoint (pagefault/syscall/timer/illegal/device). Returns a not-ok TrapFrame on
+        timeout/idle, so the journey falls back to its authored captions."""
         from ..domain.xv6 import parse_trapframe
-        raw = self.agent.post("/trapcatch")
+        raw = self.agent.post(f"/trapcatch?kind={kind}")
         txt = ""
         try:
             txt = json.loads(raw).get("out", "")
         except Exception:
             txt = raw or ""
         return parse_trapframe(txt)
+
+    def alarms(self) -> str:
+        """Raw gini_dump text (contains the per-proc `ALARM …` lines) for the sigalarm-lab strip."""
+        return self.agent.get_text("/procs")
 
     def console(self) -> str:
         return self.agent.get_text("/console")

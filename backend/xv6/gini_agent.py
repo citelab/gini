@@ -355,8 +355,23 @@ def gdb_run(commands, timeout=TIMEOUT):
 # current proc is cpus[$tp].proc ($tp = hartid in xv6). On an idle kernel with no user proc this
 # times out and the frontend falls back to the authored journey. gdb_run appends `detach`.
 _TF = "cpus[$tp].proc->trapframe"
-_TRAP_CATCH = [
-    "tbreak usertrap",
+# gdb breakpoint predicates to catch a trap of a SPECIFIC kind (Phase 4). "any" = no condition.
+_TRAP_COND = {
+    "syscall": "$scause==8",
+    "pagefault": "($scause==12 || $scause==13 || $scause==15)",
+    "illegal": "$scause==2",
+    "timer": "$scause==0x8000000000000005",
+    "device": "($scause==0x8000000000000009)",
+}
+
+
+def _trap_catch_cmds(kind="any"):
+    cond = _TRAP_COND.get(kind)
+    brk = f"tbreak usertrap if {cond}" if cond else "tbreak usertrap"
+    return [brk] + _TRAP_CATCH_TAIL
+
+
+_TRAP_CATCH_TAIL = [
     "continue",
     "echo ===TRAP===\\n",
     "printf \"scause %p\\n\", $scause",
@@ -443,8 +458,11 @@ class Handler(BaseHTTPRequestHandler):
             # switch) this times out harmlessly and the next read resumes the guest.
             self._send({"out": gdb_run(["tbreak swtch", "continue"])})
         elif u.path == "/trapcatch":
-            # freeze the next live user trap and read its CSRs + saved user registers (Phase 2).
-            self._send({"out": gdb_run(_TRAP_CATCH)})
+            # freeze the next live user trap and read its CSRs + saved user registers. An optional
+            # ?kind= (pagefault/syscall/timer/illegal/device) conditions the breakpoint (Phase 4);
+            # default "any" catches the next trap of any kind (Phase 2).
+            kind = (q.get("kind", ["any"])[0] or "any").strip()
+            self._send({"out": gdb_run(_trap_catch_cmds(kind))})
         elif u.path == "/control":
             # set the time-slice quantum over the SERIAL (no gdb): Ctrl-\ resets it to 1, then
             # Ctrl-] bumps it up to the target. Reliable console input, unlike the gdb write.
@@ -474,12 +492,16 @@ class Handler(BaseHTTPRequestHandler):
             prog = (q.get("prog", [""])[0] or "").strip()
             ok = bool(prog) and prog in PROGRAMS and _SERIAL.write(prog + " &\n")
             self._send({"ok": ok, "prog": prog})
-        elif u.path == "/kill":                       # xv6 `kill <pid>` (init/sh guarded by UI)
+        elif u.path == "/kill":                       # CONTROL-PLANE kill (init/sh guarded by UI)
             try:
                 pid = int(q.get("pid", ["0"])[0])
             except ValueError:
                 pid = 0
-            ok = pid > 2 and _SERIAL.write(f"kill {pid}\n")
+            # Ctrl-Y + <pid> + newline: the kernel's consoleintr fires gini_kill() straight from the
+            # UART interrupt, so the kill lands immediately instead of waiting for the shell + `kill`
+            # program to be scheduled behind the workload (the old `kill <pid>\n` path). The shell
+            # `kill` still works when typed in the Terminal.
+            ok = pid > 2 and _SERIAL.write(f"\x19{pid}\n")
             self._send({"ok": ok, "pid": pid})
         elif u.path == "/input":                      # raw console input (the in-app console)
             self._send({"ok": _SERIAL.write(self._body())})

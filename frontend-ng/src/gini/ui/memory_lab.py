@@ -114,11 +114,14 @@ class PhysBar(QWidget):
 
 
 class MemoryLab(QDialog):
-    def __init__(self, parent, theme: ThemeManager, device=None, provider=None) -> None:
+    def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
+                 on_play=None, play_games=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.provider = provider or DemoVm()
+        self._on_play = on_play             # callable(game_id) opening a game; may be None
+        self._play_games = play_games or []  # [(label, game_id)]
 
         t = theme.theme
         self.setWindowTitle(f"Memory Lab — {getattr(device, 'name', 'xv6')}")
@@ -151,6 +154,15 @@ class MemoryLab(QDialog):
         title = QLabel(f"  Virtual memory — {getattr(self.device, 'name', 'xv6')}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
+        if self._on_play is not None:                 # in-lab games (thrashing, translate)
+            for label, gid in self._play_games:
+                play = QPushButton(f"  Play: {label}")
+                play.setStyleSheet(
+                    f"QPushButton{{color:{t.accent_for('purple')};background:{t.panel2};"
+                    f"border:1px solid {t.line};border-radius:8px;padding:5px 11px;}}"
+                    f"QPushButton:hover{{border-color:{t.accent};}}")
+                play.clicked.connect(lambda _c=False, g=gid: self._on_play(g))
+                head.addWidget(play)
         self._satp = QLabel(); self._satp.setStyleSheet(
             _scss(f"color:{t.muted};font-family:monospace;font-size:11px;"))
         head.addWidget(self._satp)

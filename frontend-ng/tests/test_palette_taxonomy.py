@@ -13,7 +13,8 @@ from gini.domain.devices import Category, get
 
 def test_every_machine_is_in_the_machines_section():
     machines = D.by_category()[Category.MACHINES]
-    assert [d.key for d in machines] == ["host", "container", "instance", "kinstance", "xv6"]
+    assert [d.key for d in machines] == ["host", "desktop", "container", "instance",
+                                         "kinstance", "xv6"]
     # …and nothing that ISN'T a machine snuck in
     for d in machines:
         assert d.backend_kind in ("vm", "xv6", None) or d.key in ("container", "instance",

@@ -40,6 +40,11 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("host", "hub", "Share one collision domain (teaching: watch flooding & collisions).", ()),
     ("host", "router", "Attach a machine straight to a router as its gateway off the LAN.", ()),
     ("host", "wap", "Join the network over Wi-Fi.", ()),
+    # a graphical Desktop is a real networked host — same LAN connectivity as `host`.
+    ("desktop", "switch", "Join a LAN — the graphical host sits on a subnet like any machine.", ()),
+    ("desktop", "hub", "Share one collision domain (watch flooding & collisions).", ()),
+    ("desktop", "router", "Attach the graphical host straight to a router as its gateway.", ()),
+    ("desktop", "wap", "Join the network over Wi-Fi.", ()),
     ("switch", "router", "Uplink the LAN to a router so it can reach other subnets.", ()),
     ("switch", "switch", "Extend the LAN onto a second switch.", ()),
     ("hub", "switch", "Bridge a shared-media segment into a switched LAN.", ()),

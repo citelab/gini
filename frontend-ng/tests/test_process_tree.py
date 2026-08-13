@@ -44,13 +44,33 @@ def test_tree_kill_only_for_user_procs_when_live(app):
     fired = []
     tree.kill_requested.connect(fired.append)
     tree.set_procs(_procs(), running_pids=[4])
-    # walk to a user proc (pid 4) and click its kill button
+    # walk to a user proc (pid 4) and click its labelled Kill button
     sh = tree.topLevelItem(0).child(0)
     busy = sh.child(0)                                    # pid 4
     btn = tree.itemWidget(busy, 3)
-    assert btn is not None
+    assert btn is not None and btn.text() == "Kill"       # proper label, not a bare ✕
     btn.click()
     assert fired == [4]
     # init (pid 1) has no kill button
     assert tree.itemWidget(tree.topLevelItem(0), 3) is None
+    tree.close()
+
+
+def test_tree_kill_button_shows_pending_state(app):
+    from gini.ui.process_tree import ProcessTree
+    tree = ProcessTree(_theme(app))
+    tree.set_live(True)
+    tree.set_procs(_procs(), running_pids=[4])
+    busy = tree.topLevelItem(0).child(0).child(0)         # pid 4
+    tree.itemWidget(busy, 3).click()                      # request kill
+    # the button flips to a disabled 'killing…' state immediately...
+    b = tree.itemWidget(busy, 3)
+    assert b.text() == "killing…" and not b.isEnabled()
+    assert 4 in tree._killing
+    # ...and the pending state SURVIVES a tree rebuild (the ~0.5s poll) while pid 4 still exists
+    tree.set_procs(_procs(), running_pids=[4])
+    assert tree.itemWidget(tree.topLevelItem(0).child(0).child(0), 3).text() == "killing…"
+    # once the proc is gone (reaped), the pending mark is dropped
+    tree.set_procs(parse_procdump("1 sleep init 0\n2 sleep sh 1\n"), running_pids=[])
+    assert tree._killing == set()
     tree.close()
