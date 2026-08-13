@@ -73,7 +73,7 @@ def coach_prompt(issues, canvas_summary: str) -> str:
             "restate the list.")
 
 
-def os_coach_prompt(events, card: str, remaining: int) -> str:
+def os_coach_prompt(events, card: str, remaining: int, focus: str = "") -> str:
     """OS Coach: measured, Socratic help grounded in the LIVE xv6 kernel state. `events` are
     detected deterministically by the StateWatcher (ground truth — the model coaches, it does
     not invent). The model gives ONE nudge, never the full answer, so the help is a hint-ladder
@@ -88,7 +88,8 @@ def os_coach_prompt(events, card: str, remaining: int) -> str:
         "the full explanation, do NOT write code, and do NOT invent processes or values that "
         "aren't in the state. Refer to processes by pid.\n\n"
         f"Live kernel state:\n{card}\n\nDetected moments:\n{ev}\n\n"
-        f"(The student has {remaining} Coach hint(s) left this session, so make it count.)\n"
+        + (f"{focus}\n\n" if focus else "")
+        + f"(The student has {remaining} Coach hint(s) left this session, so make it count.)\n"
         "Reply with 2-3 sentences: one nudge.")
 
 

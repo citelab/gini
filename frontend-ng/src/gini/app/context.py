@@ -85,6 +85,9 @@ class Settings:
     llm_model: str = "llama3.1"
     llm_think: bool = False          # ask reasoning models (e.g. gemma4:e2b) to think
     llm_num_ctx: int = 8192          # context window (Ollama defaults to only 2048 + truncates)
+    # Reasoning 2.0: the deterministic Reasoning Twin audits mission-tutor turns for coverage
+    # (docs/REASONING_2.0_DESIGN.md). Off by default while phase A proves out.
+    twin_enabled: bool = False
     # Build a missing backend image (gRouter / POX) automatically instead of printing the
     # `docker build …` line and refusing to Run. Off by default: the first build takes a couple
     # of minutes, and silently burning that on someone's first Run is a poor surprise.

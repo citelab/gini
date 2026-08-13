@@ -32,25 +32,30 @@ def first_json(text: str):
     return None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Persona:
     name: str
     system: str                 # "you do ONLY this" — no general-assistant framing
     temperature: float = 0.3
     stateful: bool = False       # only the Reasoning persona is stateful (reads shared memory)
+    schema: dict | None = None   # optional JSON Schema → decoder-constrained output (Reasoning 2.0)
 
 
 class PersonaRunner:
-    """Invokes personas on one injected model. `llm` is `llm(prompt) -> str`, or
-    `llm(prompt, temperature=...) -> str` (the runner passes temperature when the callable accepts it)."""
+    """Invokes personas on one injected model. `llm` is `llm(prompt) -> str`, optionally accepting
+    `temperature=` and/or `schema=` keyword args (the runner passes each only when the callable
+    accepts it — so simple lambdas in tests and older backends keep working unchanged)."""
 
     def __init__(self, llm) -> None:
         self._llm = llm
         self._accepts_temp = False
+        self._accepts_schema = False
         try:
-            self._accepts_temp = "temperature" in inspect.signature(llm).parameters
+            params = inspect.signature(llm).parameters
+            self._accepts_temp = "temperature" in params
+            self._accepts_schema = "schema" in params
         except (TypeError, ValueError):
-            self._accepts_temp = False
+            pass
         self.last_prompt = ""    # for tests / debugging — the exact text last sent
 
     def call(self, persona: Persona, *, context: str = "", task: str = "") -> str:
@@ -63,9 +68,12 @@ class PersonaRunner:
         self.last_prompt = prompt
         if self._llm is None:
             return ""
+        kwargs = {}
+        if self._accepts_temp:
+            kwargs["temperature"] = persona.temperature
+        if self._accepts_schema and persona.schema is not None:
+            kwargs["schema"] = persona.schema
         try:
-            if self._accepts_temp:
-                return (self._llm(prompt, temperature=persona.temperature) or "").strip()
-            return (self._llm(prompt) or "").strip()
+            return (self._llm(prompt, **kwargs) or "").strip()
         except Exception:
             return ""

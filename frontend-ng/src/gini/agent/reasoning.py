@@ -10,7 +10,7 @@ about the student's actual board — not canned. A non-LLM fallback keeps it usa
 from __future__ import annotations
 
 from .contracts import Intent, Move, Notification
-from .personas import Persona, PersonaRunner
+from .personas import Persona, PersonaRunner, first_json
 
 _SYSTEM = (
     "You are the game master of a hands-on lab mission — warm, concise, and in character. You ONLY "
@@ -19,6 +19,17 @@ _SYSTEM = (
     "don't cover the question, say what IS known and stop — don't guess.")
 
 REASONING = Persona("Reasoning", system=_SYSTEM, temperature=0.35, stateful=True)
+
+# The covered variant (Reasoning 2.0): same voice, but the reply is ONE JSON object carrying the
+# line plus a coverage report the Twin diffs exactly. Decoder-constrained where the backend
+# supports structured outputs (schema); the tolerant first_json path handles the rest.
+def _covered_persona():
+    from .twin.dialectic import COVERAGE_SCHEMA
+    return Persona("Reasoning", system=_SYSTEM, temperature=0.35, stateful=True,
+                   schema=COVERAGE_SCHEMA)
+
+
+REASONING_COVERED = None   # built lazily (avoids a twin import at module load)
 
 # how a triggering change maps to the SHAPE of the move (routing, not reasoning — the model still
 # writes the content)
@@ -34,6 +45,7 @@ class ReasoningAgent:
         self.runner = runner
         self.bb = blackboard
         self.lesson = lesson
+        self.last_coverage = None    # the last covered turn's report (None = coverage-silent)
 
     # -- grounding: turn the blackboard's verdicts into a compact fact sheet -- #
     def _situation(self) -> str:
@@ -83,16 +95,43 @@ class ReasoningAgent:
                                      self.bb.memory.digest()) if p)
 
     # -- the reasoning turn ------------------------------------------------- #
-    def react(self, trigger, *, note: str = "") -> Move:
+    def react(self, trigger, *, note: str = "", coverage_concerns=None) -> Move:
         """React to a Notification or a student Intent → one grounded Move. `note` (optional) is a
-        critique from the Critic persona used to revise a first draft."""
+        critique from the Critic persona used to revise a first draft. `coverage_concerns`
+        (Reasoning 2.0) asks the persona to ALSO report coverage against the Twin's concern list;
+        the parsed report lands on `self.last_coverage` (None = coverage-silent)."""
         change, task, refs = self._frame(trigger)
         if note:
             task = f"{task}\nA reviewer noted: {note}. Fix that in your line."
-        text = self.runner.call(REASONING, context=self._context(), task=task) or self._fallback(change)
+        self.last_coverage = None
+        if coverage_concerns:
+            global REASONING_COVERED
+            if REASONING_COVERED is None:
+                REASONING_COVERED = _covered_persona()
+            from .twin.dialectic import concern_context, coverage_instruction
+            # twin-as-context: the concern set rides in the GROUNDING (guaranteed recall shapes
+            # the draft), and again as the coverage checklist the exact diff runs against.
+            ctx = "\n\n".join(p for p in (self._context(),
+                                          concern_context(coverage_concerns)) if p)
+            raw = self.runner.call(REASONING_COVERED, context=ctx,
+                                   task=task + coverage_instruction(coverage_concerns))
+            text = self._parse_covered(raw) or self._fallback(change)
+        else:
+            text = (self.runner.call(REASONING, context=self._context(), task=task)
+                    or self._fallback(change))
         if not note:                        # don't double-record on a revision pass
             self._remember(change, trigger)
         return Move(kind=_MOVE_KIND.get(change, "say"), text=text, refs=refs)
+
+    def _parse_covered(self, raw: str) -> str:
+        """A covered reply -> the tutor line, with the coverage report set aside for the Twin.
+        Tolerant: a model that ignored the JSON shape just becomes coverage-silent prose."""
+        from .twin.contracts import parse_coverage
+        obj = first_json(raw or "")
+        if isinstance(obj, dict) and isinstance(obj.get("text"), str):
+            self.last_coverage = parse_coverage(obj.get("coverage"))
+            return obj["text"].strip()
+        return (raw or "").strip()
 
     def _frame(self, trigger) -> tuple[str, str, tuple]:
         if isinstance(trigger, Intent):
