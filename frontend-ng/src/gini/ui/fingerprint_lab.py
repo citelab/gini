@@ -43,14 +43,14 @@ class FingerprintLab(QWidget):
         self._seen_tr: set = set()
 
         t = theme.theme
-        self.setWindowTitle(f"Process Fingerprints — {device.name}")
+        self.setWindowTitle(f"Process Fingerprints Lab — {device.name}")
         self.resize(780, 620)
         self.setStyleSheet(f"QWidget{{background:{t.bg};}}")
         root = QVBoxLayout(self)
 
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("metrics", t.accent_for("purple"), 22))
-        title = QLabel(f"  Process Fingerprints — {device.name}")
+        title = QLabel(f"  Process Fingerprints Lab — {device.name}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         self._reset_btn = QPushButton("Reset")

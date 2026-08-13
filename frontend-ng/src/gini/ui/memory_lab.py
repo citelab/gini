@@ -124,7 +124,7 @@ class MemoryLab(QDialog):
         self._play_games = play_games or []  # [(label, game_id)]
 
         t = theme.theme
-        self.setWindowTitle(f"Memory Lab — {getattr(device, 'name', 'xv6')}")
+        self.setWindowTitle(f"Virtual Memory Lab — {getattr(device, 'name', 'xv6')}")
         self.resize(920, 700)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
@@ -151,7 +151,7 @@ class MemoryLab(QDialog):
         t = self.theme.theme
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("layout", t.accent_for("purple"), 22))
-        title = QLabel(f"  Virtual memory — {getattr(self.device, 'name', 'xv6')}")
+        title = QLabel(f"  Virtual Memory Lab — {getattr(self.device, 'name', 'xv6')}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         if self._on_play is not None:                 # in-lab games (thrashing, translate)

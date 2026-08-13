@@ -92,7 +92,7 @@ class CpuLab(QWidget):
         self._prev_modetime: dict | None = None
 
         t = theme.theme
-        self.setWindowTitle(f"CPU & Registers — {device.name}")
+        self.setWindowTitle(f"CPU & Registers Lab — {device.name}")
         self.resize(860, 620)
         self.setStyleSheet(f"QWidget{{background:{t.bg};}}")
         root = QVBoxLayout(self)
@@ -100,7 +100,7 @@ class CpuLab(QWidget):
 
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("host", t.accent_for("red"), 22))
-        title = QLabel(f"  CPU & Registers — {device.name}")
+        title = QLabel(f"  CPU & Registers Lab — {device.name}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         mode = QLabel("live" if live else "offline demo")

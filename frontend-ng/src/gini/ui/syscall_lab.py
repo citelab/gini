@@ -70,7 +70,7 @@ class SyscallLab(QDialog):
         self._busy = False
 
         t = theme.theme
-        self.setWindowTitle(f"Syscall Lab — {getattr(device, 'name', 'xv6')}")
+        self.setWindowTitle(f"System Calls Lab — {getattr(device, 'name', 'xv6')}")
         self.resize(760, 560)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)

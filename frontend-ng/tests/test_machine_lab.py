@@ -85,15 +85,16 @@ def test_lab_opens_on_the_layered_overview(app):
     lab.close()
 
 
-def test_scheduler_card_drills_in_and_back(app):
+def test_scheduler_card_opens_its_own_window(app):
+    # the scheduler now opens as its OWN window (like every other card) so the hub stays up and
+    # subsystems can be open concurrently
     from gini.ui.machine_lab import MachineLab
     lab = MachineLab(None, _theme(app), _Dev(), state=None)
     lab._ov_cards["scheduler"].clicked.emit()          # click the Scheduler card
-    assert lab._stack.currentWidget() is lab._sched_page
-    assert lab._back_btn.isHidden() is False           # back button available on a sub-page
-    lab._show_overview()                               # ← Overview
-    assert lab._stack.currentWidget() is lab._overview
-    assert lab._back_btn.isHidden() is True
+    assert lab._sched_win is not None                  # opened as a separate window
+    assert lab._sched_page.parent() is lab._sched_win  # the page was reparented into it
+    assert lab._stack.currentWidget() is lab._overview  # the hub is still shown (concurrent)
+    lab._sched_win.close()
     lab.close()
 
 
@@ -168,8 +169,10 @@ def test_real_mode_without_data_shows_banner_not_fakes(app):
     assert lab._banner.isVisibleTo(lab._sched_page)  # the "no live data" banner is shown
     assert "No live data" in lab._banner_lbl.text()
     # opening a data face is guarded (no crash on a null provider) — it reveals the banner instead
+    # (which lives on the scheduler page, now opened as its own window)
     lab._open_storage_lab()
-    assert lab._stack.currentWidget() is lab._sched_page
+    assert lab._sched_win is not None
+    lab._sched_win.close()
     lab.close()
 
 

@@ -238,8 +238,11 @@ class MachineLab(QDialog):
         self._build_panels(spl)
 
         self._overview = self._build_overview()
-        self._stack.addWidget(self._overview)     # index 0
-        self._stack.addWidget(self._sched_page)   # index 1
+        self._stack.addWidget(self._overview)     # index 0 — the hub is the permanent Machine Lab
+        # the scheduler page opens in its OWN window (like every other card) so the hub stays up and
+        # subsystems can be open concurrently; built eagerly (widgets exist for rendering + tests),
+        # reparented into its window on first open.
+        self._sched_win = None
 
         self._busy = False
         self._closed = False                      # set on close; guards worker-thread callbacks
@@ -410,21 +413,36 @@ class MachineLab(QDialog):
 
     # -- page navigation -------------------------------------------------- #
     def _show_overview(self) -> None:
-        self._shadow_poll.stop()
         self._stack.setCurrentWidget(self._overview)
-        self._back_btn.setVisible(False)
+        self._back_btn.setVisible(False)          # vestigial now the hub is permanent
         self._title_lbl.setText(f"  Machine Lab — {self.device.name}")
         if self.live:
-            self._ov_poll.start(2000)     # keep the mini-stats fresh while the hub is up
+            self._ov_poll.start(2000)             # keep the mini-stats fresh while the hub is up
         self._update_overview()
 
+    def _ensure_sched_window(self) -> None:
+        """Lazily wrap the eagerly-built scheduler page in its own window (reparents it once)."""
+        if self._sched_win is not None:
+            return
+        from PySide6.QtWidgets import QDialog
+        t = self.theme.theme
+        w = QDialog(self)
+        w.setWindowTitle(f"Process Scheduler Lab — {self.device.name}")
+        w.resize(940, 700)
+        w.setStyleSheet(f"QDialog{{background:{t.bg};}}")
+        lay = QVBoxLayout(w); lay.setContentsMargins(10, 10, 10, 10)
+        lay.addWidget(self._sched_page)
+        w.finished.connect(lambda _r=0: self._shadow_poll.stop())
+        self._sched_win = w
+
     def _show_scheduler(self) -> None:
-        self._ov_poll.stop()
-        self._stack.setCurrentWidget(self._sched_page)
-        self._back_btn.setVisible(True)
-        self._title_lbl.setText(f"  Process scheduler — {self.device.name}")
+        # opens the scheduler in its OWN window; the hub (and its mini-stat poll) stays live, so the
+        # scheduler can be open alongside Memory/CPU/etc.
+        self._ensure_sched_window()
+        self._sched_win.show()
+        self._sched_win.raise_()
         if self.live:
-            self._shadow_poll.start(3000)     # keep the shadow status fresh; catch external edits
+            self._shadow_poll.start(3000)         # keep the shadow status fresh; catch external edits
             self._refresh_shadows()
 
     def _on_ov_poll(self) -> None:

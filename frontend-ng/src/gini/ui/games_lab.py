@@ -40,14 +40,14 @@ class GamesLab(QWidget):
         self._built: dict = {}
 
         t = theme.theme
-        self.setWindowTitle(f"Games — {device.name}")
+        self.setWindowTitle(f"Games Lab — {device.name}")
         self.resize(820, 600)
         self.setStyleSheet(f"QWidget{{background:{t.bg};}}")
         root = QVBoxLayout(self)
 
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("robot", t.accent_for("purple"), 22))
-        title = QLabel(f"  Diagnose Games — {device.name}")
+        title = QLabel(f"  Games Lab — {device.name}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         chip = QLabel("live" if live else "offline demo")

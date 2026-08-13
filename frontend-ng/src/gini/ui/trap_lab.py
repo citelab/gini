@@ -89,7 +89,7 @@ class TrapLab(QDialog):
         self._closed = False
 
         t = theme.theme
-        self.setWindowTitle(f"Trap Lab — {getattr(device, 'name', 'xv6')}")
+        self.setWindowTitle(f"Traps & Interrupts Lab — {getattr(device, 'name', 'xv6')}")
         self.resize(760, 580)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
