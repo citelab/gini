@@ -7,6 +7,6 @@ try:
 except Exception:  # noqa: BLE001 — no built _version.py (raw source tree)
     try:
         from importlib.metadata import version as _v
-        __version__ = _v("gini-gbuilder")
+        __version__ = _v("gini-toolkit")
     except Exception:  # noqa: BLE001
         __version__ = "0.0.0+unknown"
