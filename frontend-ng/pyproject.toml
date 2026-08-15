@@ -51,6 +51,8 @@ where = ["src"]
 [tool.setuptools_scm]
 root = ".."
 version_file = "src/gini/_version.py"
+# drop the "+g<hash>" local segment: tagged clean builds -> 6.0.0; between-tag builds -> 6.0.1.dev0
+local_scheme = "no-local-version"
 
 [tool.ruff]
 line-length = 100

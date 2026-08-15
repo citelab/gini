@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
+dist/                  # build artifacts — never commit (keeps the tree clean for setuptools-scm)
 .pytest_cache/
 pytest-cache-files-*/
 .venv/
