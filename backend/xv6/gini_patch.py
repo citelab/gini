@@ -450,6 +450,8 @@ void            gini_logdump(void);
 void            gini_scdump(void);
 void            gini_break(void);
 void            gini_kill(int);
+void            gini_setprio(int, int);
+void            gini_setticket(int, int);
 struct proc*    gini_pick(void);
 extern int      sched_policy;
 extern int      sched_quantum;
@@ -793,6 +795,29 @@ gini_kill(int pid)
   }
   PRINTF("[gini] kill: no pid %d\\n", pid);
 }
+
+// GINI-xv6: CONTROL-PLANE per-proc scheduling setters. Without these every proc is priority 10 /
+// 1 ticket, so the PRIORITY scheduler acts like round-robin and LOTTERY weighting is invisible.
+// Set from the console interrupt (cons.lock held) — a benign int write the scheduler reads on its
+// next pick. The UI drives these so priority/lottery experiments have real differences to schedule
+// on, and the priority-fix / lottery-fix assignments become gradable.
+void
+gini_setprio(int pid, int v)
+{
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p->pid == pid){ p->priority = v; PRINTF("[gini] pid %d priority %d\\n", pid, v); return; }
+  }
+  PRINTF("[gini] setprio: no pid %d\\n", pid);
+}
+
+void
+gini_setticket(int pid, int n)
+{
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p->pid == pid){ p->tickets = n; PRINTF("[gini] pid %d tickets %d\\n", pid, n); return; }
+  }
+  PRINTF("[gini] setticket: no pid %d\\n", pid);
+}
 '''
 append_once("kernel/proc.c", _GINI_BREAK.replace("PRINTF", PRINT),
             "GINI-xv6: interrupt a hung foreground")
@@ -877,6 +902,29 @@ regex_once("kernel/console.c",
            "  if(c == C('Y')){ gini_killpid = 0; release(&cons.lock); return; }\n"
            r"  \1",
            "GINI: control-plane kill pid-entry")
+
+# 4f3) console.c — CONTROL-PLANE per-proc scheduling setters. Two-number entry ("<pid> <val>"):
+# Ctrl-O begins a priority set, Ctrl-N a tickets set; digits accumulate into pid, a space/comma
+# advances to the value, any terminator ('\n') fires gini_setprio/gini_setticket from the interrupt.
+# Same no-scheduling, no-echo pattern as the kill entry. Anchored on consoleintr's switch(c).
+regex_once("kernel/console.c",
+           r"(switch\s*\(c\)\s*\{)",
+           "static int gini_ctl_op = 0, gini_ctl_pid = 0, gini_ctl_val = 0, gini_ctl_stage = 0;"
+           "  // GINI: control-plane sched set\n"
+           "  if(gini_ctl_op){\n"
+           "    if(c >= '0' && c <= '9'){ if(gini_ctl_stage == 0) gini_ctl_pid = gini_ctl_pid*10 + (c-'0');"
+           " else gini_ctl_val = gini_ctl_val*10 + (c-'0'); }\n"
+           "    else if(c == ' ' || c == ','){ gini_ctl_stage = 1; }\n"
+           "    else { if(gini_ctl_op == 1) gini_setprio(gini_ctl_pid, gini_ctl_val);"
+           " else gini_setticket(gini_ctl_pid, gini_ctl_val); gini_ctl_op = 0; }\n"
+           "    release(&cons.lock); return;\n"
+           "  }\n"
+           "  if(c == C('O')){ gini_ctl_op = 1; gini_ctl_pid = gini_ctl_val = gini_ctl_stage = 0;"
+           " release(&cons.lock); return; }\n"
+           "  if(c == C('N')){ gini_ctl_op = 2; gini_ctl_pid = gini_ctl_val = gini_ctl_stage = 0;"
+           " release(&cons.lock); return; }\n"
+           r"  \1",
+           "GINI: control-plane sched set")
 
 # 4g) syscall.c — per-syscall counters (histogram) + a recent-call trace ring (strace view).
 #     The definitions + gini_scdump go at end-of-file (types/externs are declared in defs.h so

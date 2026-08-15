@@ -503,6 +503,21 @@ class Handler(BaseHTTPRequestHandler):
             # `kill` still works when typed in the Terminal.
             ok = pid > 2 and _SERIAL.write(f"\x19{pid}\n")
             self._send({"ok": ok, "pid": pid})
+        elif u.path == "/control/priority":       # CONTROL-PLANE: set a proc's scheduling priority
+            try:
+                pid = int(q.get("pid", ["0"])[0]); v = int(q.get("v", ["10"])[0])
+            except ValueError:
+                pid, v = 0, 10
+            # Ctrl-O + "<pid> <v>" + newline -> gini_setprio() from consoleintr (no shell scheduling)
+            ok = pid > 2 and _SERIAL.write(f"\x0f{pid} {v}\n")
+            self._send({"ok": ok, "pid": pid, "priority": v})
+        elif u.path == "/control/tickets":        # CONTROL-PLANE: set a proc's lottery ticket count
+            try:
+                pid = int(q.get("pid", ["0"])[0]); n = int(q.get("n", ["1"])[0])
+            except ValueError:
+                pid, n = 0, 1
+            ok = pid > 2 and _SERIAL.write(f"\x0e{pid} {n}\n")   # Ctrl-N + "<pid> <n>" + newline
+            self._send({"ok": ok, "pid": pid, "tickets": n})
         elif u.path == "/input":                      # raw console input (the in-app console)
             self._send({"ok": _SERIAL.write(self._body())})
         elif u.path in ("/interrupt", "/break"):      # Ctrl-C: kernel breaks a hung foreground

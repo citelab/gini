@@ -41,3 +41,6 @@ tags
 # offscreen render previews from scripts/gen_cue_shots.py and ad-hoc checks
 cue_*.png
 frontend-ng/src/gini/data/kb_index.json
+
+# setuptools-scm generated version file
+frontend-ng/src/gini/_version.py

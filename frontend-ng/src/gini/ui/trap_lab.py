@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from ..domain.xv6 import (
     TRAP_KINDS, TrapRate, parse_alarms, parse_trapcounts, parse_traptrace, trap_kind_name,
 )
-from .theme import ThemeManager
+from .theme import ThemeManager, icons
 
 # trap kinds the "Step a trap" catcher can target (conditioned gdb breakpoint); "any" = next trap
 _CATCH_KINDS = ["any", "pagefault", "syscall", "timer", "illegal", "device"]
@@ -93,6 +93,13 @@ class TrapLab(QDialog):
         self.resize(760, 580)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
+
+        hdr = QHBoxLayout()
+        ic = QLabel(); ic.setPixmap(icons.render_pixmap("dashboard", t.accent_for("amber"), 22))
+        title = QLabel(f"  Traps & Interrupts Lab — {getattr(device, 'name', 'xv6')}")
+        title.setStyleSheet(f"color:{t.text};font-size:16px;font-weight:600;")
+        hdr.addWidget(ic); hdr.addWidget(title); hdr.addStretch(1)
+        root.addLayout(hdr)
 
         head = QLabel("Every trap the CPU takes, classified by cause. A system call, a timer "
                       "preemption, and a demand-paged page are the same mechanism — watch the mix "

@@ -107,6 +107,14 @@ def test_patcher_applies_and_is_idempotent(tmp_path):
     assert "gini_killpid" in con and "if(c == C('Y'))" in con and "gini_kill(gini_killpid)" in con
     assert "gini_kill(int pid)" in (k / "proc.c").read_text() and "[gini] killed pid" in proc
     assert "void            gini_kill(int);" in (k / "defs.h").read_text()
+    # control-plane per-proc scheduling setters (priority/tickets) — two-number console entry so the
+    # priority + lottery experiments have real differences to schedule on
+    assert "gini_setprio(int pid, int v)" in proc and "gini_setticket(int pid, int n)" in proc
+    assert "gini_ctl_op" in con and "if(c == C('O'))" in con and "if(c == C('N'))" in con
+    assert "gini_setprio(gini_ctl_pid, gini_ctl_val)" in con
+    defs2 = (k / "defs.h").read_text()
+    assert "void            gini_setprio(int, int);" in defs2
+    assert "void            gini_setticket(int, int);" in defs2
 
     # VM/paging additions: the live fault ring (trap.c) + the usertrap capture hook + the
     # all-procs page-table dump (proc.c) + their defs.h prototypes.

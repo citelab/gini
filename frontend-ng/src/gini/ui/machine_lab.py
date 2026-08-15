@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -230,10 +230,17 @@ class MachineLab(QDialog):
 
         self._sched_page = QWidget()
         spl = QVBoxLayout(self._sched_page); spl.setContentsMargins(0, 0, 0, 0)
+        shdr = QHBoxLayout()             # title header, consistent with the other Labs' windows
+        sic = QLabel(); sic.setPixmap(icons.render_pixmap("host", t.accent_for("red"), 22))
+        stitle = QLabel(f"  Process Scheduler Lab — {device.name}")
+        stitle.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
+        shdr.addWidget(sic); shdr.addWidget(stitle); shdr.addStretch(1)
+        spl.addLayout(shdr)
         self._build_banner(spl)          # shown in Real mode when there's no live data (never fake)
         self._build_controls(spl)
         if self.live:
             self._build_launcher(spl)   # launch/kill programs to give the scheduler real work
+            self._build_sched_controls(spl)  # per-proc priority/tickets (control-plane) setters
             self._build_shadow_bar(spl)  # the shadow: toggle + Load/Revert + inline result
         self._build_panels(spl)
 
@@ -681,6 +688,84 @@ class MachineLab(QDialog):
         lay.addWidget(hint); lay.addStretch(1)
         root.addWidget(bar)
 
+    def _build_sched_controls(self, root) -> None:
+        """Per-process priority + ticket setters (control-plane) — so priority/lottery have real
+        differences to schedule on. Pick a pid, set its priority (lower = higher) and lottery
+        tickets, then Set."""
+        t = self.theme.theme
+        bar = QFrame(); bar.setStyleSheet(
+            _scss(f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:10px;}}"))
+        lay = QHBoxLayout(bar); lay.setContentsMargins(12, 6, 12, 6)
+        lay.addWidget(QLabel("Scheduling for pid"))
+        self._sc_pid = QComboBox(); self._sc_pid.setMinimumWidth(64)
+        self._sc_pid.setStyleSheet(
+            f"QComboBox{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
+            "border-radius:6px;padding:3px 8px;}")
+        self._sc_pid.currentIndexChanged.connect(self._load_sched_control)
+        lay.addWidget(self._sc_pid)
+        lay.addWidget(QLabel("priority"))
+        self._sc_prio = QSpinBox(); self._sc_prio.setRange(0, 30); self._sc_prio.setValue(10)
+        self._sc_prio.setToolTip("lower = higher priority")
+        lay.addWidget(self._sc_prio)
+        lay.addWidget(QLabel("tickets"))
+        self._sc_tickets = QSpinBox(); self._sc_tickets.setRange(1, 100); self._sc_tickets.setValue(1)
+        self._sc_tickets.setToolTip("lottery weight")
+        lay.addWidget(self._sc_tickets)
+        setb = QPushButton("Set"); setb.setStyleSheet(self._btn_css())
+        setb.clicked.connect(self._apply_sched_control)
+        lay.addWidget(setb)
+        for w in (self._sc_pid, self._sc_prio, self._sc_tickets):
+            pass
+        for lbl in bar.findChildren(QLabel):
+            lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
+        lay.addStretch(1)
+        root.addWidget(bar)
+
+    def _sched_user_pids(self) -> list:
+        snap = self.state.latest
+        return [p for p in (snap.procs if snap else []) if p.pid > 2]
+
+    def _refresh_sched_pids(self) -> None:
+        """Keep the pid dropdown in step with the live process list (preserve the selection)."""
+        if not hasattr(self, "_sc_pid"):
+            return
+        cur = self._sc_pid.currentData()
+        procs = self._sched_user_pids()
+        wanted = [(f"{p.pid} {p.name}", p.pid) for p in procs]
+        have = [(self._sc_pid.itemText(i), self._sc_pid.itemData(i))
+                for i in range(self._sc_pid.count())]
+        if have == wanted:
+            return
+        self._sc_pid.blockSignals(True)
+        self._sc_pid.clear()
+        for text, pid in wanted:
+            self._sc_pid.addItem(text, pid)
+        if cur is not None:                       # keep pointing at the same pid if it's still there
+            idx = self._sc_pid.findData(cur)
+            if idx >= 0:
+                self._sc_pid.setCurrentIndex(idx)
+        self._sc_pid.blockSignals(False)
+        self._load_sched_control()
+
+    def _load_sched_control(self) -> None:
+        """Load the selected pid's current priority/tickets into the spinboxes."""
+        pid = self._sc_pid.currentData()
+        for p in self._sched_user_pids():
+            if p.pid == pid:
+                if p.priority is not None:
+                    self._sc_prio.setValue(p.priority)
+                if p.tickets is not None:
+                    self._sc_tickets.setValue(p.tickets)
+                return
+
+    def _apply_sched_control(self) -> None:
+        pid = self._sc_pid.currentData()
+        if pid is None:
+            return
+        prio, tk = self._sc_prio.value(), self._sc_tickets.value()
+        self._bg(lambda: (self.state.provider.set_priority(pid, prio),
+                          self.state.provider.set_tickets(pid, tk)))
+
     def _update_slice_lbl(self) -> None:
         v = self._slice.value()
         self._slice_lbl.setText(f"{v} tick{'s' if v != 1 else ''}  (~{v * 0.5:.1f}s slice)")
@@ -1120,6 +1205,8 @@ class MachineLab(QDialog):
         for pid in sf.get("cpu_monopoly", ()):
             flags.setdefault(pid, "monopolising CPU")
         self._proc_tree.set_procs(snap.procs, running_pids, flags=flags)
+        if hasattr(self, "_sc_pid"):
+            self._refresh_sched_pids()          # keep the priority/tickets pid list live
         # per-CPU registers (a column per core; falls back to one column single-CPU)
         cpu_regs = snap.cpu_regs or ({0: snap.cpu} if snap.cpu else {})
         cids = sorted(cpu_regs)

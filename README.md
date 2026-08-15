@@ -2,6 +2,8 @@
 
 **A visual lab for computer networks *and* cloud computing — draw a system, press Run, and it comes to life as real containers you can inspect, drive, and observe.**
 
+💬 **Join the community:** [GINI Discord](https://discord.gg/s5zTAgdKQd) — questions, help, and discussion.
+
 GINI lets students and instructors build a topology on a canvas, then launches it as
 honest, running infrastructure on Docker: a real C router that actually forwards packets,
 a real OpenFlow controller programming a real switch, and real cloud services (databases,

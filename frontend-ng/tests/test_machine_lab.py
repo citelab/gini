@@ -272,6 +272,37 @@ def test_live_lab_launch_and_kill_call_provider(app):
     lab.close()
 
 
+def test_sched_controls_apply_priority_and_tickets(app):
+    # WS1: per-proc priority/tickets setters drive the control-plane bridge ops
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+
+    class Prov(_FakeLive):
+        def __init__(self):
+            super().__init__(); self.prio = []; self.tk = []
+        def set_priority(self, pid, v):
+            self.prio.append((pid, v))
+        def set_tickets(self, pid, n):
+            self.tk.append((pid, n))
+
+    prov = Prov()
+    ms = MachineState(prov, device_id="d", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    lab._render()                                       # populate the pid dropdown from the snapshot
+    idx = lab._sc_pid.findData(5)                       # pid 5 = the user 'spin' process
+    assert idx >= 0
+    lab._sc_pid.setCurrentIndex(idx)
+    lab._sc_prio.setValue(3); lab._sc_tickets.setValue(8)
+    lab._apply_sched_control()
+    import time
+    for _ in range(60):                                 # let the off-thread bridge calls land
+        app.processEvents(); time.sleep(0.005)
+        if prov.prio and prov.tk:
+            break
+    assert prov.prio == [(5, 3)] and prov.tk == [(5, 8)]
+    lab.close()
+
+
 def test_machine_lab_has_no_console_button(app):
     # the console is now a peripheral (the Terminal), not a button baked into the Lab
     from gini.ui.machine_lab import MachineLab
