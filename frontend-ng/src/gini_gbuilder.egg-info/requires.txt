@@ -1,9 +1,10 @@
-PySide6-Essentials>=6.6
+PyYAML>=6.0
 
 [agent]
 mcp>=1.0
 
 [dev]
+gini-gbuilder[ui]
 pytest>=7
 pytest-qt>=4
 ruff>=0.4
@@ -12,3 +13,6 @@ mypy>=1.8
 [graph]
 matplotlib>=3.7
 numpy>=1.24
+
+[ui]
+PySide6-Essentials>=6.6

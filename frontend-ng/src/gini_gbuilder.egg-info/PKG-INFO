@@ -1,18 +1,21 @@
 Metadata-Version: 2.4
 Name: gini-gbuilder
-Version: 6.0.0a1
+Version: 6.0.1.dev0+g01e92c9e0.d20260815
 Summary: GINI gBuilder — next-generation topology builder for computer networks and cloud computing experimentation
 Author: GINI Toolkit
 License: GPL-3.0-or-later
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
-Requires-Dist: PySide6-Essentials>=6.6
+Requires-Dist: PyYAML>=6.0
+Provides-Extra: ui
+Requires-Dist: PySide6-Essentials>=6.6; extra == "ui"
 Provides-Extra: agent
 Requires-Dist: mcp>=1.0; extra == "agent"
 Provides-Extra: graph
 Requires-Dist: matplotlib>=3.7; extra == "graph"
 Requires-Dist: numpy>=1.24; extra == "graph"
 Provides-Extra: dev
+Requires-Dist: gini-gbuilder[ui]; extra == "dev"
 Requires-Dist: pytest>=7; extra == "dev"
 Requires-Dist: pytest-qt>=4; extra == "dev"
 Requires-Dist: ruff>=0.4; extra == "dev"
