@@ -48,43 +48,99 @@ It's designed to anchor three courses:
 
 ## Requirements
 
-- **macOS or Linux**
-- **Python 3.11+** (3.12 recommended) for the gBuilder app
-- **Docker** (Docker Desktop on macOS) — used to run topologies
-- *Optional:* a local **[Ollama](https://ollama.com)** model for richer GINI AI answers
+- **Python 3.10+** (3.12 recommended)
+- A **container runtime** — Docker, or **Colima** on macOS (`gini-setup` can install it) — needed to
+  *Run* topologies. You can explore fully in **Demo mode** without one.
+- Works on **macOS, Linux, and Windows**. *Optional:* a local **[Ollama](https://ollama.com)** model
+  for richer GINI AI answers.
 
 ---
 
-## Quick start
+## Install
 
-### 1. Run the app
+Three steps:
 
 ```bash
+pipx install gini-toolkit     # the app (isolated). `pip install gini-toolkit` also works.
+gini-setup                    # brings in the container runtime + images (one time)
+gbuilder                      # launch
+```
+
+`gbuilder` opens immediately — build, save, and explore topologies, with the AI tutor and everything
+in **Demo mode** working right away. Live **Run** (real containers) lights up once `gini-setup`
+finishes. After a later `pipx upgrade gini-toolkit`, re-run `gini-setup --update` to refresh images.
+
+> No `pipx`? Install it once (`brew install pipx` on macOS, or `pip install pipx`), or use
+> `pip install gini-toolkit` inside a virtual environment.
+
+<details>
+<summary><b>macOS details</b></summary>
+
+`gini-setup` uses **Colima** — a free, lightweight Docker runtime, no Docker Desktop license needed.
+On a clean Mac with [Homebrew](https://brew.sh) it offers to run:
+
+```bash
+brew install colima docker
+colima start --cpu 2 --memory 4 --disk 30
+```
+
+If Docker Desktop (or Colima) is already running, `gini-setup` detects it and just pulls the images.
+</details>
+
+<details>
+<summary><b>Linux details</b></summary>
+
+Install **Docker Engine** first — it needs `sudo`, so `gini-setup` guides rather than auto-installs:
+
+```bash
+# https://docs.docker.com/engine/install/ for your distro, then:
+sudo usermod -aG docker $USER      # log out / back in afterwards
+```
+
+Podman works too. Then run `gini-setup` to pull the images.
+</details>
+
+<details>
+<summary><b>Windows details</b></summary>
+
+Colima isn't available on Windows — use **Docker Desktop** or **Podman Desktop**:
+
+```powershell
+winget install -e --id Docker.DockerDesktop
+```
+
+Start it, then run `gini-setup`. (Live-Run networking on Windows is still being validated;
+Demo mode works fully.)
+</details>
+
+<details>
+<summary><b>Run from source (development)</b></summary>
+
+```bash
+# from a clone of the repo:
 cd frontend-ng
-python -m pip install -e .
-python -m gini            # or: gbuilder
+pip install -e ".[dev]"            # editable — your source stays live
+gbuilder
+# build images locally instead of pulling from the registry:
+cd .. && docker build -t gini-xv6:latest backend/xv6      # + oszoo / grouter / pox
 ```
 
-This opens gBuilder. You can build, save, and explore topologies right away — the AI tutor
-works offline, and "Run" needs Docker (next step).
+Point the app at a different image registry with `GINI_REGISTRY=ghcr.io/<owner>`.
+</details>
 
-### 2. Build the two local images (once)
+<details>
+<summary><b>Troubleshooting</b></summary>
 
-Cloud-service images are pulled from Docker Hub automatically on first Run. The **router**
-and **SDN controller** images are built locally:
+- **"runtime not set up yet"** — run `gini-setup`. Demo mode still works without it.
+- **`gini-setup` pull says `denied` / `not found`** — images unreachable: check your network, or that
+  the registry (`ghcr.io/gini-toolkit`) is correct and its packages are public.
+- **Two `gbuilder`s on your PATH** — you installed with both pip *and* pipx; keep one
+  (`pip uninstall gini-toolkit` or `pipx uninstall gini-toolkit`).
+</details>
 
-```bash
-# the real C gRouter (used by Router and OpenVSwitch elements)
-cd backend && docker build -f grouter-build/Dockerfile -t gini-grouter .
+---
 
-# the POX OpenFlow controller (used by the OpenFlow Controller element)
-cd backend/sdn && docker build -t gini-pox .
-```
-
-Prefer the app to build them for you? Run with `GINI_AUTOBUILD_GROUTER=1` and
-`GINI_AUTOBUILD_POX=1`.
-
-### 3. Draw, Run, explore
+### Your first topology
 
 - **Place** a device by dragging it from the palette onto the canvas.
 - **Connect** two devices: click the **Connect** tool in the toolbar (the link icon), then
