@@ -126,9 +126,12 @@ class Classifier:
 
 # ---- orchestration -------------------------------------------------------- #
 class MissionAgent:
-    """One model wearing all three hats, plus the deterministic blackboard, run as a single turn."""
+    """One model wearing all three hats, plus the deterministic blackboard, run as a single turn.
+    With a `twin` (Reasoning 2.0), the turn is additionally audited for COVERAGE: the Twin
+    enumerates the concerns that matter, diffs the persona's coverage report exactly, objects
+    once ("why not X?"), and flags whatever survives. `twin=None` ≡ the pre-Twin behavior."""
 
-    def __init__(self, runner: PersonaRunner, blackboard, lesson) -> None:
+    def __init__(self, runner: PersonaRunner, blackboard, lesson, twin=None) -> None:
         self.runner = runner
         self.bb = blackboard
         self.lesson = lesson
@@ -136,6 +139,8 @@ class MissionAgent:
         self.understanding = UnderstandingAgent(runner, lesson)
         self.reasoning = ReasoningAgent(runner, blackboard, lesson)
         self.critic = CriticAgent(runner)
+        self.twin = twin
+        self.last_twin_result = None      # TwinResult of the last audited turn (tests/metrics)
 
     def turn(self, trigger=None, *, utterance: str = "") -> Move:
         change = getattr(trigger, "change", "") if trigger is not None else ""
@@ -145,7 +150,8 @@ class MissionAgent:
         intent = self.understanding.parse(utterance) if (route.understand and utterance) else None
         react_trigger = intent if intent is not None else (
             trigger if trigger is not None else Intent(text=utterance))
-        move = self.reasoning.react(react_trigger)
+        concerns = self._concerns()
+        move = self.reasoning.react(react_trigger, coverage_concerns=concerns or None)
 
         bad = self.critic.verify_claims(move, self.bb)          # deterministic oracle check (always)
         if route.critic or bad:
@@ -154,5 +160,66 @@ class MissionAgent:
             if bad:
                 note = (note + " / " if note else "") + "contradicts facts: " + "; ".join(bad)
             if not crit.ok or crit.unsupported or bad:
-                move = self.reasoning.react(react_trigger, note=note)      # one revision pass
-        return move
+                move = self.reasoning.react(react_trigger, note=note,      # one revision pass
+                                            coverage_concerns=concerns or None)
+        return self._twin_audit(move, react_trigger, concerns)
+
+    # -- Reasoning 2.0: the Twin's coverage audit --------------------------- #
+    def _concerns(self) -> list:
+        if self.twin is None:
+            return []
+        try:
+            from .twin.mission import mission_concerns
+            return mission_concerns(self.bb, self.lesson)
+        except Exception:
+            return []                     # the Twin is strictly additive — never break a turn
+
+    def _twin_ctx(self, move: Move, react_trigger):
+        """The adjudication context for this turn: what shape of move this is, what (if anything)
+        was asked, the live board, the covered-history, and the schema-constrained translator for
+        state claims (LLM proposes the predicate; the oracle evaluates it)."""
+        from .twin.dialectic import TwinContext
+        from .twin.justify import llm_translate
+        utterance = react_trigger.text if isinstance(react_trigger, Intent) else ""
+        return TwinContext(move_kind=move.kind, utterance=utterance,
+                           world=getattr(self.bb, "_world", None),
+                           history=self.twin.history,
+                           translate=lambda why: llm_translate(self.runner, why))
+
+    def _twin_audit(self, move: Move, react_trigger, concerns: list) -> Move:
+        if self.twin is None or not concerns:
+            return move
+        try:
+            import time
+            from .twin.dialectic import TwinResult
+            twin = self.twin
+            twin.metrics["turns"] += 1
+            cov = self.reasoning.last_coverage
+            first_cov = cov
+            if cov is None:
+                twin.metrics["coverage_silent"] += 1
+            objections = twin.audit(concerns, cov, self._twin_ctx(move, react_trigger))
+            first = tuple(objections)
+            twin.metrics["objections"] += len(first)
+            # the bounded dialectic: revise while objections stand, up to max_rounds or budget
+            rounds, deadline = 0, time.monotonic() + twin.budget_s
+            while objections and rounds < twin.max_rounds and time.monotonic() < deadline:
+                move = self.reasoning.react(react_trigger, note=twin.note(objections),
+                                            coverage_concerns=concerns)
+                rounds += 1
+                twin.metrics["revisions"] += 1
+                cov = self.reasoning.last_coverage
+                objections = twin.audit(concerns, cov, self._twin_ctx(move, react_trigger))
+            surviving = tuple(objections)
+            if surviving:
+                move = self.twin.flag(move, list(surviving))    # visible, never a silent ship
+                twin.metrics["flags"] += 1
+            twin.record(cov)                                    # covered ids -> mission history
+            accepted, rejected = twin.split_omissions(concerns, cov)
+            self.last_twin_result = TwinResult(
+                concerns=tuple(concerns), coverage_silent=first_cov is None,
+                objections=first, surviving=surviving,
+                accepted_omissions=accepted, rejected_omissions=rejected, rounds=rounds)
+            return move
+        except Exception:
+            return move                    # additive: a Twin fault must not lose the turn

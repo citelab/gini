@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
+dist/                  # build artifacts — never commit (keeps the tree clean for setuptools-scm)
 .pytest_cache/
 pytest-cache-files-*/
 .venv/
@@ -41,3 +42,12 @@ tags
 # offscreen render previews from scripts/gen_cue_shots.py and ad-hoc checks
 cue_*.png
 frontend-ng/src/gini/data/kb_index.json
+
+# setuptools-scm generated version file
+frontend-ng/src/gini/_version.py
+
+token.txt
+*.token
+
+token.txt
+*.token

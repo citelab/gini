@@ -51,6 +51,22 @@ def _apply_branding(app) -> None:
             pass                          # no pyobjc → bundle a .app for a permanent Dock icon
 
 
+def _setup_preflight() -> None:
+    """Soft check: Demo mode always works; live Run needs the container runtime + images from
+    `gini-setup`. We only nudge here — never block — so the app is explorable immediately."""
+    try:
+        from . import __version__
+        from .setup import marker
+        if not marker.is_setup_done():
+            print("[gini] Runtime not set up yet — Demo mode works now; run `gini-setup` to enable "
+                  "live Run (installs Docker/Colima + pulls images).")
+        elif marker.needs_update(__version__):
+            print(f"[gini] App is {__version__} but images were set up for {marker.setup_version()} "
+                  "— run `gini-setup --update` to refresh them.")
+    except Exception:
+        pass
+
+
 def main() -> int:
     args = set(sys.argv[1:])
     from PySide6.QtWidgets import QApplication
@@ -80,6 +96,7 @@ def main() -> int:
     if not ({"--demo", "--selftest"} & args):
         win.restore_last_project()                 # reopen last session's project
 
+    _setup_preflight()                             # non-blocking: Demo always works
     win.show()
     from PySide6.QtCore import QTimer
     QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted

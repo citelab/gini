@@ -1170,11 +1170,25 @@ class Assistant(QWidget):
             self._render_followups(["Re-check", "Step switch"])
             return
         card = ms.card(level=1)
+        # Reasoning 2.0 (twin-as-context for the coach): the deterministic concern set picks the
+        # most salient issue for the nudge to target; it is also the upgraded no-model fallback.
+        concerns, focus = [], ""
+        if getattr(self.ctx.settings, "twin_enabled", False):
+            try:
+                from ..agent.twin.os_coach import coach_concerns, fallback_text, focus_line
+                concerns = coach_concerns(events, ms)
+                focus = focus_line(concerns)
+            except Exception:
+                concerns, focus = [], ""
         if self._loop is not None:               # the model authors the Socratic nudge
             ledger.record(events)
-            self._ask_async(os_coach_prompt(events, card, ledger.remaining()), "")
+            self._ask_async(os_coach_prompt(events, card, ledger.remaining(), focus=focus), "")
         else:                                    # deterministic fallback (Coach is model-gated)
-            if events:
+            if concerns:
+                ledger.record(events)
+                from ..agent.twin.os_coach import fallback_text
+                self._post("GINI", fallback_text(concerns))
+            elif events:
                 ledger.record(events)
                 self._post("GINI", "Notice — " + "; ".join(e.detail for e in events[:2]))
             else:
@@ -1291,7 +1305,10 @@ class Assistant(QWidget):
             panel=_MissionPanelProxy(self._mission_panel, self.mission_ui_op.emit),
             profile=self._mission_profile,
             submit=self._submit_to_center,      # report the result to the course server
-            gm_factory=AgentGameMaster)         # reasoning runs through the multi-agent stack
+            # reasoning runs through the multi-agent stack; the Reasoning Twin audits coverage
+            # when enabled in Settings (Reasoning 2.0 phase A, off by default)
+            gm_factory=lambda lesson, **kw: AgentGameMaster(
+                lesson, twin_enabled=getattr(self.ctx.settings, "twin_enabled", False), **kw))
         self._mission_busy = self._mission_dirty = False
         self._hide_mission_picker()         # drop the picker once we're playing
         self._select_convo("gini")          # a mission plays in the GINI surface, never a human thread
@@ -1865,13 +1882,20 @@ class Assistant(QWidget):
         return ("coach" if self.coach_mode else "wizard" if self.wizard_mode
                 else "explain" if self.explain_mode else "chat")
 
-    def _quick_llm(self, prompt: str) -> str:
-        """A one-shot completion on the same model — for understanding-refine and the
-        session summariser. Runs on the worker thread (never blocks the UI)."""
+    def _quick_llm(self, prompt: str, schema: dict | None = None) -> str:
+        """A one-shot completion on the same model — for understanding-refine, the session
+        summariser, and the mission personas. Runs on the worker thread (never blocks the UI).
+        `schema` (optional) requests decoder-constrained JSON via the backend's structured
+        outputs; backends without support just ignore it (callers keep tolerant parsing)."""
         try:
             from ..agent.llm.backend import Message
             out = []
-            for ch in self._loop.backend.chat([Message("user", prompt)], tools=None):
+            try:
+                chunks = self._loop.backend.chat([Message("user", prompt)], tools=None,
+                                                 schema=schema)
+            except TypeError:                       # a backend without the schema kwarg
+                chunks = self._loop.backend.chat([Message("user", prompt)], tools=None)
+            for ch in chunks:
                 if ch.text:
                     out.append(ch.text)
             return "".join(out)

@@ -1,18 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gini-gbuilder"
-version = "6.0.0a1"
+name = "gini-toolkit"
+dynamic = ["version"]        # derived from git tags by setuptools-scm (see [tool.setuptools_scm])
 description = "GINI gBuilder — next-generation topology builder for computer networks and cloud computing experimentation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "GINI Toolkit" }]
+# `pip install gini-toolkit` gives a runnable desktop app: engine + the PySide6/Qt GUI. The
+# container runtime (Docker/Colima) and images are brought in separately by the `gini-setup` command.
 dependencies = [
-    "PySide6-Essentials>=6.6",
-    "PyYAML>=6.0",          # reads authored Lesson packs (Missions / Teaching Center)
+    "PySide6-Essentials>=6.6",   # the Qt6 desktop GUI (gini.ui + the `gbuilder` entrypoint)
+    "PyYAML>=6.0",               # reads authored Lesson packs (Missions / Teaching Center)
 ]
 
 [project.optional-dependencies]
@@ -31,7 +33,8 @@ dev = [
 ]
 
 [project.scripts]
-gbuilder = "gini.__main__:main"
+gbuilder = "gini.__main__:main"          # the desktop app
+gini-setup = "gini.setup.cli:main"       # one-time: bring in the container runtime + images
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,6 +42,15 @@ where = ["src"]
 [tool.setuptools.package-data]
 "gini.ui" = ["assets/*.png", "assets/*.ico", "assets/*.icns"]
 "gini.domain" = ["missions/**/*.yaml"]
+
+# Version comes from git tags (e.g. `git tag v6.1.0` -> 6.1.0). The repo root is one level up from
+# this pyproject, hence root = "..". A generated _version.py is written into the package at build
+# time (gitignored). Untagged working trees get e.g. 6.1.0.dev3+g<hash>.
+[tool.setuptools_scm]
+root = ".."
+version_file = "src/gini/_version.py"
+# drop the "+g<hash>" local segment: tagged clean builds -> 6.0.0; between-tag builds -> 6.0.1.dev0
+local_scheme = "no-local-version"
 
 [tool.ruff]
 line-length = 100

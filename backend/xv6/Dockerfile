@@ -25,6 +25,10 @@ COPY gini_patch.py /opt/gini_patch.py
 # `make` alone builds only kernel/kernel (the default target); fs.img is a separate target
 # (normally a dep of `make qemu`), so build both explicitly or QEMU can't open the disk.
 RUN cd xv6-riscv && python3 /opt/gini_patch.py . && make kernel/kernel fs.img
+# Stash the pristine shadow stub OUTSIDE kernel/shadows/ (which the Load loop bind-mounts over at
+# runtime), so the agent can compute "present" (does the student's file differ from the stub?) and
+# /revert can restore a known-good kernel.
+RUN cp /opt/xv6-riscv/kernel/shadows/gini_sched.c /opt/gini_sched_ref.c
 
 COPY gini_agent.py /opt/gini_agent.py
 COPY boot.sh /opt/boot.sh

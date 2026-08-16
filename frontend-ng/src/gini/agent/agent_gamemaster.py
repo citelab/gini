@@ -24,14 +24,21 @@ from .reasoning import REASONING
 
 
 class AgentGameMaster:
-    def __init__(self, lesson, llm=None, *, persona: str | None = None) -> None:
+    def __init__(self, lesson, llm=None, *, persona: str | None = None,
+                 twin_enabled: bool = False) -> None:
         self.lesson = lesson
         self.llm = llm
         self.persona = persona or getattr(lesson, "persona", "coach")
         self.runner = PersonaRunner(llm)
         self.bb = Blackboard()
         self.bb.load_lesson(lesson)
-        self.agent = MissionAgent(self.runner, self.bb, lesson)
+        # Reasoning 2.0: the Twin audits covered turns. Model-gated — with no LLM the persona
+        # answers are authored text and a coverage dialogue would only add noise.
+        twin = None
+        if twin_enabled and llm is not None:
+            from .twin.dialectic import Twin
+            twin = Twin()
+        self.agent = MissionAgent(self.runner, self.bb, lesson, twin=twin)
         self.reasoning = self.agent.reasoning
         self._prev_met: int | None = None
         self._get_world = None                          # bound by the controller (for the explainer)

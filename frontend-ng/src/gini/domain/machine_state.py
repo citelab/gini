@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .xv6 import SchedTimeline, Snapshot
+from .xv6 import DemoScheduler, SchedTimeline, Snapshot
 from .xv6_fs import DemoDisk, fs_summary
 from .xv6_vm import DemoVm, memory_summary
 
@@ -129,6 +129,13 @@ class StateWatcher:
         elif not cond:
             self._fired.discard(key)
 
+    def active(self, kind: str | None = None) -> set:
+        """The pids whose conditions are CURRENTLY active (not just fired once) — so the UI can
+        badge a starving/monopolising proc for as long as it's true, then clear it. Optionally
+        filter by kind ('starvation' | 'cpu_monopoly' | 'zombie_leak')."""
+        return {pid for (k, pid) in self._fired
+                if pid is not None and (kind is None or k == kind)}
+
 
 # --------------------------------------------------------------------------- #
 # The state card (what the agent is fed)
@@ -196,6 +203,8 @@ class MachineState:
     provider: object                              # scheduler feed (snapshot()/step()/…)
     device_id: str = ""
     policy: str = "round-robin"
+    mode: str = "real"                            # "real" (live kernel) | "demo" (stand-in). A
+    #                                               USER choice — never auto-switched (see set_mode)
     latest: Snapshot | None = None
     timeline: SchedTimeline = field(default_factory=SchedTimeline)
     cpu_timelines: dict = field(default_factory=dict)   # cpu_index -> SchedTimeline (SMP)
@@ -206,16 +215,65 @@ class MachineState:
     on_event: object = None                       # callback(self) fired on new pedagogical events
     _events: list = field(default_factory=list)
     _prev_card: dict = field(default_factory=dict)
+    # The two data "planes" the mode toggles between: each is (provider, vm, fs). The injected
+    # trio becomes the plane matching the initial `mode`; the other is created lazily. `_real`
+    # may stay None when no xv6 is running — then Real mode shows an error, never demo data.
+    _real: tuple | None = None
+    _demo: tuple | None = None
 
     def __post_init__(self) -> None:
         if self.vm is None:
             self.vm = DemoVm()                    # offline stand-ins; Mac bridge overrides
         if self.fs is None:
             self.fs = DemoDisk()
+        trio = (self.provider, self.vm, self.fs)
+        if self.mode == "demo":
+            self._demo = self._demo or trio
+        else:
+            self._real = self._real or trio
         try:
             self._ingest(self.provider.snapshot())
         except Exception:
             pass
+
+    # -- mode (Real/Demo) — an explicit user action, never automatic --------- #
+    def has_real(self) -> bool:
+        """True when a live kernel plane is attached (an xv6 is running)."""
+        return bool(self._real and self._real[0] is not None)
+
+    def attach_real(self, provider, vm=None, fs=None) -> None:
+        """Wire the live bridge as the Real plane (called when the topology starts). If we're
+        currently in Real mode, switch to it now so an already-open Lab goes live."""
+        self._real = (provider, vm if vm is not None else getattr(provider, "vm", None),
+                      fs if fs is not None else getattr(provider, "fs", None))
+        if self.mode == "real":
+            self.provider, self.vm, self.fs = self._real
+            self.refresh()
+
+    def set_mode(self, mode: str) -> None:
+        """Switch the active data plane. This is the ONLY place the source changes, and only when
+        the user asks — nothing auto-falls-back from real to demo. Clears the timelines so demo
+        and real samples never blend on the Gantt."""
+        if mode not in ("real", "demo") or mode == self.mode:
+            return
+        self.mode = mode
+        prov, vm, fs = self._plane(mode)
+        self.provider, self.vm, self.fs = prov, vm, fs
+        self.timeline = SchedTimeline()
+        self.cpu_timelines = {}
+        self.latest = None
+        if prov is not None:
+            try:
+                self._ingest(prov.snapshot())
+            except Exception:
+                pass
+
+    def _plane(self, mode: str) -> tuple:
+        if mode == "real":
+            return self._real if self.has_real() else (None, None, None)
+        if self._demo is None:                    # build the demo plane on first switch to it
+            self._demo = (DemoScheduler(), DemoVm(), DemoDisk())
+        return self._demo
 
     # -- reads --------------------------------------------------------------- #
     @property
@@ -223,10 +281,14 @@ class MachineState:
         return int(getattr(self.provider, "timeslice", 1) or 1)
 
     def refresh(self) -> Snapshot | None:
+        if self.provider is None:                 # Real mode with no running kernel -> no data
+            return None
         self._ingest(self.provider.snapshot())
         return self.latest
 
     def step(self) -> Snapshot | None:
+        if self.provider is None:
+            return None
         self._ingest(self.provider.step())
         return self.latest
 
@@ -259,6 +321,29 @@ class MachineState:
 
     def pending_events(self) -> bool:
         return bool(self._events)
+
+    def scheduling_flags(self) -> dict:
+        """Currently-active scheduling conditions, for the scheduler-face badges:
+        {"starvation": {pids}, "cpu_monopoly": {pids}, "zombie_leak": {pids}}. Read-only view of
+        the watcher — does NOT drain the Coach event queue."""
+        return {kind: self.watcher.active(kind)
+                for kind in ("starvation", "cpu_monopoly", "zombie_leak")}
+
+    def shadows(self) -> dict:
+        """The shadow manifest ({name: ShadowStatus}) from the live provider — which student
+        shadows are wired and healthy. Empty when the provider (or build) has no shadows."""
+        getter = getattr(self.provider, "shadows", None)
+        if callable(getter):
+            try:
+                return getter() or {}
+            except Exception:
+                return {}
+        return {}
+
+    def policies(self) -> dict:
+        """The kernel's policy roster {id: name} (from the POLICY lines) — drives the UI selector,
+        so a policy the kernel ships auto-appears. Empty on an older build / offline."""
+        return dict(getattr(self.provider, "kernel_policies", {}) or {})
 
     # -- controls ------------------------------------------------------------ #
     def set_timeslice(self, ticks: int) -> None:

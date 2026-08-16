@@ -98,7 +98,11 @@ class OllamaBackend:
 
     # -- chat ---------------------------------------------------------------- #
     def chat(self, messages: list[Message], tools: list[dict] | None = None,
-             stream: bool = False) -> Iterator[Chunk]:
+             stream: bool = False, schema: dict | None = None) -> Iterator[Chunk]:
+        """`schema` (optional) is a JSON Schema passed as Ollama's `format` field — the server
+        CONSTRAINS decoding so the reply is guaranteed to match (structured outputs). Used by the
+        structured personas (coverage/classifier/critic JSON) so malformed output becomes a rare
+        transport error instead of a routine small-model failure. Reasoning-2.0 §10 amendment."""
         base = {
             "model": self.model,
             "messages": [_to_ollama_message(m) for m in messages],
@@ -121,11 +125,16 @@ class OllamaBackend:
                 p["think"] = True
             attempts.append(p)
         attempts.append(dict(base))                 # bare minimum
+        if schema is not None:
+            # constrain every attempt; keep ONE unconstrained fallback (an older server may
+            # reject `format` — the callers' tolerant first_json parsing still applies then).
+            attempts = [{**p, "format": schema} for p in attempts] + [dict(base)]
 
         # Stream the answer token-by-token over real HTTP (live "typing" feel). Tool
         # turns still come back whole in the final streamed object. Injected transports
-        # (tests) keep the simple non-streaming path.
-        if self.stream and not self._injected:
+        # (tests) keep the simple non-streaming path. Structured (schema) calls are
+        # machine-consumed, never displayed — no reason to stream them.
+        if self.stream and not self._injected and schema is None:
             last_err = None
             for payload in attempts:
                 try:

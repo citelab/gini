@@ -15,12 +15,43 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..domain.xv6_vm import DemoVm, region_for
+from ..domain.xv6_vm import PGSIZE, DemoVm, classify_faults, region_for, shared_frames
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
 
 _REGION_ACCENT = {"text": "blue", "data": "green", "heap": "cyan", "guard": "slate",
                   "stack": "amber", "trapframe": "purple", "trampoline": "red"}
+_FAULT_ACCENT = {"cow-write": "purple", "lazy-alloc": "green", "stack-growth": "amber",
+                 "illegal": "red"}
+
+
+class ResidentMeter(QWidget):
+    """A two-tone bar: RESIDENT (physically-backed) pages filled solid inside the VIRTUAL extent,
+    so lazy allocation reads as a gap that fills in — virtual jumps on sbrk, resident catches up
+    one page per fault."""
+
+    def __init__(self, theme) -> None:
+        super().__init__()
+        self.theme = theme
+        self._res = 0
+        self._virt = 0
+        self.setMinimumHeight(22)
+
+    def set_values(self, resident, virtual) -> None:
+        self._res, self._virt = int(resident), int(virtual)
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        t = self.theme.theme
+        p.fillRect(self.rect(), QColor(t.panel))
+        if self._virt <= 0:
+            return
+        w = self.width()
+        # the virtual extent (outline) then the resident fill inside it
+        p.fillRect(0, 0, w, self.height(), QColor(t.panel2))
+        frac = max(0.0, min(1.0, self._res / self._virt))
+        p.fillRect(0, 0, int(w * frac), self.height(), QColor(t.accent_for("green")))
 
 
 class RegionStrip(QWidget):
@@ -83,14 +114,17 @@ class PhysBar(QWidget):
 
 
 class MemoryLab(QDialog):
-    def __init__(self, parent, theme: ThemeManager, device=None, provider=None) -> None:
+    def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
+                 on_play=None, play_games=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.provider = provider or DemoVm()
+        self._on_play = on_play             # callable(game_id) opening a game; may be None
+        self._play_games = play_games or []  # [(label, game_id)]
 
         t = theme.theme
-        self.setWindowTitle(f"Memory Lab — {getattr(device, 'name', 'xv6')}")
+        self.setWindowTitle(f"Virtual Memory Lab — {getattr(device, 'name', 'xv6')}")
         self.resize(920, 700)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
@@ -106,16 +140,29 @@ class MemoryLab(QDialog):
         grid.addWidget(self._build_faults_panel(), 1, 1)
         grid.setColumnStretch(0, 3); grid.setColumnStretch(1, 2)
 
+        # the COW / sharing view + per-process resident-vs-virtual meters (uses all_procs())
+        root.addWidget(self._build_sharing_panel())
+
         self._render(self.provider.snapshot())
+        self._render_sharing()
 
     # -- header/panels ---------------------------------------------------- #
     def _build_header(self, root) -> None:
         t = self.theme.theme
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("layout", t.accent_for("purple"), 22))
-        title = QLabel(f"  Virtual memory — {getattr(self.device, 'name', 'xv6')}")
+        title = QLabel(f"  Virtual Memory Lab — {getattr(self.device, 'name', 'xv6')}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
+        if self._on_play is not None:                 # in-lab games (thrashing, translate)
+            for label, gid in self._play_games:
+                play = QPushButton(f"  Play: {label}")
+                play.setStyleSheet(
+                    f"QPushButton{{color:{t.accent_for('purple')};background:{t.panel2};"
+                    f"border:1px solid {t.line};border-radius:8px;padding:5px 11px;}}"
+                    f"QPushButton:hover{{border-color:{t.accent};}}")
+                play.clicked.connect(lambda _c=False, g=gid: self._on_play(g))
+                head.addWidget(play)
         self._satp = QLabel(); self._satp.setStyleSheet(
             _scss(f"color:{t.muted};font-family:monospace;font-size:11px;"))
         head.addWidget(self._satp)
@@ -166,20 +213,49 @@ class MemoryLab(QDialog):
 
     def _build_faults_panel(self) -> QFrame:
         t = self.theme.theme
-        f, v = self._framed("Page faults")
-        self._fault_tbl = self._table(["VA", "cause"])
+        f, v = self._framed("Page faults  ·  live ring (classified)")
+        self._fault_tbl = self._table(["pid", "VA", "cause", "kind"])
         v.addWidget(self._fault_tbl, 1)
-        live = not hasattr(self.provider, "simulate_fault")   # live reader can't fake a fault
-        btn = QPushButton("  Refresh" if live else "  Simulate page fault")
-        btn.setToolTip("Re-read the live page tables (launch `alloc` from the scheduler window "
-                       "to make real page faults / new mappings)" if live else
+        self._live = not hasattr(self.provider, "simulate_fault")   # live reader can't fake a fault
+        btn = QPushButton("  Refresh" if self._live else "  Simulate page fault")
+        btn.setToolTip("Re-read the live fault ring + page tables (launch `alloc` from the "
+                       "scheduler window to make real faults)" if self._live else
                        "Grow the stack by one page via a simulated demand fault")
         btn.setIcon(icons.icon("send", t.accent_for("amber"), 14))
         btn.clicked.connect(self._on_fault)
-        btn.setStyleSheet(
-            f"QPushButton{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
-            f"border-radius:8px;padding:6px 12px;}}QPushButton:hover{{border-color:{t.accent};}}")
+        btn.setStyleSheet(self._btn_css())
         v.addWidget(btn)
+        return f
+
+    def _btn_css(self) -> str:
+        t = self.theme.theme
+        return (f"QPushButton{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
+                f"border-radius:8px;padding:6px 12px;}}QPushButton:hover{{border-color:{t.accent};}}")
+
+    def _build_sharing_panel(self) -> QFrame:
+        """The COW / physical-sharing view: each process's resident-vs-virtual meter, plus the
+        physical pages mapped by more than one process (shared until one writes)."""
+        t = self.theme.theme
+        f, v = self._framed("Copy-on-write  ·  processes & physically-shared pages")
+        row = QHBoxLayout(); v.addLayout(row, 1)
+        # left: per-process resident/virtual meters
+        left = QWidget(); self._proc_box = QVBoxLayout(left); self._proc_box.setSpacing(4)
+        self._proc_meters: dict = {}
+        lw = QWidget(); lv = QVBoxLayout(lw); lv.setContentsMargins(0, 0, 0, 0)
+        cap = QLabel("resident (green) within virtual (sz)")
+        cap.setStyleSheet(_scss(f"color:{t.faint};font-size:10px;border:none;"))
+        lv.addWidget(cap); lv.addWidget(left); lv.addStretch(1)
+        row.addWidget(lw, 2)
+        # right: shared physical frames
+        self._share_tbl = self._table(["phys page", "shared by", "cow"])
+        row.addWidget(self._panel("Shared physical pages", self._share_tbl, fill=True), 3)
+        # a COW-write button in demo mode (make the child copy its shared page)
+        if hasattr(self.provider, "simulate_cow_write"):
+            b = QPushButton("  Simulate COW write (child writes shared page)")
+            b.setIcon(icons.icon("send", t.accent_for("purple"), 14))
+            b.setStyleSheet(self._btn_css())
+            b.clicked.connect(self._on_cow)
+            v.addWidget(b)
         return f
 
     def _framed(self, title) -> tuple[QFrame, QVBoxLayout]:
@@ -196,6 +272,70 @@ class MemoryLab(QDialog):
     def _on_fault(self) -> None:
         fn = getattr(self.provider, "simulate_fault", None)
         self._render(fn() if callable(fn) else self.provider.snapshot())
+        self._render_sharing()
+
+    def _on_cow(self) -> None:
+        fn = getattr(self.provider, "simulate_cow_write", None)
+        if callable(fn):
+            fn()
+        self._render(self.provider.snapshot())
+        self._render_sharing()
+
+    def _all_procs(self) -> dict:
+        fn = getattr(self.provider, "all_procs", None)
+        try:
+            return fn() if callable(fn) else {}
+        except Exception:
+            return {}
+
+    def _fault_rows(self, snap):
+        """(pid, va, cause, kind) rows. Live: the classified fault RING; demo: the simulated log."""
+        if self._live:
+            faults = classify_faults(self._all_procs_faults(), self._all_procs())
+            return [(f.pid, f.va, f.cause, f.kind) for f in faults]
+        return [(getattr(f, "pid", None), f.va, f.cause, "") for f in snap.faults]
+
+    def _all_procs_faults(self):
+        fn = getattr(self.provider, "faults", None)
+        try:
+            return fn() if callable(fn) else []
+        except Exception:
+            return []
+
+    def _render_sharing(self) -> None:
+        t = self.theme.theme
+        procs = self._all_procs()
+        # per-process resident-vs-virtual meters (rebuild)
+        while self._proc_box.count():
+            w = self._proc_box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self._proc_meters = {}
+        for pid in sorted(procs):
+            pv = procs[pid]
+            roww = QWidget(); rl = QHBoxLayout(roww); rl.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(f"pid {pid} {pv.name}")
+            lbl.setStyleSheet(_scss(f"color:{t.text};font-size:11px;border:none;min-width:110px;"))
+            meter = ResidentMeter(self.theme)
+            meter.set_values(pv.resident_pages, max(pv.virtual_pages, pv.resident_pages))
+            num = QLabel(f"{pv.resident_pages}/{max(pv.virtual_pages, pv.resident_pages)} pg")
+            num.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;border:none;min-width:56px;"))
+            rl.addWidget(lbl); rl.addWidget(meter, 1); rl.addWidget(num)
+            self._proc_box.addWidget(roww)
+            self._proc_meters[pid] = meter
+        # shared physical pages (mapped by >1 proc) — the COW sharing signal
+        shared = shared_frames(procs)
+        # is any owner's leaf for this pa a COW page? (user, read-only, RSW-marked)
+        self._share_tbl.setRowCount(len(shared))
+        for r, pa in enumerate(sorted(shared)):
+            pids = shared[pa]
+            cow = any(pte.pa == pa and pte.cow for pv in procs.values() for pte in pv.leaves)
+            vals = [hex(pa), ", ".join(f"pid {x}" for x in pids), "COW" if cow else "—"]
+            for c, val in enumerate(vals):
+                it = QTableWidgetItem(val)
+                if c == 2 and cow:
+                    it.setForeground(QColor(t.accent_for("purple")))
+                self._share_tbl.setItem(r, c, it)
 
     def _render(self, snap) -> None:
         t = self.theme.theme
@@ -219,8 +359,13 @@ class MemoryLab(QDialog):
         self._phys_lbl.setText(
             f"{ph.used_pages:,} used / {ph.free_pages:,} free of {ph.total_pages:,} pages "
             f"({ph.used_frac * 100:.1f}% used · {ph.free_pages * 4 // 1024} MB free)")
-        # faults
-        self._fault_tbl.setRowCount(len(snap.faults))
-        for r, flt in enumerate(snap.faults):
-            for c, val in enumerate([hex(flt.va), flt.cause]):
-                self._fault_tbl.setItem(r, c, QTableWidgetItem(val))
+        # faults — the live classified ring (or the simulated demo log)
+        rows = self._fault_rows(snap)
+        self._fault_tbl.setRowCount(len(rows))
+        for r, (pid, va, cause, kind) in enumerate(rows):
+            cells = ["" if pid is None else str(pid), hex(va), cause, kind]
+            for c, val in enumerate(cells):
+                it = QTableWidgetItem(val)
+                if c == 3 and kind in _FAULT_ACCENT:
+                    it.setForeground(QColor(t.accent_for(_FAULT_ACCENT[kind])))
+                self._fault_tbl.setItem(r, c, it)

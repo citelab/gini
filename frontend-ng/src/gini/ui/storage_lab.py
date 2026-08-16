@@ -71,7 +71,7 @@ class StorageLab(QDialog):
         self.provider = provider or DemoDisk()
 
         t = theme.theme
-        self.setWindowTitle(f"Storage Lab — {getattr(device, 'name', 'xv6')}")
+        self.setWindowTitle(f"File System Lab — {getattr(device, 'name', 'xv6')}")
         self.resize(920, 720)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
@@ -98,7 +98,7 @@ class StorageLab(QDialog):
         t = self.theme.theme
         head = QHBoxLayout()
         ic = QLabel(); ic.setPixmap(icons.render_pixmap("database", t.accent_for("cyan"), 22))
-        title = QLabel(f"  File system — {getattr(self.device, 'name', 'xv6')}")
+        title = QLabel(f"  File System Lab — {getattr(self.device, 'name', 'xv6')}")
         title.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(title); head.addStretch(1)
         root.addLayout(head)

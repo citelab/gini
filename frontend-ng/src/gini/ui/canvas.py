@@ -272,8 +272,15 @@ class NodeItem(QGraphicsObject):
     def _resizable(self) -> bool:
         return pricing.resizable(self.inst.type_key)
 
+    # xv6 caps at L (2 vCPU): QEMU harts are capped at 2 for a legible 1-2 core scheduler demo, so
+    # the Size must never advertise more cores than the machine actually runs.
+    _XV6_MAX_LEVEL = 3        # L
+
     def _size(self) -> int:
-        return pricing.size_level(getattr(self.inst, "size", 1)) if self._resizable() else 1
+        if not self._resizable():
+            return 1
+        lvl = pricing.size_level(getattr(self.inst, "size", 1))
+        return min(lvl, self._XV6_MAX_LEVEL) if self.inst.type_key == "xv6" else lvl
 
     def node_h(self) -> float:
         return NODE_H + (self._size() - 1) * SIZE_STEP
@@ -291,6 +298,8 @@ class NodeItem(QGraphicsObject):
                                 "then Run again.", "info")
             return
         new = pricing.size_level(self._size() + delta)
+        if self.inst.type_key == "xv6":
+            new = min(new, self._XV6_MAX_LEVEL)     # + can't push xv6 past L (2 vCPU)
         if new == self._size():
             return
         self.prepareGeometryChange()

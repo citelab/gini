@@ -85,15 +85,16 @@ def test_lab_opens_on_the_layered_overview(app):
     lab.close()
 
 
-def test_scheduler_card_drills_in_and_back(app):
+def test_scheduler_card_opens_its_own_window(app):
+    # the scheduler now opens as its OWN window (like every other card) so the hub stays up and
+    # subsystems can be open concurrently
     from gini.ui.machine_lab import MachineLab
     lab = MachineLab(None, _theme(app), _Dev(), state=None)
     lab._ov_cards["scheduler"].clicked.emit()          # click the Scheduler card
-    assert lab._stack.currentWidget() is lab._sched_page
-    assert lab._back_btn.isHidden() is False           # back button available on a sub-page
-    lab._show_overview()                               # ← Overview
-    assert lab._stack.currentWidget() is lab._overview
-    assert lab._back_btn.isHidden() is True
+    assert lab._sched_win is not None                  # opened as a separate window
+    assert lab._sched_page.parent() is lab._sched_win  # the page was reparented into it
+    assert lab._stack.currentWidget() is lab._overview  # the hub is still shown (concurrent)
+    lab._sched_win.close()
     lab.close()
 
 
@@ -103,6 +104,75 @@ def test_overview_cards_carry_live_mini_stats(app):
     assert "procs" in lab._ov_cards["scheduler"].stat.text()      # e.g. "3 procs · 0.0 sw/s"
     assert "switches" in lab._ov_cards["journey"].stat.text()
     assert "core" in lab._ov_cards["cpu"].stat.text()
+    lab.close()
+
+
+def test_policy_combo_switches_policy(app):
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    lab._policy_combo.setCurrentText("lottery")          # user picks a policy
+    assert lab.state.policy == "lottery"                 # drives MachineState -> provider
+    assert lab.state.provider.policy == "lottery"        # demo honours it (offline)
+    lab.close()
+
+
+def test_scheduler_page_has_ready_queue_and_share(app):
+    from gini.ui.machine_lab import MachineLab
+    lab = MachineLab(None, _theme(app), _Dev(), state=None)
+    for _ in range(6):                                   # build a timeline so shares populate
+        lab._on_step()
+    tbl = lab._sched_panel._tbl
+    assert tbl.rowCount() >= 1
+    shares = [tbl.item(r, 5).text() for r in range(tbl.rowCount()) if tbl.item(r, 5)]
+    assert any("%" in s for s in shares)                 # a CPU-share bar rendered
+    lab.close()
+
+
+def test_starvation_flag_badges_the_process_tree(app):
+    from gini.domain.machine_state import MachineState, StateWatcher
+    from gini.ui.machine_lab import MachineLab
+    ms = MachineState(DemoScheduler(), device_id="d")
+    ms.watcher = StateWatcher(starve=2)
+    snap = Snapshot(procs=parse_procdump("3 running spin 1\n4 runnable spin 1"), running_pid=3)
+    for _ in range(3):                                   # drive a starvation condition for pid 4
+        ms._ingest(snap)
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms)
+    lab._render()
+    it = _tree_item(lab._proc_tree, 4)
+    assert "⚠" in it.text(2) or "starving" in it.text(2)  # pid 4 is badged as starving
+    lab.close()
+
+
+def test_data_mode_toggle_swaps_source(app):
+    # the Real/Demo toggle is a user action that swaps the state's data plane
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    ms = MachineState(DemoScheduler(timeslice=1), device_id="d1", mode="demo")
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms)
+    assert lab.state.mode == "demo" and lab._mode_btns["demo"].isChecked()
+    lab._set_data_mode("real")                       # click "Real"
+    assert lab.state.mode == "real" and lab._mode_btns["real"].isChecked()
+    assert lab.live is True
+    lab._set_data_mode("demo")                       # ...back to Demo
+    assert lab.state.mode == "demo" and lab.live is False
+    lab.close()
+
+
+def test_real_mode_without_data_shows_banner_not_fakes(app):
+    # Real selected with nothing running -> an explicit banner, never demo data in the panels
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    ms = MachineState(DemoScheduler(timeslice=1), device_id="d1", mode="demo")
+    ms.set_mode("real")                              # user asked for Real; no live plane attached
+    assert ms.provider is None and ms.latest is None
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms)
+    assert lab._banner.isVisibleTo(lab._sched_page)  # the "no live data" banner is shown
+    assert "No live data" in lab._banner_lbl.text()
+    # opening a data face is guarded (no crash on a null provider) — it reveals the banner instead
+    # (which lives on the scheduler page, now opened as its own window)
+    lab._open_storage_lab()
+    assert lab._sched_win is not None
+    lab._sched_win.close()
     lab.close()
 
 
@@ -202,6 +272,37 @@ def test_live_lab_launch_and_kill_call_provider(app):
     lab.close()
 
 
+def test_sched_controls_apply_priority_and_tickets(app):
+    # WS1: per-proc priority/tickets setters drive the control-plane bridge ops
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+
+    class Prov(_FakeLive):
+        def __init__(self):
+            super().__init__(); self.prio = []; self.tk = []
+        def set_priority(self, pid, v):
+            self.prio.append((pid, v))
+        def set_tickets(self, pid, n):
+            self.tk.append((pid, n))
+
+    prov = Prov()
+    ms = MachineState(prov, device_id="d", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    lab._render()                                       # populate the pid dropdown from the snapshot
+    idx = lab._sc_pid.findData(5)                       # pid 5 = the user 'spin' process
+    assert idx >= 0
+    lab._sc_pid.setCurrentIndex(idx)
+    lab._sc_prio.setValue(3); lab._sc_tickets.setValue(8)
+    lab._apply_sched_control()
+    import time
+    for _ in range(60):                                 # let the off-thread bridge calls land
+        app.processEvents(); time.sleep(0.005)
+        if prov.prio and prov.tk:
+            break
+    assert prov.prio == [(5, 3)] and prov.tk == [(5, 8)]
+    lab.close()
+
+
 def test_machine_lab_has_no_console_button(app):
     # the console is now a peripheral (the Terminal), not a button baked into the Lab
     from gini.ui.machine_lab import MachineLab
@@ -239,6 +340,46 @@ def _wait(app, cond, n=200):        # ~1s budget: absorbs cold-start jitter (fon
         app.processEvents(); time.sleep(0.005)
         if cond():
             return
+
+
+def test_shadow_bar_load_shows_result_and_mirrors_to_console(app):
+    from gini.domain.machine_state import MachineState
+    from gini.domain.xv6 import ShadowStatus
+    from gini.ui.machine_lab import MachineLab
+
+    logs = []
+
+    class Prov(_FakeLive):
+        def __init__(self):
+            super().__init__(); self.loaded = 0; self.reverted = 0; self.toggled = []
+        def shadows(self):
+            return {"prio_sched": ShadowStatus("prio_sched", present=True, enabled=True,
+                                               active=True, faults=0, hash="abc123")}
+        def load(self):
+            self.loaded += 1; return True, "loaded"
+        def revert(self):
+            self.reverted += 1; return False, "kernel/shadows/gini_sched.c:22: error: expected ';'"
+        def set_shadow(self, name, on):
+            self.toggled.append((name, on))
+
+    prov = Prov()
+    ms = MachineState(prov, device_id="d", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True,
+                     on_log=lambda lvl, msg: logs.append((lvl, msg)))
+    lab._show_scheduler()
+    assert hasattr(lab, "_load_btn") and hasattr(lab, "_shadow_status")   # the shadow bar built
+
+    lab._load_shadow()                                     # success path
+    _wait(app, lambda: prov.loaded > 0 and "Loaded" in lab._shadow_result.toPlainText())
+    assert prov.loaded == 1
+    assert "✓ Loaded" in lab._shadow_result.toPlainText()
+    assert any(lvl == "info" for lvl, _ in logs)           # mirrored to the console
+
+    lab._revert_shadow()                                   # failure path -> compile error inline
+    _wait(app, lambda: prov.reverted > 0 and "error:" in lab._shadow_result.toPlainText())
+    assert "error:" in lab._shadow_result.toPlainText()    # gcc error shown inline, not just console
+    assert any(lvl == "error" for lvl, _ in logs)
+    lab.close()
 
 
 def test_terminal_sends_command_with_args(app):

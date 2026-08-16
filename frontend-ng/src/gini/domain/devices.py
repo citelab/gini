@@ -44,10 +44,11 @@ class Category(str, Enum):
 # they all run your code, and they differ in how much of a machine they actually are.
 PALETTE_RANK: dict[str, int] = {
     "host": 1,          # a Linux container on the fabric
-    "container": 2,     # …the same, but you supply the image
-    "instance": 3,      # a cloud VM (as the cloud presents it)
-    "kinstance": 4,     # a REAL microVM — its own kernel (Kata)
-    "xv6": 5,           # a real teaching kernel on QEMU-RISC-V
+    "desktop": 2,       # …the same, but it also runs a graphical desktop (headful)
+    "container": 3,     # …the same, but you supply the image
+    "instance": 4,      # a cloud VM (as the cloud presents it)
+    "kinstance": 5,     # a REAL microVM — its own kernel (Kata)
+    "xv6": 6,           # a real teaching kernel on QEMU-RISC-V
 }
 
 
@@ -172,7 +173,9 @@ _DEVICES: list[DeviceType] = [
         "time-slice to watch context switches. Runs standalone; xv6 has no networking, so instead "
         "of network links you attach peripherals — a Terminal and a Storage Volume.",
         backend_kind="xv6",
-        default_properties={"Name": "", "Timeslice": "1", "CPUs": "1"},
+        # vCPU count is the Size tier (S/M/L/XL -> -smp harts, capped at 2); no separate CPUs
+        # property (it was vestigial and contradicted the Size).
+        default_properties={"Name": "", "Timeslice": "1"},
         property_choices={"Timeslice": ("1", "5", "10", "100")},
         is_cloud=False,   # stated, not inferred from the palette section
     ),

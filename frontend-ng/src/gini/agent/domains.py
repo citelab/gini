@@ -85,3 +85,7 @@ def names() -> list[str]:
 
 
 register(NetworkingPack())
+
+# the OS pack — same protocol, drops xv6/OS onto the domain-neutral engine.
+from .xv6_pack import Xv6Pack   # noqa: E402  (import here to avoid a cycle at module top)
+register(Xv6Pack())

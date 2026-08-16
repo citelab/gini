@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..domain.xv6 import SyscallRate, parse_sccounts, parse_sctrace, syscall_name
-from .theme import ThemeManager
+from .theme import ThemeManager, icons
 
 
 class HistogramBars(QWidget):
@@ -70,10 +70,17 @@ class SyscallLab(QDialog):
         self._busy = False
 
         t = theme.theme
-        self.setWindowTitle(f"Syscall Lab — {getattr(device, 'name', 'xv6')}")
+        self.setWindowTitle(f"System Calls Lab — {getattr(device, 'name', 'xv6')}")
         self.resize(760, 560)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
+
+        hdr = QHBoxLayout()
+        ic = QLabel(); ic.setPixmap(icons.render_pixmap("send", t.accent_for("blue"), 22))
+        title = QLabel(f"  System Calls Lab — {getattr(device, 'name', 'xv6')}")
+        title.setStyleSheet(f"color:{t.text};font-size:16px;font-weight:600;")
+        hdr.addWidget(ic); hdr.addWidget(title); hdr.addStretch(1)
+        root.addLayout(hdr)
 
         head = QLabel("What the kernel is doing under the hood — system calls in the last 60s "
                       "(histogram) and the most recent calls (trace). No gdb; live over serial.")

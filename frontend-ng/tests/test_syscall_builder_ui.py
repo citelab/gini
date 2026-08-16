@@ -52,7 +52,7 @@ def test_apply_callback_receives_codegen(app):
     b.body_edit.setPlainText("  return 1;")
     b._on_generate()
     b._on_apply()
-    assert got.get("n") == 22               # first free number after the stock set
+    assert got.get("n") == 23               # first free number after the 22 stock syscalls
     assert "SYS_mycall" in got.get("name", "")
     b.close()
 

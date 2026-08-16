@@ -17,17 +17,18 @@ from .theme import ThemeManager, icons
 
 
 class CpuJourney(QDialog):
-    def __init__(self, parent, theme: ThemeManager, device=None, cpu=None) -> None:
+    def __init__(self, parent, theme: ThemeManager, device=None, cpu=None, frame=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.cpu = cpu                      # a CpuState (real regs) to seed the syscall path
+        self.frame = frame                  # a TrapFrame from /trapcatch (a real frozen trap)
         self._mode = "syscall"
         self._i = 0
 
         t = theme.theme
         self.setWindowTitle(f"CPU journey — {getattr(device, 'name', 'xv6')}")
-        self.resize(820, 480)
+        self.resize(820, 500)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
 
@@ -36,6 +37,26 @@ class CpuJourney(QDialog):
                       "context). Preemption is both. Step through and watch which save-area moves.")
         head.setWordWrap(True); head.setStyleSheet(f"color:{t.muted};font-size:12px;")
         root.addWidget(head)
+
+        # a live banner when we froze a real trap (Phase 2): its actual scause/sepc/stval
+        self._live = QLabel(); self._live.setWordWrap(True)
+        self._live.setVisible(bool(frame))
+        if frame is not None and getattr(frame, "ok", False):
+            acc = t.accent_for("amber")
+            self._live.setStyleSheet(
+                f"color:{acc};background:{t.panel2};border:1px solid {acc};border-radius:8px;"
+                "padding:6px 10px;font-family:monospace;font-size:12px;")
+            msg = f"● froze a live trap: {frame.kind_name} · scause {frame.scause} · sepc {frame.sepc}"
+            if frame.stval and frame.stval not in ("0x0", "0x0000000000000000"):
+                msg += f" · stval {frame.stval}"
+            if frame.pid is not None and frame.pid >= 0:
+                msg += f" · pid {frame.pid}"
+            self._live.setText(msg)
+        elif frame is not None:
+            self._live.setStyleSheet(f"color:{t.faint};font-size:12px;")
+            self._live.setText("● couldn't freeze a trap (kernel idle) — showing the reference "
+                               "walkthrough. Launch a program and try again.")
+        root.addWidget(self._live)
 
         modes = QHBoxLayout()
         self._mode_group = QButtonGroup(self); self._mode_group.setExclusive(True)
@@ -127,6 +148,32 @@ class CpuJourney(QDialog):
         self._i = max(0, min(len(stages) - 1, self._i + d))
         self._render()
 
+    def _live_note(self, title) -> str:
+        """The real-values line appended to a trap-entry stage caption. Prefers a frozen trap
+        (TrapFrame) — its actual saved registers and scause — else falls back to the running
+        proc's live registers at the dispatch stage."""
+        fr = self.frame
+        if fr is not None and getattr(fr, "ok", False):
+            r = fr.regs
+            if title == "uservec":
+                parts = [f"{k}={r[k]}" for k in ("ra", "sp", "a0", "a7") if k in r]
+                return ("this trap's user registers, saved into the trapframe:  " + "  ".join(parts)
+                        if parts else "this trap's user registers are saved into the trapframe")
+            if title == "usertrap":
+                s = f"scause={fr.scause} → {fr.kind_name}   ·   sepc={fr.sepc}"
+                if fr.stval and fr.stval not in ("0x0", "0x0000000000000000"):
+                    s += f"   ·   stval (faulting address) = {fr.stval}"
+                return s
+            if title == "syscall()":
+                a7, a0 = r.get("a7", ""), r.get("a0", "")
+                return f"live: a7={a7}  a0={a0}" if (a7 or a0) else ""
+            return ""
+        # no frozen trap — the original behaviour: seed the dispatch stage from the running proc
+        if title == "syscall()" and self.cpu is not None:
+            return (f"live: a7={self.cpu.key('a7')}  a0={self.cpu.key('a0')}  "
+                    f"pc={self.cpu.key('pc')}")
+        return ""
+
     def _render(self) -> None:
         t = self.theme.theme
         stages = JOURNEYS[self._mode]
@@ -144,12 +191,10 @@ class CpuJourney(QDialog):
         self._band.setText(f"CPU is in: {s.band.upper()} mode · {lane}"
                            + (f"   · privilege {'change' if s.band == 'user' else 'stays S'}"
                               if self._mode != 'context' else "   · never leaves S"))
-        self._caption.setText(s.caption)
-        # seed real registers into the syscall dispatch caption
-        if self._mode == "syscall" and s.title == "syscall()" and self.cpu is not None:
-            self._caption.setText(
-                s.caption + f"\n\nlive: a7={self.cpu.key('a7')}  a0={self.cpu.key('a0')}  "
-                f"pc={self.cpu.key('pc')}")
+        # seed the trap-entry captions with real values — from a frozen trap if we have one,
+        # else the running proc's registers (the old behaviour), else nothing.
+        note = self._live_note(s.title) if self._mode == "syscall" else ""
+        self._caption.setText(s.caption + (f"\n\n{note}" if note else ""))
         # highlight the active save-area
         for card, kind in ((self._tf, "trapframe"), (self._ctx, "context")):
             on = s.save == kind
