@@ -45,3 +45,9 @@ frontend-ng/src/gini/data/kb_index.json
 
 # setuptools-scm generated version file
 frontend-ng/src/gini/_version.py
+
+token.txt
+*.token
+
+token.txt
+*.token
