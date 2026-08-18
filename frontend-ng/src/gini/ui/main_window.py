@@ -180,6 +180,10 @@ class MainWindow(QMainWindow):
         self._make_delete_shortcut()
         self._make_menubar()
         self._make_docks()
+        from PySide6.QtWidgets import QApplication
+        _app = QApplication.instance()
+        if _app is not None:                 # backstop so ⌘Q / app-menu Quit is blocked while running
+            _app.installEventFilter(self)
         self._make_statusbar()
         self._wire_llm()
 
@@ -798,6 +802,10 @@ class MainWindow(QMainWindow):
         self._manual_addr_act.setChecked(self.ctx.topology.manual_addressing)
         self._delete_act = act("delete", "trash", "Delete selected device", self._delete_selected)
         self._delete_act.setEnabled(False)
+        self._rhud_act = act("rhud", "router",
+                             "Routing HUD — model view of the network's routing; long-press a "
+                             "router for its shortest-path tree", self._toggle_routing_hud,
+                             checkable=True)
         self._run_act = act("run", "play", "Run", self._run)
         self._stop_act = act("stop", "stop", "Stop", self._stop)
         self._server_act = act("server", "cloud",
@@ -846,7 +854,8 @@ class MainWindow(QMainWindow):
         def _build_left(lay) -> None:
             lay.addWidget(tray(("new", "open", "save")))
             lay.addWidget(self._tb_spacer(6))
-            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete")))
+            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete",
+                                "rhud")))
             lay.addWidget(self._tb_spacer(8))
             lay.addWidget(self.run_button)                    # morphing ▶/■ power button
             lay.addWidget(self._tb_spacer(8))
@@ -1323,6 +1332,10 @@ class MainWindow(QMainWindow):
         self._autosave_timer.start()
 
     def closeEvent(self, e) -> None:
+        if self._running:                    # don't quit out from under a live topology
+            self.ctx.log("The topology is still running — press Stop before quitting.", "error")
+            e.ignore()
+            return
         self._persist_current_project()      # never lose the active project's work / chat
         # Reap any hardware worker still talking to a board over USB. Quitting while one
         # runs garbage-collects a live QThread, which Qt turns into an abort — so the app
@@ -1330,6 +1343,37 @@ class MainWindow(QMainWindow):
         from .worker_host import drain
         drain()
         super().closeEvent(e)
+
+    def eventFilter(self, obj, event):       # noqa: N802
+        # Backstop for macOS ⌘Q / the app-menu Quit, which can bypass closeEvent: block the app-level
+        # Quit while a topology is running (the window close-button path is handled by closeEvent).
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Type.Quit and self._running:
+            self.ctx.log("The topology is still running — press Stop before quitting.", "error")
+            return True                      # consume the quit
+        return super().eventFilter(obj, event)
+
+    def _toggle_routing_hud(self, checked: bool) -> None:
+        """Show/hide the Routing HUD — a model view of the whole network's authentic routing state
+        (long-press a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
+        try:
+            if checked:
+                if getattr(self, "_rhud", None) is None:
+                    from .routing_hud import RoutingHudController
+                    devs = self.ctx.topology.devices
+                    self._rhud = RoutingHudController(
+                        self.canvas, self.theme,
+                        router_devices=lambda: [(d.id, d.name) for d in devs.values()
+                                                if d.type_key in ("router", "firewall")],
+                        query=self.element_query,
+                        delay_prop=lambda rid, k: devs[rid].properties.get(k, "") if rid in devs
+                        else "",
+                        positions_of=lambda: {d.id: (d.x, d.y) for d in devs.values()})
+                self._rhud.show_topright()
+            elif getattr(self, "_rhud", None) is not None:
+                self._rhud.close()
+        except Exception as e:
+            self.ctx.bus.log.emit("error", f"Routing HUD: {e}")
 
     def _refresh_icons(self) -> None:
         t = self.theme.theme
@@ -3137,6 +3181,12 @@ class MainWindow(QMainWindow):
     def _on_log(self, level: str, message: str) -> None:
         tag = {"ok": "✓", "error": "✕", "chat": "›"}.get(level, "•")
         self.console.appendPlainText(f"{tag} {message}")
+        if level == "error":                 # audible cue — the student checks the Console for why
+            try:
+                from PySide6.QtWidgets import QApplication
+                QApplication.beep()
+            except Exception:
+                pass
 
     def _update_status(self) -> None:
         s = self.api.summary()

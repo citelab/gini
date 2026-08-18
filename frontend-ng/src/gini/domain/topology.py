@@ -6,6 +6,7 @@ the compiler/persistence layers read it, and the AI agent layer mutates it.
 from __future__ import annotations
 
 import itertools
+import re
 from dataclasses import dataclass, field, asdict
 
 from . import devices
@@ -74,12 +75,28 @@ class Topology:
 
     # -- creation ----------------------------------------------------------- #
     def _new_id(self, prefix: str) -> str:
-        return f"{prefix}{next(self._ids)}"
+        # Never hand out an id already in use. The counter can be behind after a load (it's rebuilt
+        # from the saved ids), so skip any collision — otherwise a new link/device id would overwrite
+        # an existing one in self.links / self.devices (silently deleting an interconnect).
+        while True:
+            cand = f"{prefix}{next(self._ids)}"
+            if cand not in self.devices and cand not in self.links:
+                return cand
 
     def _auto_name(self, dt: DeviceType) -> str:
         # prefix: a user override (e.g. "Mach_"), else the curated default (M, R, S, …)
         base = self.prefix_overrides.get(dt.key) or devices.default_prefix(dt.key)
-        n = self._name_counters.get(base, 0) + 1
+        # Next number = one past the highest already in use. The counter alone is 0 right after a
+        # LOAD (devices deserialize with explicit names, never touching the counter), so also scan
+        # the current names — otherwise a device added to a loaded topology collides at {base}1.
+        # Manual edits / paste / delete-and-re-add are handled the same way.
+        n = self._name_counters.get(base, 0)
+        pat = re.compile(rf"^{re.escape(base)}(\d+)$")
+        for d in self.devices.values():
+            m = pat.match(d.name or "")
+            if m:
+                n = max(n, int(m.group(1)))
+        n += 1
         self._name_counters[base] = n
         return f"{base}{n}"
 
@@ -197,15 +214,22 @@ class Topology:
         t = cls(data.get("name", "untitled"))
         t.manual_addressing = bool(data.get("manual_addressing", False))
         max_n = 0
+
+        def _bump(ident: str) -> None:
+            nonlocal max_n
+            for token in ident.replace("-", " ").split():
+                if token.isdigit():
+                    max_n = max(max_n, int(token))
+
         for d in data.get("devices", []):
             inst = DeviceInstance(**d)
             t.devices[inst.id] = inst
-            for token in inst.id.replace("-", " ").split():
-                if token.isdigit():
-                    max_n = max(max_n, int(token))
+            _bump(inst.id)
         for l in data.get("links", []):
             link = Link(**l)
             t.links[link.id] = link
+            _bump(link.id)                       # links share the id counter — MUST count them too,
+            #                                      else new ids collide with existing links on load
         t._ids = itertools.count(max_n + 1)
         return t
 
