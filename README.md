@@ -1,13 +1,14 @@
 # GINI — gBuilder 6.0
 
-**A visual lab for computer networks *and* cloud computing — draw a system, press Run, and it comes to life as real containers you can inspect, drive, and observe.**
+**A visual lab for computer networks, cloud computing, *and* operating systems — draw a system, press Run, and it comes to life as real containers (and a real xv6 kernel) you can inspect, drive, and observe.**
 
 💬 **Join the community:** [GINI Discord](https://discord.gg/s5zTAgdKQd) — questions, help, and discussion.
 
 GINI lets students and instructors build a topology on a canvas, then launches it as
 honest, running infrastructure on Docker: a real C router that actually forwards packets,
 a real OpenFlow controller programming a real switch, and real cloud services (databases,
-object stores, message queues, dashboards) discoverable by name. A built-in AI tutor —
+object stores, message queues, dashboards) discoverable by name — plus a real **xv6** operating-system
+kernel you can watch and extend in a visual **Machine Lab**. A built-in AI tutor —
 **GINI** — explains what's on the canvas, animates how packets flow, and can scaffold
 whole working systems from a one-line description.
 
@@ -15,8 +16,10 @@ It's designed to anchor three courses:
 
 - **Computer Networks** — switches, routers, subnets, firewalls, and real OpenFlow SDN.
 - **Cloud Computing** — VPC-style networking, managed services, autoscaling, observability.
-- **Operating Systems** — containers as live namespaces/cgroups, plus a hackable ~20k-line
-  C network stack you can read and extend.
+- **Operating Systems** — a real **xv6** (RISC-V) kernel in a visual **Machine Lab**: watch the
+  scheduler, system calls, traps, virtual memory, and the file system live, then extend the kernel
+  yourself with **shadows** — a novel way to drop your own code into a *running* xv6 machine to
+  experiment (fix the scheduler, add a syscall) without forking the kernel.
 
 > gBuilder 6.0 is the modern rewrite of the classic GINI Toolkit. The original
 > Python 2.7 / PyQt4 / SCons app lives under `legacy/` for reference.
@@ -40,6 +43,10 @@ It's designed to anchor three courses:
 - **Live observability** — drop *Metrics* + *Dashboards* and GINI auto-wires
   cAdvisor → Prometheus → Grafana with a prebuilt dashboard. Generate load and watch the
   graphs move.
+- **A real OS to hack** — a genuine **xv6** kernel in a visual **Machine Lab** (scheduler, system
+  calls, traps, virtual memory, file system — all live over the serial, no gdb), plus **shadows**:
+  drop your own code into a running xv6 machine for experiments and graded assignments, no kernel
+  fork required.
 - **GINI AI** — an in-app tutor with **Explain**, **Tutor**, and **Wizard** modes. Ask it
   to explain a device, trace a path, or describe a system you want and it lays out a
   working blueprint. Runs against a local LLM (Ollama) or fully offline.
@@ -48,9 +55,11 @@ It's designed to anchor three courses:
 
 ## Requirements
 
-- **Python 3.10+** (3.12 recommended)
-- A **container runtime** — Docker, or **Colima** on macOS (`gini-setup` can install it) — needed to
-  *Run* topologies. You can explore fully in **Demo mode** without one.
+- **Python 3.10+** (3.12 recommended). The Qt 6 GUI — **PySide6** plus **QtWebEngine** (for the
+  embedded Desktop / OS-Zoo screens) — installs **automatically** as a dependency; you never install
+  Qt separately, whichever install route you pick.
+- A **container runtime** — Docker, or **Colima**/**Podman** (`gini-setup` detects it and can help
+  install it) — needed to *Run* topologies. You can explore fully in **Demo mode** without one.
 - Works on **macOS, Linux, and Windows**. *Optional:* a local **[Ollama](https://ollama.com)** model
   for richer GINI AI answers.
 
@@ -58,17 +67,37 @@ It's designed to anchor three courses:
 
 ## Install
 
-Three steps:
+There are **two ways to install, both fully supported** — pick one (don't mix the two; see
+Troubleshooting). Either way the Qt GUI (PySide6 + QtWebEngine) is pulled in automatically.
+
+### 1. From source — the latest code
+
+Recommended if you want the newest features, plan to build the xv6 kernel image yourself, or want to
+contribute. You track `main`, so you always have the freshest bits.
 
 ```bash
-pipx install gini-toolkit     # the app (isolated). `pip install gini-toolkit` also works.
+# in your clone of the repo:
+cd frontend-ng
+pip install -e .              # editable install; PySide6 + QtWebEngine come with it
 gini-setup                    # brings in the container runtime + images (one time)
 gbuilder                      # launch
 ```
 
-`gbuilder` opens immediately — build, save, and explore topologies, with the AI tutor and everything
-in **Demo mode** working right away. Live **Run** (real containers) lights up once `gini-setup`
-finishes. After a later `pipx upgrade gini-toolkit`, re-run `gini-setup --update` to refresh images.
+### 2. Pre-compiled package — the simplest, most stable
+
+The hands-off route. It may be a version or two behind `main`, but it's the more stable, "just
+install and go" option — good for students and classroom setups.
+
+```bash
+pipx install gini-toolkit     # the app, isolated. `pip install gini-toolkit` also works.
+gini-setup                    # brings in the container runtime + images (one time)
+gbuilder                      # launch
+```
+
+Either way, `gbuilder` opens immediately — build, save, and explore topologies, with the AI tutor and
+everything in **Demo mode** working right away. Live **Run** (real containers) lights up once
+`gini-setup` finishes. After upgrading (`git pull` for source, or `pipx upgrade gini-toolkit` for the
+package), re-run `gini-setup --update` to refresh images.
 
 > No `pipx`? Install it once (`brew install pipx` on macOS, or `pip install pipx`), or use
 > `pip install gini-toolkit` inside a virtual environment.
@@ -114,15 +143,15 @@ Demo mode works fully.)
 </details>
 
 <details>
-<summary><b>Run from source (development)</b></summary>
+<summary><b>Dev tools & building images locally</b></summary>
 
 ```bash
-# from a clone of the repo:
-cd frontend-ng
-pip install -e ".[dev]"            # editable — your source stays live
-gbuilder
-# build images locally instead of pulling from the registry:
-cd .. && docker build -t gini-xv6:latest backend/xv6      # + oszoo / grouter / pox
+# extra dev tooling (tests, linters) on top of the source install:
+cd frontend-ng && pip install -e ".[dev]"
+
+# build the container images yourself instead of pulling them
+# (needed to hack the xv6 kernel via shadows):
+docker build -t gini-xv6:latest backend/xv6      # + oszoo / grouter / pox
 ```
 
 Point the app at a different image registry with `GINI_REGISTRY=ghcr.io/<owner>`.

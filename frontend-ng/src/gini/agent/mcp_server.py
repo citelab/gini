@@ -3,7 +3,7 @@
 The tool *behavior* lives in one place — `tools.registry` — and is shared with the
 in-app agent loop. Here we publish those same tools over MCP with explicit signatures
 (so clients get correct schemas), each delegating to `registry.execute`. Install the
-optional dep with: pip install gini-gbuilder[agent].
+optional dep with: pip install gini-toolkit[agent].
 
 Run standalone:  python -m gini.agent.mcp_server
 """
@@ -20,10 +20,10 @@ def build_server(api: GiniAPI, registry: ToolRegistry | None = None):
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as e:  # pragma: no cover
-        raise RuntimeError("MCP server needs 'mcp'. Install: pip install gini-gbuilder[agent]") from e
+        raise RuntimeError("MCP server needs 'mcp'. Install: pip install gini-toolkit[agent]") from e
 
     reg = registry or build_registry(api)
-    server = FastMCP("gini-gbuilder")
+    server = FastMCP("gini-toolkit")
 
     def call(name: str, **kwargs) -> str:
         return json.dumps(reg.execute(name, kwargs), default=str)
