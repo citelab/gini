@@ -14,6 +14,19 @@ from pathlib import Path
 
 def open_terminal(title: str, cwd: str | Path, command: str) -> tuple[bool, str]:
     cwd = str(cwd)
+    if sys.platform == "win32":
+        # Windows HAS terminals (cmd / PowerShell / Windows Terminal) — it just needs a different
+        # launcher than macOS/Linux. Prefer Windows Terminal if installed; else a classic console via
+        # `start`. `cmd /k` keeps the window open after the command so the student can keep typing;
+        # the working dir is inherited from the Popen cwd.
+        try:
+            if shutil.which("wt"):                     # Windows Terminal
+                subprocess.Popen(["wt", "-d", cwd, "cmd", "/k", command])
+            else:
+                subprocess.Popen(f'start "{title}" cmd /k "{command}"', shell=True, cwd=cwd)
+            return True, "opened Windows console"
+        except OSError as e:
+            return False, str(e)
     if sys.platform == "darwin":
         script = f'cd {_q(cwd)} && clear && echo {_q("== " + title + " ==")} && {command}'
         osa = f'tell application "Terminal" to do script "{script.replace(chr(34), chr(92) + chr(34))}"'

@@ -14,6 +14,8 @@ authors = [{ name = "GINI Toolkit" }]
 # container runtime (Docker/Colima) and images are brought in separately by the `gini-setup` command.
 dependencies = [
     "PySide6-Essentials>=6.6",   # the Qt6 desktop GUI (gini.ui + the `gbuilder` entrypoint)
+    "PySide6-Addons>=6.6",       # QtWebEngine — embeds headful Desktops / OS-Zoo screens (else the
+    #                              system browser). Bundled so one install pulls it in automatically.
     "PyYAML>=6.0",               # reads authored Lesson packs (Missions / Teaching Center)
 ]
 

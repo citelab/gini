@@ -26,9 +26,12 @@ A PyPI version can be uploaded **only once, ever** — always bump the version.
 ```bash
 export GHCR_USER=anrl
 export GHCR_TOKEN=ghp_...your-PAT...             # PAT with write:packages
-scripts/push-images.sh 6.0.0                     # builds + pushes gini-xv6/oszoo/grouter/pox
-scripts/push-images.sh 6.0.0 --no-build          # reuse local images (skip the rebuild)
+scripts/push-images.sh 6.0.0                     # multi-arch (amd64+arm64) build + push, all 4 images
 ```
+
+Images are built **multi-architecture** (amd64 + arm64) via `docker buildx`, so an x86 machine and an
+Apple-Silicon machine both pull the right variant. Cross-building is slow (QEMU emulates the other
+CPU). Override targets with `GINI_PLATFORMS=linux/arm64` if you only need one.
 
 ## 3. Make the packages public — ONE TIME
 
