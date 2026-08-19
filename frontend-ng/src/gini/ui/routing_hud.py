@@ -18,6 +18,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from ..domain.routing_model import collect_router_data, forwarding_tree
+from .glass import apply_glass, paint_glass_panel
 
 _NODE_R = 16
 _LONGPRESS_MS = 380
@@ -34,6 +35,7 @@ class RoutingHud(QWidget):
         self._table_rid = None                      # tapped router whose table is shown
         self.resize(360, 300)
         self.setMouseTracking(True)
+        apply_glass(self)
         self._press_rid = None
         self._lp = QTimer(self); self._lp.setSingleShot(True)
         self._lp.timeout.connect(self._fire_longpress)
@@ -81,12 +83,7 @@ class RoutingHud(QWidget):
         t = self.theme.theme
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        # glass panel
-        glass = QColor(t.panel); glass.setAlpha(232)
-        p.setBrush(glass); p.setPen(QColor(t.line))
-        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
-        p.setPen(QColor(t.muted)); p.setFont(QFont(self.font().family(), 9, QFont.Bold))
-        p.drawText(12, 8, self.width() - 24, 16, Qt.AlignLeft, "ROUTING")
+        paint_glass_panel(p, self.rect(), self.theme, "ROUTING")
         if not self._model:
             p.setPen(QColor(t.faint))
             p.drawText(self.rect(), Qt.AlignCenter, "— no routers running —")

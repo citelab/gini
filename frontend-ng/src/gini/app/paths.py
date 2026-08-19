@@ -107,6 +107,7 @@ PERSISTED_KEYS = (
     "llm_enabled", "llm_url", "llm_model", "llm_think",
     "auto_internet", "name_prefixes", "prices", "autobuild_images",
     "connector_style",                  # bent ↔ straight, toggled from the toolbar
+    "flow_hud_window_s",                # Flow HUD scrolling window (seconds)
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
     "show_help_on_launch",
     "tc_url", "tc_course", "tc_student", "tc_token",   # Teaching Center enrolment

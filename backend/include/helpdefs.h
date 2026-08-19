@@ -17,7 +17,7 @@
 #define USAGE_EXIT          "exit"
 #define USAGE_QUEUE   	    "queue action [action specific options]"
 #define USAGE_QDISC			"qdisc qname tspec"
-#define USAGE_SPOLICY		"spolicy action [action specific options]"
+#define USAGE_SPOLICY		"spolicy show | spolicy set rr|drr"
 #define USAGE_CLASS		    "class cname [-src ip_spec [<min_port--max_port>]] [-dst ip_spec [<min_port--max_port>]] [-prot num] [-tos tos_spec]"
 #define USAGE_FILTER     	"filter action [action specific options]"
 #define USAGE_OPENFLOW      "openflow action [action specific options]"

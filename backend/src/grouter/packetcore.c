@@ -202,11 +202,15 @@ void printQueueStats(pktcore_t *pcore)
 	keylst = map_keys(pcore->queues);
 	klster = lister_create(keylst);
 
-	printf("NOT YET IMPLEMENTED \n");
-	while (nxtkey = ((char *)lister_next(klster)))
+	printf("Scheduling policy: %s\n", (rconfig.schedpolicy == GR_SCHED_DRR) ? "drr" : "rr");
+	printf("%-12s %-9s %7s %8s %11s %11s %12s\n",
+	       "queue", "qdisc", "weight", "cursize", "fwd(pkts)", "drop(pkts)", "fwd(bytes)");
+	while ((nxtkey = ((char *)lister_next(klster))))
 	{
 		nextq = map_get(pcore->queues, nxtkey);
-		printf("Stats for %s \n", nxtkey);
+		printf("%-12s %-9s %7.1f %8d %11ld %11ld %12ld\n",
+		       nextq->name, nextq->qdisc, nextq->weight, nextq->cursize,
+		       nextq->pkts_out, nextq->pkts_drop, nextq->bytes_out);
 	}
 	lister_release(klster);
 	list_release(keylst);
@@ -276,6 +280,21 @@ void modifyQueueDiscipline(pktcore_t *pcore, char *qname, char *qdisc)
 		{
 			nextq = map_get(pcore->queues, nxtkey);
 			strcpy(nextq->qdisc, qdisc);
+			// switching a live queue to RED must set up its RED state, exactly as
+			// addPktCoreQueue does at creation, or redDiscard sees zeroed thresholds.
+			if (!strcmp(qdisc, "red"))
+			{
+				qentrytype_t *qentry = getqdiscEntry(pcore->qdiscs, "red");
+				if (qentry != NULL)
+				{
+					nextq->maxval = nextq->maxsize * qentry->maxval;
+					nextq->minval = nextq->maxsize * qentry->minval;
+					nextq->pmaxval = qentry->pmaxval;
+					nextq->avgqsize = 0;
+					nextq->count = -1;
+					nextq->idlestart = 0;
+				}
+			}
 		}
 	}
 	lister_release(klster);
@@ -323,7 +342,7 @@ pthread_t PktCoreSchedulerInit(pktcore_t *pcore)
 	int threadstat;
 	pthread_t threadid;
 
-	threadstat = pthread_create((pthread_t *)&threadid, NULL, (void *)roundRobinScheduler, (void *)pcore);
+	threadstat = pthread_create((pthread_t *)&threadid, NULL, (void *)packetScheduler, (void *)pcore);
 	if (threadstat != 0)
 	{
 		verbose(1, "[PKTCoreSchedulerInit]:: unable to create thread.. ");
@@ -511,6 +530,7 @@ static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 		if (thisq->cursize >= thisq->maxsize)
 		{
 			verbose(2, "[enqueuePacket]:: Packet dropped.. Queue for [%s] is full.. cursize %d..  ", qkey, thisq->cursize);
+			thisq->pkts_drop++; thisq->bytes_drop += gpktByteLen(in_pkt);
 			free(in_pkt);
 			pthread_mutex_unlock(&(pcore->qlock));
 			return EXIT_FAILURE;
@@ -519,12 +539,14 @@ static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 		if ( (!strcmp(thisq->qdisc, "red")) && (redDiscard(thisq, in_pkt)) )
 		{
 			verbose(2, "[enqueuePacket]:: RED Discarded Packet .. ");
+			thisq->pkts_drop++; thisq->bytes_drop += gpktByteLen(in_pkt);
 			free(in_pkt);
 			pthread_mutex_unlock(&(pcore->qlock));
 			return EXIT_FAILURE;
 		}
 
 		pcore->packetcnt++;
+		thisq->pkts_in++; thisq->bytes_in += gpktByteLen(in_pkt);
 		if (pcore->packetcnt == 1)
 			pthread_cond_signal(&(pcore->schwaiting)); // wake up scheduler if it was waiting..
 		pthread_mutex_unlock(&(pcore->qlock));

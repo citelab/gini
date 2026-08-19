@@ -42,10 +42,14 @@ typedef struct _simplequeue_t
 	// following parameters are useful for scheduling algorithms
 	double weight;
 	double stime, ftime;
+	double deficit;                 // DRR deficit counter (bytes)
 	// following parameters are useful for RED
 	double minval, maxval, pmaxval;
 	double avgqsize, idlestart;
 	int count;
+	// per-queue statistics: packets/bytes forwarded (out), enqueued (in), and dropped
+	long pkts_in, pkts_out, pkts_drop;
+	long bytes_in, bytes_out, bytes_drop;
 } simplequeue_t;
 
 

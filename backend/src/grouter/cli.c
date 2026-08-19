@@ -1541,13 +1541,43 @@ void qdiscCmd()
 
 /*
  * spolicy show
+ * spolicy set rr|drr
  */
 void spolicyCmd()
 {
     char *next_tok = strtok(NULL, " \n");
 
+    if (next_tok == NULL)
+    {
+        printf("Usage: spolicy show | spolicy set rr|drr\n");
+        return;
+    }
     if (!strcmp(next_tok, "show"))
-        printf("Scheduling policy: rr (round robin)\n");
+    {
+        printf("Scheduling policy: %s\n",
+               (rconfig.schedpolicy == GR_SCHED_DRR) ? "drr (deficit round robin)"
+                                                  : "rr (round robin)");
+    }
+    else if (!strcmp(next_tok, "set"))
+    {
+        next_tok = strtok(NULL, " \n");
+        if (next_tok == NULL)
+            printf("Usage: spolicy set rr|drr\n");
+        else if (!strcmp(next_tok, "rr"))
+        {
+            rconfig.schedpolicy = GR_SCHED_RR;
+            printf("Scheduling policy set to rr (round robin)\n");
+        }
+        else if (!strcmp(next_tok, "drr"))
+        {
+            rconfig.schedpolicy = GR_SCHED_DRR;
+            printf("Scheduling policy set to drr (deficit round robin)\n");
+        }
+        else
+            printf("Unknown policy '%s'. Use rr or drr.\n", next_tok);
+    }
+    else
+        printf("Usage: spolicy show | spolicy set rr|drr\n");
 }
 
 void openflowCmd()

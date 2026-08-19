@@ -99,7 +99,13 @@ typedef struct _router_config
 	pthread_t openflow_flowtable_timeout;
 	pthread_t control_plane;            /* B2: control-plane module thread */
 	int schedcycle;
+	int schedpolicy;                    /* scheduling policy: GR_SCHED_RR (default) or GR_SCHED_DRR */
 } router_config;
+
+/* Packet scheduling policies (rconfig.schedpolicy). Named GR_* to avoid colliding
+ * with POSIX SCHED_RR / SCHED_FIFO from <sched.h>. */
+#define GR_SCHED_RR   0     /* round robin: one packet per non-empty queue, in turn */
+#define GR_SCHED_DRR  1     /* deficit round robin: byte share per queue, by weight */
 
 
 // function prototypes for code in utils.c..

@@ -67,6 +67,7 @@ class Settings:
     connector_style: str = "orthogonal"   # "orthogonal" (bent, rounded) | "straight"
     snap_to_grid: bool = True
     show_minimap: bool = True
+    flow_hud_window_s: int = 60            # Flow HUD: seconds of cwnd history shown (scrolling)
     autosave: bool = False
     server: str = "localhost"
     remote_port: int = 10000

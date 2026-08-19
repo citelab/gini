@@ -1283,7 +1283,7 @@ class RuntimeCompiler:
                 cand = [c for c in seg_routers.get(seg, []) if c in dist and c != did]
                 if not cand:
                     continue                                   # unreachable from here
-                best = min(cand, key=lambda c: dist[c])
+                best = min(cand, key=lambda c: (dist[c], str(c)))
                 nh = firsthop[best]
                 if nh is None:
                     continue
@@ -1308,7 +1308,7 @@ class RuntimeCompiler:
                     cand = [c for c in seg_routers.get(bseg, []) if c in dist and c != did]
                     if not cand:
                         continue
-                    nh = firsthop[min(cand, key=lambda c: dist[c])]
+                    nh = firsthop[min(cand, key=lambda c: (dist[c], str(c)))]
                     if nh is None:
                         continue
                     shared = adj[did][nh]
@@ -1327,7 +1327,7 @@ class RuntimeCompiler:
                     cand = [c for c in seg_routers.get(gw_seg, [])
                             if c in dist and c != did]
                     if cand:
-                        best = min(cand, key=lambda c: dist[c])
+                        best = min(cand, key=lambda c: (dist[c], str(c)))
                         nh = firsthop[best]
                         if nh is not None:
                             shared = adj[did][nh]
@@ -1834,7 +1834,8 @@ def address_map(topo: Topology) -> dict[str, dict]:
              "link_id": itf.link_id}
             for i, itf in enumerate(m.ifaces)]}
     for r in cfg.routers:
-        out[r.name] = {"role": "router", "interfaces": [
+        out[r.name] = {"role": "router", "routes": list(getattr(r, "routes", []) or []),
+                       "interfaces": [
             {"name": f"eth{i}", "ip": itf.ip, "mac": itf.mac, "subnet": subnet(itf.ip),
              "gateway": None, "peer": itf.ep.peer.device, "link_id": itf.link_id}
             for i, itf in enumerate(r.ifaces)]}
