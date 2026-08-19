@@ -17,11 +17,13 @@ from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from ..domain.routing_model import collect_router_data, forwarding_tree
+from ..domain.routing_model import RouteHistory, collect_router_data, forwarding_tree
 from .glass import apply_glass, paint_glass_panel
 
 _NODE_R = 16
 _LONGPRESS_MS = 380
+_TL_H = 22                  # timeline strip height (bottom of the panel)
+_LIVE_W = 44                # width of the LIVE chip at the timeline's right end
 
 
 class RoutingHud(QWidget):
@@ -39,6 +41,55 @@ class RoutingHud(QWidget):
         self._press_rid = None
         self._lp = QTimer(self); self._lp.setSingleShot(True)
         self._lp.timeout.connect(self._fire_longpress)
+        # P4 convergence replay: scrub through recorded routing states
+        self._history: RouteHistory | None = None
+        self._scrub_t: float | None = None          # None = live; else the replayed instant
+        self._scrub_drag = False
+
+    # -- P4: replay state --------------------------------------------------- #
+    @property
+    def scrubbing(self) -> bool:
+        return self._scrub_t is not None
+
+    def set_history(self, history: RouteHistory) -> None:
+        """Called by the controller after each poll. While scrubbing, the recording keeps
+        growing underneath but the displayed (historical) model is left alone."""
+        self._history = history
+        self.update()                               # the timeline's live edge advanced
+
+    def _timeline_rect(self):
+        from PySide6.QtCore import QRectF
+        return QRectF(12, self.height() - _TL_H - 6, self.width() - 24 - _LIVE_W, _TL_H)
+
+    def _live_rect(self):
+        from PySide6.QtCore import QRectF
+        return QRectF(self.width() - _LIVE_W - 8, self.height() - _TL_H - 6, _LIVE_W, _TL_H)
+
+    def _t_at_x(self, x: float) -> float:
+        tl = self._timeline_rect()
+        h = self._history
+        span = (h.t_end - h.t_start) or 1.0
+        frac = min(1.0, max(0.0, (x - tl.left()) / (tl.width() or 1.0)))
+        return h.t_start + frac * span
+
+    def _scrub_to(self, t: float) -> None:
+        """Show the routing state that was in force at time t (near the live edge → live)."""
+        h = self._history
+        if h is None or len(h) == 0:
+            return
+        if t >= h.t_end - 0.5 or (h.t_end - h.t_start) <= 0.5:
+            self.go_live()
+            return
+        self._scrub_t = t
+        m = h.at(t)
+        if m is not None:
+            self.set_model(m)                       # re-traces the SPT root against THAT state
+
+    def go_live(self) -> None:
+        self._scrub_t = None
+        if self._history is not None and self._history.latest() is not None:
+            self.set_model(self._history.latest())
+        self.update()
 
     # -- data -------------------------------------------------------------- #
     def set_model(self, model, positions=None) -> None:
@@ -62,7 +113,8 @@ class RoutingHud(QWidget):
             return {}
         rids = list(self._model.routers)
         m = 30
-        w, h = self.width() - 2 * m, self.height() - 2 * m
+        bot = m + (_TL_H if (self._history is not None and len(self._history) > 0) else 0)
+        w, h = self.width() - 2 * m, self.height() - m - bot
         pts = {r: self._positions[r] for r in rids if r in self._positions}
         if len(pts) < len(rids) or not pts:          # missing positions → circle layout fallback
             n = max(len(rids), 1)
@@ -125,6 +177,51 @@ class RoutingHud(QWidget):
         # tapped router's table card
         if self._table_rid in self._model.routers and self._table_rid in fit:
             self._paint_table(p, fit[self._table_rid], self._model.routers[self._table_rid])
+        # P4: convergence timeline (scrub bar) along the bottom
+        if self._history is not None and len(self._history) > 0:
+            self._paint_timeline(p)
+
+    def _paint_timeline(self, p) -> None:
+        t = self.theme.theme
+        h = self._history
+        tl = self._timeline_rect()
+        cy = tl.center().y()
+        span = (h.t_end - h.t_start) or 1.0
+
+        def X(tt):
+            return tl.left() + min(1.0, max(0.0, (tt - h.t_start) / span)) * tl.width()
+
+        # track
+        p.setPen(QPen(QColor(t.line), 2))
+        p.drawLine(int(tl.left()), int(cy), int(tl.right()), int(cy))
+        # change-point ticks: each recorded snapshot = the moment the routing state changed
+        p.setPen(QPen(QColor(t.accent), 2))
+        for ct in h.change_times():
+            xx = int(X(ct))
+            p.drawLine(xx, int(cy) - 5, xx, int(cy) + 5)
+        # playhead: at the scrub instant, or the live edge
+        cur = self._scrub_t if self._scrub_t is not None else h.t_end
+        px = int(X(cur))
+        knob = QColor(t.accent_for("amber")) if self.scrubbing else QColor(t.accent)
+        p.setBrush(knob); p.setPen(QPen(knob, 1))
+        p.drawEllipse(QPointF(px, cy), 5, 5)
+        # LIVE chip (click to snap back) / replay badge
+        lr = self._live_rect()
+        p.setFont(QFont(self.font().family(), 8, QFont.Bold))
+        if self.scrubbing:
+            p.setBrush(QColor(0, 0, 0, 0)); p.setPen(QColor(t.line))
+            p.drawRoundedRect(lr, 8, 8)
+            p.setPen(QColor(t.muted))
+            p.drawText(lr, Qt.AlignCenter, "LIVE")
+            back = h.t_end - cur
+            p.setPen(QColor(t.accent_for("amber")))
+            p.drawText(int(tl.left()), int(tl.top()) - 12, int(tl.width()), 12,
+                       Qt.AlignLeft, f"replay  ·  t−{back:.0f}s")
+        else:
+            p.setBrush(QColor(0, 0, 0, 0)); p.setPen(QColor(t.accent))
+            p.drawRoundedRect(lr, 8, 8)
+            p.setPen(QColor(t.accent))
+            p.drawText(lr, Qt.AlignCenter, "● LIVE")
 
     def _paint_table(self, p, near: QPointF, node) -> None:
         t = self.theme.theme
@@ -152,13 +249,31 @@ class RoutingHud(QWidget):
         return None
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
-        self._press_rid = self._hit(e.position() if hasattr(e, "position") else e.pos())
+        pos = e.position() if hasattr(e, "position") else e.pos()
+        # P4 replay controls first: the LIVE chip and the scrub timeline
+        if self._history is not None and len(self._history) > 0:
+            if self._live_rect().contains(pos):
+                self.go_live()
+                return
+            if self._timeline_rect().contains(pos):
+                self._scrub_drag = True
+                self._scrub_to(self._t_at_x(pos.x()))
+                return
+        self._press_rid = self._hit(pos)
         if self._press_rid is not None:
             self._lp.start(_LONGPRESS_MS)
         else:                                         # tap empty space → clear the highlight + table
             self.clear_highlight()
 
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if self._scrub_drag:
+            pos = e.position() if hasattr(e, "position") else e.pos()
+            self._scrub_to(self._t_at_x(pos.x()))
+
     def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
+        if self._scrub_drag:                          # let go of the scrubber → stay paused there
+            self._scrub_drag = False
+            return
         if self._lp.isActive():                       # released before long-press fired → a tap
             self._lp.stop()
             if self._press_rid is not None:
@@ -209,9 +324,19 @@ class RoutingHudController(QObject):
         self._delay_prop = delay_prop
         self._positions_of = positions_of
         self._busy = False
-        self.model_ready.connect(lambda m, p: self.hud.set_model(m, p))
+        self.history = RouteHistory()               # P4: convergence recording for the scrub
+        self.model_ready.connect(self._on_model)
         self._poll = QTimer(self); self._poll.timeout.connect(self.refresh)
         self._interval = interval_ms
+
+    def _on_model(self, model, positions) -> None:
+        import time
+        self.history.push(model, time.monotonic())
+        self.hud.set_history(self.history)          # timeline live-edge / new change ticks
+        if not self.hud.scrubbing:                  # don't yank a replay back to live
+            self.hud.set_model(model, positions)
+        else:
+            self.hud._positions = dict(positions)   # keep layout fresh for when we resume
 
     def _build(self):
         """Assemble the live model (blocking CLI reads — call off the GUI thread)."""
@@ -244,4 +369,5 @@ class RoutingHudController(QObject):
 
     def close(self) -> None:
         self._poll.stop()
+        self.hud._scrub_t = None                    # reopen live (history survives the session)
         self.hud.hide()

@@ -21,6 +21,7 @@ class EventBus(QObject):
     device_changed = Signal(str)      # device id (properties/position)
     device_resized = Signal(str)      # device id (size tier changed -> maybe live CPU update)
     link_added = Signal(str)          # link id
+    link_removed = Signal(str)        # link id
     selection_changed = Signal(object)  # device id or None
     canvas_background_clicked = Signal()  # left-click on empty canvas (exit sticky modes)
     llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
@@ -30,6 +31,7 @@ class EventBus(QObject):
     log = Signal(str, str)            # level, message
     assistant_message = Signal(str, str)  # role, text
     run_state = Signal(bool, str)     # ok, message (from the orchestrator worker thread)
+    mem_metrics = Signal(object)      # {"stats": {svc:{mem_used,..}}, "vm": mib, "t": s} — memory watchdog
     device_activated = Signal(str)    # device id (double-clicked -> open terminal/console)
     machine_events = Signal(str)      # xv6 device id — new teachable kernel events (proactive Coach)
     device_delete_requested = Signal(str)  # device id (right-click -> Delete)
@@ -314,6 +316,11 @@ class AppContext:
         if self.selected_id == device_id:
             self.select(None)
         self.bus.device_removed.emit(device_id)
+        self.bus.topology_changed.emit()
+
+    def remove_link(self, link_id: str) -> None:
+        self.topology.remove_link(link_id)
+        self.bus.link_removed.emit(link_id)
         self.bus.topology_changed.emit()
 
     def clear_topology(self) -> int:

@@ -1768,6 +1768,20 @@ def validate(topo: Topology) -> list[dict]:
         issues.append({"level": "warn", "device": name[did],
                        "message": f"{name[did]} isn't connected to anything."})
 
+    # 1b. two machines wired directly to each other. Not illegal — it is a valid
+    #     point-to-point segment and GINI will address it — but stations normally join a
+    #     LAN through a switch, so flag it as a teaching hint (advisory, never a block).
+    for l in topo.links.values():
+        if getattr(l, "kind", "link") == "attach":
+            continue                          # a Source/Sink rider, not a network cable
+        if role.get(l.source_id) == "machine" and role.get(l.target_id) == "machine":
+            issues.append({"level": "warn", "device": name.get(l.source_id),
+                           "message": f"{name.get(l.source_id)} and "
+                                      f"{name.get(l.target_id)} are wired directly — "
+                                      f"machines usually join a LAN through a switch. A "
+                                      f"direct link is a point-to-point segment (fine, but "
+                                      f"unusual)."})
+
     # 2. machines with no gateway (no router on any of their subnets) — islands.
     #    A host on a switched/SDN L2 domain is fine without a router (it reaches its
     #    LAN at layer 2), so only warn for hosts NOT on any switch/OVS.

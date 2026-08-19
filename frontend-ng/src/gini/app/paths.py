@@ -105,6 +105,7 @@ def remember_project(path: str, *, limit: int = 8) -> None:
 PERSISTED_KEYS = (
     "theme", "reduced_motion", "text_size",
     "llm_enabled", "llm_url", "llm_model", "llm_think",
+    "twin_enabled",                     # Reasoning Twin: audit AI coverage (missions + OS coach)
     "auto_internet", "name_prefixes", "prices", "autobuild_images",
     "connector_style",                  # bent ↔ straight, toggled from the toolbar
     "flow_hud_window_s",                # Flow HUD scrolling window (seconds)

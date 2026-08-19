@@ -155,6 +155,9 @@ class Topology:
                     if l.source_id == device_id or l.target_id == device_id]:
             self.links.pop(lid, None)
 
+    def remove_link(self, link_id: str) -> None:
+        self.links.pop(link_id, None)
+
     def rename(self, device_id: str, name: str) -> None:
         d = self.devices[device_id]
         d.name = name
