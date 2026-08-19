@@ -662,11 +662,25 @@ class EdgeItem(QGraphicsObject):
         self._scene = scene
         self.link = link
         self.setZValue(1)
+        # a link is a first-class citizen: click to select, Delete/trash to remove it.
+        # The hit area is the stroked path (see shape()), not the bounding box — so
+        # clicking the empty space near a wire still deselects/box-selects as before.
+        self.setFlag(QGraphicsItem.ItemIsSelectable)
         self._path = QPainterPath()
         self._packet_t: float | None = None
         self._packet_color: QColor | None = None
         self._flow_anim: QVariantAnimation | None = None
         self.refresh()
+
+    def shape(self) -> QPainterPath:  # noqa: N802
+        """Clickable region = the wire itself, fattened to a finger-friendly ~12px."""
+        if self._path.isEmpty():
+            return QPainterPath()
+        from PySide6.QtGui import QPainterPathStroker
+        stroker = QPainterPathStroker()
+        stroker.setWidth(12)
+        stroker.setCapStyle(Qt.RoundCap)
+        return stroker.createStroke(self._path)
 
     def _is_attach(self) -> bool:
         return getattr(self.link, "kind", "link") == "attach"
@@ -730,8 +744,18 @@ class EdgeItem(QGraphicsObject):
         p.setBrush(Qt.NoBrush)                    # open path: stroke only, never fill
         if self._is_attach():
             self._paint_attach(p, t)
+            if self.isSelected():                 # selection ring for attach tethers too
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(_qcolor(t.accent), 1.6, Qt.DashLine))
+                p.drawPath(self._path)
             return
-        p.setPen(QPen(_qcolor(t.line2), 2))
+        if self.isSelected():                     # selected wire: accent + a soft halo
+            halo = _qcolor(t.accent); halo.setAlpha(60)
+            p.setPen(QPen(halo, 7))
+            p.drawPath(self._path)
+            p.setPen(QPen(_qcolor(t.accent), 2.4))
+        else:
+            p.setPen(QPen(_qcolor(t.line2), 2))
         p.drawPath(self._path)
         if self._packet_t is not None:
             pt = self._path.pointAtPercent(self._packet_t)
@@ -857,6 +881,7 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.device_added.connect(self._on_device_added)
         ctx.bus.device_removed.connect(self._on_device_removed)
         ctx.bus.link_added.connect(self._on_link_added)
+        ctx.bus.link_removed.connect(self._on_link_removed)
         ctx.bus.device_changed.connect(self._on_device_changed)
         ctx.bus.addressing_changed.connect(self._refresh_node_labels)
         ctx.bus.warnings_changed.connect(self._on_warnings)
@@ -1010,6 +1035,11 @@ class CanvasScene(QGraphicsScene):
         if m is not None and not m.allows(inst.type_key):
             self.ctx.bus.present_callout.emit(
                 device_id, f"Off-goal — not part of “{m.goal}”. Click the ✕ to remove it.")
+
+    def _on_link_removed(self, link_id: str) -> None:
+        edge = self.edges.pop(link_id, None)
+        if edge:
+            self.removeItem(edge)
 
     def _on_device_removed(self, device_id: str) -> None:
         node = self.nodes.pop(device_id, None)

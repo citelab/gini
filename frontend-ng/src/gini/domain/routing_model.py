@@ -246,6 +246,77 @@ def collect_router_data(routers, query, delay_prop, links=None):
     return assemble_model(infos, links, latency_of=latency_of)
 
 
+# -- P4: convergence recording (pure; the HUD scrub renders straight off this) ------------------ #
+def model_signature(model: RoutingModel) -> tuple:
+    """A hashable fingerprint of the network's routing state: every router's table rows
+    (plus its interface IPs). Two models with the same signature forward identically."""
+    sig = []
+    for rid in sorted(model.routers):
+        r = model.routers[rid]
+        rows = tuple(sorted((e.network, e.netmask, e.nexthop, e.iface,
+                             getattr(e, "origin", "")) for e in r.table))
+        sig.append((rid, tuple(sorted(r.ips)), rows))
+    return tuple(sig)
+
+
+class RouteHistory:
+    """A ring buffer of RoutingModel snapshots for the convergence replay.
+
+    `push(model, tnow)` records a snapshot only when the routing state CHANGED (same
+    signature → just advance the live edge), so a converged network costs one entry no
+    matter how long it sits still — and every entry is a genuine convergence event.
+    `at(t)` returns the model that was in force at time t (latest snapshot ≤ t).
+    """
+    RETAIN_S = 600.0          # keep the last 10 minutes of convergence events
+    MAXSNAPS = 300            # hard cap (each snapshot is one poll's parsed tables)
+
+    def __init__(self) -> None:
+        self.snaps: list = []          # [(t, model)] — t = when this state FIRST appeared
+        self.t_end: float = 0.0        # the live edge (last time any state was observed)
+        self._last_sig = None
+
+    def __len__(self) -> int:
+        return len(self.snaps)
+
+    @property
+    def t_start(self) -> float:
+        return self.snaps[0][0] if self.snaps else 0.0
+
+    def change_times(self) -> list:
+        return [t for t, _ in self.snaps]
+
+    def push(self, model: RoutingModel, tnow: float) -> bool:
+        """Record the state at `tnow`. Returns True if it was a CHANGE (new snapshot)."""
+        self.t_end = max(self.t_end, tnow)
+        sig = model_signature(model)
+        if sig == self._last_sig and self.snaps:
+            return False                              # unchanged — just extend the live edge
+        self._last_sig = sig
+        self.snaps.append((tnow, model))
+        cutoff = tnow - self.RETAIN_S                 # ring: drop events older than RETAIN_S,
+        while len(self.snaps) > 1 and self.snaps[0][0] < cutoff:
+            self.snaps.pop(0)                         # but always keep the oldest survivor
+        if len(self.snaps) > self.MAXSNAPS:
+            del self.snaps[:-self.MAXSNAPS]
+        return True
+
+    def at(self, t: float) -> RoutingModel | None:
+        """The model in force at time t: the latest snapshot with snap_t <= t."""
+        best = None
+        for st, m in self.snaps:
+            if st <= t:
+                best = m
+            else:
+                break
+        return best if best is not None else (self.snaps[0][1] if self.snaps else None)
+
+    def latest(self) -> RoutingModel | None:
+        return self.snaps[-1][1] if self.snaps else None
+
+    def clear(self) -> None:
+        self.snaps.clear(); self._last_sig = None; self.t_end = 0.0
+
+
 def forwarding_tree(model: RoutingModel, root: str) -> TraceResult:
     """The forwarding tree/DAG rooted at `root`, built purely from real next-hops.
 

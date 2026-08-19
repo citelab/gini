@@ -1,18 +1,19 @@
-"""The analytics strip below the Console — a live GINI $ "cloud bill".
+"""The analytics strip below the Console — a live GINI $ "cloud bill" + memory watch.
 
 Every billable element you place is a rented resource (see domain/pricing.py). While a
 lab runs, this panel accrues `rate/hr × elapsed` in GINI $ so students *feel* cloud
-pay-as-you-go. It also shows a per-category cost breakdown and resource counts. Real
-performance telemetry (latency/throughput) is deliberately left to Grafana — the
-"Open Grafana" button jumps to the running dashboard when one is on the canvas.
+pay-as-you-go. It also shows a per-category cost breakdown, resource counts, and a
+MEMORY gauge: the lab's container memory against the Docker VM's total, coloured by
+pressure, with a runaway warning when some container's memory keeps climbing (the
+early signal of the leak-then-OOM-sweep failure mode).
 """
 from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
 from ..domain.pricing import CATEGORY_ORDER
@@ -26,8 +27,6 @@ class Dashboard(QWidget):
     """Compact, short cost/analytics panel. Driven by the main window:
     `set_estimate()` on every topology change, `start()`/`stop()` on run/stop."""
 
-    open_grafana_requested = Signal()
-
     def __init__(self, theme, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme                       # ThemeManager
@@ -37,7 +36,6 @@ class Dashboard(QWidget):
         self._accrued = 0.0                      # GINI $ accrued this session
         self._running = False
         self._start: float | None = None
-        self._grafana_url: str | None = None
         self.setMaximumHeight(104)
 
         root = QHBoxLayout(self)
@@ -55,6 +53,9 @@ class Dashboard(QWidget):
         root.addLayout(self._metric(self.count_lbl, "resources"))
         self.rps_lbl = self._value("—")
         root.addLayout(self._metric(self.rps_lbl, "req/s · lab"))
+        self.mem_lbl = self._value("—")     # keeps #DashValue styling; colour via inline override
+        self.mem_lbl.setToolTip("Lab container memory / Docker VM total")
+        root.addLayout(self._metric(self.mem_lbl, "memory"))
 
         sep = QFrame(); sep.setFrameShape(QFrame.VLine); sep.setObjectName("DashSep")
         root.addWidget(sep)
@@ -74,14 +75,12 @@ class Dashboard(QWidget):
         self.bill_lbl = self._caption("● not running — projected rate")
         self.bill_lbl.setObjectName("DashState")
         right.addWidget(self.bill_lbl, alignment=Qt.AlignRight)
-        self.grafana_btn = QPushButton("Open Grafana")
-        self.grafana_btn.setObjectName("DashGrafana")
-        self.grafana_btn.setCursor(Qt.PointingHandCursor)
-        self.grafana_btn.setEnabled(False)
-        self.grafana_btn.setToolTip("Latency & throughput live in Grafana — add a "
-                                    "Dashboards element to your topology.")
-        self.grafana_btn.clicked.connect(self.open_grafana_requested.emit)
-        right.addWidget(self.grafana_btn, alignment=Qt.AlignRight)
+        # runaway-memory warning (hidden until the watchdog flags a container)
+        self.mem_warn_lbl = QLabel("")
+        self.mem_warn_lbl.setObjectName("DashMemWarn")
+        self.mem_warn_lbl.setTextFormat(Qt.RichText)
+        self.mem_warn_lbl.hide()
+        right.addWidget(self.mem_warn_lbl, alignment=Qt.AlignRight)
         root.addLayout(right)
 
         self._tick = QTimer(self)
@@ -143,9 +142,43 @@ class Dashboard(QWidget):
         self._tick.stop()
         self._render()
 
-    def set_grafana_url(self, url: str | None) -> None:
-        self._grafana_url = url
-        self.grafana_btn.setEnabled(bool(url))
+    def set_memory(self, used_mib, vm_mib, runaways=None) -> None:
+        """Fleet memory gauge + runaway warning (fed by MainWindow's memory watchdog).
+
+        used_mib: sum of all lab containers' memory; vm_mib: the Docker VM's total;
+        runaways: [Runaway] — containers whose memory keeps climbing. Pass used_mib
+        None to clear (lab stopped)."""
+        t = self.theme.theme
+        if used_mib is None:
+            self.mem_lbl.setText("—")
+            self.mem_lbl.setStyleSheet("")
+            self.mem_warn_lbl.hide()
+            return
+        if vm_mib:
+            pct = 100.0 * used_mib / vm_mib
+            self.mem_lbl.setText(f"{used_mib / 1024:.1f}/{vm_mib / 1024:.0f} GB")
+            self.mem_lbl.setToolTip(
+                f"Lab containers use {used_mib:.0f} MiB of the Docker VM's "
+                f"{vm_mib:.0f} MiB ({pct:.0f}%)")
+            col = (t.accent_for("red") if pct >= 90
+                   else t.accent_for("amber") if pct >= 75 else t.accent_for("green"))
+            self.mem_lbl.setStyleSheet(f"color: {col};")
+        else:
+            self.mem_lbl.setText(f"{used_mib / 1024:.1f} GB")
+            self.mem_lbl.setStyleSheet("")
+        if runaways:
+            r = runaways[0]
+            more = f" (+{len(runaways) - 1} more)" if len(runaways) > 1 else ""
+            self.mem_warn_lbl.setText(
+                f'<span style="color:{t.accent_for("red")};font-weight:700">'
+                f'⚠ {r.svc} memory rising ~{r.slope_mib_per_min:.0f} MiB/min{more}</span>')
+            self.mem_warn_lbl.setToolTip(
+                "Sustained memory growth — possible runaway/leak. Check the container "
+                "(its console, processes, or logs) before the VM runs out and the OOM "
+                "killer takes the lab down.")
+            self.mem_warn_lbl.show()
+        else:
+            self.mem_warn_lbl.hide()
 
     def set_fabric(self, totals: dict) -> None:
         """Lab-wide app metrics from the cloud fabric (request rate, services up)."""
@@ -156,9 +189,6 @@ class Dashboard(QWidget):
             self.rps_lbl.setToolTip(f"{up}/{tot} services up")
         else:
             self.rps_lbl.setText("—")
-
-    def grafana_url(self) -> str | None:
-        return self._grafana_url
 
     # -- internals ---------------------------------------------------------- #
     def _on_tick(self) -> None:
@@ -209,14 +239,7 @@ class Dashboard(QWidget):
                                   letter-spacing: 0.4px; text-transform: uppercase; }}
             QLabel#DashChips {{ font-size: {sp(12)}px; }}
             QLabel#DashState {{ color: {t.muted}; font-size: {sp(10)}px; }}
+            QLabel#DashMemWarn {{ font-size: {sp(11)}px; }}
             QFrame#DashSep {{ color: {t.line2}; }}
-            QPushButton#DashGrafana {{
-                background: {t.accent_soft}; color: {t.accent2};
-                border: 1px solid {t.accent2}; border-radius: 6px;
-                padding: 4px 12px; font-weight: 600; }}
-            QPushButton#DashGrafana:disabled {{
-                background: transparent; color: {t.faint};
-                border: 1px solid {t.line2}; }}
-            QPushButton#DashGrafana:hover:enabled {{ background: {t.accent2}; color: white; }}
         """)
         self._render()

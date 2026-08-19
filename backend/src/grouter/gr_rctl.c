@@ -74,6 +74,24 @@ int gr_rctl_exec(const char *line, char *out, size_t outlen)
     return n;
 }
 
+/* Send fully, without ever raising SIGPIPE. A client that vanished mid-reply (a
+ * timed-out docker exec, a killed console) used to hit plain write() -> SIGPIPE ->
+ * the DEFAULT ACTION TERMINATES THE ROUTER. MSG_NOSIGNAL turns that into an error
+ * return we handle by dropping the client; SO_SNDTIMEO (set per client) bounds a
+ * reader that stopped consuming. The data plane must never die because a CLI
+ * client misbehaved. */
+static int send_all(int fd, const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t k = send(fd, buf, len, MSG_NOSIGNAL);
+        if (k <= 0)
+            return -1;                  /* client gone / send timeout — drop it */
+        buf += k;
+        len -= (size_t)k;
+    }
+    return 0;
+}
+
 static void serve_client(int fd)
 {
     char line[4096];
@@ -87,24 +105,49 @@ static void serve_client(int fd)
             pos = 0;
             if (line[0]) {
                 gr_rctl_exec(line, out, sizeof out);
-                write(fd, out, strlen(out));
+                if (send_all(fd, out, strlen(out)) < 0)
+                    return;
             }
-            write(fd, RCTL_END, strlen(RCTL_END));
+            if (send_all(fd, RCTL_END, strlen(RCTL_END)) < 0)
+                return;
         } else {
             line[pos++] = c;
         }
     }
 }
 
+/* One detached thread per client. The old serial accept loop served a single client
+ * to EOF before accepting the next, so one open console (or one leaked one-shot
+ * query holding its connection) starved every other client forever: console dead,
+ * HUD queries empty — while the data plane forwarded happily. Command EXECUTION is
+ * still serialized by rctl_lock inside gr_rctl_exec, so concurrency here is safe. */
+static void *client_thread(void *arg)
+{
+    int fd = (int)(long)arg;
+    struct timeval rcv = { 3600, 0 };   /* reap leaked/idle clients after an hour */
+    struct timeval snd = { 10, 0 };     /* a stuck reader can't hold a thread forever */
+
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof rcv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof snd);
+    serve_client(fd);
+    close(fd);
+    return NULL;
+}
+
 static void *accept_loop(void *arg)
 {
     int srv = (int)(long)arg;
+    pthread_t ct;
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     for (;;) {
         int cl = accept(srv, NULL, NULL);
         if (cl < 0) continue;
-        serve_client(cl);
-        close(cl);
+        if (pthread_create(&ct, NULL, client_thread, (void *)(long)cl) == 0) {
+            pthread_detach(ct);
+        } else {                        /* thread spawn failed: serve inline (old way) */
+            serve_client(cl);
+            close(cl);
+        }
     }
     return NULL;
 }

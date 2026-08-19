@@ -871,7 +871,27 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if tk == MACHINE_GUI and m.get("novnc_port"):   # headful host: publish its noVNC console
             lines += ['    ports:', f'      - "{m["novnc_port"]}:6080"']
         lines += _cpu_limit_lines(m.get("cpus"))
-    return "\n".join(lines) + "\n"
+    return "\n".join(_cap_service_logs(lines)) + "\n"
+
+
+def _cap_service_logs(lines: list[str]) -> list[str]:
+    """Insert a json-file log cap into every service block (right after its `image:` or
+    `build:` line — each service has exactly one, at 4-space indent). Without caps,
+    Docker keeps EVERY log line forever; chatty containers (per-packet router logging)
+    poured unbounded logs into the VM and fed the OOM pressure that killed a lab."""
+    cap = ["    logging:",
+           "      driver: json-file",
+           '      options: {max-size: "5m", max-file: "2"}']
+    out: list[str] = []
+    capped = False          # once per service block — some services emit BOTH build: AND image:
+    for ln in lines:
+        if ln and not ln.startswith("    "):    # a new service header (or top-level key)
+            capped = False
+        out.append(ln)
+        if not capped and (ln.startswith("    image:") or ln.startswith("    build:")):
+            out.extend(cap)
+            capped = True
+    return out
 
 
 def _cpu_limit_lines(cpus) -> list[str]:
@@ -1331,6 +1351,23 @@ class Orchestrator:
                                "mem_used": _parse_mem_mib(parts[2].split("/")[0]),
                                "net_bytes": _parse_bytes(rx) + _parse_bytes(tx)}
         return out
+
+    _vm_mem_mib: float | None = None      # cached — the VM's size doesn't change mid-run
+
+    def vm_memory_mib(self) -> float | None:
+        """The Docker VM's total memory (MiB) via `docker info` — the budget every lab
+        container shares on macOS. None if the daemon is unreachable. Cached."""
+        if Orchestrator._vm_mem_mib is not None:
+            return Orchestrator._vm_mem_mib
+        try:
+            r = subprocess.run(["docker", "info", "--format", "{{.MemTotal}}"],
+                               capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and r.stdout.strip().isdigit():
+                Orchestrator._vm_mem_mib = int(r.stdout.strip()) / (1024 * 1024)
+                return Orchestrator._vm_mem_mib
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return None
 
     def runtime_available(self, name: str, workdir: str | Path | None = None) -> bool:
         """Whether the active Docker daemon has an OCI runtime registered under `name`

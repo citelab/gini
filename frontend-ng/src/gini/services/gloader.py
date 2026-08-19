@@ -102,6 +102,10 @@ class GLoader:
         """CPU/mem/net for every running container in one call (per-element Live history)."""
         return self._orch.stats_all()
 
+    def vm_memory_mib(self) -> float | None:
+        """The Docker VM's total memory (MiB) — the shared budget for the whole lab."""
+        return self._orch.vm_memory_mib()
+
     def runtime_available(self, name: str) -> bool:
         """Whether the active Docker backend has an OCI runtime (e.g. 'kata') registered."""
         return self._orch.runtime_available(name)

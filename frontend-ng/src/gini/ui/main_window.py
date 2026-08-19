@@ -145,6 +145,14 @@ class MainWindow(QMainWindow):
         self._fabric_poll.setInterval(2000)
         self._fabric_poll.timeout.connect(self._poll_fabric)
         self.ctx.bus.fabric_metrics.connect(self._on_fabric_metrics)
+        from ..domain.memwatch import MemWatch
+        self._memwatch = MemWatch()             # fleet memory gauge + runaway detection
+        self._mem_warned: set = set()           # services already flagged this run
+        self._mem_pressure_warned = False
+        self._mem_poll = QTimer(self)
+        self._mem_poll.setInterval(5000)        # docker stats is ~1-2s of work; keep it light
+        self._mem_poll.timeout.connect(self._poll_mem)
+        self.ctx.bus.mem_metrics.connect(self._on_mem_metrics)
         self._k8s_poll = QTimer(self)           # kubernetes metrics (kubectl)
         self._k8s_poll.setInterval(3000)
         self._k8s_poll.timeout.connect(self._poll_k8s)
@@ -806,7 +814,8 @@ class MainWindow(QMainWindow):
                                  "builds the table. Off = static routes are pre-installed.",
                                  self._toggle_routing_mode, checkable=True)
         self._dynroute_act.setChecked(self.ctx.topology.routing_mode == "dynamic")
-        self._delete_act = act("delete", "trash", "Delete selected device", self._delete_selected)
+        self._delete_act = act("delete", "trash", "Delete selected — device, box, or link",
+                               self._delete_selected)
         self._delete_act.setEnabled(False)
         self._rhud_act = act("rhud", "router",
                              "Routing HUD — model view of the network's routing; long-press a "
@@ -1473,7 +1482,6 @@ class MainWindow(QMainWindow):
         # analytics strip — a short "cloud bill" dashboard stacked under the Console
         from .dashboard import Dashboard
         self.dashboard = Dashboard(self.theme)
-        self.dashboard.open_grafana_requested.connect(self._open_grafana)
         dash = QDockWidget("Dashboard", self)
         dash.setObjectName("dock_dashboard")
         dash.setWidget(self.dashboard)
@@ -1970,22 +1978,22 @@ class MainWindow(QMainWindow):
                                  + (f"  ({why})" if why else ""), "warn")
             self._wire_xv6_providers()          # attach live GDB bridges to any xv6 kernels
             self._populate_overlay_hosts()      # names resolve over gini0, not the Docker bridge
-            grafana = None
             for s in getattr(self, "_last_services", []):   # surface web consoles
                 for p in s.ports:
                     if p.get("web"):
                         url = f"http://localhost:{p['host']}{p.get('path', '')}"
                         self.ctx.log(f"{s.name} ({p['label']}): {url}", "ok")
-                        if getattr(s, "type_key", None) == "dashboard":
-                            grafana = url
             # start the GINI $ meter billing the launched topology
             from ..domain.pricing import bill
             rate = bill(self.ctx.topology, self.ctx.settings.prices)["rate_per_hr"]
-            self.dashboard.set_grafana_url(grafana)
             self.dashboard.start(rate)
             self.inspector.set_live_running(True)       # enable the Live metrics plots
             self.canvas.scene_.running = True           # enable console/logs/login actions
             self._fabric_poll.start()                   # poll cloud-fabric app metrics
+            self._memwatch.clear()                      # fresh memory history per run
+            self._mem_warned.clear()
+            self._mem_poll.start()                      # fleet memory gauge + runaway watch
+            self._preflight_vm_memory()                 # warn early if the VM looks small
             from PySide6.QtCore import QTimer
             QTimer.singleShot(6000, self._drive_loadgens)   # let Fortio boot, then load
             QTimer.singleShot(2000, self._log_startup_times)  # VM-vs-container startup signal
@@ -2039,7 +2047,8 @@ class MainWindow(QMainWindow):
                 self._poll.stop()
                 self._set_runtime_status("idle")
                 self.dashboard.stop()           # freeze the session's GINI $ bill
-                self.dashboard.set_grafana_url(None)
+                self._mem_poll.stop()
+                self.dashboard.set_memory(None, None)
                 # Devices on a board's radio are facts about a RUNNING lab. With the
                 # lab down we no longer know anything, so stop claiming we do.
                 self.canvas.clear_live_clients()
@@ -2501,6 +2510,63 @@ class MainWindow(QMainWindow):
         self.dashboard.set_fabric(snap.get("totals", {}))
         self.inspector.set_fabric_snapshot(snap)
 
+    # -- memory watchdog (fleet gauge + runaway detection) ------------------- #
+    def _poll_mem(self) -> None:
+        if not self._running:
+            return
+        import threading
+        import time as _time
+
+        def work():
+            stats = self._gloader.stats_all()
+            if stats:
+                self.ctx.bus.mem_metrics.emit(
+                    {"stats": stats, "vm": self._gloader.vm_memory_mib(),
+                     "t": _time.monotonic()})
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_mem_metrics(self, snap) -> None:
+        self._memwatch.ingest(snap["stats"], snap["t"])
+        vm = snap.get("vm")
+        used = self._memwatch.total_mib()
+        runs = self._memwatch.runaways()
+        self.dashboard.set_memory(used, vm, runs)
+        for r in runs:                          # warn once per service per run
+            if r.svc not in self._mem_warned:
+                self._mem_warned.add(r.svc)
+                self.ctx.log(
+                    f"Memory watch: '{r.svc}' has grown {r.growth_mib:.0f} MiB in "
+                    f"{r.span_s / 60:.0f} min (~{r.slope_mib_per_min:.0f} MiB/min) — "
+                    "possible runaway. Check its console/processes before the Docker "
+                    "VM runs out and the OOM killer takes the lab down.", "warn")
+        if vm and used / vm >= 0.9 and not self._mem_pressure_warned:
+            self._mem_pressure_warned = True
+            self.ctx.log(
+                f"Memory watch: the lab is using {used / 1024:.1f} GB of the Docker "
+                f"VM's {vm / 1024:.1f} GB (>90%). Containers may be OOM-killed soon — "
+                "raise Docker Desktop memory (Settings → Resources).", "warn")
+
+    def _preflight_vm_memory(self) -> None:
+        """At Run: warn if the Docker VM looks undersized for this topology — the
+        student-facing version of the lesson from the OOM sweep."""
+        import threading
+
+        def work():
+            vm = self._gloader.vm_memory_mib()
+            if not vm:
+                return
+            from ..domain.memwatch import estimate_need_mib
+            n = len(getattr(self, "_last_services", []) or []) or \
+                len(self.ctx.topology.devices)
+            need = estimate_need_mib(n)
+            if need > vm * 0.9:
+                self.ctx.log(
+                    f"Preflight: this lab (~{n} containers, wants ~{need / 1024:.1f} GB) "
+                    f"is tight for the Docker VM's {vm / 1024:.1f} GB. If containers "
+                    "die with exit 137, raise Docker Desktop memory "
+                    "(Settings → Resources).", "warn")
+        threading.Thread(target=work, daemon=True).start()
+
     def _element_stats(self, device_name: str):
         """Live CPU%/memory sample for the Inspector's metrics plots (None if not running)."""
         if not self._running:
@@ -2536,16 +2602,6 @@ class MainWindow(QMainWindow):
                 self.ctx.log(f"{dname}: couldn't apply size live ({msg}). "
                              f"It takes effect on the next Run.", "info")
         threading.Thread(target=worker, daemon=True).start()
-
-    def _open_grafana(self) -> None:
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
-        url = self.dashboard.grafana_url()
-        if not url:
-            self.ctx.log("No Grafana running — add a Dashboards element and Run.", "info")
-            return
-        QDesktopServices.openUrl(QUrl(url))
-        self.ctx.log(f"Opening Grafana: {url}", "ok")
 
     def _on_palette_explain(self, type_key: str) -> None:
         """In explain mode, clicking a palette element explains that element TYPE."""
@@ -2597,13 +2653,17 @@ class MainWindow(QMainWindow):
         # socket — so the OVS console can run `openflow ...` to dump its flow table.
         is_router = dev is not None and _role(dev.type_key) in ("router", "ovs")
         try:
+            # `timeout 12` bounds the IN-CONTAINER client too: subprocess.run's timeout
+            # only kills the local `docker exec` — the remote grconsole would live on,
+            # blocked in recv(), holding the router's control socket (which used to
+            # wedge the serial rctl server: dead console + empty HUD queries).
             if is_router:
                 # the real C gRouter: run one CLI command over its control socket
-                cmd = ["docker", "compose", "exec", "-T", svc, "python3",
-                       "/build/grouter-build/grconsole.py", f"/run/{svc}.ctl",
-                       "--once", command]
+                cmd = ["docker", "compose", "exec", "-T", svc, "timeout", "12",
+                       "python3", "/build/grouter-build/grconsole.py",
+                       f"/run/{svc}.ctl", "--once", command]
             else:
-                cmd = ["docker", "compose", "exec", "-T", "fabric",
+                cmd = ["docker", "compose", "exec", "-T", "fabric", "timeout", "12",
                        "python", "-m", "dataplane.console", svc, command]
             r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
                                text=True, timeout=15)
@@ -3204,19 +3264,42 @@ class MainWindow(QMainWindow):
         self.canvas.addAction(a)
 
     def _update_delete_enabled(self) -> None:
-        from .canvas import GroupItem, NodeItem
-        has_sel = any(isinstance(i, (NodeItem, GroupItem))     # boxes (VPC/Subnet/Region) too
+        from .canvas import EdgeItem, GroupItem, NodeItem
+        has_sel = any(isinstance(i, (NodeItem, GroupItem, EdgeItem))   # cards, boxes, AND wires
                       for i in self.canvas.scene_.selectedItems())
         busy = self._running or getattr(self, "_stopping", False)
         self._delete_act.setEnabled(has_sel and not busy)
 
     def _delete_selected(self) -> None:
         # delete selected CARDS *and* BOXES — GroupItems (VPC/Subnet/Region) were excluded, so a
-        # selected VPC/Subnet left Delete + the trash button doing nothing.
-        from .canvas import GroupItem, NodeItem
-        ids = [i.inst.id for i in self.canvas.scene_.selectedItems()
-               if isinstance(i, (NodeItem, GroupItem))]
-        self._remove_devices(ids)
+        # selected VPC/Subnet left Delete + the trash button doing nothing. Selected WIRES
+        # (EdgeItems) delete too — a link is removable without deleting its endpoints.
+        from .canvas import EdgeItem, GroupItem, NodeItem
+        selected = self.canvas.scene_.selectedItems()
+        ids = [i.inst.id for i in selected if isinstance(i, (NodeItem, GroupItem))]
+        lids = [i.link.id for i in selected if isinstance(i, EdgeItem)]
+        self._remove_devices(ids)       # device removal prunes its links; do it first
+        self._remove_links([l for l in lids if l in self.ctx.topology.links])
+
+    def _remove_links(self, lids: list[str]) -> None:
+        if not lids:
+            return
+        if self._running or getattr(self, "_stopping", False):
+            self.ctx.log("Stop the topology before removing links.", "info")
+            return
+        names = []
+        for lid in lids:
+            link = self.ctx.topology.links.get(lid)
+            if link:
+                a = self.ctx.topology.devices.get(link.source_id)
+                b = self.ctx.topology.devices.get(link.target_id)
+                names.append(f"{a.name if a else '?'}–{b.name if b else '?'}")
+                self.ctx.remove_link(lid)
+        if names:
+            self._recompute_addressing()    # subnets/IPs shift when a segment disappears
+            self._update_status()
+            self._update_delete_enabled()
+            self.ctx.log(f"Removed link {', '.join(names)}.", "info")
 
     def _delete_device(self, device_id: str) -> None:
         self._remove_devices([device_id])

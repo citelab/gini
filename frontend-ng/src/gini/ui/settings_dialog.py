@@ -106,8 +106,14 @@ class SettingsDialog(QDialog):
         self.llm_think = QCheckBox("Reasoning ('thinking') model")
         self.llm_think.setChecked(settings.llm_think)
         aif.addRow("", self.llm_think)
+        self.twin_enabled = QCheckBox("Reasoning Twin — audit the AI's coverage of what matters")
+        self.twin_enabled.setChecked(bool(getattr(settings, "twin_enabled", False)))
+        aif.addRow("", self.twin_enabled)
         aif.addRow("", _note("Without an LLM, GINI still builds, explains, traces paths, "
-                            "and runs Wizard recipes."))
+                            "and runs Wizard recipes.\n\n"
+                            "The Twin (missions + OS coach) checks each AI turn against GINI's "
+                            "ground truth: missed points trigger a revision, and anything still "
+                            "missing is flagged as “Also worth a look…”. Needs the LLM."))
 
         # --- Naming ------------------------------------------------------- #
         nf = _page(tabs, "Naming")
@@ -227,6 +233,7 @@ class SettingsDialog(QDialog):
             "llm_url": self.llm_url.text().strip() or "http://localhost:11434",
             "llm_model": self.llm_model.text().strip() or "llama3.1",
             "llm_think": self.llm_think.isChecked(),
+            "twin_enabled": self.twin_enabled.isChecked(),
             "name_prefixes": prefixes,
             "prices": prices,                         # was computed but dropped -> KeyError
             "show_help_on_launch": self.show_help.isChecked(),

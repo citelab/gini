@@ -211,7 +211,14 @@ void setupProgram(int ac, char *av[])
 	prog_set_url("http://www.cs.mcgill.ca/~anrl/gini/");
 	prog_set_desc("GINI router provides a user-space IP router for teaching and learning purposes.");
 
-	prog_set_verbosity_level(2);
+	/* Default verbosity 1: boot/config messages, but NOT the per-packet level-2
+	 * logging (~20 lines per forwarded packet). Under Docker the old always-on
+	 * level 2 poured unbounded json-file logs out of every router — real memory/
+	 * disk pressure on the daemon. GINI_VERBOSE=2 restores full packet tracing. */
+	{
+		const char *gv = getenv("GINI_VERBOSE");   /* stdlib via slack/std.h */
+		prog_set_verbosity_level(gv ? atol(gv) : 1);
+	}
 
 	indx = prog_opt_process(ac, av);
 
