@@ -11,6 +11,7 @@
 #include "gr_control_plane.h"
 #include "gr_modules.h"     /* gr_pkt_proto, gr_pkt_ipdst */
 #include "gr_state.h"       /* gr_route_lookup/add, gr_route_del_match */
+#include "routetable.h"     /* ROUTE_ORIGIN_DYNAMIC */
 #include "ip.h"             /* IPOutgoingPacket, IPSend2Output, ip_packet_t, MTU_tbl */
 #include "mtu.h"            /* findInterfaceIP, findAllInterfaceIPs */
 
@@ -133,7 +134,10 @@ static int svc_send_udp(int iface, const uchar *dst_mac,
 
 static void svc_route_add(const uchar *net, const uchar *mask, const uchar *nhop, int iface)
 {
-    gr_route_add((uchar *)net, (uchar *)mask, (uchar *)nhop, iface);
+    /* control-plane routes are tagged DYNAMIC: `route show` attributes them, and a
+     * flood of them can never evict the router's own connected routes */
+    gr_route_add_tagged((uchar *)net, (uchar *)mask, (uchar *)nhop, iface,
+                        ROUTE_ORIGIN_DYNAMIC);
 }
 static void svc_route_del(const uchar *net, const uchar *mask)
 {

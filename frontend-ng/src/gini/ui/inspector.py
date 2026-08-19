@@ -429,9 +429,26 @@ class Inspector(QWidget):
             return "Switches forward at Layer 2 — no IP routes."
         lines = [f"{itf['subnet']} &rarr; dev {itf['name']} (connected)"
                  for itf in addr["interfaces"]]
+        # static inter-router routes the compiler installed (so a router shows how it
+        # reaches non-adjacent subnets, not just its connected ones)
+        import ipaddress
+        for rt in addr.get("routes", []):
+            try:
+                plen = ipaddress.IPv4Network(f"0.0.0.0/{rt['mask']}").prefixlen
+            except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, KeyError, ValueError):
+                plen = None
+            if rt.get("net") == "0.0.0.0":
+                lines.append(f"default &rarr; via {rt['gw']} dev {rt['dev']}")
+            else:
+                dest = f"{rt['net']}/{plen}" if plen is not None else rt.get("net", "?")
+                lines.append(f"{dest} &rarr; via {rt['gw']} dev {rt['dev']}")
         gw = next((i["gateway"] for i in addr["interfaces"] if i.get("gateway")), None)
         if gw:
             lines.append(f"default &rarr; via {gw}")
+        if (addr["role"] == "router"
+                and getattr(self.ctx.topology, "routing_mode", "static") == "dynamic"):
+            lines.append("<i>dynamic routing — further routes come from the control-plane "
+                         "protocol at runtime (see the Routing HUD)</i>")
         return "<br>".join(lines)
 
     def _neighbors(self, name: str) -> str:

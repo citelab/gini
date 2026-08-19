@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..domain.router_modules import BASE, CUSTOM, INLINE, MODULE_BY_KEY, RouterProgram
@@ -25,6 +25,7 @@ class RouterLab(QDialog):
     routes_ready = Signal(list)  # parsed RouteEntry rows (from a worker thread)
     chain_ready = Signal(str)    # live `gpipe list` output (the deployed service chain)
     delay_ready = Signal(str)    # live `delay show` output (link-delay status)
+    qstats_ready = Signal(object)  # (policy, [QueueStat]) from `queue stats`
 
     def __init__(self, parent, theme: ThemeManager, device, program: RouterProgram,
                  on_console=None, command_fn=None, sdn=False, query_fn=None,
@@ -48,6 +49,7 @@ class RouterLab(QDialog):
         self.routes_ready.connect(self._on_routes)
         self.chain_ready.connect(self._on_chain)
         self.delay_ready.connect(self._set_delay_status)
+        self.qstats_ready.connect(self._on_qstats)
         if self.sdn:
             program.set_mode("openflow")   # an OVS is an OpenFlow switch by definition
             from ..domain.flowlog import FlowLog
@@ -121,17 +123,19 @@ class RouterLab(QDialog):
             root.addWidget(self._advanced_toggle())
             root.addWidget(self._adv_box, 1)
             root.addWidget(self._build_route_table())
+            root.addWidget(self._build_qos_panel())
         else:  # router — the full pipeline is the point
             root.addWidget(body_w, 1)
             root.addWidget(self._build_sfc_row())
             root.addWidget(self._build_delay_panel())
             root.addWidget(self._build_route_table())
+            root.addWidget(self._build_qos_panel())
             root.addWidget(foot_w)
 
         self._rebuild()
 
-        # poll the live table (flows for an OVS, routes otherwise) while open
-        refresh = self._refresh_flows if self.sdn else self._refresh_routes
+        # poll the live table (flows for an OVS, routes + queue stats otherwise) while open
+        refresh = self._refresh_flows if self.sdn else self._refresh_router_live
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(refresh)
         if query_fn is not None:
@@ -481,6 +485,140 @@ class RouterLab(QDialog):
     def _set_route_status(self, text: str) -> None:
         if hasattr(self, "route_status"):
             self.route_status.setText(text)
+
+    # Traffic & QoS (classifier + weighted queues + scheduler) --------------
+    def _refresh_router_live(self) -> None:
+        """Live poll for the router/firewall face: routes and per-queue stats."""
+        self._refresh_routes()
+        self._refresh_qstats()
+
+    def _build_qos_panel(self) -> QWidget:
+        t = self.theme.theme
+        w = QFrame(); w.setObjectName("Card")
+        w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
+                        f"border-radius:10px;}}")
+        lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
+
+        cols = ["Queue", "Qdisc", "Weight", "Backlog", "Fwd pkts", "Drop pkts",
+                "Fwd bytes", "Share"]
+        self.qos_table = QTableWidget(0, len(cols))
+        self.qos_table.setHorizontalHeaderLabels(cols)
+        self.qos_table.verticalHeader().setVisible(False)
+        self.qos_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.qos_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.qos_table.setMinimumHeight(120)
+        hh = self.qos_table.horizontalHeader()
+        for i in range(len(cols)):
+            hh.setSectionResizeMode(i, QHeaderView.Stretch if i == 0
+                                    else QHeaderView.ResizeToContents)
+
+        head = QHBoxLayout()
+        title = self._chevron("Traffic & QoS", self.qos_table, expanded=True)
+        head.addWidget(title); head.addStretch(1)
+        head.addWidget(QLabel("scheduler:"))
+        self.qos_policy = QComboBox()
+        self.qos_policy.addItem("Round robin", "rr")
+        self.qos_policy.addItem("Deficit RR (weighted)", "drr")
+        self.qos_policy.currentIndexChanged.connect(self._set_scheduler)
+        head.addWidget(self.qos_policy)
+        self.qos_status = QLabel("…"); self.qos_status.setObjectName("Muted")
+        refresh = QPushButton("  Refresh"); refresh.setIcon(icons.icon("play", t.muted, 13))
+        refresh.clicked.connect(self._refresh_qstats)
+        head.addSpacing(10); head.addWidget(self.qos_status)
+        head.addSpacing(10); head.addWidget(refresh)
+        lay.addLayout(head)
+
+        # add a class + its weighted queue in one go
+        add = QHBoxLayout()
+        self.qos_name = QLineEdit(); self.qos_name.setPlaceholderText("class (e.g. flowA)")
+        self.qos_src = QLineEdit(); self.qos_src.setPlaceholderText("source IP (e.g. 10.0.1.10)")
+        self.qos_weight = QDoubleSpinBox(); self.qos_weight.setRange(0.1, 100.0)
+        self.qos_weight.setSingleStep(1.0); self.qos_weight.setValue(1.0)
+        self.qos_weight.setPrefix("w ")
+        self.qos_qdisc = QComboBox(); self.qos_qdisc.addItems(["taildrop", "red"])
+        addbtn = QPushButton("  Add class + queue")
+        addbtn.clicked.connect(self._add_qos_class)
+        for wdg in (self.qos_name, self.qos_src, self.qos_weight, self.qos_qdisc, addbtn):
+            add.addWidget(wdg)
+        lay.addLayout(add)
+        lay.addWidget(self.qos_table)
+        return w
+
+    def _set_scheduler(self) -> None:
+        if self.command_fn is None:
+            self._set_qos_status("not running — press Run to change the scheduler")
+            return
+        pol = self.qos_policy.currentData()
+        try:
+            self.command_fn(f"spolicy set {pol}")
+            self._set_qos_status(f"scheduler set to {pol}")
+        except Exception:
+            self._set_qos_status("could not set scheduler")
+        self._refresh_qstats()
+
+    def _add_qos_class(self) -> None:
+        if self.command_fn is None:
+            self._set_qos_status("not running — press Run to add a class")
+            return
+        name = self.qos_name.text().strip()
+        src = self.qos_src.text().strip()
+        weight = self.qos_weight.value()
+        qdisc = self.qos_qdisc.currentText()
+        if not name:
+            self._set_qos_status("enter a class name")
+            return
+        try:
+            cmd = f"class add {name}"
+            if src:
+                cmd += f" -src ( -net {src} )"
+            self.command_fn(cmd)
+            if qdisc == "red":                    # RED must exist before a queue uses it
+                self.command_fn("qdisc add red -min 0.3 -max 0.8 -pmax 0.1")
+            self.command_fn(f"queue add {name} {qdisc} -weight {weight:g} -size 50")
+            self._set_qos_status(f"added class {name} (weight {weight:g}, {qdisc})")
+        except Exception:
+            self._set_qos_status("could not add class/queue")
+        self._refresh_qstats()
+
+    def _refresh_qstats(self) -> None:
+        if self.query_fn is None:
+            self._set_qos_status("not running — press Run to see live queue stats")
+            return
+        import threading
+        qf = self.query_fn
+
+        def work():
+            from ..domain.qos import parse_queue_stats
+            payload = ("", [])
+            try:
+                payload = parse_queue_stats(qf("queue stats"))
+            except Exception:
+                pass
+            self.qstats_ready.emit(payload)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_qstats(self, payload) -> None:
+        policy, rows = payload
+        if policy and hasattr(self, "qos_policy"):
+            self.qos_policy.blockSignals(True)
+            idx = self.qos_policy.findData(policy)
+            if idx >= 0:
+                self.qos_policy.setCurrentIndex(idx)
+            self.qos_policy.blockSignals(False)
+        total = sum(r.fwd_bytes for r in rows)
+        self.qos_table.setRowCount(len(rows))
+        for r, q in enumerate(rows):
+            cells = [q.name, q.qdisc, f"{q.weight:g}", str(q.backlog),
+                     str(q.fwd_pkts), str(q.drop_pkts), str(q.fwd_bytes),
+                     f"{q.share_pct(total):.0f}%"]
+            for c, val in enumerate(cells):
+                self.qos_table.setItem(r, c, QTableWidgetItem(val))
+        n = len(rows)
+        self._set_qos_status(f"{n} queue{'s' if n != 1 else ''}" if n else "no queues")
+
+    def _set_qos_status(self, text: str) -> None:
+        if hasattr(self, "qos_status"):
+            self.qos_status.setText(text)
 
     # Firewall face ---------------------------------------------------------
     def _build_firewall_panel(self) -> QWidget:

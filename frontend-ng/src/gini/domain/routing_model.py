@@ -93,6 +93,9 @@ class RoutingModel:
         self._lat: dict = {frozenset((e.a, e.b)): e.latency_ms for e in self.edges}
         # a representative IP to aim at when reaching each router
         self.dest_ip: dict = dict(dest_ip or {})
+        # routers whose target IP the CALLER pinned: the trace aims at exactly that IP.
+        # Unpinned routers let forwarding_tree try every interface and pick the nearest.
+        self.pinned_dest: set = set((dest_ip or {}).keys())
         for r in routers:
             self.dest_ip.setdefault(r.rid, next(iter(sorted(r.ips)), None))
 
@@ -244,22 +247,48 @@ def collect_router_data(routers, query, delay_prop, links=None):
 
 
 def forwarding_tree(model: RoutingModel, root: str) -> TraceResult:
-    """The forwarding tree/DAG rooted at `root`, built purely from real next-hops."""
+    """The forwarding tree/DAG rooted at `root`, built purely from real next-hops.
+
+    A router is multi-homed, so we trace toward EACH of a destination's interface IPs and
+    keep the nearest (fewest-hop) reaching branch. Aiming only at one representative IP —
+    e.g. an interface that faces a *different* neighbour — would draw a longer path than
+    forwarding actually takes and hide a direct link. Trying every interface makes a
+    directly-connected neighbour show its direct edge, so the tree renders honestly.
+    """
     res = TraceResult(root=root)
     for dest in model.routers:
         if dest == root:
             continue
-        target = model.dest_ip.get(dest)
-        if not target:
+        if dest in getattr(model, "pinned_dest", ()):     # caller pinned a specific target IP
+            t = model.dest_ip.get(dest)
+            targets = [t] if t else []
+        else:
+            targets = sorted(model.routers[dest].ips)
+            if not targets:
+                t = model.dest_ip.get(dest)
+                targets = [t] if t else []
+        if not targets:
             continue
-        edges, reaching, loop, deadend, ecmp = _trace_dest(model, root, target)
+        best = None                # (sort_key, edges, path, lat, loop, deadend, ecmp)
+        for target in targets:
+            edges, reaching, loop, deadend, ecmp = _trace_dest(model, root, target)
+            if reaching:
+                # representative branch for THIS interface: least latency, then fewest hops
+                path, lat = min(reaching, key=lambda pl: (pl[1] if pl[1] is not None else 1e18,
+                                                          len(pl[0])))
+                # choose the interface by fewest hops first (a direct link wins), then latency
+                key = (0, len(path) - 1, lat if lat is not None else 1e18)
+            else:
+                path, lat = [], None
+                key = (1, 0 if loop else 1, 0.0)          # prefer a loop over a dead-end if nothing reaches
+            cand = (key, edges, path, lat, loop, deadend, ecmp)
+            if best is None or cand[0] < best[0]:
+                best = cand
+        _key, edges, path, lat, loop, deadend, ecmp = best
         res.edges_used |= edges
         if ecmp:
             res.ecmp.add(dest)
-        if reaching:
-            # representative path = the reaching branch with the least latency, then fewest hops
-            path, lat = min(reaching, key=lambda pl: (pl[1] if pl[1] is not None else 1e18,
-                                                      len(pl[0])))
+        if path:                                          # reached via its nearest interface
             res.per_dest[dest] = PathResult(dest, "ok", len(path) - 1, lat, path)
             if loop:
                 res.loops.add(dest)                       # a loop can coexist with a reaching branch

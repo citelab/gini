@@ -67,6 +67,11 @@ class Topology:
         # when True the compiler stops auto-assigning IPs and honors each device's
         # static_ips, auto-filling any interface left blank.
         self.manual_addressing: bool = False
+        # "static": the compiler pre-installs shortest-path inter-router routes at boot.
+        # "dynamic": routers boot with CONNECTED routes only — a routing protocol (e.g. a
+        # student's RIP in the Lua control plane) owns the table. One author per table,
+        # so the two computations never fight.
+        self.routing_mode: str = "static"
         self._ids = itertools.count(1)
         self._name_counters: dict[str, int] = {}
         # per-type auto-name prefix overrides (type_key -> prefix), set from Settings;
@@ -205,6 +210,7 @@ class Topology:
         return {
             "name": self.name,
             "manual_addressing": self.manual_addressing,
+            "routing_mode": self.routing_mode,
             "devices": [asdict(d) for d in self.devices.values()],
             "links": [asdict(l) for l in self.links.values()],
         }
@@ -213,6 +219,7 @@ class Topology:
     def from_dict(cls, data: dict) -> "Topology":
         t = cls(data.get("name", "untitled"))
         t.manual_addressing = bool(data.get("manual_addressing", False))
+        t.routing_mode = data.get("routing_mode", "static") or "static"
         max_n = 0
 
         def _bump(ident: str) -> None:

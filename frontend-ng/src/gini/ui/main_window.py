@@ -800,12 +800,21 @@ class MainWindow(QMainWindow):
                                     "Manual addressing — assign IP addresses by hand",
                                     self._toggle_manual_addr, checkable=True)
         self._manual_addr_act.setChecked(self.ctx.topology.manual_addressing)
+        self._dynroute_act = act("dynroute", "dynroute",
+                                 "Dynamic routing — routers boot with connected routes only, "
+                                 "so a routing protocol (e.g. RIP in the Lua control plane) "
+                                 "builds the table. Off = static routes are pre-installed.",
+                                 self._toggle_routing_mode, checkable=True)
+        self._dynroute_act.setChecked(self.ctx.topology.routing_mode == "dynamic")
         self._delete_act = act("delete", "trash", "Delete selected device", self._delete_selected)
         self._delete_act.setEnabled(False)
         self._rhud_act = act("rhud", "router",
                              "Routing HUD — model view of the network's routing; long-press a "
                              "router for its shortest-path tree", self._toggle_routing_hud,
                              checkable=True)
+        self._fhud_act = act("fhud", "metrics",
+                             "Flow HUD — live TCP congestion windows; click a flow to plot its "
+                             "cwnd sawtooth with drops", self._toggle_flow_hud, checkable=True)
         self._run_act = act("run", "play", "Run", self._run)
         self._stop_act = act("stop", "stop", "Stop", self._stop)
         self._server_act = act("server", "cloud",
@@ -854,12 +863,12 @@ class MainWindow(QMainWindow):
         def _build_left(lay) -> None:
             lay.addWidget(tray(("new", "open", "save")))
             lay.addWidget(self._tb_spacer(6))
-            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete",
-                                "rhud")))
+            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr",
+                                "dynroute", "delete")))
             lay.addWidget(self._tb_spacer(8))
             lay.addWidget(self.run_button)                    # morphing ▶/■ power button
             lay.addWidget(self._tb_spacer(8))
-            lay.addWidget(tray(("zoom_in", "zoom_out")))
+            lay.addWidget(tray(("zoom_in", "zoom_out", "rhud", "fhud")))
             lay.addStretch(1)                                 # push the cluster left
 
         # RIGHT cluster: mode/model/activity pills · theme picker, packed to the right.
@@ -1358,6 +1367,11 @@ class MainWindow(QMainWindow):
         (long-press a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
         try:
             if checked:
+                # only one HUD at a time — turn the Flow HUD off if it is on
+                if getattr(self, "_fhud", None) is not None:
+                    self._fhud.close()
+                if hasattr(self, "_fhud_act"):
+                    self._fhud_act.setChecked(False)
                 if getattr(self, "_rhud", None) is None:
                     from .routing_hud import RoutingHudController
                     devs = self.ctx.topology.devices
@@ -1374,6 +1388,33 @@ class MainWindow(QMainWindow):
                 self._rhud.close()
         except Exception as e:
             self.ctx.bus.log.emit("error", f"Routing HUD: {e}")
+
+    def _toggle_flow_hud(self, checked: bool) -> None:
+        """Show/hide the Flow HUD — live TCP congestion windows read from `ss -tin` on the
+        stations. Click a flow chip to plot its cwnd sawtooth with drop marks. Top-right."""
+        try:
+            if checked:
+                # only one HUD at a time — turn the Routing HUD off if it is on
+                if getattr(self, "_rhud", None) is not None:
+                    self._rhud.close()
+                if hasattr(self, "_rhud_act"):
+                    self._rhud_act.setChecked(False)
+                if getattr(self, "_fhud", None) is None:
+                    from .flow_hud import FlowHudController
+                    from ..services.compiler import _role
+                    devs = self.ctx.topology.devices
+                    self._fhud = FlowHudController(
+                        self.canvas, self.theme,
+                        machines=lambda: [d.name for d in devs.values()
+                                          if _role(d.type_key) == "machine"],
+                        query=self._machine_shell,   # docker exec `ss -tin` in the station
+                        window_getter=lambda: int(
+                            getattr(self.ctx.settings, "flow_hud_window_s", 60) or 60))
+                self._fhud.show_topright()
+            elif getattr(self, "_fhud", None) is not None:
+                self._fhud.close()
+        except Exception as e:
+            self.ctx.bus.log.emit("error", f"Flow HUD: {e}")
 
     def _refresh_icons(self) -> None:
         t = self.theme.theme
@@ -1657,6 +1698,8 @@ class MainWindow(QMainWindow):
         self.ctx.selected_id = None
         if hasattr(self, "_manual_addr_act"):
             self._manual_addr_act.setChecked(topo.manual_addressing)
+        if hasattr(self, "_dynroute_act"):
+            self._dynroute_act.setChecked(getattr(topo, "routing_mode", "static") == "dynamic")
         for d in topo.devices.values():
             self.ctx.bus.device_added.emit(d.id)
         for link in topo.links.values():
@@ -1735,6 +1778,20 @@ class MainWindow(QMainWindow):
         self.ctx.log(
             "Manual addressing: on — set IPs in Inspector › Interfaces; blanks auto-fill."
             if on else "Manual addressing: off — IPs are auto-assigned.", "info")
+
+    def _toggle_routing_mode(self, on: bool) -> None:
+        """Static (default): the compiler pre-installs shortest-path routes at boot.
+        Dynamic: routers get CONNECTED routes only — a routing protocol (a control-plane
+        program, e.g. RIP in Lua) owns the table, so the two computations never fight."""
+        self.ctx.topology.routing_mode = "dynamic" if on else "static"
+        self._recompute_addressing()      # Routes tab reflects the mode immediately
+        self.ctx.log(
+            "Dynamic routing: on — routers boot with connected routes only; run a "
+            "control-plane protocol (e.g. RIP) to build the rest. Watch it converge "
+            "in the Routing HUD."
+            if on else
+            "Dynamic routing: off — static routes are computed and pre-installed at boot.",
+            "info")
 
     # -- remote (GINI server) backend -------------------------------------- #
     def _toggle_backend(self) -> None:
@@ -2553,6 +2610,24 @@ class MainWindow(QMainWindow):
             return (r.stdout or r.stderr or "").strip() or "(no output)"
         except Exception as e:
             return f"(query failed: {e})"
+
+    def _machine_shell(self, device_name: str, command: str) -> str:
+        """Run a shell command directly inside a machine's container (docker exec).
+
+        Unlike element_query, this does NOT go through the element control console (a plain
+        Machine has no `gini>` console) — it execs into the container, so telemetry like
+        `ss -tin` runs against the station's real TCP stack. Off the GUI thread."""
+        if not self._workdir:
+            return ""
+        import subprocess
+        from ..services.compiler import _svc
+        try:
+            svc = _svc(device_name)
+            r = subprocess.run(["docker", "compose", "exec", "-T", svc, "sh", "-c", command],
+                               cwd=self._workdir, capture_output=True, text=True, timeout=8)
+            return r.stdout or ""
+        except Exception:
+            return ""
 
     def _log_startup_times(self) -> None:
         """Log per-element startup times to the Console — the VM-vs-container headline

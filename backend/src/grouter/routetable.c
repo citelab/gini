@@ -81,13 +81,18 @@ int findRouteEntry(route_entry_t route_tbl[], uchar *ip_addr, uchar *nhop, int *
 
 
 /*
- * Add a route entry to the table, if entry found update, else fill in an empty one,
- * if no empty entry, overwrite a used one, indicated by rtbl_replace_indx
+ * Add a route entry to the table, if entry found update, else fill in an empty one.
+ * If no empty entry, overwrite a used one (round-robin via rtbl_replace_indx) — but
+ * NEVER a CONNECTED entry: evicting a router's own interface subnet silently destroys
+ * its connectivity (a hazard when a buggy control-plane protocol floods the table).
+ * If every slot is connected, the add is refused loudly instead.
  */
-void addRouteEntry(route_entry_t route_tbl[], uchar* nwork, uchar* nmask, uchar* nhop, int interface)
+void addRouteEntryTagged(route_entry_t route_tbl[], uchar* nwork, uchar* nmask, uchar* nhop,
+                         int interface, uchar origin)
 {
 	int i;
 	int ifree = -1;
+	char tmpbuf[MAX_TMPBUF_LEN];
 
 	// First check if the entry is already in the table, if it is, update it
 	for (i = 0; i < MAX_ROUTES; i++)
@@ -100,9 +105,10 @@ void addRouteEntry(route_entry_t route_tbl[], uchar* nwork, uchar* nmask, uchar*
 		{
 			if ((COMPARE_IP(nmask, route_tbl[i].netmask)) == 0)
 			{
-				// match
+				// match: last writer wins, and the origin tag records who
 				COPY_IP(route_tbl[i].nexthop, nhop);
 				route_tbl[i].interface = interface;
+				route_tbl[i].origin = origin;
 
 				verbose(2, "[addRouteEntry]:: updated route table entry #%d", i);
 				return;
@@ -112,18 +118,48 @@ void addRouteEntry(route_entry_t route_tbl[], uchar* nwork, uchar* nmask, uchar*
 
 	if (ifree < 0)
 	{
-		ifree = rtbl_replace_indx;
-		rtbl_replace_indx = (rtbl_replace_indx + 1) % MAX_ROUTES;
+		// table full: round-robin eviction, skipping CONNECTED entries
+		for (i = 0; i < MAX_ROUTES; i++)
+		{
+			int cand = (rtbl_replace_indx + i) % MAX_ROUTES;
+			if (route_tbl[cand].origin != ROUTE_ORIGIN_CONNECTED)
+			{
+				ifree = cand;
+				rtbl_replace_indx = (cand + 1) % MAX_ROUTES;
+				break;
+			}
+		}
+		if (ifree < 0)
+		{
+			error("[addRouteEntry]:: route table full of connected routes; cannot add %s",
+			      IP2Dot(tmpbuf, nwork));
+			return;
+		}
 	}
 
 	COPY_IP(route_tbl[ifree].network, nwork);
 	COPY_IP(route_tbl[ifree].netmask, nmask);
 	COPY_IP(route_tbl[ifree].nexthop, nhop);
 	route_tbl[ifree].interface = interface;
+	route_tbl[ifree].origin = origin;
 	route_tbl[ifree].is_empty = FALSE;
 
-	verbose(2, "[addRouteEntry]:: overwrote route entry #%d", rtbl_replace_indx);
+	verbose(2, "[addRouteEntry]:: wrote route entry #%d (origin %c)", ifree, origin);
 	return;
+}
+
+
+/*
+ * Untagged add (existing callers): the origin is derived — a zero nexthop is a
+ * CONNECTED (interface) route, anything else is STATIC (CLI/boot `route add`).
+ * Control-plane protocols use addRouteEntryTagged(..., ROUTE_ORIGIN_DYNAMIC).
+ */
+void addRouteEntry(route_entry_t route_tbl[], uchar* nwork, uchar* nmask, uchar* nhop, int interface)
+{
+	uchar null_ip_addr[] = {0, 0, 0, 0};
+	uchar origin = (COMPARE_IP(nhop, null_ip_addr) == 0) ?
+	               ROUTE_ORIGIN_CONNECTED : ROUTE_ORIGIN_STATIC;
+	addRouteEntryTagged(route_tbl, nwork, nmask, nhop, interface, origin);
 }
 
 
@@ -167,7 +203,10 @@ void RouteTableInit(route_entry_t route_tbl[])
 	rtbl_replace_indx = 0;
 
 	for(i = 0; i < MAX_ROUTES; i++)
+	{
 		route_tbl[i].is_empty = TRUE;
+		route_tbl[i].origin = ROUTE_ORIGIN_STATIC;
+	}
 	verbose(2, "[initRouteTable]:: table initialized");
 
 	return;
@@ -186,14 +225,15 @@ void printRouteTable(route_entry_t route_tbl[])
 	printf("\n=================================================================\n");
 	printf("      R O U T E  T A B L E \n");
 	printf("-----------------------------------------------------------------\n");
-	printf("Index\tNetwork\t\tNetmask\t\tNexthop\t\tInterface \n");
+	printf("Index\tNetwork\t\tNetmask\t\tNexthop\t\tInterface\tOrigin \n");
 
 	for (i = 0; i < MAX_ROUTES; i++)
 		if (route_tbl[i].is_empty != TRUE)
 		{
 			iface = findInterface(route_tbl[i].interface);
-			printf("[%d]\t%s\t%s\t%s\t\t%s\n", i, IP2Dot(tmpbuf, route_tbl[i].network),
-			       IP2Dot((tmpbuf+20), route_tbl[i].netmask), IP2Dot((tmpbuf+40), route_tbl[i].nexthop), iface->device_name);
+			printf("[%d]\t%s\t%s\t%s\t\t%s\t%c\n", i, IP2Dot(tmpbuf, route_tbl[i].network),
+			       IP2Dot((tmpbuf+20), route_tbl[i].netmask), IP2Dot((tmpbuf+40), route_tbl[i].nexthop),
+			       iface->device_name, route_tbl[i].origin ? route_tbl[i].origin : '?');
 			rcount++;
 		}
 	printf("-----------------------------------------------------------------\n");

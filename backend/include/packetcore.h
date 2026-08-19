@@ -67,11 +67,12 @@ void *packetProcessor(void *pc);
 
 int enqueuePacket(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize, uint8_t openflow);
 
-// Function prototypes from roundrobin.c and wfq.c??
-void *weightedFairScheduler(void *pc);
-int weightedFairQueuer(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize, char *qkey);
-int roundRobinQueuer(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize, char *qkey);
-void *roundRobinScheduler(void *pc);
+// Scheduler entry point (roundrobin.c): a single thread that dispatches packets
+// from the per-class queues using the policy in rconfig.schedpolicy (RR or DRR).
+void *packetScheduler(void *pc);
+// Real on-the-wire byte length of a packet (Ethernet + IP total length), used for
+// byte-fair DRR accounting and per-queue byte statistics.
+int gpktByteLen(gpacket_t *p);
 
 int redDiscard(simplequeue_t *thisq, gpacket_t *ipkt);
 #endif

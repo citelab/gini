@@ -34,6 +34,15 @@ void gr_route_add(uchar *net, uchar *mask, uchar *nhop, int iface)
     pthread_rwlock_unlock(&route_lock);
 }
 
+/* Tagged add: control-plane protocols pass ROUTE_ORIGIN_DYNAMIC so `route show`
+ * (and the frontend HUD) can attribute their routes, and eviction rules apply. */
+void gr_route_add_tagged(uchar *net, uchar *mask, uchar *nhop, int iface, uchar origin)
+{
+    pthread_rwlock_wrlock(&route_lock);
+    addRouteEntryTagged(route_tbl, net, mask, nhop, iface, origin);
+    pthread_rwlock_unlock(&route_lock);
+}
+
 void gr_route_del(int index)
 {
     pthread_rwlock_wrlock(&route_lock);

@@ -36,6 +36,9 @@ simplequeue_t *createSimpleQueue(char *name, int maxsize, int blockonwrite,
 	msgqueue->cursize = 0;
 	msgqueue->bytesleft = 0;
 	msgqueue->avgbyterate = 0.0;
+	msgqueue->deficit = 0.0;
+	msgqueue->pkts_in = msgqueue->pkts_out = msgqueue->pkts_drop = 0;
+	msgqueue->bytes_in = msgqueue->bytes_out = msgqueue->bytes_drop = 0;
 	msgqueue->prevaccesstime = (long)time(NULL);
 	msgqueue->blockonwrite = blockonwrite;
 	msgqueue->blockonread = blockonread;

@@ -64,6 +64,15 @@ class SettingsDialog(QDialog):
         self.reduced = QCheckBox("Reduce motion / animations")
         self.reduced.setChecked(settings.reduced_motion)
         appf.addRow("", self.reduced)
+        self.flow_window = QComboBox()
+        for _secs in (30, 60, 120, 300):
+            self.flow_window.addItem(f"{_secs} seconds", _secs)
+        _cur = int(getattr(settings, "flow_hud_window_s", 60) or 60)
+        _i = self.flow_window.findData(_cur)
+        self.flow_window.setCurrentIndex(_i if _i >= 0 else 1)   # default 60 s
+        appf.addRow("Flow HUD window", self.flow_window)
+        appf.addRow("", _note("How many seconds of the TCP congestion-window plot the Flow HUD "
+                              "keeps on screen. The plot scrolls within this window."))
 
         # --- Networking --------------------------------------------------- #
         netf = _page(tabs, "Networking")
@@ -211,6 +220,7 @@ class SettingsDialog(QDialog):
             "theme": self.theme.currentText(),
             "text_size": self.text_size.currentText(),
             "reduced_motion": self.reduced.isChecked(),
+            "flow_hud_window_s": int(self.flow_window.currentData() or 60),
             "auto_internet": self.auto_internet.isChecked(),
             "autobuild_images": self.autobuild.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),
