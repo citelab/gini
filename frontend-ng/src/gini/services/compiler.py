@@ -1239,8 +1239,12 @@ class RuntimeCompiler:
         extra = [(b.physical_subnet, b.seg, b.ip)
                  for b in cfg.gbridge if b.mode == "routed" and b.physical_subnet
                  and b.seg >= 0]
-        self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                                gw_seg, gw_ip, extra)
+        # dynamic routing mode: routers boot with CONNECTED routes only — a routing
+        # protocol (a control-plane program, e.g. RIP in Lua) owns the table. Installing
+        # static routes too would silently fight it (same table, last writer wins).
+        if getattr(topo, "routing_mode", "static") != "dynamic":
+            self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
+                                    gw_seg, gw_ip, extra)
 
         return cfg
 

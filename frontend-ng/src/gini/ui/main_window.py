@@ -800,6 +800,12 @@ class MainWindow(QMainWindow):
                                     "Manual addressing — assign IP addresses by hand",
                                     self._toggle_manual_addr, checkable=True)
         self._manual_addr_act.setChecked(self.ctx.topology.manual_addressing)
+        self._dynroute_act = act("dynroute", "dynroute",
+                                 "Dynamic routing — routers boot with connected routes only, "
+                                 "so a routing protocol (e.g. RIP in the Lua control plane) "
+                                 "builds the table. Off = static routes are pre-installed.",
+                                 self._toggle_routing_mode, checkable=True)
+        self._dynroute_act.setChecked(self.ctx.topology.routing_mode == "dynamic")
         self._delete_act = act("delete", "trash", "Delete selected device", self._delete_selected)
         self._delete_act.setEnabled(False)
         self._rhud_act = act("rhud", "router",
@@ -857,7 +863,8 @@ class MainWindow(QMainWindow):
         def _build_left(lay) -> None:
             lay.addWidget(tray(("new", "open", "save")))
             lay.addWidget(self._tb_spacer(6))
-            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr", "delete")))
+            lay.addWidget(tray(("compile", "layout", "connect", "edges", "manualaddr",
+                                "dynroute", "delete")))
             lay.addWidget(self._tb_spacer(8))
             lay.addWidget(self.run_button)                    # morphing ▶/■ power button
             lay.addWidget(self._tb_spacer(8))
@@ -1691,6 +1698,8 @@ class MainWindow(QMainWindow):
         self.ctx.selected_id = None
         if hasattr(self, "_manual_addr_act"):
             self._manual_addr_act.setChecked(topo.manual_addressing)
+        if hasattr(self, "_dynroute_act"):
+            self._dynroute_act.setChecked(getattr(topo, "routing_mode", "static") == "dynamic")
         for d in topo.devices.values():
             self.ctx.bus.device_added.emit(d.id)
         for link in topo.links.values():
@@ -1769,6 +1778,20 @@ class MainWindow(QMainWindow):
         self.ctx.log(
             "Manual addressing: on — set IPs in Inspector › Interfaces; blanks auto-fill."
             if on else "Manual addressing: off — IPs are auto-assigned.", "info")
+
+    def _toggle_routing_mode(self, on: bool) -> None:
+        """Static (default): the compiler pre-installs shortest-path routes at boot.
+        Dynamic: routers get CONNECTED routes only — a routing protocol (a control-plane
+        program, e.g. RIP in Lua) owns the table, so the two computations never fight."""
+        self.ctx.topology.routing_mode = "dynamic" if on else "static"
+        self._recompute_addressing()      # Routes tab reflects the mode immediately
+        self.ctx.log(
+            "Dynamic routing: on — routers boot with connected routes only; run a "
+            "control-plane protocol (e.g. RIP) to build the rest. Watch it converge "
+            "in the Routing HUD."
+            if on else
+            "Dynamic routing: off — static routes are computed and pre-installed at boot.",
+            "info")
 
     # -- remote (GINI server) backend -------------------------------------- #
     def _toggle_backend(self) -> None:

@@ -15,7 +15,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_ROUTE_RE = re.compile(r"^\[(\d+)\]\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$")
+# the gRouter prints an optional trailing Origin column (C=connected, S=static,
+# D=dynamic/control-plane); older builds print 5 columns, so it must stay optional
+_ROUTE_RE = re.compile(r"^\[(\d+)\]\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+([CSD]))?\s*$")
 
 
 @dataclass
@@ -25,6 +27,7 @@ class RouteEntry:
     netmask: str
     nexthop: str          # 0.0.0.0 == directly connected
     iface: str
+    origin: str = ""      # "C" connected · "S" static · "D" dynamic (control plane); "" = unknown
 
     @property
     def direct(self) -> bool:
@@ -41,7 +44,7 @@ def parse_routes(text: str) -> list[RouteEntry]:
         m = _ROUTE_RE.match(line.strip())
         if m:
             out.append(RouteEntry(int(m.group(1)), m.group(2), m.group(3),
-                                  m.group(4), m.group(5)))
+                                  m.group(4), m.group(5), m.group(6) or ""))
     return out
 
 

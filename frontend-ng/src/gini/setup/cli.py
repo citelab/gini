@@ -1,9 +1,11 @@
 """`gini-setup` — one-time bootstrap of the container runtime + images.
 
-    gini-setup            # detect/guide the runtime, then pull the images
-    gini-setup --check    # report status and exit
-    gini-setup --update   # re-pull images (after `pip install -U gini-toolkit`)
-    gini-setup --yes      # run auto-install steps without prompting
+    gini-setup                    # detect/guide the runtime, then pull the images
+    gini-setup --check            # report status and exit
+    gini-setup --update           # re-pull images (after `pip install -U gini-toolkit`)
+    gini-setup --yes              # run auto-install steps without prompting
+    gini-setup --build            # SOURCE install: build all images locally from backend/
+    gini-setup --build --source ~/gini/backend    # backend tree not auto-found
 """
 from __future__ import annotations
 
@@ -84,17 +86,51 @@ def _pull(os_name: str) -> int:
     return 0
 
 
+def _build(os_name: str, source: str | None) -> int:
+    """Source-based install: build every image locally from the backend/ tree, tagged with the
+    plain local names the orchestrator resolves — no registry involved."""
+    backend = images.find_backend(source)
+    if backend is None:
+        print("Could not find the backend/ source tree (looked next to this install, in "
+              "$GINI_BACKEND, and under the current directory).")
+        print("Point me at it:  gini-setup --build --source /path/to/gini/backend")
+        return 1
+    print(f"Building images from {backend}:")
+    results = images.build_images(backend)
+    ok = [n for n, s in results if s]
+    bad = [n for n, s in results if not s]
+    for n, s in results:
+        print("  ok  " if s else "  FAIL", n)
+    marker.write_marker({"version": _app_version(), "os": os_name,
+                         "tag": "source", "images": ok, "built_from": str(backend)})
+    print("\nRecorded", marker.marker_path())
+    if bad:
+        print("\nSome images failed to build — scroll up for the docker build error. "
+              "Re-run `gini-setup --build` after fixing; successful images are kept.")
+        return 2
+    print("\nSetup complete (source build). Launch the app with:  gbuilder")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="gini-setup",
                                  description="Bring in the GINI container runtime + images.")
     ap.add_argument("--check", action="store_true", help="report status and exit")
     ap.add_argument("--update", action="store_true", help="re-pull images for the current version")
     ap.add_argument("--yes", "-y", action="store_true", help="run auto-install steps without asking")
+    ap.add_argument("--build", action="store_true",
+                    help="source install: docker-build all images locally from the backend/ tree")
+    ap.add_argument("--source", metavar="PATH", default=None,
+                    help="path to the backend/ source tree (with --build; else auto-detected)")
     args = ap.parse_args(argv)
     os_name = runtime.detect_os()
 
     if args.check:
         return _do_check(os_name)
+    if args.build:
+        if not _ensure_runtime(os_name, args.yes):
+            return 1
+        return _build(os_name, args.source)
     if args.update:
         if not runtime.docker_available():
             print("No runtime — run `gini-setup` first.")
