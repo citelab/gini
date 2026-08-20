@@ -58,8 +58,9 @@ def _setup_preflight() -> None:
         from . import __version__
         from .setup import marker
         if not marker.is_setup_done():
-            print("[gini] Runtime not set up yet — Demo mode works now; run `gini-setup` to enable "
-                  "live Run (installs Docker/Colima + pulls images).")
+            print("[gini] Runtime not set up yet — Demo mode works now. To enable live Run: "
+                  "`gini-setup` (installs the runtime + pulls images), or from a source "
+                  "checkout `gini-setup --build` (builds the images locally).")
         elif marker.needs_update(__version__):
             print(f"[gini] App is {__version__} but images were set up for {marker.setup_version()} "
                   "— run `gini-setup --update` to refresh them.")

@@ -8,7 +8,10 @@ from pathlib import Path
 
 
 def gini_home() -> Path:
-    return Path(os.environ.get("GINI_HOME", str(Path.home() / ".gini")))
+    """Same location + same override as app.paths.gini_home (GINI_HOME_DIR), so the marker
+    always lands where gbuilder looks. GINI_HOME kept as a legacy fallback."""
+    return Path(os.environ.get("GINI_HOME_DIR") or os.environ.get("GINI_HOME")
+                or (Path.home() / ".gini")).expanduser()
 
 
 def marker_path() -> Path:

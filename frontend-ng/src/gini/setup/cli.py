@@ -75,12 +75,21 @@ def _pull(os_name: str) -> int:
     bad = [r for r, s in results if not s]
     for r, s in results:
         print("  ok  " if s else "  FAIL", r)
+    if not ok:
+        # nothing pulled: don't record a marker that --check would call "not run yet" anyway;
+        # tell the user the actual way forward instead.
+        print("\nNo images could be pulled — the registry may not be published yet, or it is "
+              "unreachable from this network.")
+        print("If you installed from a source checkout, build the images locally instead:")
+        print("    gini-setup --build")
+        return 2
     marker.write_marker({"version": _app_version(), "os": os_name,
                          "tag": images.image_tag(_app_version()), "images": ok})
     print("\nRecorded", marker.marker_path())
     if bad:
         print("\nSome images could not be pulled — they may not be published yet, or the registry "
-              "is unreachable. Live Run will be limited until they're available.")
+              "is unreachable. Live Run will be limited until they're available. "
+              "(Source checkout? `gini-setup --build` builds them locally.)")
         return 2
     print("\nSetup complete. Launch the app with:  gbuilder")
     return 0
