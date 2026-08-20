@@ -631,11 +631,22 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     return work
 
 
+def _hostpath(p) -> str:
+    """A host path for use inside the compose file: always forward slashes.
+
+    A Windows path lands in a *double-quoted* YAML scalar (`"C:\\Users\\...:/captures"`),
+    where `\\U` and `\\x` are escape sequences — compose's YAML loader then fails with
+    "did not find expected hexadecimal number" and nothing starts. Docker accepts forward
+    slashes on every platform, so normalizing here keeps one code path.
+    """
+    return str(p).replace("\\", "/")
+
+
 def _compose(config: RuntimeConfig, auto_internet: bool = True,
              laptop_id: str = "") -> str:
     from ..app.paths import captures_dir, scripts_dir
-    cap_host = str(captures_dir())          # host path bind-mounted into routers at /captures
-    scr_host = str(scripts_dir())           # student Lua modules, mounted read-only at /scripts
+    cap_host = _hostpath(captures_dir())    # host path bind-mounted into routers at /captures
+    scr_host = _hostpath(scripts_dir())     # student Lua modules, mounted read-only at /scripts
     rt = config.to_runtime(docker=True)
     # The `gini` bridge is a normal (non-internal) network so the HOST can reach
     # published web consoles (Grafana/MinIO/…). "Faithful mode" (auto_internet off) does
@@ -777,7 +788,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if s.get("volumes"):
             lines.append("    volumes:")
             for v in s["volumes"]:
-                lines.append(f'      - "{v}"')
+                lines.append(f'      - "{_hostpath(v)}"')   # may carry an absolute host path
 
     # the GINI Cloud Fabric agent — watches every cloud service, serves normalized
     # app-level metrics to gBuilder on a fixed host port.
@@ -872,7 +883,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         ]
         if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
             from ..app.paths import captures_dir
-            lines += ['    volumes:', f'      - "{str(captures_dir())}:/captures"']
+            lines += ['    volumes:', f'      - "{_hostpath(captures_dir())}:/captures"']
         if tk == MACHINE_GUI and m.get("novnc_port"):   # headful host: publish its noVNC console
             lines += ['    ports:', f'      - "{m["novnc_port"]}:6080"']
         lines += _cpu_limit_lines(m.get("cpus"))
