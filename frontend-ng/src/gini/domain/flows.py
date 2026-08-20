@@ -17,7 +17,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_ADDR = re.compile(r"^(\S+):(\d+)$")
+_ADDR = re.compile(r"^(.*):(\d+)$")
+
+# An IPv4-mapped IPv6 address: a dual-stack listener (iperf3 -s binds ::) reports its peers
+# as [::ffff:10.0.4.10], while the client's own socket reports plain 10.0.4.10. They are the
+# SAME host, so without canonicalising them one connection shows up as two flows.
+_V6_MAPPED = re.compile(r"^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$", re.IGNORECASE)
+
+
+def _norm_ip(ip: str) -> str:
+    """Canonical form of an address as `ss` printed it: brackets stripped, an IPv4-mapped
+    IPv6 address reduced to its IPv4 form."""
+    s = (ip or "").strip().strip("[]")
+    m = _V6_MAPPED.match(s)
+    return m.group(1) if m else s
 
 
 @dataclass
@@ -41,8 +54,10 @@ class FlowSample:
 
     @property
     def label(self) -> str:
-        """Short chip label, by host/IP (e.g. '10.0.1.10 -> 10.0.2.10')."""
-        return f"{self.local_ip} -> {self.peer_ip}"
+        """Chip label. The ports are part of it because one pair of stations commonly carries
+        SEVERAL connections at once (iperf3 opens a control connection and its data
+        connections), and by IP alone those chips would be indistinguishable."""
+        return f"{self.local_ip}:{self.local_port} -> {self.peer_ip}:{self.peer_port}"
 
     @property
     def pair_key(self) -> frozenset:
@@ -91,8 +106,8 @@ def parse_ss(text: str, host: str = "") -> list[FlowSample]:
                     cc = itoks[0]           # first bare word is the algorithm name
                 out.append(FlowSample(
                     host=host,
-                    local_ip=la.group(1), local_port=int(la.group(2)),
-                    peer_ip=pa.group(1), peer_port=int(pa.group(2)),
+                    local_ip=_norm_ip(la.group(1)), local_port=int(la.group(2)),
+                    peer_ip=_norm_ip(pa.group(1)), peer_port=int(pa.group(2)),
                     cc=cc,
                     cwnd=_num(r"\bcwnd:(\d+)", info, int, 0),
                     ssthresh=_num(r"\bssthresh:(\d+)", info, int, 0),
@@ -148,7 +163,13 @@ class FlowTracker:
 
     Each poll may report a flow twice (once from each endpoint). We keep the direction
     with the larger cwnd — the sender — as the representative for that connection.
+
+    A connection that ends stops appearing in `ss`, so its series is dropped once it has been
+    unseen for IDLE_S. Without that, finishing a transfer and starting another leaves the old
+    chip on the panel forever and every re-run adds one more.
     """
+    IDLE_S = 10.0        # unseen for this long => the socket is gone; retire the chip
+
     def __init__(self) -> None:
         self.series: dict[str, FlowSeries] = {}
 
@@ -165,6 +186,10 @@ class FlowTracker:
                 fs = FlowSeries(key=key, label=s.label, cc=s.cc)
                 self.series[key] = fs
             fs.add(s, tnow)
+        # retire flows whose sockets have disappeared from ss
+        for k in [k for k, f in self.series.items()
+                  if f.t and (tnow - f.t[-1]) > self.IDLE_S]:
+            self.series.pop(k, None)
 
     def active(self, since: float | None = None) -> list[FlowSeries]:
         """Flows with at least one sample; if `since` given, only those seen after it."""

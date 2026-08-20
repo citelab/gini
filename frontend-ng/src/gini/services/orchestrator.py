@@ -596,33 +596,38 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     # copy the runtime data-plane modules
     for py in Path(runtime_dir).glob("*.py"):
         shutil.copy(py, work / "dataplane" / py.name)
-    (work / "docker" / "Dockerfile.machine").write_text(_DOCKERFILE_MACHINE)
-    (work / "docker" / "Dockerfile.machine-lean").write_text(_DOCKERFILE_MACHINE_LEAN)
-    (work / "docker" / "Dockerfile.machine-security").write_text(_DOCKERFILE_MACHINE_SECURITY)
-    (work / "docker" / "Dockerfile.machine-gui").write_text(_DOCKERFILE_MACHINE_GUI)
-    (work / "docker" / "Dockerfile.fabric").write_text(_DOCKERFILE_FABRIC)
-    (work / "docker" / "Dockerfile.cloudfabric").write_text(_DOCKERFILE_CLOUDFABRIC)
-    (work / "docker" / "Dockerfile.faas").write_text(_DOCKERFILE_FAAS)
-    (work / "docker" / "Dockerfile.sg").write_text(_DOCKERFILE_SG)
-    (work / "run_fabric.py").write_text(_RUN_FABRIC)
-    (work / "run_faas.py").write_text(_RUN_FAAS)
+    # Everything written here is consumed INSIDE Linux containers, so pin the bytes:
+    # UTF-8 (Windows' locale default is cp1252 — an em-dash in a comment became byte
+    # 0x97 and killed run_fabric.py with a SyntaxError) and \n newlines (CRLF breaks sh).
+    def _put(path: Path, text: str) -> None:
+        path.write_text(text, encoding="utf-8", newline="\n")
+
+    _put(work / "docker" / "Dockerfile.machine", _DOCKERFILE_MACHINE)
+    _put(work / "docker" / "Dockerfile.machine-lean", _DOCKERFILE_MACHINE_LEAN)
+    _put(work / "docker" / "Dockerfile.machine-security", _DOCKERFILE_MACHINE_SECURITY)
+    _put(work / "docker" / "Dockerfile.machine-gui", _DOCKERFILE_MACHINE_GUI)
+    _put(work / "docker" / "Dockerfile.fabric", _DOCKERFILE_FABRIC)
+    _put(work / "docker" / "Dockerfile.cloudfabric", _DOCKERFILE_CLOUDFABRIC)
+    _put(work / "docker" / "Dockerfile.faas", _DOCKERFILE_FAAS)
+    _put(work / "docker" / "Dockerfile.sg", _DOCKERFILE_SG)
+    _put(work / "run_fabric.py", _RUN_FABRIC)
+    _put(work / "run_faas.py", _RUN_FAAS)
     # security-group iptables scripts, bind-mounted into each member's firewall sidecar
     for fw in config.firewalls:
         d = work / "sg"
         d.mkdir(exist_ok=True)
-        (d / f"{fw['member']}.sh").write_text(fw["script"])
+        _put(d / f"{fw['member']}.sh", fw["script"])
     # generated service config (e.g. observability: prometheus.yml, grafana provisioning)
     for s in config.services:
         for rel, content in s.files.items():
             dst = work / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(content)
+            _put(dst, content)
     # kubernetes manifests, bind-mounted into each k3s cluster container for kubectl apply
     for k in config.k8s:
         (work / "k8s" / k.svc).mkdir(parents=True, exist_ok=True)
-        (work / "k8s" / k.svc / "manifests.yaml").write_text(k.manifests or "")
-    (work / "docker-compose.yml").write_text(
-        _compose(config, auto_internet, laptop_id))
+        _put(work / "k8s" / k.svc / "manifests.yaml", k.manifests or "")
+    _put(work / "docker-compose.yml", _compose(config, auto_internet, laptop_id))
     return work
 
 
