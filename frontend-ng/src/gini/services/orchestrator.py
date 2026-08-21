@@ -1090,7 +1090,7 @@ class Orchestrator:
         if shutil.which("docker") is None:
             return False, "docker not found — is Docker installed and running?"
         present = subprocess.run(["docker", "image", "inspect", GROUTER_IMAGE],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace")
         if present.returncode == 0:
             return True, "image present"
         # locate the backend (repo_root/backend) relative to this file
@@ -1110,7 +1110,7 @@ class Orchestrator:
         # opt-in auto-build
         b = subprocess.run(["docker", "build", "-f", "grouter-build/Dockerfile",
                             "-t", GROUTER_IMAGE, "."], cwd=str(backend),
-                           capture_output=True, text=True, timeout=1800)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
         if b.returncode != 0:
             return False, f"Building {GROUTER_IMAGE} failed:\n{(b.stderr or b.stdout)[-800:]}"
         return True, f"built {GROUTER_IMAGE}"
@@ -1120,7 +1120,7 @@ class Orchestrator:
         if shutil.which("docker") is None:
             return False, "docker not found — is Docker installed and running?"
         present = subprocess.run(["docker", "image", "inspect", POX_IMAGE],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace")
         if present.returncode == 0:
             return True, "image present"
         sdn = Path(__file__).resolve().parents[4] / "backend" / "sdn"
@@ -1134,7 +1134,7 @@ class Orchestrator:
                            f"(Or tick Settings → Networking → \"Build missing lab images "
                            f"automatically\" and press Run — GINI will build it for you.)")
         b = subprocess.run(["docker", "build", "-t", POX_IMAGE, "."], cwd=str(sdn),
-                           capture_output=True, text=True, timeout=1800)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
         if b.returncode != 0:
             return False, f"Building {POX_IMAGE} failed:\n{(b.stderr or b.stdout)[-800:]}"
         return True, f"built {POX_IMAGE}"
@@ -1152,7 +1152,7 @@ class Orchestrator:
             return {}
         try:
             r = subprocess.run([*self._dc, "ps", "--format", "json"],
-                               cwd=str(wd), capture_output=True, text=True, timeout=20)
+                               cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return {}
         out = (r.stdout or "").strip()
@@ -1185,12 +1185,12 @@ class Orchestrator:
             return False, "not running"
         try:
             r = subprocess.run([*self._dc, "ps", "-q", service],
-                               cwd=str(wd), capture_output=True, text=True, timeout=20)
+                               cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             ids = (r.stdout or "").strip().splitlines()
             if not ids or not ids[0]:
                 return False, f"{service}: no running container"
             u = subprocess.run(["docker", "update", "--cpus", f"{cpus:g}", ids[0]],
-                               capture_output=True, text=True, timeout=20)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             return u.returncode == 0, (u.stderr or u.stdout).strip()
         except FileNotFoundError:
             return False, "docker not found — is Docker installed and running?"
@@ -1205,14 +1205,14 @@ class Orchestrator:
             return None
         try:
             r = subprocess.run([*self._dc, "ps", "-q", service],
-                               cwd=str(wd), capture_output=True, text=True, timeout=15)
+                               cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
             ids = (r.stdout or "").strip().splitlines()
             if not ids or not ids[0]:
                 return None
             s = subprocess.run(
                 ["docker", "stats", "--no-stream", "--format",
                  "{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}", ids[0]],
-                capture_output=True, text=True, timeout=15)
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
             line = (s.stdout or "").strip()
             if s.returncode != 0 or not line:
                 return None
@@ -1237,7 +1237,7 @@ class Orchestrator:
             try:
                 r = subprocess.run(base + ["get", "nodes", "--no-headers"],
                                    cwd=str(self.workdir), capture_output=True,
-                                   text=True, timeout=20)
+                                   text=True, encoding="utf-8", errors="replace", timeout=20)
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return False, "docker/cluster not reachable"
             if r.returncode == 0 and " Ready" in (" " + r.stdout):
@@ -1246,7 +1246,7 @@ class Orchestrator:
         else:
             return False, "k3s API did not become Ready in time"
         a = subprocess.run(base + ["apply", "-f", "/gini-manifests/"],
-                           cwd=str(self.workdir), capture_output=True, text=True, timeout=60)
+                           cwd=str(self.workdir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         return a.returncode == 0, (a.stderr or a.stdout).strip()
 
     def k8s_pods(self, service: str) -> list:
@@ -1257,7 +1257,7 @@ class Orchestrator:
             r = subprocess.run(
                 [*self._dc, "exec", "-T", service, "kubectl", "get", "pods",
                  "-A", "-o", "json"], cwd=str(self.workdir),
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return []
         if r.returncode != 0:
@@ -1286,7 +1286,7 @@ class Orchestrator:
             r = subprocess.run(
                 [*self._dc, "exec", "-T", service, "kubectl",
                  "get", "hpa,deploy", "-o", "json"], cwd=str(self.workdir),
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return {}
         if r.returncode != 0:
@@ -1336,7 +1336,7 @@ class Orchestrator:
             r = subprocess.run(
                 [*self._dc, "exec", "-T", service, "kubectl", "scale",
                  f"deployment/{deployment}", f"--replicas={int(replicas)}"],
-                cwd=str(self.workdir), capture_output=True, text=True, timeout=20)
+                cwd=str(self.workdir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
         except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
             return False, str(e)
@@ -1358,7 +1358,7 @@ class Orchestrator:
             r = subprocess.run(
                 [*self._dc, "exec", "-T", service, "kubectl", "patch",
                  f"hpa/{hpa}", "--type", "merge", "-p", json.dumps({"spec": spec})],
-                cwd=str(self.workdir), capture_output=True, text=True, timeout=20)
+                cwd=str(self.workdir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
         except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
             return False, str(e)
@@ -1373,7 +1373,7 @@ class Orchestrator:
             s = subprocess.run(
                 ["docker", "stats", "--no-stream", "--format",
                  "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}"],
-                cwd=str(wd), capture_output=True, text=True, timeout=20)
+                cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return {}
         if s.returncode != 0:
@@ -1406,7 +1406,7 @@ class Orchestrator:
             return Orchestrator._vm_mem_mib
         try:
             r = subprocess.run(["docker", "info", "--format", "{{.MemTotal}}"],
-                               capture_output=True, text=True, timeout=15)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
             if r.returncode == 0 and r.stdout.strip().isdigit():
                 Orchestrator._vm_mem_mib = int(r.stdout.strip()) / (1024 * 1024)
                 return Orchestrator._vm_mem_mib
@@ -1421,7 +1421,7 @@ class Orchestrator:
         try:
             r = subprocess.run(["docker", "info", "--format", "{{json .Runtimes}}"],
                                cwd=(str(wd) if wd else None),
-                               capture_output=True, text=True, timeout=15)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
             if r.returncode != 0:
                 return False
             import json
@@ -1438,13 +1438,13 @@ class Orchestrator:
         import re
         try:
             ids = subprocess.run([*self._dc, "ps", "-q"], cwd=str(wd),
-                                 capture_output=True, text=True, timeout=20).stdout.split()
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20).stdout.split()
             if not ids:
                 return {}
             r = subprocess.run(
                 ["docker", "inspect", "--format",
                  "{{.Name}}\t{{.Created}}\t{{.State.StartedAt}}", *ids],
-                cwd=str(wd), capture_output=True, text=True, timeout=20)
+                cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return {}
         out: dict = {}
@@ -1534,7 +1534,7 @@ class Orchestrator:
     def _compose(self, *args: str) -> tuple[bool, str]:
         try:
             r = subprocess.run([*self._dc, *args], cwd=str(self.workdir),
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
         except FileNotFoundError:
             return False, "docker not found — is Docker installed and running?"

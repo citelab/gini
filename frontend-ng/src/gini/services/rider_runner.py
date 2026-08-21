@@ -39,7 +39,7 @@ class RiderRunner:
         wd = getattr(self.orch, "workdir", None)
         try:
             r = subprocess.run(cmd, cwd=str(wd) if wd else None,
-                               capture_output=True, text=True, timeout=self.timeout)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=self.timeout)
             return r.returncode, (r.stdout or "") + (r.stderr or "")
         except subprocess.TimeoutExpired as e:            # keep partial output, flag the timeout
             partial = e.stdout if isinstance(e.stdout, str) else ""

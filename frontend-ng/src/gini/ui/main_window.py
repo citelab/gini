@@ -2776,7 +2776,7 @@ class MainWindow(QMainWindow):
                 cmd = ["docker", "compose", "exec", "-T", "fabric", "timeout", "12",
                        "python", "-m", "dataplane.console", svc, command]
             r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
-                               text=True, timeout=15)
+                               text=True, encoding="utf-8", errors="replace", timeout=15)
             return (r.stdout or r.stderr or "").strip() or "(no output)"
         except Exception as e:
             return f"(query failed: {e})"
@@ -2794,7 +2794,7 @@ class MainWindow(QMainWindow):
         try:
             svc = _svc(device_name)
             r = subprocess.run(["docker", "compose", "exec", "-T", svc, "sh", "-c", command],
-                               cwd=self._workdir, capture_output=True, text=True, timeout=8)
+                               cwd=self._workdir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
             return r.stdout or ""
         except Exception:
             return ""
@@ -2855,7 +2855,7 @@ class MainWindow(QMainWindow):
                    "-e", f"GINI_BODY={body}", "faas", "python", "-c", _FAAS_INVOKE]
             try:
                 r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
-                                   text=True, timeout=30)
+                                   text=True, encoding="utf-8", errors="replace", timeout=30)
                 line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
                 d = json.loads(line) if line else None
                 if d:
