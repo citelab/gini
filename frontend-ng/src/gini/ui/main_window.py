@@ -2349,7 +2349,7 @@ class MainWindow(QMainWindow):
         (getent/DNS Probe) and ping/reach ride the DRAWN gini0 network instead of Docker's bridge.
         Off the GUI thread — it's a docker exec per machine. Containers are fresh each run, so no
         accumulation. This is the 'small Phase-2.x': it makes reachability follow the topology."""
-        import shlex
+        import base64
         import subprocess
         import threading
         from ..services.compiler import _role, _svc, overlay_hosts
@@ -2368,18 +2368,34 @@ class MainWindow(QMainWindow):
         # /etc/hosts, so a getent/ping for the machine's own name would hit the bridge unless our
         # overlay line comes first. `> /etc/hosts` truncates-in-place (works on the bind mount; `mv`
         # wouldn't). Docker's original lines stay below, so nothing that needs the bridge id breaks.
-        block = "\n".join(f"{ip}\t{nm}" for nm, ip in hosts.items())
+        block = "\n".join(f"{ip}\t{nm}" for nm, ip in hosts.items()) + "\n"
+        # Ship the block as base64: a single bare ASCII token with no spaces, tabs, newlines or
+        # quotes. Passing the raw block meant an argv element containing tabs AND newlines, which
+        # Windows mangles on its way through CreateProcess (Python quotes it, the CLI re-splits it)
+        # — the exec then failed, silently, and names fell back to Docker's bridge DNS (172.x)
+        # instead of the drawn 10/8 network. base64 removes that whole class of quoting hazard.
+        blob = base64.b64encode(block.encode("utf-8")).decode("ascii")
+        script = (f"echo {blob} | base64 -d > /tmp/gini_hosts && "
+                  "cat /etc/hosts >> /tmp/gini_hosts && "
+                  "cat /tmp/gini_hosts > /etc/hosts")
 
         def work():
+            failed = []
             for dev in devs:
-                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc",
-                       "{ printf '%%s\\n' %s; cat /etc/hosts; } > /tmp/gini_hosts && "
-                       "cat /tmp/gini_hosts > /etc/hosts" % shlex.quote(block)]
+                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", script]
                 try:
-                    subprocess.run(cmd, cwd=str(wd) if wd else None,
-                                   capture_output=True, timeout=8)
-                except Exception:                # noqa: BLE001 — best-effort; a slow box just misses
-                    pass
+                    r = subprocess.run(cmd, cwd=str(wd) if wd else None,
+                                       capture_output=True, timeout=8)
+                    if r.returncode != 0:
+                        failed.append(f"{dev.name}: {(r.stderr or b'').decode(errors='replace').strip()[:120]}")
+                except Exception as e:           # noqa: BLE001 — best-effort; a slow box just misses
+                    failed.append(f"{dev.name}: {e}")
+            if failed:
+                # Don't fail silently: without these lines, names resolve to the Docker bridge and
+                # experiments see 172.x addresses instead of the topology's 10/8 ones.
+                self.ctx.log("Name resolution over the drawn network could not be set up on: "
+                             + ", ".join(failed[:4])
+                             + (" …" if len(failed) > 4 else ""), "warn")
         threading.Thread(target=work, daemon=True).start()
 
     def _recompute_addressing(self) -> None:
