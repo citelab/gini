@@ -21,6 +21,11 @@ except Exception:  # pragma: no cover
 _BODY: dict[str, str] = {
     # --- networking ---
     "router": '<rect x="2.5" y="9" width="19" height="9" rx="2"/><path d="M6.5 9V6M12 9V6M17.5 9V6"/><path d="M6.5 13.5h.01M10 13.5h.01M13.5 13.5h.01"/>',
+    # a padlock — spinlock contention (Lock Lab)
+    "locks": '<rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/>'
+             '<path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/><path d="M12 14v2.5"/>',
+    # IEC power symbol — a broken ring with a vertical bar (reboot / reset a machine)
+    "power": '<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>',
     # dynamic routing: two circulating arrows — routers exchanging routes (RIP/OSPF)
     "dynroute": '<path d="M19 12a7 7 0 0 1-12.2 4.7"/><path d="M5 12a7 7 0 0 1 12.2-4.7"/>'
                 '<path d="M6.5 13.2l.3 3.5 3.4-.9"/><path d="M17.5 10.8l-.3-3.5-3.4.9"/>',

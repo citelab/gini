@@ -414,6 +414,24 @@ void gr_cp_stop_all(void)
     }
 }
 
+int gr_cp_status(char *out, size_t outlen)
+{
+    int i, n = 0, any = 0;
+    pthread_mutex_lock(&cp_lock);
+    for (i = 0; i < g_nmod && n < (int)outlen - 1; i++)
+        if (g_modules[i]->status)
+        {
+            any = 1;
+            n += g_modules[i]->status(g_modules[i], out + n, outlen - n);
+        }
+    if (g_nmod == 0)
+        snprintf(out, outlen, "no control modules loaded");
+    else if (!any || n == 0)
+        snprintf(out, outlen, "no status published");
+    pthread_mutex_unlock(&cp_lock);
+    return 0;
+}
+
 int gr_cp_list(char *out, size_t outlen)
 {
     int i, n = 0;

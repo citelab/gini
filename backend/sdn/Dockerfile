@@ -7,7 +7,8 @@ FROM python:3.9-slim
 WORKDIR /opt
 COPY pox/ /opt/pox/
 COPY run-pox.sh /usr/local/bin/run-pox.sh
-RUN chmod +x /usr/local/bin/run-pox.sh
+# strip CR (a Windows/CRLF checkout makes the `#!` line unrunnable: "no such file or directory")
+RUN sed -i 's/\r$//' /usr/local/bin/run-pox.sh && chmod +x /usr/local/bin/run-pox.sh
 
 # Which controller app to run, and the OpenFlow port to listen on. Overridden per
 # container by the orchestrator (POX_APP / POX_PORT from the compiled topology).

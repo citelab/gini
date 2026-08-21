@@ -821,9 +821,17 @@ class MainWindow(QMainWindow):
                              "Routing HUD — model view of the network's routing; long-press a "
                              "router for its shortest-path tree", self._toggle_routing_hud,
                              checkable=True)
+        self._oshud_act = act("oshud", "host",
+                              "OS HUD — X-ray a running xv6 kernel: the causal story of a launch "
+                              "across every subsystem, on one time axis. Scrub to replay.",
+                              self._toggle_os_hud, checkable=True)
         self._fhud_act = act("fhud", "metrics",
                              "Flow HUD — live TCP congestion windows; click a flow to plot its "
                              "cwnd sawtooth with drops", self._toggle_flow_hud, checkable=True)
+        self._mhud_act = act("mhud", "hub",
+                             "Multicast HUD — live groups, joins, and the distribution tree's "
+                             "per-interface copy rates (mcast_tree.lua)",
+                             self._toggle_mcast_hud, checkable=True)
         self._run_act = act("run", "play", "Run", self._run)
         self._stop_act = act("stop", "stop", "Stop", self._stop)
         self._server_act = act("server", "cloud",
@@ -877,7 +885,7 @@ class MainWindow(QMainWindow):
             lay.addWidget(self._tb_spacer(8))
             lay.addWidget(self.run_button)                    # morphing ▶/■ power button
             lay.addWidget(self._tb_spacer(8))
-            lay.addWidget(tray(("zoom_in", "zoom_out", "rhud", "fhud")))
+            lay.addWidget(tray(("zoom_in", "zoom_out", "rhud", "fhud", "mhud", "oshud")))
             lay.addStretch(1)                                 # push the cluster left
 
         # RIGHT cluster: mode/model/activity pills · theme picker, packed to the right.
@@ -1376,11 +1384,19 @@ class MainWindow(QMainWindow):
         (long-press a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
         try:
             if checked:
-                # only one HUD at a time — turn the Flow HUD off if it is on
+                # only one HUD at a time — turn the other HUDs off if they are on
                 if getattr(self, "_fhud", None) is not None:
                     self._fhud.close()
                 if hasattr(self, "_fhud_act"):
                     self._fhud_act.setChecked(False)
+                if getattr(self, "_mhud", None) is not None:
+                    self._mhud.close()
+                if hasattr(self, "_mhud_act"):
+                    self._mhud_act.setChecked(False)
+                if getattr(self, "_oshud", None) is not None:
+                    self._oshud.close()
+                if hasattr(self, "_oshud_act"):
+                    self._oshud_act.setChecked(False)
                 if getattr(self, "_rhud", None) is None:
                     from .routing_hud import RoutingHudController
                     devs = self.ctx.topology.devices
@@ -1403,11 +1419,19 @@ class MainWindow(QMainWindow):
         stations. Click a flow chip to plot its cwnd sawtooth with drop marks. Top-right."""
         try:
             if checked:
-                # only one HUD at a time — turn the Routing HUD off if it is on
+                # only one HUD at a time — turn the other HUDs off if they are on
                 if getattr(self, "_rhud", None) is not None:
                     self._rhud.close()
                 if hasattr(self, "_rhud_act"):
                     self._rhud_act.setChecked(False)
+                if getattr(self, "_mhud", None) is not None:
+                    self._mhud.close()
+                if hasattr(self, "_mhud_act"):
+                    self._mhud_act.setChecked(False)
+                if getattr(self, "_oshud", None) is not None:
+                    self._oshud.close()
+                if hasattr(self, "_oshud_act"):
+                    self._oshud_act.setChecked(False)
                 if getattr(self, "_fhud", None) is None:
                     from .flow_hud import FlowHudController
                     from ..services.compiler import _role
@@ -1424,6 +1448,76 @@ class MainWindow(QMainWindow):
                 self._fhud.close()
         except Exception as e:
             self.ctx.bus.log.emit("error", f"Flow HUD: {e}")
+
+    def _toggle_mcast_hud(self, checked: bool) -> None:
+        """Show/hide the Multicast HUD — live multicast groups, member interfaces, and
+        per-interface copy rates, polled from `gpipe cp status` on every router (the
+        mcast_tree.lua forwarder publishes the snapshots). Top-right of the canvas."""
+        try:
+            if checked:
+                # only one HUD at a time — turn the other HUDs off if they are on
+                for attr, act_attr in (("_rhud", "_rhud_act"), ("_fhud", "_fhud_act")):
+                    if getattr(self, attr, None) is not None:
+                        getattr(self, attr).close()
+                    if hasattr(self, act_attr):
+                        getattr(self, act_attr).setChecked(False)
+                if getattr(self, "_mhud", None) is None:
+                    from .mcast_hud import McastHudController
+                    devs = self.ctx.topology.devices
+                    self._mhud = McastHudController(
+                        self.canvas, self.theme,
+                        routers=lambda: [d.name for d in devs.values()
+                                         if d.type_key in ("router", "firewall")],
+                        query=self.element_query)
+                self._mhud.show_topright()
+            elif getattr(self, "_mhud", None) is not None:
+                self._mhud.close()
+        except Exception as e:
+            self.ctx.bus.log.emit("error", f"Multicast HUD: {e}")
+
+    def _toggle_os_hud(self, checked: bool) -> None:
+        """Show/hide the OS HUD — the kernel's own X-ray. Needs a RUNNING xv6 Machine: the events
+        come from that kernel's rings, merged by the global event clock."""
+        try:
+            if checked:
+                for other, act_name in (("_rhud", "_rhud_act"), ("_fhud", "_fhud_act"),
+                                        ("_mhud", "_mhud_act")):
+                    if getattr(self, other, None) is not None:
+                        getattr(self, other).close()
+                    if hasattr(self, act_name):
+                        getattr(self, act_name).setChecked(False)
+                if getattr(self, "_oshud", None) is None:
+                    from .os_hud import OsHudController
+                    self._oshud = OsHudController(
+                        self.canvas, self.theme,
+                        agent_of=self._xv6_agent,
+                        mode_of=self._xv6_modetime)
+                self._oshud.show_topright()
+            elif getattr(self, "_oshud", None) is not None:
+                self._oshud.close()
+        except Exception as e:
+            self.ctx.bus.log.emit("error", f"OS HUD: {e}")
+
+    def _xv6_state(self):
+        """The MachineState of the first xv6 Machine on the canvas, via the same shared
+        `ctx.machine_states` the Lab and the Ask GINI agent use — so the HUD reads exactly the
+        state the rest of the app sees."""
+        for d in self.ctx.topology.devices.values():
+            if getattr(d, "type_key", "") == "xv6":
+                return self._machine_state_for(d.id)
+        return None
+
+    def _xv6_agent(self):
+        """The in-container agent client of that machine, or None when nothing is running.
+        The HUD reads the kernel's event rings through it."""
+        st = self._xv6_state()
+        return getattr(getattr(st, "provider", None), "agent", None) if st else None
+
+    def _xv6_modetime(self) -> dict:
+        """The kernel's user/kernel/idle tick counters, for the Mode lane."""
+        st = self._xv6_state()
+        snap = getattr(st, "latest", None) if st else None
+        return dict(getattr(snap, "modetime", {}) or {}) if snap else {}
 
     def _refresh_icons(self) -> None:
         t = self.theme.theme

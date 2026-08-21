@@ -27,7 +27,8 @@ RUN sed -i 's/Components: main/Components: main contrib/' /etc/apt/sources.list.
 
 WORKDIR /opt
 COPY boot_zoo.sh /opt/boot_zoo.sh
-RUN chmod +x /opt/boot_zoo.sh
+# strip CR (a Windows/CRLF checkout makes the `#!` line unrunnable: "no such file or directory")
+RUN sed -i 's/\r$//' /opt/boot_zoo.sh && chmod +x /opt/boot_zoo.sh
 
 # Where fetched full-OS images and any persistent overlay live. Mount a volume here to cache
 # downloads and (with ZOO_PERSIST=1) keep changes across runs.

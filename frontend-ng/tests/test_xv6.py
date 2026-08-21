@@ -1,7 +1,8 @@
 """xv6 state parsing + scheduling timeline (the Machine Lab's read side)."""
 from gini.domain.xv6 import (
     Snapshot, SchedTimeline, build_process_tree, parse_backtrace, parse_procdump,
-    parse_registers, running_pid,
+    parse_lock_cpus, parse_locks, parse_registers, parse_traptrace, running_pid,
+    stvec_str,
 )
 
 PROCDUMP = """
@@ -351,3 +352,57 @@ def test_timeline_records_context_switches():
     pids = [s.pid for s in tl.recent()]
     assert pids == [3, 3, 4]                 # one advance without switch, then a switch
     assert tl.switches() == 1
+
+
+# -- trap-ring CSRs: honest interrupt state, captured AT TRAP TIME ----------------------------- #
+def test_traptrace_parses_legacy_five_field_lines():
+    # kernels built before the CSR capture emit 5 fields; they must still parse, with no CSRs
+    e = parse_traptrace("TR 3 0 0x8 0x000000000000005a 0x0")[0]
+    assert (e.pid, e.kind, e.cause) == (3, 0, "0x8")
+    assert not e.has_csr and e.came_from == "—"
+
+
+def test_traptrace_parses_csr_triple_and_decodes_spp():
+    # SPP clear -> the trap interrupted USER code; set -> kernel code
+    user = parse_traptrace(
+        "TR 3 0 0x8 0x5a 0x0 0x0000000000000020 0x222 0x20")[0]
+    kern = parse_traptrace(
+        "TR 3 2 0x8000000000000005 0x80001bb4 0x0 0x0000000000000120 0x222 0x20")[0]
+    assert user.has_csr and user.sie == "0x222"
+    assert user.came_from == "user"
+    assert kern.came_from == "kernel"            # 0x120 has SSTATUS_SPP (1<<8) set
+
+
+def test_stvec_decodes_direct_and_vectored_mode():
+    assert "direct" in stvec_str(0x800062c0)
+    assert "vectored" in stvec_str(0x800062c1)   # low bits = mode, not part of the base
+    assert stvec_str(0x800062c1).startswith("0x800062c0")
+    assert stvec_str(None) == "—"
+
+
+# -- lock contention telemetry (the Lock Lab feed) --------------------------------------------- #
+_LOCK_DUMP = """LOCKCPU 2
+LOCK bcache 12043 8891
+LOCK kmem 3320 12
+LOCK proc 88213 0
+LOCK log 402 55"""
+
+
+def test_parse_locks_sorted_by_contention():
+    ls = parse_locks(_LOCK_DUMP)
+    # most SPINS first — `proc` has by far the most acquires but zero contention, and that
+    # distinction is the whole lesson
+    assert [l.name for l in ls] == ["bcache", "log", "kmem", "proc"]
+    assert ls[-1].name == "proc" and ls[-1].acquires == 88213 and ls[-1].contention == 0.0
+
+
+def test_lock_contention_ratio():
+    ls = {l.name: l for l in parse_locks(_LOCK_DUMP)}
+    assert abs(ls["bcache"].contention - 8891 / 12043) < 1e-9
+    assert ls["kmem"].contention < 0.01
+
+
+def test_parse_locks_empty_on_older_kernel():
+    assert parse_locks("") == []
+    assert parse_lock_cpus("") == 0
+    assert parse_lock_cpus(_LOCK_DUMP) == 2

@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..domain.xv6_vm import PGSIZE, DemoVm, classify_faults, region_for, shared_frames
+from ..domain.xv6_vm import (
+    PGSIZE, DemoVm, ad_str, classify_faults, region_for, shared_frames,
+)
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
 
@@ -113,6 +115,49 @@ class PhysBar(QWidget):
                    QColor(t.accent_for("amber")))
 
 
+class FragBar(QWidget):
+    """Fragmentation, drawn honestly from what the kernel can tell us.
+
+    The kernel reports free pages and the LARGEST CONTIGUOUS free run (from the allocation
+    bitmap S3 maintains). Those two numbers are the whole story of a page allocator: plenty of
+    free memory whose biggest run is small IS fragmentation, and it is why a free-list allocator
+    degrades while a buddy/locality policy holds up. The bar shows total memory, the free share,
+    and — as a solid inner block — how much of that free memory is in ONE run.
+    """
+
+    def __init__(self, theme) -> None:
+        super().__init__()
+        self.theme = theme
+        self._free = self._total = self._run = 0
+        self.setMinimumHeight(34)
+
+    def set_values(self, free, total, max_run) -> None:
+        self._free, self._total, self._run = int(free), int(total), int(max_run)
+        self.update()
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        t = self.theme.theme
+        p.fillRect(self.rect(), QColor(t.panel))
+        if self._total <= 0:
+            p.setPen(QColor(t.faint))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "page allocator not reported — rebuild the xv6 image")
+            return
+        w, h = self.width(), self.height()
+        used_frac = 1.0 - (self._free / self._total)
+        # used memory (amber) on the left, free (dim) to the right
+        p.fillRect(0, 0, int(w * used_frac), h, QColor(t.accent_for("amber")))
+        # the largest contiguous free run, drawn inside the free region: a wide block means
+        # healthy memory, a sliver means fragmented
+        run_frac = self._run / self._total
+        x = int(w * used_frac)
+        p.setBrush(QColor(t.accent_for("green")))
+        p.setPen(Qt.NoPen)
+        p.drawRect(x + 1, 6, max(2, int(w * run_frac) - 2), h - 12)
+
+
 class MemoryLab(QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
                  on_play=None, play_games=None) -> None:
@@ -134,7 +179,10 @@ class MemoryLab(QDialog):
         root.addWidget(self._panel("Address space  ·  regions (low → high VA)", self._strip))
 
         grid = QGridLayout(); grid.setSpacing(10); root.addLayout(grid, 1)
-        self._pt_tbl = self._table(["VA", "PA", "perms", "region"])
+        # A/D = the accessed + dirty bits the hardware maintains. Every page-replacement policy
+        # reads them (clock sweeps A and clears it; D says an eviction needs a write-back), and
+        # they were being parsed out of the PTE and thrown away.
+        self._pt_tbl = self._table(["VA", "PA", "perms", "A/D", "region"])
         grid.addWidget(self._panel("Page table  ·  leaf mappings", self._pt_tbl, fill=True), 0, 0, 2, 1)
         grid.addWidget(self._build_phys_panel(), 0, 1)
         grid.addWidget(self._build_faults_panel(), 1, 1)
@@ -208,6 +256,12 @@ class MemoryLab(QDialog):
         self._phys_lbl = QLabel(); self._phys_lbl.setStyleSheet(
             _scss(f"color:{t.text};font-size:12px;border:none;"))
         v.addWidget(self._phys_lbl)
+        # S3: fragmentation — free memory vs. the largest CONTIGUOUS free run
+        self._frag_bar = FragBar(self.theme)
+        v.addWidget(self._frag_bar)
+        self._frag_lbl = QLabel(); self._frag_lbl.setWordWrap(True)
+        self._frag_lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;border:none;"))
+        v.addWidget(self._frag_lbl)
         v.addStretch(1)
         return f
 
@@ -346,12 +400,15 @@ class MemoryLab(QDialog):
         self._pt_tbl.setRowCount(len(leaves))
         for r, pte in enumerate(leaves):
             reg = region_for(pte.va, snap.regions)
-            for c, val in enumerate([hex(pte.va), hex(pte.pa), pte.perms, reg]):
+            ad = ad_str(pte.flags)
+            for c, val in enumerate([hex(pte.va), hex(pte.pa), pte.perms, ad, reg]):
                 it = QTableWidgetItem(val)
                 if c == 2 and "u" in pte.perms:
                     it.setForeground(QColor(t.accent_for("green")))
                 elif c == 2 and pte.perms == "----":
                     it.setForeground(QColor(t.faint))
+                elif c == 3:                       # touched pages stand out from cold ones
+                    it.setForeground(QColor(t.accent_for("amber") if "A" in ad else t.faint))
                 self._pt_tbl.setItem(r, c, it)
         # physical memory
         ph = snap.phys
@@ -359,6 +416,19 @@ class MemoryLab(QDialog):
         self._phys_lbl.setText(
             f"{ph.used_pages:,} used / {ph.free_pages:,} free of {ph.total_pages:,} pages "
             f"({ph.used_frac * 100:.1f}% used · {ph.free_pages * 4 // 1024} MB free)")
+        # S3: the allocator's own bitmap counters (0 on a kernel without the page bitmap)
+        free, total = getattr(snap, "free_pages", 0), getattr(snap, "total_pages", 0)
+        run = getattr(snap, "max_free_run", 0)
+        self._frag_bar.set_values(free, total, run)
+        if total:
+            frag = 1.0 - (run / free) if free else 0.0
+            self._frag_lbl.setText(
+                f"largest contiguous free run: {run:,} pages ({run * 4 // 1024} MB) of "
+                f"{free:,} free — {frag * 100:.0f}% of free memory is NOT in that run"
+                + ("   ·   healthy" if frag < 0.15 else "   ·   fragmented"))
+        else:
+            self._frag_lbl.setText(
+                "fragmentation needs the page-allocator bitmap — rebuild the xv6 image")
         # faults — the live classified ring (or the simulated demo log)
         rows = self._fault_rows(snap)
         self._fault_tbl.setRowCount(len(rows))

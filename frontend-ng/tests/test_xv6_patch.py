@@ -89,15 +89,18 @@ def test_patcher_applies_and_is_idempotent(tmp_path):
     assert "extern int      sched_quantum" in (k / "defs.h").read_text()
 
     # console.c: the GINI dumps are added AND bracketed with 0x1e/0x1f (via %c) so the agent can
-    # hide them from the human console; the native Ctrl-P procdump stays plain. Eight bracketed
+    # hide them from the human console; the native Ctrl-P procdump stays plain. Nine bracketed
     # dumps now: procs(T), page table(V), fs(F), syscalls(S), all-procs VM(A), fault ring(E),
-    # trap ring(R), shadow manifest(W).
+    # trap ring(R), shadow manifest(W), lock contention(L).
     con = (k / "console.c").read_text()
     assert "gini_dump();" in con and "gini_vmdump();" in con and "gini_fsdump();" in con
     assert "gini_vmdump_all();" in con and "gini_faultdump();" in con
     assert "case C('A')" in con and "case C('E')" in con
     assert "case C('W')" in con and "gini_shadowdump();" in con   # the shadow manifest dump
-    assert con.count('printk("%c",30)') == 8 and con.count('printk("%c",31)') == 8
+    assert "case C('L')" in con and "gini_lockdump();" in con     # lock contention (Lock Lab)
+    # every bracketed dump must be BALANCED — an unmatched 30/31 would corrupt the frame the
+    # agent splits on, so compare the counts to each other rather than to a magic number
+    assert con.count('printk("%c",30)') == con.count('printk("%c",31)') >= 9
     assert "case C('\\\\')" in con                           # quantum reset key intact
     assert "case C('C'): gini_break();" in con              # Ctrl-C -> break a hung foreground
     assert "gini_break" in (k / "proc.c").read_text()       # the kernel-side break function

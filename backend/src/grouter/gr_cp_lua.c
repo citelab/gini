@@ -21,6 +21,9 @@
  *     route_add(net, mask, nexthop, iface) / route_del(net, mask)
  *     interfaces()  -> { {iface=, ip=}, .. }
  *     log(msg)
+ *     publish(text)                               -- set the module's status snapshot; read
+ *                                                    (cross-thread safe) by `gpipe cp status`,
+ *                                                    which the Multicast HUD polls
  *
  * With `listen` + `emit` + the raw packet, a student can implement multicast (snoop IGMP for
  * membership, replicate datagrams to member interfaces) entirely in Lua; keeping the membership
@@ -30,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
@@ -38,8 +42,16 @@
 #include "message.h"
 
 #define GR_CP_LUA_PORT 5200      /* GINI control-plane teaching port (UDP) */
+#define GR_CP_SNAP_MAX 4096      /* published status snapshot buffer */
 
-typedef struct { lua_State *L; const gr_cp_services_t *svc; gr_cp_module_t *self; } lua_cp_state;
+typedef struct {
+    lua_State *L; const gr_cp_services_t *svc; gr_cp_module_t *self;
+    /* status snapshot: written by publish() on the control thread, read by the CLI
+     * thread via lua_cp_status(). The mutex is the only cross-thread touch point;
+     * the Lua state itself is never entered from the CLI thread. */
+    char snap[GR_CP_SNAP_MAX];
+    pthread_mutex_t snap_lock;
+} lua_cp_state;
 
 /* every API function carries the module state as its first upvalue */
 #define ST(L) ((lua_cp_state *)lua_touserdata((L), lua_upvalueindex(1)))
@@ -154,6 +166,34 @@ static int l_log(lua_State *L)
     return 0;
 }
 
+/* publish(text): replace the module's status snapshot (shown by `gpipe cp status`). */
+static int l_publish(lua_State *L)
+{
+    lua_cp_state *s = ST(L);
+    size_t len; const char *txt = luaL_checklstring(L, 1, &len);
+    if (len >= sizeof s->snap) len = sizeof s->snap - 1;
+    pthread_mutex_lock(&s->snap_lock);
+    memcpy(s->snap, txt, len);
+    s->snap[len] = '\0';
+    pthread_mutex_unlock(&s->snap_lock);
+    return 0;
+}
+
+/* status hook: copy the last published snapshot out (CLI thread; never enters Lua). */
+static int lua_cp_status(gr_cp_module_t *self, char *out, size_t outlen)
+{
+    lua_cp_state *s = (lua_cp_state *)self->state;
+    int n = 0;
+    if (!s || outlen == 0) return 0;
+    pthread_mutex_lock(&s->snap_lock);
+    if (s->snap[0])
+        n = snprintf(out, outlen, "%s\n", s->snap);
+    pthread_mutex_unlock(&s->snap_lock);
+    if (n < 0) n = 0;
+    if (n > (int)outlen) n = (int)outlen;
+    return n;
+}
+
 static void call_hook(lua_cp_state *s, const char *name, int nargs)
 {
     if (lua_pcall(s->L, nargs, 0, 0) != LUA_OK)
@@ -214,6 +254,7 @@ static int lua_cp_start(gr_cp_module_t *self, const gr_cp_services_t *svc, const
     lua_cp_state *s = (lua_cp_state *)calloc(1, sizeof *s);
     if (!s) { lua_close(L); return -1; }
     s->L = L; s->svc = svc; s->self = self;
+    pthread_mutex_init(&s->snap_lock, NULL);
     self->state = s;
 
 #define REG(nm, fn) do { lua_pushlightuserdata(L, s); lua_pushcclosure(L, (fn), 1); \
@@ -225,6 +266,7 @@ static int lua_cp_start(gr_cp_module_t *self, const gr_cp_services_t *svc, const
     REG("interfaces", l_interfaces);
     REG("listen",     l_listen);
     REG("log",        l_log);
+    REG("publish",    l_publish);
 #undef REG
 
     /* default filter (a routing module keeps this); a forwarding module overrides it with listen() */
@@ -257,6 +299,7 @@ static void lua_cp_stop(gr_cp_module_t *self)
     lua_cp_state *s = (lua_cp_state *)self->state;
     if (!s) return;
     if (s->L) lua_close(s->L);
+    pthread_mutex_destroy(&s->snap_lock);
     free(s);
 }
 
@@ -268,5 +311,6 @@ gr_cp_module_t *gr_cp_lua_create(void)
     m->start = lua_cp_start;
     m->on_packet = lua_cp_on_packet;
     m->stop = lua_cp_stop;
+    m->status = lua_cp_status;
     return m;
 }

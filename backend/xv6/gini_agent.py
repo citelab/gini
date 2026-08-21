@@ -34,6 +34,16 @@ XV6_DIR = "/opt/xv6-riscv"
 SHADOW_FILE = XV6_DIR + "/kernel/shadows/gini_sched.c"
 SHADOW_REF = "/opt/gini_sched_ref.c"    # pristine stub (outside the bind-mount) for present/hash
 
+# One student file per SUBSYSTEM, matching the `sub=` field the kernel now emits on each SHADOW
+# line. Each has a pristine reference copy stashed outside the bind-mount, so "has the student
+# edited THIS file?" is answered per subsystem instead of every shadow inheriting the scheduler's
+# answer (which used to mark a vm shadow "present" because gini_sched.c had been touched).
+SHADOWS = {
+    "sched": (XV6_DIR + "/kernel/shadows/gini_sched.c", "/opt/gini_sched_ref.c"),
+    "vm":    (XV6_DIR + "/kernel/shadows/gini_vm.c",    "/opt/gini_vm_ref.c"),
+    "fs":    (XV6_DIR + "/kernel/shadows/gini_fs.c",    "/opt/gini_fs_ref.c"),
+}
+
 # The kernel brackets every GINI dump (Ctrl-T/V/F, machine-readable) with these control bytes, so
 # the reader can split the single serial stream into TWO logical streams at ingest time: a CLEAN
 # human console (what the Terminal shows) and captured dump blocks (what the Machine Lab parses).
@@ -235,6 +245,62 @@ class Qemu:
 _QEMU = Qemu()
 
 
+class Wedge:
+    """Notices when the guest stops answering, and blames the shadow that was enabled.
+
+    Deliberately does NOT reboot: a student who wrote a scheduler that hangs the machine should
+    SEE that it hung, be told which of their shadows did it, and press Reboot themselves. We only
+    report. The kernel's `gini_shadow[]` initialises enabled=0, so any reboot brings the machine
+    back WITHOUT their code — no extra mechanism needed to "boot with it disabled".
+
+    A hard wedge (panic, or a loop with interrupts off) stops the dumps, which is what this sees.
+    A SOFT wedge — a picker that loops forever with interrupts on — keeps answering dumps while
+    nothing ever runs; that one is detected frontend-side from the scheduling timeline.
+    """
+    GRACE_S = 10.0                # a busy guest can be slow; only complain after this long
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.last_ok = time.monotonic()
+        self.enabled = []         # shadow names enabled at the last manifest read
+        self.faults = {}          # shadow name -> how many times it wedged the machine
+        self.blamed = []          # names blamed for the CURRENT wedge (cleared on reboot)
+
+    def note_dump(self, text: str) -> None:
+        """Called on every poll. A non-empty dump means the kernel is still servicing interrupts."""
+        if not text:
+            return
+        with self._lock:
+            self.last_ok = time.monotonic()
+            if self.blamed:       # it answered again on its own -> not wedged after all
+                self.blamed = []
+
+    def note_manifest(self, text: str) -> None:
+        with self._lock:
+            self.enabled = re.findall(r"SHADOW (\S+).*?enabled=1", text or "")
+
+    def rebooted(self) -> None:
+        with self._lock:
+            self.last_ok = time.monotonic()
+            self.blamed = []
+            self.enabled = []     # they come back disabled
+
+    def state(self) -> dict:
+        with self._lock:
+            quiet = time.monotonic() - self.last_ok
+            wedged = quiet > self.GRACE_S
+            if wedged and not self.blamed:
+                self.blamed = list(self.enabled) or ["(no shadow enabled)"]
+                for n in self.blamed:                  # count the fault once per wedge
+                    self.faults[n] = self.faults.get(n, 0) + 1
+            return {"wedged": wedged, "quiet_s": round(quiet, 1),
+                    "blamed": list(self.blamed), "faults": dict(self.faults),
+                    "panic": _SERIAL.tail()[-2000:].count("panic") > 0 if wedged else False}
+
+
+_WEDGE = Wedge()
+
+
 def _scope_errors(log: str) -> str:
     """Keep the gcc lines that name the student's shadow file (or say 'error:'), so a compile
     failure is legible instead of a wall of kernel build output."""
@@ -256,10 +322,18 @@ def _rebuild():
     return True, "loaded"
 
 
-def _revert():
-    """Restore the shipped stub, then rebuild — one-click back to a known-good kernel."""
+def _revert(sub: str = ""):
+    """Restore the shipped stub(s), then rebuild — one click back to a known-good kernel.
+
+    `sub` names ONE subsystem (sched/vm/fs) so a student experimenting with paging can throw away
+    their vm file without losing the scheduler they already got working. No `sub` reverts all,
+    which is the old behaviour and still the "put everything back" button.
+    """
+    targets = [SHADOWS[sub]] if sub in SHADOWS else list(SHADOWS.values())
     try:
-        shutil.copyfile(SHADOW_REF, SHADOW_FILE)
+        for path, ref in targets:
+            if os.path.exists(ref):
+                shutil.copyfile(ref, path)
     except Exception as e:
         return False, f"revert error: {e}"
     return _rebuild()
@@ -277,15 +351,27 @@ def _stamp_manifest(text: str) -> str:
     """Rewrite the kernel's `hash=baseline present=0` into the agent-computed file hash + present
     (does the student's shadow file differ from the shipped stub?), so the manifest carries a real
     version. `active`/`enabled`/`faults` stay as the kernel emitted them."""
-    fh = _md5(SHADOW_FILE)
-    present = "1" if (fh and fh != _md5(SHADOW_REF)) else "0"
-    short = (fh or "baseline")[:8]
+    # present/hash PER SUBSYSTEM: each SHADOW line carries `sub=`, so stamp it from that
+    # subsystem's own file. (Pre-`sub=` kernels fall back to the scheduler file, as before.)
+    stamp = {}
+    for sub, (path, ref) in SHADOWS.items():
+        fh = _md5(path)
+        stamp[sub] = ("1" if (fh and fh != _md5(ref)) else "0", (fh or "baseline")[:8])
+    faults = _WEDGE.state()["faults"]      # host-side: times this shadow wedged the machine
     out = []
     for ln in text.splitlines():
         if ln.lstrip().startswith("SHADOW "):
+            msub = re.search(r"sub=(\w+)", ln)
+            present, short = stamp.get(msub.group(1) if msub else "sched", stamp["sched"])
             ln = re.sub(r"hash=\S+", f"hash={short}", ln)
             ln = re.sub(r"present=\d+", f"present={present}", ln)
+            # the kernel's own faults= counter is never incremented (it cannot catch its own
+            # crash); substitute the agent's count, which is the honest number
+            m = re.match(r"\s*SHADOW (\S+)", ln)
+            if m and faults.get(m.group(1)):
+                ln = re.sub(r"faults=\d+", f"faults={faults[m.group(1)]}", ln)
         out.append(ln)
+    _WEDGE.note_manifest(text)
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 # gdb-python: walk proc[] and print `pid <state> <name>` for every active slot (the Mac's
@@ -403,11 +489,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
-            self._send({"ok": True})
+            # carries the wedge verdict so the Lab can tell the student to reboot (we never do)
+            self._send({"ok": True, "wedge": _WEDGE.state()})
         elif path == "/programs":
             self._send({"programs": PROGRAMS})
         elif path == "/procs":                       # fast, NO-halt process table (Ctrl-P)
-            self._send(_SERIAL.procdump(), ctype="text/plain")
+            txt = _SERIAL.procdump()
+            _WEDGE.note_dump(txt)                    # the liveness heartbeat (~2/s)
+            self._send(txt, ctype="text/plain")
         elif path == "/console":
             self._send(_SERIAL.tail(), ctype="text/plain")
         elif path == "/console/stream":               # append-only delta for the Terminal
@@ -438,6 +527,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x01"), ctype="text/plain")   # Ctrl-A -> gini_vmdump_all()
         elif path == "/faults":
             self._send(_SERIAL.dump(b"\x05"), ctype="text/plain")   # Ctrl-E -> gini_faultdump()
+        elif path == "/locks":                        # Ctrl-L -> gini_lockdump() (contention)
+            self._send(_SERIAL.dump(b"\x0c"), ctype="text/plain")
         elif path == "/traps":
             self._send(_SERIAL.dump(b"\x12"), ctype="text/plain")   # Ctrl-R -> gini_trapdump()
         else:
@@ -522,14 +613,34 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": _SERIAL.write(self._body())})
         elif u.path in ("/interrupt", "/break"):      # Ctrl-C: kernel breaks a hung foreground
             self._send({"ok": _SERIAL.write("\x03")})  # console driver handles it, not sh
+        elif u.path == "/shadow/enable":
+            # Toggle a shadow BY INDEX (kernel Ctrl-G <digits><terminator>). /shadow/toggle only
+            # ever reached the current scheduler policy; the harness needs to drive vm/fs shadows
+            # too, and to enable exactly ONE at a time so a measurement isolates that shadow.
+            i = (parse_qs(u.query).get("i", ["0"])[0] or "0").strip()
+            ok = i.isdigit() and _SERIAL.write("\x07" + i + "\n")
+            self._send({"ok": bool(ok), "index": i})
         elif u.path == "/shadow/toggle":              # flip the CURRENT policy's shadow on/off
             self._send({"ok": _SERIAL.write("\x0b")})  # Ctrl-K (the bridge sets policy first)
+        elif u.path == "/reboot":                     # student-initiated reset: relaunch QEMU only
+            # No `make` — this reboots the CURRENT kernel. A full process restart (not a QEMU
+            # `system_reset`) so the kernel image in RAM is pristine even if a wedged kernel
+            # scribbled over its own text. Shadows come back OFF: gini_shadow[] initialises
+            # enabled=0, and nothing here re-enables them — which is exactly what a student
+            # recovering from a wedge needs.
+            _QEMU.restart()
+            _WEDGE.rebooted()
+            self._send({"ok": True, "shadows": "disabled after reboot"})
         elif u.path == "/rebuild":                    # Load: incremental make + restart QEMU
             ok, log = _rebuild()
             self._send({"ok": ok, "log": log})
-        elif u.path == "/revert":                     # restore the shipped stub, then rebuild
-            ok, log = _revert()
+        elif u.path == "/revert":                     # restore the shipped stub(s), then rebuild
+            # ?sub=vm reverts just that subsystem's file; no sub reverts all of them
+            sub = (parse_qs(u.query).get("sub", [""])[0] or "").strip()
+            ok, log = _revert(sub)
             self._send({"ok": ok, "log": log})
+        elif u.path == "/locks/reset":                # Ctrl-Z -> zero the lock counters
+            self._send({"ok": bool(_SERIAL.write("\x1a"))})
         elif u.path == "/console/clear":              # blank the Screen (baseline to now)
             _SERIAL.clear_console()
             self._send({"ok": True})
@@ -538,14 +649,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    # Seed the shadow file if the bind-mounted host folder is empty (Load loop): the mount hides the
-    # image's kernel/shadows/gini_sched.c, so copy the pristine stub back in — the pre-built
-    # kernel/kernel still boots, and the student's edits + Load rebuild from this file.
-    if not os.path.exists(SHADOW_FILE) and os.path.exists(SHADOW_REF):
-        try:
-            os.makedirs(os.path.dirname(SHADOW_FILE), exist_ok=True)
-            shutil.copyfile(SHADOW_REF, SHADOW_FILE)
-        except Exception:
-            pass
+    # Seed EVERY shadow file if the bind-mounted host folder is empty (Load loop): the mount hides
+    # the image's kernel/shadows/*.c, so copy each pristine stub back in — the pre-built
+    # kernel/kernel still boots, and the student's edits + Load rebuild from these files.
+    # (Missing any one of them would fail the link, since all three .o are in the Makefile.)
+    for _path, _ref in SHADOWS.values():
+        if not os.path.exists(_path) and os.path.exists(_ref):
+            try:
+                os.makedirs(os.path.dirname(_path), exist_ok=True)
+                shutil.copyfile(_ref, _path)
+            except Exception:
+                pass
     _QEMU.start()                                     # launch the kernel; the agent stays PID 1
     HTTPServer(("0.0.0.0", 5000), Handler).serve_forever()
