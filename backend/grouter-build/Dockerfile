@@ -42,7 +42,12 @@ COPY grouter-build/  ./grouter-build/
 
 # build the real gRouter with the C compiler (gcc). invoke via bash so it doesn't depend on the
 # copied file keeping its executable bit.
-RUN CC=gcc OUT=/usr/local/bin/grouter bash ./grouter-build/build.sh
+#
+# Strip CR first: a Windows clone (git core.autocrlf=true) checks the script out with CRLF, and
+# bash inside the container then dies with `set: pipefail\r: invalid option name`. .gitattributes
+# prevents this for fresh clones; this keeps EXISTING Windows checkouts building.
+RUN sed -i 's/\r$//' ./grouter-build/build.sh \
+ && CC=gcc OUT=/usr/local/bin/grouter bash ./grouter-build/build.sh
 
 # --------------------------------------------------------------------------------------------- #
 # RUNTIME: the binary + the shared libraries it links against + python3 for the entrypoint +

@@ -1,6 +1,7 @@
 """xv6 file-system model — layout maths, GDB parsers, and the DemoDisk write-ahead log."""
 from gini.domain.xv6_fs import (
-    DemoDisk, Superblock, layout, parse_dinode, parse_logheader, parse_superblock,
+    DemoDisk, FsSnapshot, Superblock, layout, parse_bcache, parse_dinode, parse_logheader,
+    parse_superblock,
 )
 
 SB = "$1 = {magic = 271828, size = 2000, nblocks = 1954, ninodes = 200, nlog = 30, " \
@@ -54,3 +55,32 @@ def test_demodisk_write_cycles_the_log():
     d.simulate_write(); assert d.log.phase == "building" and d.log.blocks
     d.simulate_write(); assert d.log.phase == "committing"
     d.simulate_write(); assert d.log.phase == "idle"   # installed, back to idle
+
+
+# -- S1: buffer-cache telemetry (lights up a panel that was dark on real hardware) -------------- #
+_BC_DUMP = """size = 2000 nblocks = 1953 ninodes = 200 nlog = 30 logstart = 2 inodestart = 32 bmapstart = 45
+BC hits 812 misses 96 evicts 66 nbuf 3
+BUF 0 45 0 1 940
+BUF 1 32 2 1 977
+BUF 2 0 0 0 0
+LOG start = 2 outstanding = 0 committing = 0 n = 0 block = {}"""
+
+
+def test_parse_bcache_counters_and_buffers():
+    bc = parse_bcache(_BC_DUMP)
+    assert (bc["hits"], bc["misses"], bc["evicts"]) == (812, 96, 66)
+    bufs = bc["bufs"]
+    assert len(bufs) == 3
+    assert bufs[0].index == 0 and bufs[0].blockno == 45 and bufs[0].lastuse == 940
+    assert bufs[1].in_use and not bufs[0].in_use      # refcnt>0 => never a legal victim
+    assert not bufs[2].valid
+
+
+def test_bcache_hit_rate():
+    snap = FsSnapshot(sb=Superblock(), **parse_bcache(_BC_DUMP))
+    assert abs(snap.hit_rate - 812 / 908) < 1e-9
+
+
+def test_parse_bcache_absent_on_older_kernel():
+    # before the bcache telemetry the panel must stay honest rather than invent numbers
+    assert parse_bcache("size = 2000\nLOG start = 2 outstanding = 0 committing = 0 n = 0") == {}

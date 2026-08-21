@@ -584,12 +584,36 @@ while True:
 '''
 
 
+def _seed_examples(scripts: Path, shared: Path) -> None:
+    """Copy the examples GINI ships (packaged under gini/data/examples) into the user's
+    ~/.gini dirs, so the book's instructions work out of the box: mcast_tree.lua appears
+    in ~/.gini/scripts (loadable as /scripts/mcast_tree.lua on every router), and the
+    Multicast File Distribution starter kit in ~/.gini/shared/multicast_fs (visible at
+    /shared/multicast_fs on every station). Never overwrites a file the user edited."""
+    ex = Path(__file__).resolve().parents[1] / "data" / "examples"
+    try:
+        src = ex / "mcast_tree.lua"
+        if src.exists() and not (scripts / src.name).exists():
+            shutil.copy(src, scripts / src.name)
+        kit = ex / "multicast_fs"
+        if kit.is_dir():
+            dst = shared / "multicast_fs"
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in kit.iterdir():
+                if f.is_file() and not (dst / f.name).exists():
+                    shutil.copy(f, dst / f.name)
+    except Exception:
+        pass    # examples are a convenience; never block a Run on them
+
+
 def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str | Path,
                   auto_internet: bool = True, laptop_id: str = "") -> Path:
     """Write a self-contained Docker project that runs this topology."""
-    from ..app.paths import captures_dir, scripts_dir
+    from ..app.paths import captures_dir, scripts_dir, shared_dir
     captures_dir().mkdir(parents=True, exist_ok=True)   # host dir bind-mounted for tap .pcaps
     scripts_dir().mkdir(parents=True, exist_ok=True)    # host dir bind-mounted for Lua VNFs
+    shared_dir().mkdir(parents=True, exist_ok=True)     # host dir bind-mounted into machines
+    _seed_examples(scripts_dir(), shared_dir())         # ship mcast_tree.lua + the C starter kit
     work = Path(workdir)
     (work / "dataplane").mkdir(parents=True, exist_ok=True)
     (work / "docker").mkdir(exist_ok=True)
@@ -881,9 +905,14 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
         ]
+        from ..app.paths import captures_dir, shared_dir
+        # every station mounts ~/.gini/shared at /shared: students edit sources on the
+        # host and compile in the container (the Multicast File Distribution capstone),
+        # and a station can drop results back for the host to inspect.
+        vols = [f'      - "{_hostpath(shared_dir())}:/shared"']
         if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
-            from ..app.paths import captures_dir
-            lines += ['    volumes:', f'      - "{_hostpath(captures_dir())}:/captures"']
+            vols.append(f'      - "{_hostpath(captures_dir())}:/captures"')
+        lines += ['    volumes:'] + vols
         if tk == MACHINE_GUI and m.get("novnc_port"):   # headful host: publish its noVNC console
             lines += ['    ports:', f'      - "{m["novnc_port"]}:6080"']
         lines += _cpu_limit_lines(m.get("cpus"))

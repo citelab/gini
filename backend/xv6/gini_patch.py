@@ -91,11 +91,75 @@ int sched_quantum = 1;
 // (deliberately imperfect) PRIMARY; `pick_*_shadow` (in kernel/shadows/gini_sched.c, the ONE file
 // students edit) is the SHADOW. Boots enabled=0 -> runs the primary; a control op toggles the
 // current policy's shadow. `active` = the shadow was actually used on the last decision.
-struct gini_shadow gini_shadow[3] = {
-  { "rr_sched",      pick_rr_shadow,      0, 0, 0 },
-  { "prio_sched",    pick_prio_shadow,    0, 0, 0 },
-  { "lottery_sched", pick_lottery_shadow, 0, 0, 0 },
+// Adapters: the registry is generic (void *(*)(void *)) but STUDENTS write naturally-typed
+// functions — `struct proc *pick_rr_shadow(void)` — so each entry goes through a one-line shim.
+static void *gsh_rr(void *a)      { (void)a; return pick_rr_shadow(); }
+static void *gsh_prio(void *a)    { (void)a; return pick_prio_shadow(); }
+static void *gsh_lottery(void *a) { (void)a; return pick_lottery_shadow(); }
+
+// Validator for a picked process. The old code returned the student's pointer straight to
+// scheduler(), which does acquire(&p->lock) — so a garbage pointer was dereferenced and panicked
+// BEFORE the RUNNABLE re-check could help. Check the pointer really addresses a table entry first.
+static int
+gsh_proc_valid(void *arg, void *ans)
+{
+  struct proc *p = (struct proc *)ans;
+  (void)arg;
+  if(p < proc || p >= &proc[NPROC])                             return 0;   // inside proc[]
+  if(((uint64)p - (uint64)proc) % sizeof(struct proc) != 0)     return 0;   // on an entry boundary
+  return p->state == RUNNABLE;                                              // and schedulable
+}
+
+struct gini_shadow gini_shadow[GINI_NSHADOW] = {
+  { "rr_sched",      "sched", gsh_rr,      gsh_proc_valid,    0, 0, 0, 0, 0 },
+  { "prio_sched",    "sched", gsh_prio,    gsh_proc_valid,    0, 0, 0, 0, 0 },
+  { "lottery_sched", "sched", gsh_lottery, gsh_proc_valid,    0, 0, 0, 0, 0 },
+  // vm: the adapter + validator live in vm.c, where walk()/ismapped() are in scope
+  { "vmfault",       "vm",    gsh_vmfault, gsh_vmfault_valid, 0, 0, 0, 0, 0 },
+  // fs: buffer-cache eviction — adapter/validator in bio.c, where bcache is private
+  { "bget_evict",    "fs",    gsh_bget,    gsh_bget_valid,    0, 0, 0, 0, 0 },
+  { "balloc",        "fs",    gsh_balloc,  gsh_balloc_valid,  0, 0, 0, 0, 0 },
+  { "kalloc",        "vm",    gsh_kalloc,  gsh_kalloc_valid,  0, 0, 0, 0, 0 },
 };
+
+// Toggle any shadow by index (console Ctrl-G <n>) — works for every subsystem, unlike Ctrl-K
+// which could only ever reach the current scheduler policy.
+void
+gini_shadow_toggle(int i)
+{
+  if(i >= 0 && i < GINI_NSHADOW)
+    gini_shadow[i].enabled = !gini_shadow[i].enabled;
+}
+
+// Clear the per-shadow counters (console Ctrl-X) so a student can re-measure after a fix without
+// rebooting — otherwise one early mistake keeps a mission's `rejects == 0` objective red forever.
+void
+gini_shadow_reset(void)
+{
+  for(int i = 0; i < GINI_NSHADOW; i++){
+    gini_shadow[i].rejects = 0;
+    gini_shadow[i].calls = 0;
+  }
+}
+
+// The one dispatch path for every shadow: ask the student, accept "not implemented", VALIDATE a
+// real answer, and fall back to the primary (counting a reject) when the answer is unusable.
+void *
+gini_shadow_call(struct gini_shadow *s, void *arg)
+{
+  void *ans;
+  if(!s->enabled || !s->shadow){ s->active = 0; return 0; }
+  s->calls++;
+  ans = s->shadow(arg);
+  if(!ans){ s->active = 0; return 0; }                 // "not implemented" -> primary
+  if(s->valid && !s->valid(arg, ans)){                 // wrong answer -> primary, and say so
+    s->rejects++;
+    s->active = 0;
+    return 0;
+  }
+  s->active = 1;
+  return ans;
+}
 
 // GINI-xv6: choose the next RUNNABLE proc per sched_policy. scheduler() calls this (wired below).
 // If the active policy's shadow is enabled and returns a proc, use it; else fall back to the
@@ -108,13 +172,14 @@ gini_pick(void)
   static int rr = 0;
   static uint lseed = 2463534242u;
 
-  // SHADOW: run the student's version for the active policy, if enabled + implemented (non-0).
-  int gpol = (sched_policy >= 0 && sched_policy < 3) ? sched_policy : 0;
-  if(gini_shadow[gpol].enabled && gini_shadow[gpol].shadow){
-    struct proc *sp = gini_shadow[gpol].shadow();
-    if(sp){ gini_shadow[gpol].active = 1; return sp; }
+  // SHADOW: run the student's version for the active policy. gini_shadow_call validates the
+  // answer (points into proc[], on an entry boundary, RUNNABLE) — a bad pointer is rejected and
+  // counted here rather than panicking in scheduler()'s acquire(&p->lock).
+  {
+    int gpol = (sched_policy >= 0 && sched_policy < GINI_NPOLICY) ? sched_policy : 0;
+    struct proc *sp = (struct proc *)gini_shadow_call(&gini_shadow[gpol], 0);
+    if(sp) return sp;
   }
-  gini_shadow[gpol].active = 0;
 
   if(sched_policy == 1){                  // PRIORITY (lower number = higher) with aging
     struct proc *best = 0;
@@ -165,10 +230,12 @@ void
 gini_shadowdump(void)
 {
   int present = (strncmp(GINI_SCHED_HASH, "baseline", 8) != 0);
-  for(int i = 0; i < 3; i++)
-    PRINTF("SHADOW %s present=%d enabled=%d active=%d faults=%d hash=%s\\n",
+  for(int i = 0; i < GINI_NSHADOW; i++)
+    PRINTF("SHADOW %s present=%d enabled=%d active=%d faults=%d rejects=%d calls=%d "
+           "sub=%s hash=%s\\n",
            gini_shadow[i].name, present, gini_shadow[i].enabled,
-           gini_shadow[i].active, gini_shadow[i].faults, GINI_SCHED_HASH);
+           gini_shadow[i].active, gini_shadow[i].faults, gini_shadow[i].rejects,
+           gini_shadow[i].calls, gini_shadow[i].subsystem, GINI_SCHED_HASH);
 }
 """.replace("PRINTF", PRINT), "GINI-xv6: scheduler control knobs")
 
@@ -266,8 +333,8 @@ regex_once("kernel/trap.c",
 #     its defs.h prototype, and console.c reaches gini_faultdump() the same way.
 _GINI_FAULT = '''
 // GINI-xv6: live page-fault ring — captured in usertrap, dumped over the serial (no gdb halt).
-struct gini_flt { int pid; uint64 scause; uint64 va; uint64 epc; };
-struct gini_flt gini_flt[64];
+struct gini_flt { int pid; uint64 scause; uint64 va; uint64 epc; uint64 seq; };
+struct gini_flt gini_flt[GINI_RING];
 int gini_flt_i;
 
 void
@@ -276,11 +343,12 @@ gini_fault_note(void)
   uint64 c = r_scause();
   if(c == 12 || c == 13 || c == 15){
     struct proc *p = myproc();
-    struct gini_flt *e = &gini_flt[gini_flt_i % 64];
+    struct gini_flt *e = &gini_flt[gini_flt_i % GINI_RING];
     e->pid = p ? p->pid : -1;
     e->scause = c;
     e->va = r_stval();
     e->epc = r_sepc();
+    e->seq = gini_stamp();     // GINI: event clock
     gini_flt_i++;
   }
 }
@@ -289,10 +357,11 @@ void
 gini_faultdump(void)
 {
   int total = gini_flt_i;
-  int start = total > 64 ? total - 64 : 0;
+  int start = total > GINI_RING ? total - GINI_RING : 0;
   for(int k = start; k < total; k++){
-    struct gini_flt *e = &gini_flt[k % 64];
-    PRINTF("FLT %d %d %p %p\\n", e->pid, (int)e->scause, (void*)e->va, (void*)e->epc);
+    struct gini_flt *e = &gini_flt[k % GINI_RING];
+    PRINTF("FLT %d %d %p %p %d\\n", e->pid, (int)e->scause, (void*)e->va, (void*)e->epc,
+           (int)e->seq);
   }
 }
 '''
@@ -326,8 +395,16 @@ regex_once("kernel/trap.c",
 _GINI_TRAP = '''
 // GINI-xv6: trap-taxonomy ring — every user trap, classified + counted + recorded (Traps face).
 enum { GT_SYSCALL=0, GT_PAGEFAULT=1, GT_TIMER=2, GT_DEVICE=3, GT_ILLEGAL=4, GT_OTHER=5, GT_NKIND=6 };
+// the global event clock (see defs.h). Atomic: traps fire on every hart.
+uint64 gini_seq;
+uint64
+gini_stamp(void)
+{
+  return __sync_fetch_and_add(&gini_seq, 1);
+}
+
 uint64 gini_trapcount[GT_NKIND];
-struct gini_trap gini_traps[64];
+struct gini_trap gini_traps[GINI_RING];
 int gini_traps_i;
 
 static int
@@ -350,12 +427,18 @@ gini_traprec(void)
   int kind = gini_kind(c);
   gini_trapcount[kind]++;
   struct proc *p = myproc();
-  struct gini_trap *e = &gini_traps[gini_traps_i % 64];
+  struct gini_trap *e = &gini_traps[gini_traps_i % GINI_RING];
   e->pid = p ? p->pid : 0;
   e->kind = kind;
   e->cause = c;
   e->epc = r_sepc();
   e->tval = r_stval();
+  // the interrupt state AS IT WAS when this trap happened (sstatus.SPP = the privilege we
+  // interrupted, SPIE = whether interrupts were enabled); the poll-time CSR read cannot see this
+  e->sstatus = r_sstatus();
+  e->sie = r_sie();
+  e->sip = r_sip();
+  e->seq = gini_stamp();       // GINI: event clock
   gini_traps_i++;
 }
 
@@ -366,11 +449,12 @@ gini_trapdump(void)
   for(int k = 0; k < GT_NKIND; k++)
     PRINTF("TC %d %s %d\\n", k, kn[k], (int)gini_trapcount[k]);
   int total = gini_traps_i;
-  int start = total > 64 ? total - 64 : 0;
+  int start = total > GINI_RING ? total - GINI_RING : 0;
   for(int k = start; k < total; k++){
-    struct gini_trap *e = &gini_traps[k % 64];
-    PRINTF("TR %d %d %p %p %p\\n", e->pid, e->kind,
-           (void*)e->cause, (void*)e->epc, (void*)e->tval);
+    struct gini_trap *e = &gini_traps[k % GINI_RING];
+    PRINTF("TR %d %d %p %p %p %p %p %p %d\\n", e->pid, e->kind,
+           (void*)e->cause, (void*)e->epc, (void*)e->tval,
+           (void*)e->sstatus, (void*)e->sie, (void*)e->sip, (int)e->seq);
   }
 }
 '''
@@ -436,12 +520,448 @@ vmprint(pagetable_t pt)
   %(P)s("page table %%p\\n", pt);
   gini_vmprint_walk(pt, 0);
 }
+
+// GINI-xv6 SHADOW (vm): lazy/demand page-fault handling. The primary is vmfault() below; the
+// student's version lives in kernel/shadows/gini_vm.c and returns the physical page it mapped,
+// or 0 to fall back. Adapter + validator live HERE because the check needs ismapped()/PHYSTOP.
+uint64 gini_vmf_ok, gini_vmf_fail;      // handled vs. fell-through counters (Memory face)
+
+void *
+gsh_vmfault(void *arg)
+{
+  struct gini_vmf_arg *a = (struct gini_vmf_arg *)arg;
+  return (void *)vmfault_shadow(a->pt, a->psz, a->va, a->read);
+}
+
+// A claimed handle is only accepted if it is REAL: a page-aligned physical page inside RAM, and
+// the faulting address genuinely mapped afterwards. Otherwise the primary runs and we count a
+// reject — a student's half-finished handler can't leave the process running on a lie.
+int
+gsh_vmfault_valid(void *arg, void *ans)
+{
+  struct gini_vmf_arg *a = (struct gini_vmf_arg *)arg;
+  uint64 pa = (uint64)ans;
+  if(pa %% PGSIZE)                          return 0;
+  if(pa < KERNBASE || pa >= PHYSTOP)        return 0;
+  return ismapped(a->pt, PGROUNDDOWN(a->va));
+}
 """ % {"P": PRINT}, "GINI-xv6: print a page table")
+
+# 3b) vmfault(): give the student's shadow first refusal. Hooked INSIDE vmfault rather than at
+#     usertrap's call site, so every caller (usertrap AND the copyin/copyout paths) goes through
+#     the same seam. gini_shadow_call validates the answer before it is believed; 0 from the
+#     shadow means "not implemented", which falls through to the stock body unchanged.
+regex_once("kernel/vm.c",
+           r"(vmfault\(pagetable_t pagetable, uint64 psz, uint64 va, int read\)\s*\n\{\s*\n)",
+           r"\1"
+           "  {  // GINI-xv6 SHADOW: the student's lazy-allocation handler gets first refusal\n"
+           "    struct gini_vmf_arg gva = { pagetable, psz, va, read };\n"
+           "    uint64 gpa = (uint64)gini_shadow_call(&gini_shadow[GINI_SH_VMFAULT], &gva);\n"
+           "    if(gpa){ gini_vmf_ok++; return gpa; }\n"
+           "    gini_vmf_fail++;\n"
+           "  }\n",
+           "GINI-xv6: vmfault shadow hook")
+
+# 3c) bio.c — BUFFER-CACHE instrumentation + the eviction SHADOW (S1).
+#     xv6 has no swapping, so the buffer cache is the only real cache-replacement policy in the
+#     kernel — this is where LRU vs clock vs random becomes measurable. `lastuse` (a tick stamp)
+#     is what gives a student the recency data their policy needs.
+regex_once("kernel/buf.h",
+           r"(  uint refcnt;\n)",
+           r"\1  uint lastuse;      // GINI-xv6: tick of the last hit — recency for the eviction lab\n",
+           "GINI-xv6: buf lastuse stamp")
+
+# hit path: count it and refresh recency
+regex_once("kernel/bio.c",
+           r"(if \(b->dev == dev && b->blockno == blockno\) \{\n\s*b->refcnt\+\+;\n)",
+           r"\1      gini_bc_hits++; b->lastuse = ticks;   // GINI-xv6: cache hit\n",
+           "GINI-xv6: bcache hit counter")
+
+# miss path: let the student's policy pick the victim BEFORE the stock LRU scan runs
+regex_once("kernel/bio.c",
+           r"(  // Not cached\.\n)",
+           r"\1"
+           "  gini_bc_misses++;\n"
+           "  {  // GINI-xv6 SHADOW: the student's eviction policy chooses which buffer to recycle\n"
+           "    struct gini_bget_arg gba = { dev, blockno, bcache.buf, NBUF };\n"
+           "    struct buf *gv = (struct buf *)gini_shadow_call(&gini_shadow[GINI_SH_BGET], &gba);\n"
+           "    if(gv){\n"
+           "      gv->dev = dev; gv->blockno = blockno; gv->valid = 0; gv->refcnt = 1;\n"
+           "      gv->lastuse = ticks; gini_bc_evicts++;\n"
+           "      release(&bcache.lock);\n"
+           "      acquiresleep(&gv->lock);\n"
+           "      return gv;\n"
+           "    }\n"
+           "  }\n",
+           "GINI-xv6: bcache eviction shadow")
+
+# stock recycle path: same bookkeeping so the two policies are compared on equal terms
+regex_once("kernel/bio.c",
+           r"(      b->refcnt = 1;\n)",
+           r"\1      b->lastuse = ticks; gini_bc_evicts++;   // GINI-xv6: shipped-policy eviction\n",
+           "GINI-xv6: bcache evict counter")
+
+append_once("kernel/bio.c", """
+// GINI-xv6: buffer-cache telemetry + the eviction shadow's adapter/validator. They live here
+// because everything they touch (bcache) is private to this file.
+uint64 gini_bc_hits, gini_bc_misses, gini_bc_evicts;
+
+void *
+gsh_bget(void *arg)
+{
+  struct gini_bget_arg *a = (struct gini_bget_arg *)arg;
+  return (void *)bget_evict_shadow(a->dev, a->blockno, a->bufs, a->nbuf);
+}
+
+// Total and cheap: a victim must be one of OUR buffers and must not be in use. This is why the
+// eviction shadow is the safest of the four — a wrong answer cannot corrupt anything, it is
+// simply refused and the shipped LRU runs instead.
+int
+gsh_bget_valid(void *arg, void *ans)
+{
+  struct buf *b = (struct buf *)ans;
+  (void)arg;
+  if(b < bcache.buf || b >= &bcache.buf[NBUF])                       return 0;
+  if(((uint64)b - (uint64)bcache.buf) %% sizeof(struct buf) != 0)     return 0;
+  return b->refcnt == 0;
+}
+
+// One line of counters, then one per buffer — the Storage Lab's cache grid reads these.
+void
+gini_bcdump(void)
+{
+  %(P)s("BC hits %%d misses %%d evicts %%d nbuf %%d\\n",
+        (int)gini_bc_hits, (int)gini_bc_misses, (int)gini_bc_evicts, NBUF);
+  for(int i = 0; i < NBUF; i++){
+    struct buf *b = &bcache.buf[i];
+    %(P)s("BUF %%d %%d %%d %%d %%d\\n", i, (int)b->blockno, (int)b->refcnt,
+          b->valid, (int)b->lastuse);
+  }
+}
+""" % {"P": PRINT}, "GINI-xv6: bcache telemetry + eviction shadow")
+
+# 3d) fs.c — BLOCK-ALLOCATOR shadow (S4) + fragmentation telemetry.
+#     The student CHOOSES a free block; the kernel does the bookkeeping (mark the bitmap, zero
+#     the block). That split is deliberate: policy is the lesson, and the dangerous part — the
+#     on-disk bitmap — never depends on their code being right.
+regex_once("kernel/fs.c",
+           r"(balloc\(uint dev\)\n\{\n)",
+           r"\1"
+           "  {  // GINI-xv6 SHADOW: the student's allocation policy picks the block\n"
+           "    struct gini_balloc_arg gaa = { dev, sb.size, gini_ba_last };\n"
+           "    uint gb = (uint)(uint64)gini_shadow_call(&gini_shadow[GINI_SH_BALLOC], &gaa);\n"
+           "    if(gb){\n"
+           "      struct buf *gbp = bread(dev, BBLOCK(gb, sb));\n"
+           "      gbp->data[(gb % BPB) / 8] |= 1 << (gb % 8);   // validated free -> mark in use\n"
+           "      log_write(gbp);\n"
+           "      brelse(gbp);\n"
+           "      bzero(dev, gb);\n"
+           "      gini_ba_note(gb);\n"
+           "      return gb;\n"
+           "    }\n"
+           "  }\n",
+           "GINI-xv6: balloc shadow hook")
+
+# the shipped path gets the same bookkeeping, so both policies are measured on equal terms
+regex_once("kernel/fs.c",
+           r"(        bzero\(dev, b \+ bi\);\n)",
+           r"\1        gini_ba_note(b + bi);   // GINI-xv6: fragmentation telemetry\n",
+           "GINI-xv6: balloc telemetry (shipped path)")
+
+append_once("kernel/fs.c", """
+// GINI-xv6: block-allocator telemetry + the allocation shadow's adapter/validator.
+// LOCALITY is the lesson here: consecutive blocks of a file that sit far apart cost seeks, so we
+// track the mean gap between successive allocations — the number an allocation-policy mission is
+// graded on.
+uint64 gini_ba_allocs, gini_ba_gapsum;
+uint   gini_ba_last;
+
+void
+gini_ba_note(uint bno)
+{
+  if(gini_ba_last)
+    gini_ba_gapsum += (bno > gini_ba_last) ? (bno - gini_ba_last) : (gini_ba_last - bno);
+  gini_ba_last = bno;
+  gini_ba_allocs++;
+}
+
+// Is this block marked free in the on-disk bitmap? Exposed to the student's shadow so they can
+// write a policy, and used by the validator to check their answer.
+int
+gini_block_free(uint dev, uint bno)
+{
+  struct buf *bp;
+  int used;
+  if(bno == 0 || bno >= sb.size)
+    return 0;
+  bp = bread(dev, BBLOCK(bno, sb));
+  used = bp->data[(bno %% BPB) / 8] & (1 << (bno %% 8));
+  brelse(bp);
+  return !used;
+}
+
+void *
+gsh_balloc(void *arg)
+{
+  struct gini_balloc_arg *a = (struct gini_balloc_arg *)arg;
+  return (void *)(uint64)balloc_shadow(a->dev, a->size, a->last);
+}
+
+// Cheap because the bitmap already exists: a returned block must be a real data block that the
+// bitmap agrees is free. Handing back an allocated block would corrupt the file system — this is
+// exactly the class of mistake the validator exists to stop.
+int
+gsh_balloc_valid(void *arg, void *ans)
+{
+  struct gini_balloc_arg *a = (struct gini_balloc_arg *)arg;
+  uint bno = (uint)(uint64)ans;
+  if(bno <= sb.bmapstart || bno >= sb.size)     // never metadata, never out of range
+    return 0;
+  return gini_block_free(a->dev, bno);
+}
+
+// The free/used bitmap itself, hex-packed, so the Storage Lab can draw the disk as a map and a
+// student can SEE fragmentation instead of reading a number.
+void
+gini_bmapdump(void)
+{
+  int nbytes = (sb.size + 7) / 8;
+  %(P)s("BA allocs %%d meangap %%d last %%d nblocks %%d\\n",
+        (int)gini_ba_allocs,
+        (int)(gini_ba_allocs > 1 ? gini_ba_gapsum / (gini_ba_allocs - 1) : 0),
+        (int)gini_ba_last, (int)sb.size);
+  %(P)s("BMAP ");
+  for(int i = 0; i < nbytes; i++){
+    struct buf *bp = bread(ROOTDEV, BBLOCK(i * 8, sb));
+    int byte = bp->data[((i * 8) %% BPB) / 8];
+    brelse(bp);
+    %(P)s("%%x%%x", (byte >> 4) & 0xf, byte & 0xf);
+  }
+  %(P)s("\\n");
+}
+""" % {"P": PRINT}, "GINI-xv6: balloc telemetry + shadow")
+
+# 3e) kalloc.c — PHYSICAL PAGE ALLOCATOR shadow (S3) + the allocation bitmap that makes it safe.
+#     Unlike the other three, a wrong answer here (a page that is already in use) silently
+#     corrupts unrelated kernel memory and stock xv6 cannot detect it. So S3 ships WITH a bitmap:
+#     one bit per physical page = 4096 bytes for xv6's 128 MiB, maintained inside the kmem lock
+#     that kalloc/kfree already hold. It doubles as the data behind the fragmentation view.
+regex_once("kernel/kalloc.c",
+           r"(void\nkfree\(void \*pa\)\n\{\n)",
+           r"\1  gini_page_clear((uint64)pa);   // GINI-xv6: mark free in the allocation bitmap\n",
+           "GINI-xv6: kfree bitmap clear")
+
+regex_once("kernel/kalloc.c",
+           r"(  if \(r\)\n    memset\(\(char \*\)r, 5, PGSIZE\); // fill with junk\n)",
+           "  if (r)\n"
+           "    gini_page_set((uint64)r);      // GINI-xv6: mark in use BEFORE the junk fill\n"
+           r"\1",
+           "GINI-xv6: kalloc bitmap set")
+
+# the shadow gets first refusal, inside kalloc so every caller shares the seam
+regex_once("kernel/kalloc.c",
+           r"(kalloc\(void\)\n\{\n  struct run \*r;\n)",
+           r"\1"
+           "\n"
+           "  {  // GINI-xv6 SHADOW: the student's page allocator picks the page\n"
+           "    void *gp = gini_shadow_call(&gini_shadow[GINI_SH_KALLOC], 0);\n"
+           "    if(gp){\n"
+           "      gini_page_set((uint64)gp);\n"
+           "      gini_ka_shadow++;\n"
+           "      memset((char *)gp, 5, PGSIZE);\n"
+           "      return gp;\n"
+           "    }\n"
+           "  }\n",
+           "GINI-xv6: kalloc shadow hook")
+
+append_once("kernel/kalloc.c", """
+// GINI-xv6: the physical-page allocation bitmap — 1 bit per page. This is what makes a student
+// page allocator SAFE to run: without it, a shadow that hands back a live page corrupts memory
+// undetectably. 4 KB of state for 128 MiB of RAM, updated inside the lock kalloc/kfree already
+// take, and it is also the data source for the Memory Lab's fragmentation view.
+uint8 gini_pagemap[((PHYSTOP - KERNBASE) / PGSIZE + 7) / 8];
+uint64 gini_ka_shadow;
+
+static inline uint64 gini_pg_idx(uint64 pa) { return (pa - KERNBASE) / PGSIZE; }
+
+static int
+gini_pg_inrange(uint64 pa)
+{
+  return pa >= KERNBASE && pa < PHYSTOP;
+}
+
+void
+gini_page_set(uint64 pa)
+{
+  uint64 i;
+  if(!gini_pg_inrange(pa)) return;
+  i = gini_pg_idx(pa);
+  gini_pagemap[i / 8] |= (1 << (i %% 8));
+}
+
+void
+gini_page_clear(uint64 pa)
+{
+  uint64 i;
+  if(!gini_pg_inrange(pa)) return;
+  i = gini_pg_idx(pa);
+  gini_pagemap[i / 8] &= ~(1 << (i %% 8));
+}
+
+int
+gini_page_isset(uint64 pa)
+{
+  uint64 i;
+  if(!gini_pg_inrange(pa)) return 0;
+  i = gini_pg_idx(pa);
+  return (gini_pagemap[i / 8] >> (i %% 8)) & 1;
+}
+
+void *
+gsh_kalloc(void *arg)
+{
+  (void)arg;
+  return kalloc_shadow();
+}
+
+// EXACT, not probabilistic: the page must be aligned, inside RAM, and genuinely free per the
+// bitmap. (xv6's kfree also poisons freed pages with 0x01, which is a cheap secondary check —
+// but the bitmap is authoritative and costs one bit.)
+int
+gsh_kalloc_valid(void *arg, void *ans)
+{
+  uint64 pa = (uint64)ans;
+  (void)arg;
+  if(pa %% PGSIZE)            return 0;
+  if(!gini_pg_inrange(pa))    return 0;
+  if((char *)pa < end)        return 0;    // below the kernel's own end = not allocatable
+  return !gini_page_isset(pa);
+}
+
+// Free-page count + the largest CONTIGUOUS free run — the fragmentation score a buddy-allocator
+// mission is graded on (a first-fit list scores badly here once memory churns).
+void
+gini_kadump(void)
+{
+  uint64 npages = (PHYSTOP - KERNBASE) / PGSIZE;
+  uint64 free = 0, run = 0, best = 0;
+  for(uint64 i = 0; i < npages; i++){
+    if(gini_page_isset(KERNBASE + i * PGSIZE)){
+      run = 0;
+    } else {
+      free++; run++;
+      if(run > best) best = run;
+    }
+  }
+  %(P)s("KA free %%d total %%d maxrun %%d shadow %%d\\n",
+        (int)free, (int)npages, (int)best, (int)gini_ka_shadow);
+}
+""" % {"P": PRINT}, "GINI-xv6: page bitmap + kalloc shadow")
+
+# 3f) spinlock.c/h — LOCK CONTENTION telemetry. The one phenomenon in this kernel that is
+#     completely invisible today, and the thing 6.1810 students read as text from a test program
+#     while GINI students could watch it move.
+#
+#     Counters are aggregated BY LOCK NAME, not per instance: the 64 per-process locks are all
+#     initlock(..., "proc") and what a student wants is "how contended is the proc lock", not 64
+#     rows. Since `name` is a string literal, its POINTER identifies the group — so the slot is
+#     resolved once in initlock and cached in the lock itself, keeping acquire() O(1).
+# The stat struct is defined HERE rather than in defs.h: spinlock.h is included before defs.h in
+# most kernel files, so the member below needs the type in scope already.
+regex_once("kernel/spinlock.h",
+           r"(// Mutual exclusion lock\.\n)",
+           "// GINI-xv6: per-NAME lock contention counters (see spinlock.c).\n"
+           "#define GINI_NLOCK 24\n"
+           "struct gini_lockstat {\n"
+           "  char *name;\n"
+           "  uint64 acquires;   // times this lock was taken\n"
+           "  uint64 spins;      // failed test-and-set attempts = time burned waiting\n"
+           "};\n"
+           "struct gini_lockstat *gini_lock_slot(char *name);\n\n"
+           r"\1",
+           "GINI-xv6: lockstat type")
+
+regex_once("kernel/spinlock.h",
+           r"(  struct cpu \*cpu; // The cpu holding the lock\.\n)",
+           r"\1  struct gini_lockstat *gstat;  // GINI-xv6: contention counters for this lock's NAME\n",
+           "GINI-xv6: spinlock stat slot")
+
+regex_once("kernel/spinlock.c",
+           r"(initlock\(struct spinlock \*lk, char \*name\)\n\{\n)",
+           r"\1  lk->gstat = gini_lock_slot(name);   // GINI-xv6: resolve the counter slot ONCE\n",
+           "GINI-xv6: initlock stat slot")
+
+# count the spin iterations — that IS contention: every iteration is a failed test-and-set
+# because another CPU holds the lock.
+regex_once("kernel/spinlock.c",
+           r"  while \(__atomic_exchange_n\(&lk->locked, 1, __ATOMIC_ACQUIRE\) != 0\)\n    ;\n",
+           "  uint64 gspins = 0;               // GINI-xv6: failed test-and-set attempts\n"
+           "  while (__atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) != 0)\n"
+           "    gspins++;\n"
+           "  if (lk->gstat) {                 // atomic: locks sharing a NAME share this slot\n"
+           "    __sync_fetch_and_add(&lk->gstat->acquires, 1);\n"
+           "    if (gspins)\n"
+           "      __sync_fetch_and_add(&lk->gstat->spins, gspins);\n"
+           "  }\n",
+           "GINI-xv6: acquire contention counters")
+
+append_once("kernel/spinlock.c", """
+// GINI-xv6: lock-contention telemetry. `acquires` counts how often a lock was taken; `spins`
+// counts failed test-and-set attempts — i.e. time a CPU burned waiting for another CPU. The
+// ratio is the number the lock lab is about, and it is ZERO on a single core (nobody to contend
+// with), which is why GINI now boots xv6 multi-core.
+struct gini_lockstat gini_locks[GINI_NLOCK];
+
+// Resolve (or claim) the slot for this lock NAME. Called once per lock from initlock, so the
+// linear scan never appears on the acquire path.
+struct gini_lockstat *
+gini_lock_slot(char *name)
+{
+  int i;
+  if(name == 0)
+    return 0;
+  for(i = 0; i < GINI_NLOCK; i++){
+    if(gini_locks[i].name == name)
+      return &gini_locks[i];
+    if(gini_locks[i].name == 0){
+      gini_locks[i].name = name;
+      return &gini_locks[i];
+    }
+  }
+  return 0;                      // table full: this lock goes uncounted rather than mis-counted
+}
+
+void
+gini_lockreset(void)
+{
+  for(int i = 0; i < GINI_NLOCK; i++){
+    gini_locks[i].acquires = 0;
+    gini_locks[i].spins = 0;
+  }
+}
+
+void
+gini_lockdump(void)
+{
+  %(P)s("LOCKCPU %%d\\n", NCPU);
+  for(int i = 0; i < GINI_NLOCK; i++){
+    if(gini_locks[i].name == 0)
+      continue;
+    %(P)s("LOCK %%s %%d %%d\\n", gini_locks[i].name,
+          (int)gini_locks[i].acquires, (int)gini_locks[i].spins);
+  }
+}
+""" % {"P": PRINT}, "GINI-xv6: lock contention telemetry")
 
 # 4) defs.h — prototypes for the non-static additions. The syscall counter/ring types + externs
 # live here (declared BEFORE syscall() uses them; defined in syscall.c).
 append_once("kernel/defs.h", """
 // GINI-xv6 additions
+// EVENT CLOCK: one monotonic counter stamped into every recorded event, so the trap, syscall
+// and page-fault rings MERGE-SORT into a single ordered story (the OS HUD X-ray). Ticks cannot
+// do this — a whole fork/exec happens inside one ~0.5s GINI tick. Declared FIRST because the
+// ring externs below use it.
+#define GINI_RING 256      // per-ring capacity: one program launch must fit in a ring
 void            vmprint(pagetable_t);
 void            gini_dump(void);
 void            gini_vmdump(void);
@@ -455,9 +975,9 @@ void            gini_setticket(int, int);
 struct proc*    gini_pick(void);
 extern int      sched_policy;
 extern int      sched_quantum;
-struct gini_sc { int pid; int num; uint64 a0; uint64 ret; };
+struct gini_sc { int pid; int num; uint64 a0; uint64 ret; uint64 seq; };
 extern uint64   gini_sccount[64];
-extern struct gini_sc gini_ring[64];
+extern struct gini_sc gini_ring[GINI_RING];
 extern int      gini_ring_i;
 """, "GINI-xv6 additions")
 
@@ -476,9 +996,13 @@ append_once("kernel/defs.h", """
 // GINI-xv6 trap-taxonomy additions
 void            gini_traprec(void);      // classify + record a trap (called from usertrap)
 void            gini_trapdump(void);     // print per-kind counters + the trap ring to the console
-struct gini_trap { int pid; int kind; uint64 cause; uint64 epc; uint64 tval; };
+// sstatus/sie/sip are captured AT TRAP TIME: the live CSR dump can only ever describe the console
+// interrupt that the dump itself caused, so honest interrupt state has to be recorded here.
+struct gini_trap { int pid; int kind; uint64 cause; uint64 epc; uint64 tval;
+                   uint64 sstatus; uint64 sie; uint64 sip; uint64 seq; };
+extern uint64   gini_vmf_ok, gini_vmf_fail;   // vm shadow: handled vs. fell-through
 extern uint64   gini_trapcount[6];
-extern struct gini_trap gini_traps[64];
+extern struct gini_trap gini_traps[GINI_RING];
 extern int      gini_traps_i;
 """, "GINI-xv6 trap-taxonomy additions")
 
@@ -488,18 +1012,79 @@ append_once("kernel/defs.h", """
 #ifndef GINI_SCHED_HASH
 #define GINI_SCHED_HASH "baseline"
 #endif
+// A shadow is a decision the student may take over. `shadow` returns their answer (0 = "not
+// implemented", run the primary); `valid` is the kernel's sanity check on that answer. The
+// scheduler could skip validation because a bad pick only wastes a slice, but an allocator that
+// hands back a live block corrupts the disk — so every shadow now gets checked, and a rejected
+// answer falls back to the primary and is COUNTED instead of being acted on.
 struct gini_shadow {
   char *name;
-  struct proc *(*shadow)(void);
+  char *subsystem;                       // "sched" | "vm" | "fs" — which lab owns it
+  void *(*shadow)(void *arg);
+  int  (*valid)(void *arg, void *ans);   // 0 = no check needed
   int enabled;
   int active;
   int faults;
+  int rejects;                           // answers the validator threw out
+  int calls;                             // times the student's code was asked
 };
 extern struct gini_shadow gini_shadow[];
+#define GINI_NPOLICY 3            // shadows 0..2 are the scheduler policies (indexed by sched_policy)
+#define GINI_SH_VMFAULT 3         // vm: lazy/demand page-fault handling
+#define GINI_SH_BGET    4         // fs: buffer-cache eviction (which buffer to recycle)
+#define GINI_SH_BALLOC  5         // fs: disk-block allocation (which free block to hand out)
+#define GINI_SH_KALLOC  6         // vm: physical page allocation (which free page to hand out)
+#define GINI_NSHADOW 7            // total registry size
+void *          gini_shadow_call(struct gini_shadow *s, void *arg);
+void            gini_shadow_toggle(int i);
+void            gini_shadow_reset(void);
 void            gini_shadowdump(void);
 struct proc*    pick_rr_shadow(void);
 struct proc*    pick_prio_shadow(void);
 struct proc*    pick_lottery_shadow(void);
+// vm shadow: the args the student's handler receives, plus the adapter/validator defined in vm.c
+struct gini_vmf_arg { pagetable_t pt; uint64 psz; uint64 va; int read; };
+void *          gsh_vmfault(void *arg);
+int             gsh_vmfault_valid(void *arg, void *ans);
+uint64          vmfault_shadow(pagetable_t pt, uint64 psz, uint64 va, int read);
+// fs shadow (buffer-cache eviction): the student gets the whole buffer array so they can write a
+// policy over it (recency lives in b->lastuse) without needing bcache's private linked list.
+struct buf;
+struct gini_bget_arg { uint dev; uint blockno; struct buf *bufs; int nbuf; };
+void *          gsh_bget(void *arg);
+int             gsh_bget_valid(void *arg, void *ans);
+struct buf *    bget_evict_shadow(uint dev, uint blockno, struct buf *bufs, int nbuf);
+void            gini_bcdump(void);
+extern uint64   gini_bc_hits, gini_bc_misses, gini_bc_evicts;
+// fs shadow (block allocation): the student picks a FREE block; the kernel marks the bitmap.
+struct gini_balloc_arg { uint dev; uint size; uint last; };
+void *          gsh_balloc(void *arg);
+int             gsh_balloc_valid(void *arg, void *ans);
+uint            balloc_shadow(uint dev, uint nblocks, uint last);
+int             gini_block_free(uint dev, uint bno);
+void            gini_ba_note(uint bno);
+void            gini_bmapdump(void);
+extern uint64   gini_ba_allocs, gini_ba_gapsum;
+extern uint     gini_ba_last;
+// vm shadow (physical page allocation) + the bitmap that makes validating it possible
+void *          gsh_kalloc(void *arg);
+int             gsh_kalloc_valid(void *arg, void *ans);
+void *          kalloc_shadow(void);
+// first address past the kernel image — a page allocator must not hand out anything below it
+// (kalloc.c has this extern privately; the shadow files need it too)
+extern char     end[];
+void            gini_page_set(uint64 pa);
+void            gini_page_clear(uint64 pa);
+int             gini_page_isset(uint64 pa);
+void            gini_kadump(void);
+extern uint64   gini_ka_shadow;
+// lock contention telemetry. NOTE: deliberately NO `extern struct gini_lockstat gini_locks[]`
+// here — start.c includes defs.h WITHOUT spinlock.h, so the type is incomplete there and an
+// array of an incomplete type is a hard error. Nothing outside spinlock.c needs the array.
+extern uint64   gini_seq;
+uint64          gini_stamp(void);
+void            gini_lockdump(void);
+void            gini_lockreset(void);
 """, "GINI-xv6 SHADOW additions")
 
 # 4a3) kernel/shadows/gini_sched.c — the ONE student-editable file (bind-mounted at runtime over
@@ -591,29 +1176,153 @@ pick_lottery_shadow(void)
   return 0;
 }
 '''
+# The VM shadow lives in its OWN student file: one file per subsystem, each independently
+# present/enabled, so a student working on paging never has to look at the scheduler file.
+_SHADOW_VM_STUB = '''// kernel/shadows/gini_vm.c — YOUR virtual-memory code. GINI bind-mounts this file; edit it and
+// click Load to rebuild the kernel with your version.
+//
+// LAZY ALLOCATION. sbrklazy() grows a process's address space WITHOUT allocating memory. The
+// pages do not exist until the process touches one, which traps here. Your job: allocate a
+// physical page, zero it, map it at the faulting address, and return the physical address.
+// Return 0 for "not mine" — the shipped implementation then runs, so a half-finished handler
+// never breaks the machine.
+//
+// GINI validates whatever you return: it must be a page-aligned physical page inside RAM, and
+// the faulting address must genuinely be mapped afterwards. A wrong answer is REJECTED (the
+// shipped version runs instead) and counted in the Machine Lab — it can never corrupt memory.
+//
+// Useful helpers (kernel/defs.h): kalloc(), kfree(), memset(), mappages(), ismapped(),
+// walk(pagetable, va, alloc)   ·   PGSIZE, PGROUNDDOWN(va), PTE_R/PTE_W/PTE_U
+#include "../types.h"
+#include "../param.h"
+#include "../memlayout.h"
+#include "../riscv.h"
+#include "../spinlock.h"
+#include "../proc.h"
+#include "../defs.h"
+
+// Handle a demand/lazy page fault at `va` for a process whose address space is `psz` bytes.
+// `read` is 1 for a load fault, 0 for a store fault.
+// Return: the physical address you mapped, or 0 to let the shipped implementation handle it.
+uint64
+vmfault_shadow(pagetable_t pt, uint64 psz, uint64 va, int read)
+{
+  (void)pt; (void)psz; (void)va; (void)read;
+  return 0;        // not implemented -> the shipped lazy allocator runs
+}
+
+// ---------------------------------------------------------------------------------------------
+// PHYSICAL PAGE ALLOCATION. Every page of memory the kernel hands out comes from here. xv6 keeps
+// a simple free LIST, so pages come back in whatever order they were freed — which scatters a
+// process's memory across RAM. A better policy keeps free memory in large contiguous runs.
+//
+//   gini_page_isset(pa)  -> 1 if that physical page is currently ALLOCATED
+//   end                  -> first address PAST the kernel image; pages below it are not
+//                           yours to give out (start your scan at PGROUNDUP((uint64)end))
+//   KERNBASE .. PHYSTOP  -> the physical range; pages are PGSIZE apart and page-aligned
+//
+// Return a FREE, page-aligned physical address, or 0 to let the shipped free-list allocator run.
+//
+// GINI keeps a bitmap of every physical page and checks your answer against it, so returning a
+// page that is already in use is REJECTED and counted — it can never corrupt memory. Your score
+// is the largest contiguous free run (see the Memory Lab).
+void *
+kalloc_shadow(void)
+{
+  return 0;        // not implemented -> the shipped free-list allocator runs
+}
+'''
+
+_SHADOW_FS_STUB = '''// kernel/shadows/gini_fs.c — YOUR file-system code. GINI bind-mounts this file; edit it and
+// click Load to rebuild the kernel with your version.
+//
+// BUFFER-CACHE EVICTION. xv6 keeps NBUF disk blocks in memory. When a block is needed that is
+// not cached, some buffer must be recycled — and WHICH one you pick is the whole subject of
+// cache replacement. (xv6 has no swapping, so this is the only real replacement policy in the
+// kernel; everything you know about LRU, clock and random applies right here.)
+//
+// You are handed the whole buffer array. For each buffer:
+//   b->refcnt   : 0 = free to recycle. ANYTHING ELSE IS IN USE — never return it.
+//   b->lastuse  : tick of the last cache hit on this buffer (recency: smaller = older)
+//   b->blockno  : which disk block it currently holds
+//   b->valid    : has data been read from disk yet
+//
+// Return the buffer to recycle, or 0 to let the shipped LRU policy decide.
+//
+// GINI validates your answer: it must be one of these buffers and must have refcnt == 0. A bad
+// answer is REJECTED (the shipped policy runs instead) and counted in the Machine Lab — so you
+// cannot corrupt the file system here, only lose hit rate. Watch the cache grid in the Storage
+// Lab: your victims flash red as they are recycled.
+#include "../types.h"
+#include "../param.h"
+#include "../memlayout.h"
+#include "../riscv.h"      // pagetable_t — defs.h needs it
+#include "../spinlock.h"
+#include "../sleeplock.h"
+#include "../fs.h"
+#include "../buf.h"
+#include "../defs.h"       // gini_block_free(), kalloc(), and friends
+
+struct buf *
+bget_evict_shadow(uint dev, uint blockno, struct buf *bufs, int nbuf)
+{
+  (void)dev; (void)blockno; (void)bufs; (void)nbuf;
+  return 0;        // not implemented -> the shipped LRU policy runs
+}
+
+// ---------------------------------------------------------------------------------------------
+// BLOCK ALLOCATION. When a file grows, the kernel needs a free disk block — and WHICH one it
+// picks decides whether the file's blocks end up next to each other (fast) or scattered across
+// the disk (slow). The shipped allocator takes the first free block it finds, which fragments
+// badly once files are created and deleted.
+//
+//   gini_block_free(dev, bno)  -> 1 if block `bno` is free in the on-disk bitmap
+//   nblocks                    -> total blocks on the disk (valid data blocks are below this)
+//   last                       -> the block handed out most recently: allocate NEAR it for
+//                                 locality, and the mean gap (your score) drops
+//
+// Return a FREE block number, or 0 to let the shipped allocator decide.
+//
+// You only CHOOSE — GINI marks the bitmap and zeroes the block for you, and validates that your
+// answer really is a free data block first. A wrong answer is REJECTED and counted, so a buggy
+// policy costs you locality, never the file system.
+uint
+balloc_shadow(uint dev, uint nblocks, uint last)
+{
+  (void)dev; (void)nblocks; (void)last;
+  return 0;        // not implemented -> the shipped first-fit allocator runs
+}
+'''
+
 if (ROOT / "kernel").exists():
     _shdir = ROOT / "kernel" / "shadows"
     _shdir.mkdir(exist_ok=True)
-    _shfile = _shdir / "gini_sched.c"
-    if not _shfile.exists():
-        _shfile.write_text(_SHADOW_STUB)
-        applied.append("kernel/shadows/gini_sched.c: created")
-    else:
-        applied.append("kernel/shadows/gini_sched.c: already present")
+    # one file per subsystem: {filename: stub}
+    for _fname, _stub in (("gini_sched.c", _SHADOW_STUB), ("gini_vm.c", _SHADOW_VM_STUB),
+                          ("gini_fs.c", _SHADOW_FS_STUB)):
+        _shfile = _shdir / _fname
+        if not _shfile.exists():
+            _shfile.write_text(_stub)
+            applied.append(f"kernel/shadows/{_fname}: created")
+        else:
+            applied.append(f"kernel/shadows/{_fname}: already present")
     _mk, _mksrc = (ROOT / "Makefile"), None
     if _mk.exists():
         _mksrc = _mk.read_text()
     if _mksrc is None:
         skipped.append("Makefile: not found (shadow OBJS)")
-    elif "$K/shadows/gini_sched.o" in _mksrc:
-        applied.append("Makefile: shadow OBJS already registered")
     else:
-        _new, _n = re.subn(r"(OBJS = \\\n)", r"\1  $K/shadows/gini_sched.o \\\n", _mksrc, count=1)
-        if _n:
-            _mk.write_text(_new)
-            applied.append("Makefile: registered kernel/shadows/gini_sched.o")
-        else:
-            skipped.append("Makefile: OBJS anchor not found for the shadow file")
+        for _obj in ("gini_sched.o", "gini_vm.o", "gini_fs.o"):
+            if f"$K/shadows/{_obj}" in _mksrc:
+                applied.append(f"Makefile: {_obj} already registered")
+                continue
+            _mksrc, _n = re.subn(r"(OBJS = \\\n)", r"\1  $K/shadows/" + _obj + r" \\\n",
+                                 _mksrc, count=1)
+            if _n:
+                _mk.write_text(_mksrc)
+                applied.append(f"Makefile: registered kernel/shadows/{_obj}")
+            else:
+                skipped.append(f"Makefile: OBJS anchor not found for {_obj}")
 
 # 4b) gini_dump(): the process table PLUS the running process's saved registers (from its
 # trapframe) and page table — printed to the console. This lets the Machine Lab read LIVE
@@ -703,6 +1412,9 @@ void
 gini_vmdump(void)
 {
   struct proc *p;
+  // vm-shadow telemetry: page faults the student's handler took vs. ones that fell through
+  %(P)s("VMF handled %%d fellthrough %%d\\n", (int)gini_vmf_ok, (int)gini_vmf_fail);
+  gini_kadump();          // GINI-xv6: page-allocator free/fragmentation counters
   for(p = proc; p < &proc[NPROC]; p++){
     if(p->state == RUNNING){
       vmprint(p->pagetable);
@@ -710,7 +1422,7 @@ gini_vmdump(void)
     }
   }
 }
-""", "GINI-xv6: print the RUNNING process's page table")
+""" % {"P": PRINT}, "GINI-xv6: print the RUNNING process's page table")
 
 # 4d1) gini_vmdump_all(): EVERY user process's leaf mappings, tagged by pid, so the Memory face
 # can put parent and child side by side and DERIVE sharing (same PA in two procs) — the whole
@@ -833,6 +1545,8 @@ gini_fsdump(void)
   PRINTF("size = %d nblocks = %d ninodes = %d nlog = %d logstart = %d "
          "inodestart = %d bmapstart = %d\\n",
          sb.size, sb.nblocks, sb.ninodes, sb.nlog, sb.logstart, sb.inodestart, sb.bmapstart);
+  gini_bcdump();          // GINI-xv6: buffer-cache counters + per-buffer state (the cache grid)
+  gini_bmapdump();        // GINI-xv6: allocator counters + the free/used block map
   gini_logdump();
 }
 '''
@@ -880,6 +1594,10 @@ regex_once("kernel/console.c",
            r"  case C('G'): if(sched_policy < 2) sched_policy++; break; // GINI: scheduler policy up\n"
            r"  case C('B'): sched_policy = 0; break;  // GINI: scheduler policy reset (round-robin)\n"
            r"  case C('K'): gini_shadow[sched_policy].enabled = !gini_shadow[sched_policy].enabled; break;  // GINI: toggle the current policy's shadow\n"
+           r"  case C('X'): gini_shadow_reset(); break;  // GINI: clear reject/call counters\n"
+           f"  case C('L'): {PRINT}(\"%c\",30); gini_lockdump(); {PRINT}(\"%c\",31); break;  "
+           "// GINI: lock contention (0x1e/0x1f-bracketed)\n"
+           r"  case C('Z'): gini_lockreset(); break;  // GINI: zero the lock counters\n"
            f"  case C('W'): {PRINT}(\"%c\",30); gini_shadowdump(); {PRINT}(\"%c\",31); break;  "
            "// GINI: shadow manifest (0x1e/0x1f-bracketed)",
            "gini_dump();")
@@ -926,13 +1644,28 @@ regex_once("kernel/console.c",
            r"  \1",
            "GINI: control-plane sched set")
 
+# 4f4) console.c — toggle ANY shadow by index: Ctrl-G <digits> <terminator>. Ctrl-K only ever
+# reached the current scheduler policy, which stops working the moment shadows exist outside the
+# scheduler (vm, fs). One digit-entry mechanism now covers every present and future shadow.
+regex_once("kernel/console.c",
+           r"(switch\s*\(c\)\s*\{)",
+           "static int gini_shidx = -1;  // GINI: shadow-toggle index entry (-1 = idle)\n"
+           "  if(gini_shidx >= 0){\n"
+           "    if(c >= '0' && c <= '9') gini_shidx = gini_shidx * 10 + (c - '0');\n"
+           "    else { gini_shadow_toggle(gini_shidx); gini_shidx = -1; }\n"
+           "    release(&cons.lock); return;\n"
+           "  }\n"
+           "  if(c == C('G')){ gini_shidx = 0; release(&cons.lock); return; }\n"
+           r"  \1",
+           "GINI: shadow toggle by index")
+
 # 4g) syscall.c — per-syscall counters (histogram) + a recent-call trace ring (strace view).
 #     The definitions + gini_scdump go at end-of-file (types/externs are declared in defs.h so
 #     syscall() can use them above); Ctrl-S dumps them.
 _SCDUMP = '''
 // GINI-xv6: per-syscall counters + recent-call trace ring (Machine Lab histogram + strace).
 uint64 gini_sccount[64];
-struct gini_sc gini_ring[64];
+struct gini_sc gini_ring[GINI_RING];
 int gini_ring_i;
 
 void
@@ -942,10 +1675,11 @@ gini_scdump(void)
     if(gini_sccount[i])
       PRINTF("SC %d %d\\n", i, (int)gini_sccount[i]);
   int total = gini_ring_i;
-  int start = total > 64 ? total - 64 : 0;
+  int start = total > GINI_RING ? total - GINI_RING : 0;
   for(int k = start; k < total; k++){
-    struct gini_sc *e = &gini_ring[k % 64];
-    PRINTF("TRACE %d %d %p %p\\n", e->pid, e->num, (void*)e->a0, (void*)e->ret);
+    struct gini_sc *e = &gini_ring[k % GINI_RING];
+    PRINTF("TRACE %d %d %p %p %d\\n", e->pid, e->num, (void*)e->a0,
+           (void*)e->ret, (int)e->seq);
   }
 }
 '''
@@ -958,9 +1692,10 @@ regex_once("kernel/syscall.c",
            "uint64 gsc_a0 = p->trapframe->a0;                 // GINI: arg0 before dispatch\n"
            "    p->trapframe->a0 = syscalls[num]();\n"
            "    if(num >= 0 && num < 64) gini_sccount[num]++;   // GINI: histogram\n"
-           "    int gsi = gini_ring_i++ % 64;                    // GINI: trace ring\n"
+           "    int gsi = gini_ring_i++ % GINI_RING;                    // GINI: trace ring\n"
            "    gini_ring[gsi].pid = p->pid; gini_ring[gsi].num = num;\n"
-           "    gini_ring[gsi].a0 = gsc_a0; gini_ring[gsi].ret = p->trapframe->a0;",
+           "    gini_ring[gsi].a0 = gsc_a0; gini_ring[gsi].ret = p->trapframe->a0;\n"
+           "    gini_ring[gsi].seq = gini_stamp();               // GINI: event clock",
            "GINI: histogram")
 
 

@@ -1,0 +1,23 @@
+# Line endings. These files are consumed INSIDE Linux containers, so they must keep LF
+# even when cloned on Windows (git's core.autocrlf=true default would rewrite them to CRLF,
+# and bash then fails with e.g. `set: pipefail\r: invalid option name` — see grouter-build/build.sh).
+* text=auto eol=lf
+
+*.sh          text eol=lf
+Dockerfile*   text eol=lf
+*.c           text eol=lf
+*.h           text eol=lf
+Makefile*     text eol=lf
+*.py          text eol=lf
+*.lua         text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+
+# binaries / images: never touched
+*.png    binary
+*.jpg    binary
+*.gz     binary
+*.zip    binary
+*.img    binary
+*.iso    binary
+*.bin    binary

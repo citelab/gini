@@ -8,8 +8,8 @@ injected provider (offline DemoDisk here; a GDB-backed reader on the Mac later).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
@@ -63,6 +63,129 @@ class DiskStrip(QWidget):
             x += seg
 
 
+class CacheGrid(QWidget):
+    """The buffer cache as a grid of cells — one per buffer, laid out like the array it is.
+
+    A table of numbers cannot show a replacement POLICY; motion can. Fill = recency heat (bright
+    = just used, fading to cold), a ring = the buffer is in use (never a legal victim), and a
+    recycled buffer FLASHES red for a moment. Run `writer` with an LRU shadow and then with a
+    random one and the difference is visible without reading a single number.
+    """
+
+    FLASH_MS = 1200
+
+    def __init__(self, theme) -> None:
+        super().__init__()
+        self.theme = theme
+        self._bufs: list = []
+        self._prev: dict = {}                 # index -> blockno, to spot a recycle
+        self._flash: dict = {}                # index -> monotonic time of the last eviction
+        self.setMinimumHeight(96)
+
+    def set_bufs(self, bufs) -> None:
+        import time
+        now = time.monotonic()
+        for b in bufs:                        # a slot whose block changed was just recycled
+            was = self._prev.get(b.index)
+            if was is not None and was != b.blockno:
+                self._flash[b.index] = now
+            self._prev[b.index] = b.blockno
+        self._bufs = list(bufs)
+        self.update()
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        import time
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        t = self.theme.theme
+        p.fillRect(self.rect(), QColor(t.panel))
+        if not self._bufs:
+            p.setPen(QColor(t.faint))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "buffer cache not reported by this kernel — rebuild the xv6 image")
+            return
+        now = time.monotonic()
+        n = len(self._bufs)
+        cols = max(1, min(10, n))
+        rows = (n + cols - 1) // cols
+        cw = max(18, (self.width() - 12) // cols)
+        ch = max(18, min(34, (self.height() - 12) // max(rows, 1)))
+        # recency is relative: the newest stamp is "hot", the oldest "cold"
+        stamps = [b.lastuse for b in self._bufs if b.lastuse] or [0]
+        lo, hi = min(stamps), max(stamps)
+        span = (hi - lo) or 1
+        warm = QColor(t.accent_for("cyan"))
+        for i, b in enumerate(self._bufs):
+            x = 6 + (i % cols) * cw
+            y = 6 + (i // cols) * ch
+            r = QRectF(x, y, cw - 4, ch - 4)
+            heat = ((b.lastuse - lo) / span) if b.lastuse else 0.0
+            fill = QColor(warm)
+            fill.setAlpha(int(40 + 180 * heat) if b.valid else 24)
+            flashed = now - self._flash.get(b.index, -99) < self.FLASH_MS / 1000.0
+            p.setBrush(QColor(t.accent_for("red")) if flashed else fill)
+            p.setPen(QPen(QColor(t.accent_for("amber") if b.in_use else t.line),
+                          2 if b.in_use else 1))
+            p.drawRoundedRect(r, 4, 4)
+            p.setPen(QColor(t.text if (heat > 0.5 or flashed) else t.muted))
+            p.setFont(QFont(self.font().family(), 8))
+            p.drawText(r, Qt.AlignCenter, str(b.blockno))
+
+
+class BlockMap(QWidget):
+    """The disk's data region as a live free/used map, drawn from the on-disk bitmap.
+
+    Fragmentation is a *shape*, not a number: a first-fit allocator leaves speckle as files are
+    created and deleted, while a locality-aware policy keeps a file's blocks in solid runs. Each
+    cell aggregates several blocks (a 2000-block disk would be unreadable one cell per block), so
+    a partly-used group shades proportionally. The newest allocation is ringed, which makes the
+    allocator's choice visible the moment it happens.
+    """
+
+    def __init__(self, theme) -> None:
+        super().__init__()
+        self.theme = theme
+        self._used: list = []
+        self._last = 0
+        self.setMinimumHeight(70)
+
+    def set_map(self, used, last_alloc=0) -> None:
+        self._used = list(used or [])
+        self._last = int(last_alloc or 0)
+        self.update()
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        p = QPainter(self)
+        t = self.theme.theme
+        p.fillRect(self.rect(), QColor(t.panel))
+        n = len(self._used)
+        if not n:
+            p.setPen(QColor(t.faint))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "block map not reported by this kernel — rebuild the xv6 image")
+            return
+        cols = max(1, self.width() // 9)
+        rows = max(1, min(6, (n + cols - 1) // cols))
+        per = max(1, (n + cols * rows - 1) // (cols * rows))     # blocks aggregated per cell
+        cw = self.width() / cols
+        ch = (self.height() - 6) / rows
+        base = QColor(t.accent_for("cyan"))
+        for c in range(cols * rows):
+            lo = c * per
+            if lo >= n:
+                break
+            grp = self._used[lo:lo + per]
+            frac = sum(1 for u in grp if u) / len(grp)
+            x, y = (c % cols) * cw, 3 + (c // cols) * ch
+            col = QColor(base)
+            col.setAlpha(int(25 + 205 * frac))                   # solid = fully allocated
+            p.fillRect(QRectF(x, y, cw - 1, ch - 1), col)
+            if lo <= self._last < lo + per:                      # the block just handed out
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(t.accent_for("amber")), 2))
+                p.drawRect(QRectF(x, y, cw - 1, ch - 1))
+
+
 class StorageLab(QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None) -> None:
         super().__init__(parent)
@@ -79,14 +202,29 @@ class StorageLab(QDialog):
 
         self._strip = DiskStrip(theme)
         root.addWidget(self._panel("On-disk layout  ·  block regions", self._strip))
+        # S4: the data region as a live free/used map — fragmentation as a picture
+        mapbox = QWidget(); mapcol = QVBoxLayout(mapbox)
+        mapcol.setContentsMargins(0, 0, 0, 0); mapcol.setSpacing(4)
+        self._block_map = BlockMap(theme)
+        mapcol.addWidget(self._block_map)
+        self._alloc_lbl = QLabel(); self._alloc_lbl.setWordWrap(True)
+        self._alloc_lbl.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
+        mapcol.addWidget(self._alloc_lbl)
+        root.addWidget(self._panel("Block allocator  ·  free / used map", mapbox))
 
         grid = QGridLayout(); grid.setSpacing(10); root.addLayout(grid, 1)
         self._inode_tbl = self._table(["inum", "type", "nlink", "size", "blocks"])
         grid.addWidget(self._panel("Inodes", self._inode_tbl, fill=True), 0, 0)
         self._tree_tbl = self._table(["", "inum", "name"])
         grid.addWidget(self._panel("Directory tree", self._tree_tbl, fill=True), 0, 1)
-        self._buf_tbl = self._table(["block", "valid", "dirty", "ref"])
-        self._buf_panel = self._panel("Buffer cache", self._buf_tbl, fill=True)
+        # the cache as a GRID (policy is motion, not numbers) with the table beneath it
+        bufbox = QWidget(); bufcol = QVBoxLayout(bufbox)
+        bufcol.setContentsMargins(0, 0, 0, 0); bufcol.setSpacing(6)
+        self._cache_grid = CacheGrid(theme)
+        bufcol.addWidget(self._cache_grid)
+        self._buf_tbl = self._table(["block", "ref", "valid", "last use"])
+        bufcol.addWidget(self._buf_tbl, 1)
+        self._buf_panel = self._panel("Buffer cache", bufbox, fill=True)
         grid.addWidget(self._buf_panel, 1, 0)
         grid.addWidget(self._build_log_panel(), 1, 1)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
@@ -188,18 +326,29 @@ class StorageLab(QDialog):
             name = ("    " * d.depth) + leaf + ("/" if d.is_dir else "")
             for c, val in enumerate(["", str(d.inum), name]):
                 self._tree_tbl.setItem(r, c, QTableWidgetItem(val))
-        # buffer cache
+        # S4: block allocator map + locality score
+        self._block_map.set_map(getattr(snap, "block_used", []), getattr(snap, "last_alloc", 0))
+        allocs, gap = getattr(snap, "allocs", 0), getattr(snap, "mean_gap", 0)
+        if allocs:
+            self._alloc_lbl.setText(
+                f"{allocs} allocations  ·  mean gap {gap} blocks between consecutive ones "
+                f"(lower = better locality = fewer seeks)  ·  last block {getattr(snap, 'last_alloc', 0)}")
+        else:
+            self._alloc_lbl.setText("no allocations yet — run `writer` to grow a file")
+        # buffer cache — the grid shows the policy at work, the table the exact state
+        self._cache_grid.set_bufs(snap.bufs)
         self._buf_tbl.setRowCount(len(snap.bufs))
         for r, b in enumerate(snap.bufs):
-            for c, val in enumerate([str(b.blockno), "✓" if b.valid else "",
-                                     "●" if b.dirty else "", str(b.refcnt)]):
+            for c, val in enumerate([str(b.blockno), str(b.refcnt),
+                                     "✓" if b.valid else "", str(b.lastuse or "")]):
                 it = QTableWidgetItem(val)
-                if c == 2 and b.dirty:
+                if c == 1 and b.in_use:          # in use = cannot be evicted
                     it.setForeground(QColor(t.accent_for("amber")))
                 self._buf_tbl.setItem(r, c, it)
+        ev = getattr(snap, "evicts", 0)
         self._buf_panel.findChild(QLabel).setText(
             f"Buffer cache  ·  {snap.hits} hits / {snap.misses} miss "
-            f"({snap.hit_rate * 100:.0f}% hit)")
+            f"({snap.hit_rate * 100:.0f}% hit)  ·  {ev} evictions")
         # log
         lg = snap.log
         self._log_phase.setText(lg.phase)

@@ -135,13 +135,15 @@ int gr_control(const char *line, char *out, size_t outlen)
         }
         else if (sub && strcmp(sub, "list") == 0)
             return gr_cp_list(out, outlen);
+        else if (sub && strcmp(sub, "status") == 0)   /* live snapshots (Multicast HUD polls this) */
+            return gr_cp_status(out, outlen);
         else if (sub && strcmp(sub, "stop") == 0)
         {
             gr_cp_stop_all();
             snprintf(out, outlen, "control plane stopped (all modules removed)");
         }
         else
-            snprintf(out, outlen, "usage: cp add <name> [args] | cp list | cp stop"
+            snprintf(out, outlen, "usage: cp add <name> [args] | cp list | cp status | cp stop"
                      "   (modules: %s)", gr_cp_names());
     }
     else if (strcmp(tok, "mcast") == 0)     /* B3: multicast membership */

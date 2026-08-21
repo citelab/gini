@@ -20,7 +20,10 @@ from ..domain.xv6 import (
     parse_modetime, parse_policies, parse_procdump, parse_registers, parse_regs_line, parse_sched,
     parse_shadow_manifest, running_pid,
 )
-from ..domain.xv6_fs import FsSnapshot, Superblock, layout, parse_logheader, parse_superblock
+from ..domain.xv6_fs import (
+    FsSnapshot, Superblock, layout, parse_balloc, parse_bcache, parse_logheader,
+    parse_superblock,
+)
 from ..domain.xv6_vm import VmSnapshot, parse_faults, parse_vmall, parse_vmprint
 
 # must match gini_pick() in gini_patch.py: 0=round-robin 1=priority 2=lottery. Custom student
@@ -124,8 +127,15 @@ class _FsReader:
             sb = parse_superblock(txt)
             if sb.size:
                 log = parse_logheader(txt, start=sb.logstart, size=sb.nlog)
+                # the buffer cache is only dumped by kernels built with the bcache telemetry;
+                # when it IS there, declare it in `have` so the panel switches from "not
+                # available (real)" to live data
+                bc = parse_bcache(txt)
+                ba = parse_balloc(txt)          # allocator counters + the free/used block map
+                have = ("layout", "log") + (("bcache",) if bc else ()) \
+                       + (("blockmap",) if ba else ())
                 return FsSnapshot(sb=sb, regions=layout(sb), log=log,
-                                  source="real", ok=True, have=("layout", "log"))
+                                  source="real", ok=True, have=have, **bc, **ba)
         except Exception:
             pass
         return FsSnapshot(sb=Superblock(), source="real", ok=False, have=())
@@ -243,6 +253,25 @@ class Xv6Bridge:
             return bool(d.get("ok")), str(d.get("log", ""))
         except Exception as e:
             return False, f"revert failed: {e}"
+
+    def reboot(self) -> tuple[bool, str]:
+        """Reset the machine: relaunch QEMU on the CURRENT kernel (no rebuild). Shadows come back
+        DISABLED — the kernel initialises them off — so this is the way out of a wedge caused by a
+        student's shadow, and the way to start an experiment from a clean boot."""
+        try:
+            d = json.loads(self.agent.post("/reboot"))
+            return bool(d.get("ok")), "rebooted — shadows are off until you enable them again"
+        except Exception as e:
+            return False, f"reboot failed: {e}"
+
+    def wedge(self) -> dict:
+        """Agent's liveness verdict: {wedged, quiet_s, blamed[], faults{}, panic}. `wedged` means
+        the kernel stopped answering dumps — GINI reports it and the student presses Reboot; we
+        never reboot on their behalf."""
+        try:
+            return self.agent.get_json("/health").get("wedge", {}) or {}
+        except Exception:
+            return {}
 
     # -- programs (launch / kill / console) via the in-container agent's serial ---- #
     def programs(self) -> list:

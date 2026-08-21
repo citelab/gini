@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..domain.xv6 import (
-    interrupt_sources, mode_split, scause_str, sstatus_flags,
+    interrupt_sources, mode_split, parse_traptrace, scause_str, sstatus_flags, stvec_str,
+    trap_kind_name,
 )
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
@@ -90,6 +91,7 @@ class CpuLab(QWidget):
         self._closed = False
         self._busy = False
         self._prev_modetime: dict | None = None
+        self._traps_text: str = ""              # raw /traps dump, refreshed with each poll
 
         t = theme.theme
         self.setWindowTitle(f"CPU & Registers Lab — {device.name}")
@@ -127,7 +129,19 @@ class CpuLab(QWidget):
         root.addWidget(self._panel("Traps & interrupts  ·  control CSRs (this hart)",
                                    self._csr_box, self._csr_note))
 
-        # 3) register tiles (per core)
+        # 3) trap history — CSR state recorded AT TRAP TIME (the honest interrupt state; the strip
+        #    above can only ever describe the console interrupt our own poll caused)
+        self._traps_box = QWidget()
+        self._traps_lay = QVBoxLayout(self._traps_box)
+        self._traps_lay.setContentsMargins(0, 0, 0, 0)
+        self._traps_lay.setSpacing(4)
+        self._traps_note = QLabel()
+        self._traps_note.setWordWrap(True)
+        self._traps_note.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
+        root.addWidget(self._panel("Trap history  ·  recorded at each real trap",
+                                   self._traps_box, self._traps_note))
+
+        # 4) register tiles (per core)
         self._tiles_box = QWidget()
         self._tiles_lay = QVBoxLayout(self._tiles_box)
         self._tiles_lay.setContentsMargins(0, 0, 0, 0)
@@ -207,11 +221,24 @@ class CpuLab(QWidget):
         def work():
             try:
                 self.state.refresh()
+                self._traps_text = self._read_traps()      # trap ring (same serial path, no gdb)
                 if not self._closed:
                     self.snap_ready.emit(None)
             except (Exception, RuntimeError):
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _read_traps(self) -> str:
+        """Raw `/traps` text (gini_trapdump over the serial). Returns '' when there's no live
+        bridge — the panel then explains itself instead of erroring."""
+        prov = getattr(self.state, "provider", None)
+        agent = getattr(prov, "agent", None)
+        if agent is None:
+            return ""
+        try:
+            return agent.get_text("/traps") or ""
+        except Exception:
+            return ""
 
     def _on_snap(self, _obj) -> None:
         self._busy = False
@@ -225,6 +252,7 @@ class CpuLab(QWidget):
         t = self.theme.theme
         self._render_modebar(snap, t)
         self._render_csr(snap, t)
+        self._render_trap_history(t)
         self._render_tiles(snap, t)
 
     def _render_modebar(self, snap, t) -> None:
@@ -262,11 +290,45 @@ class CpuLab(QWidget):
         came = "user" if flags["SPP"] == "U" else "kernel"
         self._csr_lay.addWidget(self._chip(
             f"came from {came}", t.accent_for("blue"), filled=True))
+        # SPIE holds the PRE-TRAP interrupt-enable bit — the honest answer to "were interrupts on?"
+        # (the live SIE always reads 0 here because a dump runs inside a handler).
+        self._csr_lay.addWidget(self._chip(
+            "interrupts were " + ("on" if flags["SPIE"] else "off"),
+            t.accent_for("green" if flags["SPIE"] else "slate"), filled=flags["SPIE"]))
         self._csr_lay.addStretch(1)
+        sepc = csr.get("sepc")
         self._csr_note.setText(
-            f"trap vector (stvec) {hex(csr.get('stvec', 0))}   ·   "
-            f"last trap (scause): {scause_str(csr.get('scause'))}   ·   "
-            "interrupt state = enabled sources above (global SIE reads 0 mid-dump)")
+            f"trap vector (stvec) {stvec_str(csr.get('stvec'))}   ·   "
+            f"this trap (scause): {scause_str(csr.get('scause'))}"
+            + (f"   ·   returns to (sepc) {hex(sepc)}" if sepc else "")
+            + "   —   this row describes the console interrupt that GINI's own poll caused; "
+              "the trap history below is recorded at each real trap")
+
+    # -- trap history: CSR state recorded AT TRAP TIME (uncontaminated by our polling) ---------- #
+    def _render_trap_history(self, t) -> None:
+        self._clear(self._traps_lay)
+        events = parse_traptrace(getattr(self, "_traps_text", "") or "")
+        with_csr = [e for e in events if e.has_csr]
+        if not with_csr:
+            self._traps_note.setText(
+                "no per-trap CSR state yet. Older kernels record only cause/epc/tval — rebuild the "
+                "xv6 image to capture sstatus/sie/sip at each trap. Then run `grind` (syscalls) or "
+                "`alloc` (page faults) to fill this."
+                if events else
+                "no trap history — start the machine and run `grind` or `alloc` to generate traps.")
+            return
+        for e in reversed(with_csr[-6:]):                # newest first, a handful
+            kind = trap_kind_name(e.kind)
+            try:
+                cause = scause_str(int(e.cause, 16))
+            except ValueError:
+                cause = e.cause
+            self._traps_lay.addWidget(self._chip(
+                f"pid {e.pid}  ·  {kind}  ·  {cause}  ·  interrupted {e.came_from}",
+                t.accent_for("amber" if kind == "pagefault" else "teal"), filled=False))
+        self._traps_note.setText(
+            "each entry is one REAL trap, with the interrupt state as it was at that moment — "
+            "timer ticks, syscalls and page faults, none of them caused by our polling")
 
     def _render_tiles(self, snap, t) -> None:
         self._clear(self._tiles_lay)

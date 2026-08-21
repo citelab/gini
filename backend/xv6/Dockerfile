@@ -28,11 +28,14 @@ RUN cd xv6-riscv && python3 /opt/gini_patch.py . && make kernel/kernel fs.img
 # Stash the pristine shadow stub OUTSIDE kernel/shadows/ (which the Load loop bind-mounts over at
 # runtime), so the agent can compute "present" (does the student's file differ from the stub?) and
 # /revert can restore a known-good kernel.
-RUN cp /opt/xv6-riscv/kernel/shadows/gini_sched.c /opt/gini_sched_ref.c
+RUN cp /opt/xv6-riscv/kernel/shadows/gini_sched.c /opt/gini_sched_ref.c \
+ && cp /opt/xv6-riscv/kernel/shadows/gini_vm.c    /opt/gini_vm_ref.c \
+ && cp /opt/xv6-riscv/kernel/shadows/gini_fs.c    /opt/gini_fs_ref.c
 
 COPY gini_agent.py /opt/gini_agent.py
 COPY boot.sh /opt/boot.sh
-RUN chmod +x /opt/boot.sh
+# strip CR (a Windows/CRLF checkout makes the `#!` line unrunnable: "no such file or directory")
+RUN sed -i 's/\r$//' /opt/boot.sh && chmod +x /opt/boot.sh
 
 # agent HTTP (state feed) + serial console; gdb stub stays internal to the container.
 EXPOSE 5000 4444 1234

@@ -9,6 +9,8 @@
 # The agent reads XV6_CPUS / XV6_QUANTUM from the environment to build the QEMU command.
 set -e
 cd /opt/xv6-riscv
+# The frontend sets XV6_CPUS from the element SIZE (S/M=1, L=2, XL=4). Default 1 for a bare
+# `docker run` so the container matches what the smallest machine gets.
 export XV6_CPUS="${XV6_CPUS:-1}"
 export XV6_QUANTUM="${XV6_QUANTUM:-1}"
 exec python3 /opt/gini_agent.py

@@ -66,3 +66,20 @@ def test_shadow_not_wired_fails_liveness():
     res = _grade(frag, Snapshot(procs=[Proc(3, "running", "a", tickets=1)]),
                  _timeline([3]), shadows={})
     assert res["shadow-wired"] == "unmet"
+
+
+# -- the Size control is the single truth for how many cores the guest sees ---------------------- #
+def test_xv6_harts_follow_the_size_tier():
+    """S/M -> 1 hart, L -> 2, XL -> 4.
+
+    Regression guard: an earlier build floored this at 2 so lock contention was always
+    observable, which made the Inspector say "S · 0.5 vCPU" while the Machine Lab said
+    "2 cores". A student who picks S must get one core.
+    """
+    from gini.services.compiler import _xv6_harts
+
+    class _D:
+        def __init__(self, size):
+            self.size = size
+
+    assert [_xv6_harts(_D(lvl)) for lvl in (1, 2, 3, 4)] == [1, 1, 2, 4]

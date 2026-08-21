@@ -43,3 +43,4 @@ def test_xv6_gets_no_fabric_addressing():
     # a standalone kernel has no data-plane machine entry (that loop is role=="machine")
     machines = getattr(cfg, "machines", {}) or {}
     assert all("xv6" not in str(k).lower() for k in machines)
+

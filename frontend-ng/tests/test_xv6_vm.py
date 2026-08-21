@@ -1,7 +1,7 @@
 """xv6 virtual-memory model — vmprint parsing, permission decode, and the DemoVm allocator."""
 from gini.domain.xv6_vm import (
-    TRAMPOLINE, DemoVm, classify_faults, parse_faults, parse_vmall, parse_vmprint, perms,
-    region_for, shared_frames,
+    TRAMPOLINE, DemoVm, accessed, ad_str, classify_faults, dirty, parse_faults, parse_vmall,
+    parse_vmprint, perms, region_for, shared_frames,
 )
 
 # xv6 vmprint() output: root, three level-2 entries, and leaf mappings at level 0.
@@ -127,3 +127,30 @@ def test_demovm_cow_demo_shares_then_privatises():
     assert 0x87002000 not in shared_frames(procs2)         # child copied it -> no longer shared
     child_data = next(p for p in procs2[4].leaves if p.va == 0x1000)
     assert child_data.writable and not child_data.cow      # now private + writable
+
+
+# -- S2: the vm shadow (page-fault handling) + the A/D bits it needs ---------------------------- #
+def test_ad_bits_decode():
+    V, A, D = 1, 64, 128
+    assert ad_str(V) == "··"
+    assert ad_str(V | A) == "A·" and accessed(V | A) and not dirty(V | A)
+    assert ad_str(V | A | D) == "AD" and dirty(V | D)
+
+
+def test_parse_vmprint_keeps_the_raw_pte():
+    # regression: `flags` was never set, so A/D could not reach the UI at all
+    snap = parse_vmprint(
+        "page table 0x0000000087f6b000\n"
+        "..0: pte 0x0000000021fd9c01 pa 0x0000000087f67000\n"
+        ".. ..0: pte 0x0000000021fd9801 pa 0x0000000087f66000\n"
+        ".. .. ..0: pte 0x0000000021fd94d7 pa 0x0000000087f65000\n")
+    leaf = snap.leaves[0]
+    assert leaf.flags == 0x21fd94d7
+    assert ad_str(leaf.flags) == "AD"          # this page was read AND written
+
+
+def test_vmf_telemetry_optional():
+    with_vmf = parse_vmprint("page table 0x1\nVMF handled 12 fellthrough 3")
+    assert (with_vmf.vmf_handled, with_vmf.vmf_fell) == (12, 3)
+    older = parse_vmprint("page table 0x1")    # kernel built before the vm shadow
+    assert (older.vmf_handled, older.vmf_fell) == (0, 0)

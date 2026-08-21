@@ -31,7 +31,18 @@ from .theme.manager import scale_css as _scss
 # scheduler policies the selector offers (must match domain POLICY_NAMES / kernel gini_pick)
 _POLICIES = ["round-robin", "priority", "lottery"]
 
-# long-running programs the launcher offers (must match the agent's PROGRAMS list)
+# long-running programs the launcher offers (must match the agent's PROGRAMS list).
+#
+# `grind` earns its place: it is the only workload that spends real time in KERNEL mode ("run
+# random system calls in parallel forever" — fork/exec/pipe/open/write/link/mkdir), so it is what
+# makes the CPU Journey's kernel band, the Trap Lab taxonomy and the syscall histogram show
+# anything interesting. spin/busy are user-mode loops; alloc/writer touch the kernel in bursts.
+#
+# KNOWN INTERACTION (not grind's fault): user programs write to the same serial console the Lab
+# parses framed state dumps from, so a chatty program (grind prints an "A"/"B" progress byte every
+# 500 iterations) can corrupt a dump — a mangled process line drops that process from the table,
+# a mangled frame marker leaves the table showing the last good snapshot. Any student program
+# that prints does this too; the fix is a dedicated dump channel, not dropping the program.
 _LAUNCHABLE = ["spin", "busy", "alloc", "writer", "grind", "forktest"]
 
 
@@ -221,6 +232,16 @@ class MachineLab(QDialog):
 
         root = QVBoxLayout(self)
         self._build_topbar(root)
+        # wedge banner sits at the TOP level, not on the scheduler face: a hang is a property of
+        # the machine (and can happen with no shadow enabled at all), so it must be visible
+        # whichever component the student is looking at — right next to the Reboot button.
+        self._wedge_lbl = QLabel()
+        self._wedge_lbl.setWordWrap(True)
+        self._wedge_lbl.setVisible(False)
+        self._wedge_lbl.setStyleSheet(_scss(
+            f"color:{t.accent_for('amber')};font-size:12px;background:{t.panel};"
+            f"border:1px solid {t.accent_for('amber')};border-radius:8px;padding:6px 10px;"))
+        root.addWidget(self._wedge_lbl)
 
         # Two rooms behind one door: the layered OVERVIEW (page 0, shown first) and the dense
         # SCHEDULER view (page 1). The scheduler page is built eagerly so its widgets exist for
@@ -295,6 +316,20 @@ class MachineLab(QDialog):
             b.clicked.connect(lambda _c=False, k=key: self._set_data_mode(k))
             self._mode_group.addButton(b); self._mode_btns[key] = b
             head.addWidget(b)
+        # Reboot is a MACHINE-level action, not a shadow one: reset the box on the current kernel
+        # (no rebuild) whenever you want a clean boot — after a wedge, or just to start an
+        # experiment from a known state. Lives beside Real/Demo because it is about the machine.
+        head.addSpacing(10)
+        self._reboot_btn = QPushButton()
+        self._reboot_btn.setIcon(icons.icon("power", t.accent_for("amber"), 16))
+        self._reboot_btn.setToolTip(
+            "Reboot the machine — reset on the CURRENT kernel, no rebuild.\n"
+            "Shadows come back OFF (your shadow file is kept), so this is also\n"
+            "the way out of a hang caused by a shadow.")
+        self._reboot_btn.setStyleSheet(self._btn_css())
+        self._reboot_btn.clicked.connect(self._reboot_machine)
+        self._reboot_btn.setEnabled(self.live)      # nothing to reboot in the offline stand-in
+        head.addWidget(self._reboot_btn)
         root.addLayout(head)
 
     def _build_banner(self, root) -> None:
@@ -382,7 +417,9 @@ class MachineLab(QDialog):
             ("storage", "File System", "Inodes, buffer cache, and the write-ahead log.",
              "cyan", self._open_storage_lab),
             ("journey", "Traps & Interrupts", "Live trap mix (syscall/fault/timer) + step one.",
-             "amber", self._open_trap_lab)]))
+             "amber", self._open_trap_lab),
+            ("locks", "Locks & Contention", "Which locks cores are spinning on, live.",
+             "green", self._open_lock_lab)]))
         col.addWidget(self._boundary("registers · trapframe · timer interrupts"))
         # the hardware the kernel drives
         col.addWidget(self._layer_band("HARDWARE", [
@@ -475,6 +512,14 @@ class MachineLab(QDialog):
         self._sclab = SyscallLab(self, self.theme, device=self.device,
                                  sc_source=src if callable(src) else None)
         self._sclab.show(); self._sclab.raise_()
+
+    def _open_lock_lab(self) -> None:
+        """Contention: the one kernel phenomenon nothing else here can show. Needs 2+ harts to be
+        meaningful, which is why xv6 now boots multi-core; the panel says so if it is not."""
+        from .lock_lab import LockLab
+        self._locklab = LockLab(self, self.theme, device=self.device,
+                                provider=self.state.provider, live=self.live)
+        self._locklab.show(); self._locklab.raise_()
 
     def _open_trap_lab(self) -> None:
         # The Traps room: the live trap-cause histogram + feed (observational front), with a
@@ -682,7 +727,9 @@ class MachineLab(QDialog):
         launch.setStyleSheet(self._btn_css())
         launch.clicked.connect(self._launch)
         lay.addWidget(launch)
-        hint = QLabel("spin = CPU loop · alloc = grows memory · writer = file writes. "
+        hint = QLabel("spin = CPU loop · busy = varied CPU work · alloc = grows memory · "
+                      "writer = file writes · grind = heavy KERNEL-mode syscall mix · "
+                      "forktest = fills the process table, then exits. "
                       "Use ✕ in the table to kill one.")
         hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
         lay.addWidget(hint); lay.addStretch(1)
@@ -998,6 +1045,54 @@ class MachineLab(QDialog):
     def _on_shadow_poll(self) -> None:
         if self.live and not self._closed:
             self._refresh_shadows()
+            self._check_wedge()
+
+    # -- wedge reporting: we TELL the student, we never reboot for them ------------ #
+    def _hide_wedge(self) -> None:
+        lbl = getattr(self, "_wedge_lbl", None)
+        if lbl is not None:
+            lbl.setVisible(False)
+
+    def _show_wedge(self, msg: str) -> None:
+        lbl = getattr(self, "_wedge_lbl", None)
+        if lbl is None:
+            return
+        lbl.setText("⚠  " + msg)
+        lbl.setVisible(True)
+
+    def _check_wedge(self) -> None:
+        """Two different hangs, two different messages:
+
+        HARD — the kernel stopped answering dumps (panic, or a loop with interrupts off). Only the
+        agent can see this, because from here it just looks like stale data.
+        SOFT — dumps keep working but nothing is ever scheduled; a picker that never returns a
+        process looks exactly like this. Detected here, from the timeline we already keep.
+        """
+        import time as _t
+        hard = {}
+        prov = getattr(self.state, "provider", None)
+        fn = getattr(prov, "wedge", None)
+        if callable(fn):
+            try:
+                hard = fn() or {}
+            except Exception:
+                hard = {}
+        if hard.get("wedged"):
+            who = ", ".join(hard.get("blamed") or []) or "a shadow"
+            why = "panicked" if hard.get("panic") else "stopped responding"
+            self._show_wedge(
+                f"The machine {why} {hard.get('quiet_s', '?')}s ago — {who} was enabled. "
+                "Press Reboot: the machine comes back with shadows off, and your file is kept.")
+            return
+        soft = ""
+        try:
+            soft = self.state.stall(_t.monotonic())
+        except Exception:
+            soft = ""
+        if soft:
+            self._show_wedge(soft)
+        else:
+            self._hide_wedge()
 
     def _on_shadows(self, sh) -> None:
         if self._closed:
@@ -1027,10 +1122,18 @@ class MachineLab(QDialog):
         if s is None:
             self._shadow_status.setText(f"{name}: (not reported)")
         else:
-            if s.active:
+            # one line per distinguishable situation — the same four the Coach reasons about
+            if s.faults:
+                txt, col = (f"{name}: wedged the machine {s.faults}× — rebooted without it",
+                            t.accent_for("red"))
+            elif s.rejects:
+                txt, col = (f"{name}: {s.rejects} answer(s) REJECTED — the kernel refused them and "
+                            f"used the primary", t.accent_for("amber"))
+            elif s.active:
                 txt, col = f"{name}: active ✓", t.success
-            elif s.faults:
-                txt, col = f"{name}: faulted {s.faults}×", t.accent_for("red")
+            elif s.enabled and s.calls:
+                txt, col = (f"{name}: on, asked {s.calls}× but never answers (stub returns 0)",
+                            t.muted)
             elif s.enabled:
                 txt, col = f"{name}: on (stub → primary)", t.muted
             else:
@@ -1068,8 +1171,25 @@ class MachineLab(QDialog):
     def _revert_shadow(self) -> None:
         self._run_build("revert", "Reverting to the shipped shadow…")
 
+    def _reboot_machine(self) -> None:
+        """Reset the machine on the current kernel. Never automatic: when a shadow hangs the
+        machine the student is TOLD to press this, so the hang is something they see and learn
+        from. The kernel boots with shadows disabled, so this always returns to a working box."""
+        self._reenable_shadow = None          # never auto-re-enable across a reboot
+        self._run_build("reboot", "Rebooting the machine…")
+
+    _BUILD_BTNS = ("_load_btn", "_revert_btn", "_reboot_btn")
+
+    def _set_build_btns(self, on: bool) -> None:
+        """Load/Revert live on the scheduler face (live mode only); Reboot lives in the top bar and
+        always exists — so every one of them is looked up defensively."""
+        for name in self._BUILD_BTNS:
+            b = getattr(self, name, None)
+            if b is not None:
+                b.setEnabled(on)
+
     def _run_build(self, action, busy_msg) -> None:
-        self._load_btn.setEnabled(False); self._revert_btn.setEnabled(False)
+        self._set_build_btns(False)
         self._show_result(busy_msg, "muted")
 
         def work():
@@ -1082,7 +1202,10 @@ class MachineLab(QDialog):
     def _on_load_result(self, ok, log, action) -> None:
         if self._closed:
             return
-        self._load_btn.setEnabled(True); self._revert_btn.setEnabled(True)
+        self._set_build_btns(True)
+        if action == "reboot" and ok:
+            self._hide_wedge()                    # a fresh boot clears the warning
+            self.state.new_episode()              # and the old boot's Gantt/watcher state
         if not ok:
             self._show_result(log or "build failed", "red")
             self._log("error", f"xv6 shadow {action} failed — compile error (see Machine Lab)")
@@ -1111,6 +1234,9 @@ class MachineLab(QDialog):
         t = self.theme.theme
         col = {"green": t.success, "red": t.accent_for("red"),
                "muted": t.muted}.get(tone, t.text)
+        if getattr(self, "_shadow_result", None) is None:
+            self._log("info", text)        # no shadow bar (Reboot from the top bar) -> log it
+            return
         self._shadow_result.setPlainText(text)
         self._shadow_result.setVisible(True)
         multiline = ("\n" in text) or tone == "red"

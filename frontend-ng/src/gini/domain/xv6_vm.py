@@ -29,6 +29,24 @@ def perms(pte: int) -> str:
     return out
 
 
+def ad_str(flags: int) -> str:
+    """The ACCESSED and DIRTY bits — 'A' / 'D' when set, '·' when clear.
+
+    These are the two bits page-replacement policies are built on: the hardware sets A when a page
+    is read or written and D when it is written, and a clock/second-chance algorithm sweeps them
+    and clears A. They ride in every PTE we already parse but were never surfaced.
+    """
+    return ("A" if flags & 64 else "·") + ("D" if flags & 128 else "·")
+
+
+def accessed(flags: int) -> bool:
+    return bool(flags & 64)
+
+
+def dirty(flags: int) -> bool:
+    return bool(flags & 128)
+
+
 def rsw_bits(flags: int) -> int:
     """The two reserved-for-software bits (8,9) of a PTE. xv6's COW lab parks its COW flag here,
     so a non-zero RSW on a user page is our (design-agnostic) 'this page is marked by the student'
@@ -145,6 +163,15 @@ class VmSnapshot:
     source: str = "real"
     ok: bool = True
     have: tuple = ("pagetable", "faults")
+    # vm-shadow telemetry: faults the student's handler took vs. ones that fell through to the
+    # shipped implementation. `handled == 0` while their shadow is enabled means it never answers.
+    vmf_handled: int = 0
+    vmf_fell: int = 0
+    # S3 (page allocator): free pages and the largest CONTIGUOUS free run — the fragmentation
+    # score a buddy-allocator mission is graded on
+    free_pages: int = 0
+    total_pages: int = 0
+    max_free_run: int = 0
 
 
 # -- parser: xv6 vmprint() -------------------------------------------------- #
@@ -174,8 +201,29 @@ def parse_vmprint(text: str) -> VmSnapshot:
         path[depth] = idx
         if depth == 3:                             # leaf (level 0)
             va = (path.get(1, 0) << 30) | (path.get(2, 0) << 21) | (idx << 12)
-            leaves.append(Pte(va=va, pa=pa, perms=perms(pte), valid=bool(pte & 1)))
-    return VmSnapshot(satp=satp, leaves=leaves)
+            # keep the RAW pte: `perms` only decodes r/w/x/u, but A (accessed) and D (dirty) —
+            # the bits every page-replacement algorithm runs on — live in the same word, and
+            # were being dropped here, so nothing downstream could ever show them.
+            leaves.append(Pte(va=va, pa=pa, perms=perms(pte), valid=bool(pte & 1), flags=pte))
+    return VmSnapshot(satp=satp, leaves=leaves, **_vmf_counts(text))
+
+
+_VMF_RE = re.compile(r"VMF handled (\d+) fellthrough (\d+)")
+_KA_RE = re.compile(r"KA free (\d+) total (\d+) maxrun (\d+) shadow (\d+)")
+
+
+def _vmf_counts(text: str) -> dict:
+    """`VMF handled <n> fellthrough <n>` — how many page faults the student's vm shadow took vs.
+    how many fell through to the shipped handler. Absent on older kernels -> zeros."""
+    out = {}
+    m = _VMF_RE.search(text or "")
+    if m:
+        out.update(vmf_handled=int(m.group(1)), vmf_fell=int(m.group(2)))
+    k = _KA_RE.search(text or "")
+    if k:
+        out.update(free_pages=int(k.group(1)), total_pages=int(k.group(2)),
+                   max_free_run=int(k.group(3)))
+    return out
 
 
 # -- parser: live fault ring (gini_faultdump) ------------------------------- #

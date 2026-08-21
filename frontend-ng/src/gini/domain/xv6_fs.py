@@ -63,8 +63,15 @@ class Dirent:
 class Buf:
     blockno: int
     valid: bool = True
-    dirty: bool = False
+    dirty: bool = False        # xv6 has no per-buffer dirty bit (writes go through the WAL), so
+    #                            this stays False on real hardware — kept for the demo provider
     refcnt: int = 0
+    index: int = -1            # slot in bcache.buf[] — the cache grid's cell position
+    lastuse: int = 0           # tick of the last hit; recency, and what an LRU shadow sorts on
+
+    @property
+    def in_use(self) -> bool:
+        return self.refcnt > 0
 
 
 @dataclass
@@ -94,6 +101,13 @@ class FsSnapshot:
     log: LogState = field(default_factory=LogState)
     hits: int = 0
     misses: int = 0
+    evicts: int = 0            # buffers recycled — how hard the replacement policy is working
+    # S4 (block allocator): fragmentation telemetry + the on-disk free/used map
+    allocs: int = 0
+    mean_gap: int = 0          # mean distance between successive allocations (lower = better)
+    last_alloc: int = 0
+    nblocks: int = 0
+    block_used: list = field(default_factory=list)   # [bool] per block, True = allocated
     # Provenance so the UI never passes off demo data as real. `source` is "real" (from the
     # running kernel) or "demo" (the DemoDisk stand-in). `ok` is False when a REAL read was
     # attempted but produced nothing — the face must show an error, NOT silently fall to demo.
@@ -165,6 +179,59 @@ def parse_logheader(text: str, start: int = 0, size: int = 0,
     return LogState(start=st if st is not None else start, size=size,
                     outstanding=out if out is not None else outstanding,
                     committing=bool(com) if com is not None else committing, blocks=blocks)
+
+
+_BC_RE = re.compile(r"BC hits (\d+) misses (\d+) evicts (\d+) nbuf (\d+)")
+_BUF_RE = re.compile(r"^BUF (\d+) (\d+) (\d+) (\d+) (\d+)\s*$", re.M)
+
+
+def parse_bcache(text: str) -> dict:
+    """gini_bcdump's `BC hits … misses … evicts …` + one `BUF <i> <blockno> <refcnt> <valid>
+    <lastuse>` per buffer -> {hits, misses, evicts, bufs}.
+
+    This is the data the Storage Lab's Buffer Cache panel was always designed for but never had:
+    before the bcache telemetry, only the superblock and the log were dumped, so the panel could
+    show nothing on real hardware. Empty dict on an older kernel -> the panel stays honest.
+    """
+    m = _BC_RE.search(text or "")
+    if not m:
+        return {}
+    bufs = [Buf(index=int(g[0]), blockno=int(g[1]), refcnt=int(g[2]),
+                valid=bool(int(g[3])), lastuse=int(g[4]))
+            for g in _BUF_RE.findall(text or "")]
+    return {"hits": int(m.group(1)), "misses": int(m.group(2)),
+            "evicts": int(m.group(3)), "bufs": bufs}
+
+
+_BA_RE = re.compile(r"BA allocs (\d+) meangap (\d+) last (\d+) nblocks (\d+)")
+_BMAP_RE = re.compile(r"BMAP ([0-9a-fA-F]+)")
+
+
+def parse_balloc(text: str) -> dict:
+    """gini_bmapdump's `BA allocs … meangap … last …` + the hex-packed free/used `BMAP`.
+
+    `meangap` is the fragmentation score: the mean distance between successive allocations. The
+    shipped first-fit allocator scatters a file once the disk has churned; a locality-aware
+    policy keeps it small. Empty dict on an older kernel.
+    """
+    m = _BA_RE.search(text or "")
+    if not m:
+        return {}
+    out = {"allocs": int(m.group(1)), "mean_gap": int(m.group(2)),
+           "last_alloc": int(m.group(3)), "nblocks": int(m.group(4))}
+    b = _BMAP_RE.search(text or "")
+    if b:
+        out["block_used"] = _unpack_bitmap(b.group(1), out["nblocks"])
+    return out
+
+
+def _unpack_bitmap(hexstr: str, nblocks: int) -> list:
+    """Hex bytes -> [bool] per block (True = allocated). Bit i of byte n is block n*8+i."""
+    used: list = []
+    for i in range(0, len(hexstr) - 1, 2):
+        byte = int(hexstr[i:i + 2], 16)
+        used.extend(bool(byte & (1 << b)) for b in range(8))
+    return used[:nblocks] if nblocks else used
 
 
 def parse_dinode(text: str, inum: int) -> Inode:

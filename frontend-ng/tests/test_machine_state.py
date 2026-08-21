@@ -240,3 +240,75 @@ def test_real_read_failure_never_becomes_demo():
     ms = MachineState(_Dead(), device_id="d", mode="real", vm=object(), fs=object())
     assert ms.mode == "real" and ms.latest is None        # empty, and NOT swapped to demo
     assert not isinstance(ms.provider, DemoScheduler)
+
+
+# -- a fresh kernel is a fresh episode (Stop/Run must not carry the old Gantt) ---------------- #
+class _FakeProvider:
+    """Minimal provider: snapshot() returns whatever we hand it."""
+    def __init__(self, snap=None):
+        self._snap = snap
+        self.timeslice = 1
+
+    def snapshot(self):
+        return self._snap
+
+    def step(self):
+        return self._snap
+
+
+def test_attach_real_starts_a_new_episode():
+    # boot 1: a couple of samples land on the Gantt
+    first = _FakeProvider(_snap([(1, "sleeping", "init"), (3, "running", "spin")], run=3, ticks=4))
+    ms = MachineState(provider=first, mode="real")
+    ms.refresh(); ms.refresh()
+    assert len(ms.timeline.slots) > 0                   # boot 1 left slots behind
+    assert ms.latest is not None
+
+    # Stop + Run: a brand-new kernel attaches. The old boot's slices must be GONE — its pids
+    # belong to a kernel that no longer exists (pid numbers get reused).
+    second = _FakeProvider(_snap([(1, "sleeping", "init"), (2, "running", "sh")], run=2, ticks=1))
+    ms.attach_real(second)
+    names = {s.name for s in ms.timeline.slots}
+    assert "spin" not in names                          # nothing from the previous run
+    assert ms.timeline.slots == [] or names <= {"sh", "init"}
+
+
+def test_new_episode_clears_watcher_edges_but_keeps_thresholds():
+    ms = MachineState(provider=_FakeProvider(), mode="real", watcher=StateWatcher(starve=2))
+    # arm the watcher: one runnable proc starved while another hogs the CPU
+    for _ in range(4):
+        ms.watcher.observe(_snap([(3, "running", "busy"), (4, "runnable", "spin")], run=3))
+    assert ms.watcher.active()                          # something is armed
+    ms.new_episode()
+    assert not ms.watcher.active()                      # edges forgotten
+    assert ms.watcher.starve == 2                       # configured threshold preserved
+
+
+# -- soft wedge: dumps keep working, but nothing is ever scheduled ------------------------------ #
+def test_stall_reports_when_runnable_procs_never_run():
+    # a picker that never returns a process: procs are RUNNABLE, none RUNNING, Gantt frozen
+    stuck = _snap([(1, "sleeping", "init"), (3, "runnable", "spin"),
+                   (4, "runnable", "spin")], run=None, ticks=7)
+    ms = MachineState(provider=_FakeProvider(stuck), mode="real")
+    ms.refresh()
+    assert ms.stall(1000.0) == ""              # first observation only arms the timer
+    assert ms.stall(1003.0) == ""              # still inside the grace period
+    msg = ms.stall(1012.0)                     # past grace with no progress
+    assert "No process has run" in msg and "Reboot" in msg
+
+
+def test_stall_silent_while_something_runs():
+    ms = MachineState(provider=_FakeProvider(
+        _snap([(1, "sleeping", "init"), (3, "running", "spin")], run=3, ticks=4)), mode="real")
+    ms.refresh()
+    assert ms.stall(1000.0) == ""
+    assert ms.stall(1030.0) == ""              # a RUNNING proc is progress, however long we wait
+
+
+def test_stall_silent_when_nothing_is_runnable():
+    # an idle box is not a wedge
+    ms = MachineState(provider=_FakeProvider(
+        _snap([(1, "sleeping", "init"), (2, "sleeping", "sh")], run=None, ticks=9)), mode="real")
+    ms.refresh()
+    assert ms.stall(1000.0) == ""
+    assert ms.stall(1099.0) == ""

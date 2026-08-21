@@ -112,7 +112,7 @@ int CLIInit(router_config *rarg)
     registerCLI("gpipe", gpipeCmd,
                 "manage the inline module pipeline (Z2) + control-plane modules (B2)",
                 "gpipe add acl <cidr>|nat <ip>|counter|block <ip>|lua <path> | list | clear | trace <a.b.c.d>"
-                " | cp add <name> [args] | cp list | cp stop",
+                " | cp add <name> [args] | cp list | cp status | cp stop",
                 "edit and inspect the gRouter's inline (data-plane) pipeline and control-plane modules");
 
     registerCLI("delay", delayCmd,

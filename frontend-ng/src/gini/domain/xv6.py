@@ -263,6 +263,15 @@ def interrupt_sources(sie: int, sip: int) -> list:
             for name, bit in _INT_BITS]
 
 
+def stvec_str(v: int | None) -> str:
+    """Decode the trap-vector CSR: the low 2 bits are the MODE (0 = direct, every trap enters one
+    handler; 1 = vectored, interrupts enter base + 4*cause), the rest is the base address."""
+    if not v:
+        return "—"
+    mode = "vectored" if (v & 3) == 1 else "direct"
+    return f"{hex(v & ~3)} ({mode})"
+
+
 # -- alarm state (the sigalarm lab; gini_dump `ALARM …` lines) --------------------------------- #
 @dataclass
 class AlarmState:
@@ -320,12 +329,20 @@ def running_pid(procs) -> int | None:
 # -- shadow manifest -------------------------------------------------------- #
 # The kernel emits one line per SHADOWABLE function so the oracle/AI can tell, deterministically,
 # which student shadows are wired and healthy — the OS analog of "is this router configured".
-#   SHADOW <name> present=<0|1> enabled=<0|1> active=<0|1> faults=<n> hash=<hex|baseline>
+#   SHADOW <name> present=<0|1> enabled=<0|1> active=<0|1> faults=<n>
+#          [rejects=<n> calls=<n> sub=<sched|vm|fs>] hash=<hex|baseline>
 # present : a non-stub shadow was compiled in (student wrote something)
 # enabled : the shadow toggle is on
 # active  : the dispatcher is currently running the shadow (not the primary)
-# faults  : times the shadow crashed and fell back to the primary
+# faults  : times the shadow wedged the machine (counted by the AGENT — the kernel cannot
+#           catch its own crash; see the wedge detector)
+# rejects : answers the kernel's validator threw out (a wrong-but-live answer: a proc that
+#           isn't RUNNABLE, a block that is already allocated, …). The correctness signal.
+# calls   : times the student's function was asked at all
+# sub     : which subsystem owns it — drives which lab's shadow bar shows it
 # hash    : build-time hash of the student's file ("baseline" = the shipped stub)
+# rejects/calls/sub are absent on kernels built before the validator registry, hence the
+# defaults — an older image keeps parsing exactly as before.
 @dataclass
 class ShadowStatus:
     name: str
@@ -334,6 +351,9 @@ class ShadowStatus:
     active: bool = False
     faults: int = 0
     hash: str = "baseline"
+    rejects: int = 0
+    calls: int = 0
+    subsystem: str = "sched"
 
     @property
     def is_student(self) -> bool:
@@ -342,8 +362,24 @@ class ShadowStatus:
 
     @property
     def healthy(self) -> bool:
-        """Wired in and running without having crashed back to the primary."""
-        return self.active and self.faults == 0
+        """Wired in, running, and neither wedging the machine nor being rejected."""
+        return self.active and self.faults == 0 and self.rejects == 0
+
+    @property
+    def verdict(self) -> str:
+        """The four distinguishable student situations, from deterministic evidence alone —
+        so a hint can be specific instead of generic."""
+        if not self.present:
+            return "not-started"        # still the shipped stub
+        if self.faults:
+            return "wedged"             # hung the machine; agent rebooted it
+        if not self.enabled:
+            return "off"                # written, but the toggle is off
+        if self.rejects:
+            return "rejected"           # runs, but the kernel refuses its answers
+        if not self.active:
+            return "never-runs"         # enabled yet never returns an answer (stub returns 0)
+        return "running"                # live — correctness is now the oracle's call
 
 
 _SHADOW_RE = re.compile(r"SHADOW\s+(\S+)\s+(.*)")
@@ -364,7 +400,10 @@ def parse_shadow_manifest(text: str) -> dict:
             enabled=kv.get("enabled") == "1",
             active=kv.get("active") == "1",
             faults=int(kv.get("faults", "0") or 0),
-            hash=kv.get("hash", "baseline"))
+            hash=kv.get("hash", "baseline"),
+            rejects=int(kv.get("rejects", "0") or 0),
+            calls=int(kv.get("calls", "0") or 0),
+            subsystem=kv.get("sub", "sched"))
     return out
 
 
@@ -470,15 +509,44 @@ class TrapEvent:
     cause: str = ""     # scause (hex); interrupt causes have the top bit set
     epc: str = ""       # faulting / trapping PC (hex)
     tval: str = ""      # stval — faulting address for page faults (hex)
+    # CSR state captured AT TRAP TIME (kernels built after the trap-ring CSR change). This is the
+    # uncontaminated interrupt state: the live CSR strip can only ever show the dump's own console
+    # interrupt, because reading is itself a trap. Empty on older kernels.
+    sstatus: str = ""
+    sie: str = ""
+    sip: str = ""
+
+    @property
+    def has_csr(self) -> bool:
+        return bool(self.sstatus)
+
+    @property
+    def came_from(self) -> str:
+        """Privilege the trap interrupted, from sstatus.SPP — 'user' or 'kernel' ('—' if absent)."""
+        if not self.sstatus:
+            return "—"
+        try:
+            return "kernel" if int(self.sstatus, 16) & SSTATUS_SPP else "user"
+        except ValueError:
+            return "—"
+
+
+# `TR <pid> <kind> <cause> <epc> <tval>` — with three optional trailing CSRs (sstatus sie sip)
+# recorded at trap time by newer kernels. The tail is optional so an older image still parses.
+_TR_RE = re.compile(
+    r"TR (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)"
+    r"(?: (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+))?")
 
 
 def parse_traptrace(text: str) -> list:
-    """gini_trapdump `TR <pid> <kind> <cause> <epc> <tval>` lines -> [TrapEvent] (oldest->newest)."""
+    """gini_trapdump `TR <pid> <kind> <cause> <epc> <tval> [sstatus sie sip]` -> [TrapEvent]
+    (oldest->newest). The CSR triple is present only on kernels built with the trap-ring CSR
+    capture; older dumps parse exactly as before with those fields left empty."""
     out: list = []
-    for m in re.finditer(
-            r"TR (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)", text or ""):
+    for m in _TR_RE.finditer(text or ""):
         out.append(TrapEvent(int(m.group(1)), int(m.group(2)),
-                             m.group(3), m.group(4), m.group(5)))
+                             m.group(3), m.group(4), m.group(5),
+                             m.group(6) or "", m.group(7) or "", m.group(8) or ""))
     return out
 
 
@@ -806,3 +874,42 @@ class DemoScheduler:
                "scause": 0x8000000000000005, "sepc": pc}
         return Snapshot(procs=procs, running_pid=run_pid, ticks=self._ticks,
                         cpu=cpu, stack=stack, modetime=modetime, csr=csr, source="demo")
+
+
+# -- lock contention (gini_lockdump; the Lock Lab's feed) --------------------------------------- #
+@dataclass
+class LockStat:
+    """One named lock's contention. `spins` counts FAILED test-and-set attempts — CPU time burned
+    waiting for another core — so it is zero on a single-core machine by definition, which is why
+    GINI boots xv6 with two harts."""
+    name: str
+    acquires: int = 0
+    spins: int = 0
+
+    @property
+    def contention(self) -> float:
+        """Spins per acquire. 0 = uncontended; >1 means callers typically wait more than one
+        failed attempt each, which is the signal a lock needs splitting."""
+        return (self.spins / self.acquires) if self.acquires else 0.0
+
+
+_LOCK_RE = re.compile(r"^LOCK (\S+) (\d+) (\d+)\s*$", re.M)
+_LOCKCPU_RE = re.compile(r"LOCKCPU (\d+)")
+
+
+def parse_locks(text: str) -> list:
+    """`LOCK <name> <acquires> <spins>` lines -> [LockStat], most contended first.
+
+    Counters are aggregated by lock NAME, not per instance: xv6 has 64 per-process locks all
+    called "proc", and the useful question is "how contended is the proc lock", not which of the
+    64. Empty list on a kernel without the telemetry."""
+    out = [LockStat(name=m.group(1), acquires=int(m.group(2)), spins=int(m.group(3)))
+           for m in _LOCK_RE.finditer(text or "")]
+    out.sort(key=lambda s: (-s.spins, s.name))
+    return out
+
+
+def parse_lock_cpus(text: str) -> int:
+    """The kernel's NCPU, so the Lock Lab can say 'contention is impossible on 1 core'."""
+    m = _LOCKCPU_RE.search(text or "")
+    return int(m.group(1)) if m else 0

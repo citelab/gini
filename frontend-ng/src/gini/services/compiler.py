@@ -125,10 +125,18 @@ def _toolkit_for(device) -> str:
 
 
 def _xv6_harts(device) -> int:
-    """xv6 QEMU CPU count (-smp), capped at 2: S/M -> 1 hart, L/XL -> 2 harts. (xv6 SMP is kept
-    to 1-2 for a clear, legible scheduler demo.)"""
+    """xv6 QEMU CPU count (-smp), driven by the SIZE tier: S/M -> 1 hart, L -> 2, XL -> 4.
+
+    The Size control is the single source of truth for how big a machine is — a student who picks
+    S must not silently get a 2-core kernel. (An earlier build floored this at 2 so lock
+    contention was always observable; that made the Inspector say "0.5 vCPU" while the Machine Lab
+    said "2 cores", which is worse than the thing it fixed.)
+
+    Consequence, and it is deliberate: **contention is impossible on one core**, so an S/M machine
+    shows an all-zero Lock Lab. The Lock Lab says so and tells the student to size up to L.
+    """
     v = _cpus_for(device)                          # the shown vCPU count: 0.5/1/2/4
-    return max(1, min(2, int(round(v))))
+    return max(1, min(4, int(round(v))))
 
 
 def _int(v, default: int) -> int:

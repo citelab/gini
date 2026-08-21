@@ -63,6 +63,12 @@ class StateWatcher:
 
     def __init__(self, starve: int = 4, monopoly: int = 5, zombie: int = 3) -> None:
         self.starve, self.monopoly, self.zombie = starve, monopoly, zombie
+        self.reset()
+
+    def reset(self) -> None:
+        """Start a new episode: forget streaks and armed conditions, KEEP the thresholds.
+        (A new kernel boot reuses the same pid numbers for different processes, so carrying
+        streaks across a restart would fire nonsense events.)"""
         self._runnable_streak: dict[int, int] = {}
         self._running_streak: dict[int, int] = {}
         self._zombie_age: dict[int, int] = {}
@@ -243,12 +249,62 @@ class MachineState:
 
     def attach_real(self, provider, vm=None, fs=None) -> None:
         """Wire the live bridge as the Real plane (called when the topology starts). If we're
-        currently in Real mode, switch to it now so an already-open Lab goes live."""
+        currently in Real mode, switch to it now so an already-open Lab goes live.
+
+        A fresh kernel is a fresh EPISODE: the timelines, the last snapshot and the watcher's
+        edge state are cleared, exactly as `set_mode` does — otherwise a Stop/Run cycle leaves
+        the previous boot's slices on the Gantt (pids from a kernel that no longer exists) and
+        the watcher stays armed against processes that are gone."""
         self._real = (provider, vm if vm is not None else getattr(provider, "vm", None),
                       fs if fs is not None else getattr(provider, "fs", None))
+        self.new_episode()
         if self.mode == "real":
             self.provider, self.vm, self.fs = self._real
             self.refresh()
+
+    def stall(self, now: float, grace_s: float = 8.0) -> str:
+        """SOFT-wedge detector — the failure the agent's liveness check cannot see.
+
+        A student's picker that loops forever runs with interrupts ON, so the kernel keeps
+        answering dumps and looks perfectly healthy; what stops is *progress* — no process is
+        RUNNING and the Gantt gains no new slots. Returns a message to show the student, or "".
+
+        Pure: `now` is injected, and the verdict is read from the timeline we already keep.
+        """
+        snap = self.latest
+        if snap is None or not snap.procs:
+            return ""
+        runnable = [p for p in snap.procs if p.state in ("runnable", "running")]
+        if not runnable:
+            self._stall_since = None
+            return ""                                  # genuinely nothing to run — idle, not stuck
+        running = [p for p in snap.procs if p.state == "running"]
+        slots = len(self.timeline.slots)
+        moved = (slots != getattr(self, "_stall_slots", -1)) or bool(running)
+        self._stall_slots = slots
+        if moved:
+            self._stall_since = None
+            return ""
+        if getattr(self, "_stall_since", None) is None:
+            self._stall_since = now
+            return ""
+        if now - self._stall_since < grace_s:
+            return ""
+        return (f"No process has run for {int(now - self._stall_since)}s although "
+                f"{len(runnable)} are runnable — a scheduler shadow that never returns a process "
+                f"looks exactly like this. Press Reboot to come back with shadows off.")
+
+    def new_episode(self) -> None:
+        self._stall_since = None
+        self._stall_slots = -1
+        """Forget everything sampled from a previous kernel run (Gantt slices, last snapshot,
+        watcher edges, pending events). Pure — safe to call from anywhere."""
+        self.timeline = SchedTimeline()
+        self.cpu_timelines = {}
+        self.latest = None
+        self.watcher.reset()              # keep the configured thresholds, drop the edge state
+        self._events = []
+        self._prev_card = {}
 
     def set_mode(self, mode: str) -> None:
         """Switch the active data plane. This is the ONLY place the source changes, and only when
@@ -259,9 +315,7 @@ class MachineState:
         self.mode = mode
         prov, vm, fs = self._plane(mode)
         self.provider, self.vm, self.fs = prov, vm, fs
-        self.timeline = SchedTimeline()
-        self.cpu_timelines = {}
-        self.latest = None
+        self.new_episode()                # demo and real samples never blend on the Gantt
         if prov is not None:
             try:
                 self._ingest(prov.snapshot())

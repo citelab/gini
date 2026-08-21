@@ -79,6 +79,11 @@ struct gr_cp_module
     int  (*start)(gr_cp_module_t *self, const gr_cp_services_t *svc, const char *args);
     void (*on_packet)(gr_cp_module_t *self, gpacket_t *pkt);   /* a matched packet (a copy) */
     void (*stop)(gr_cp_module_t *self);
+    /* OPTIONAL: write a live status snapshot into out (<= outlen bytes, return bytes
+     * written). Called from the CLI thread, so it must only read state that is safe to
+     * read cross-thread (e.g. a published snapshot buffer). Backs `gpipe cp status`,
+     * which the Multicast HUD polls. NULL = module has no status. */
+    int  (*status)(gr_cp_module_t *self, char *out, size_t outlen);
 };
 
 /* ---- runtime entry points ---- */
@@ -96,6 +101,10 @@ void gr_cp_stop_all(void);
 
 /* Human-readable list of loaded control modules. Backs `gpipe cp list`. */
 int  gr_cp_list(char *out, size_t outlen);
+
+/* Concatenated status snapshots of every module that implements status(). Backs
+ * `gpipe cp status` (polled by the Multicast HUD). */
+int  gr_cp_status(char *out, size_t outlen);
 
 /* Space-separated registry names, for usage messages. */
 const char *gr_cp_names(void);

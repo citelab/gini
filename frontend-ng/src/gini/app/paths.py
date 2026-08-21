@@ -46,6 +46,14 @@ def scripts_dir() -> Path:
     return gini_home() / "scripts"
 
 
+def shared_dir() -> Path:
+    """Host directory shared with every Machine container at ``/shared``. Students edit
+    sources here on their own machine and compile inside the stations (the Multicast File
+    Distribution capstone: ``gcc -o sender /shared/sender.c /shared/multicast.c``), and a
+    station can drop results back for the host to inspect. Survives topology teardown."""
+    return gini_home() / "shared"
+
+
 def config_path() -> Path:
     return gini_home() / "config.json"
 
@@ -54,6 +62,7 @@ def ensure_dirs() -> None:
     projects_dir().mkdir(parents=True, exist_ok=True)
     captures_dir().mkdir(parents=True, exist_ok=True)
     scripts_dir().mkdir(parents=True, exist_ok=True)
+    shared_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_config() -> dict:
