@@ -30,30 +30,28 @@ def _isolated_gini_home(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True, scope="module")
 def _reap_windows_between_modules():
-    """Destroy leftover top-level widgets after each test FILE, or the suite goes quadratic.
+    """Destroy leftover top-level widgets after each test FILE, or the suite crawls.
 
-    `MainWindow.__init__` calls `theme.apply()`, which ends in `app.setStyleSheet(...)`. An
-    application-level stylesheet makes Qt re-polish EVERY live widget in the process — so with N
-    windows still alive at ~285 widgets each, building window N+1 costs O(N), and a suite that
-    builds one per test costs O(N^2). Measured on a bare run:
+    Tests never destroy their MainWindows (~285 widgets each), and several things cost O(live
+    widgets) per new window:
 
-        window  1   0.14 s      284 live widgets
-        window  5   1.72 s    1,424
-        window 10   6.63 s    2,849
-        window 15  15.20 s    4,274
-
-    That is the "long pause partway through, then it keeps going" — nothing is hung, every later
-    test is just paying for every earlier one. Reaping caps the cost at one file's worth instead
-    of the whole run.
+      * `theme.apply()` re-styling the whole application — now guarded in ui/theme/manager.py,
+        which took window 15 from 15.2 s to 0.5 s on its own
+      * every window installs an event filter, so each event is dispatched to ALL of them.
+        Profiling one late window showed 355,701 eventFilter calls. Nothing but reaping fixes
+        that one, which is why BOTH halves of this are needed — the manager guard alone left the
+        suite slower than reaping alone.
 
     MODULE scope, not function scope, is deliberate: several files use `scope="module"` fixtures
     that build a window once and share it across their tests. Reaping per test would delete those
-    out from under the tests that come after. Module teardown runs after those fixtures are
-    finished, so nothing living is destroyed.
+    out from under the tests that follow. Module teardown runs after those fixtures are finished,
+    so nothing living is destroyed, and no session-scoped fixture holds widgets.
 
-    The real fix is app-side — skip the stylesheet when it has not changed, which would speed up
-    opening a second window in the product too — but that touches theming everywhere, so it is a
-    deliberate decision rather than a drive-by.
+    A note for whoever suspects this next: it was briefly removed on the theory that it caused a
+    segfault in test_sizing.py. It does not. The crash reproduces in a plain loop that builds
+    windows with no pytest involved, it happens WITHOUT this fixture too, and it happens EARLIER
+    when the manager guards are reverted — it is a headless-Qt artifact at very high widget
+    counts. The full suite runs clean on a real display with this fixture in place.
     """
     yield
     try:

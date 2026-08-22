@@ -904,7 +904,7 @@ class MainWindow(QMainWindow):
             a = QAction(_theme_swatch(get_theme(name)), name, self)
             a.setCheckable(True)
             a.setChecked(name.lower() == self.theme.theme.name.lower())
-            a.triggered.connect(lambda _=False, n=name: self.theme.set_theme(n))
+            a.triggered.connect(lambda _=False, n=name: self._pick_theme(n))
             grp.addAction(a); menu.addAction(a)
             self._theme_actions[name] = a
 
@@ -1494,7 +1494,9 @@ class MainWindow(QMainWindow):
                         agent_of=self._xv6_agent,
                         on_source=self._open_kernel_source,
                         window_getter=lambda: int(
-                            getattr(self.ctx.settings, "os_hud_window_s", 10) or 10))
+                            getattr(self.ctx.settings, "os_hud_window_s", 10) or 10),
+                        scrub_getter=lambda: int(
+                            getattr(self.ctx.settings, "os_hud_scrub_s", 120) or 120))
                 self._oshud.show_topright()
             elif getattr(self, "_oshud", None) is not None:
                 self._oshud.close()
@@ -3472,6 +3474,55 @@ class MainWindow(QMainWindow):
             self._update_status()
             self._update_delete_enabled()
             self.ctx.log(f"Removed {', '.join(names)}.", "info")
+
+    # Windows other than this one are themed ONCE, when they open.
+    #
+    # The Labs bake their colours in at construction — 151 setStyleSheet calls across seven files
+    # read `theme.theme` as they build and never look again. Switching the theme underneath an
+    # open Lab therefore repaints the application stylesheet but not those baked colours, and the
+    # window ends up half light and half dark. (The OS HUD and the canvas are fine: they read the
+    # theme inside paintEvent, so they follow a switch for free.)
+    #
+    # The rule is "a window's theme is fixed for its lifetime; only the main window is live". That
+    # is honest, costs nothing, and beats the alternatives — rebuilding open Labs makes them blink
+    # and lose their page, and making 151 call sites re-runnable is a large change to code that
+    # works. Labs already open with the CURRENT theme, so closing and reopening gets you there.
+    _LIVE_THEMED = ("MainWindow",)
+
+    def _open_windows(self) -> list:
+        """Visible top-level windows of ours, other than this one. Menus, tooltips and popups are
+        top-level too, so anything without a title bar is ignored."""
+        from PySide6.QtWidgets import QApplication
+        out = []
+        for w in QApplication.topLevelWidgets():
+            if w is self or not w.isVisible():
+                continue
+            if type(w).__name__ in self._LIVE_THEMED:
+                continue
+            if not (w.windowFlags() & Qt.Window):        # menus/tooltips/popups are not windows
+                continue
+            title = w.windowTitle()
+            if title:
+                out.append(title)
+        return out
+
+    def _pick_theme(self, name: str) -> None:
+        """Theme menu entry point. Refuses while another window is open, and says which."""
+        open_now = self._open_windows()
+        if open_now:
+            shown = ", ".join(open_now[:3]) + (" …" if len(open_now) > 3 else "")
+            self.ctx.bus.log.emit(
+                "error", f"Theme unchanged — close these first: {shown}. "
+                         "Other windows are themed when they open, so they would not follow.")
+            self._sync_theme_actions()               # un-check the entry the user just clicked
+            return
+        self.theme.set_theme(name)
+
+    def _sync_theme_actions(self) -> None:
+        """Put the checkmark back on the theme that is actually active."""
+        active = self.theme.theme.name.lower()
+        for nm, act in getattr(self, "_theme_actions", {}).items():
+            act.setChecked(nm.lower() == active)
 
     def _on_theme_changed(self, name: str) -> None:
         # persist on EVERY theme switch (the toolbar palette menu used to change the theme

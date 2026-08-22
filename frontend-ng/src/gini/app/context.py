@@ -75,6 +75,9 @@ class Settings:
     # this side the same events pile up on screen and never leave. Short is good here: a program
     # launch is over in microseconds, so 1-5s keeps one launch legible.
     os_hud_window_s: int = 10
+    # How far back the OS HUD's scrub timeline reaches. Separate from the window above: the
+    # window is how much is ON SCREEN, this is how much is RECORDED and can be scrubbed back to.
+    os_hud_scrub_s: int = 120
     autosave: bool = False
     server: str = "localhost"
     remote_port: int = 10000

@@ -43,7 +43,7 @@ from ..domain.kernel_board import (
     BLOCK_FILES, DEVICE_BLOCKS, DOOR_HELP, DOORS, Frame, Window, parse, signature,
 )
 from ..domain.os_events import (
-    LANES, EventWindow, episodes, fault_events, merge, syscall_events, trap_events,
+    LANES, EventWindow, fault_events, merge, syscall_events, trap_events,
 )
 from .glass import apply_glass, paint_glass_panel
 from .hud import HudController, HudHistory, live_rect, paint_timeline, timeline_rect
@@ -700,13 +700,9 @@ class OsHud(QWidget):
                 self.set_focus_lanes(None if self._focus == name else name)
                 return
 
-    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
-        pos = e.position() if hasattr(e, "position") else e.pos()
-        for name, r in self._hit.items():
-            if r.contains(pos) and BLOCK_FILES.get(name):
-                self.open_source.emit(name, list(BLOCK_FILES[name]))
-                return
-
+        # ...and only then the recorder controls at the bottom. This tail once got spliced into
+        # mouseDoubleClickEvent by accident, which silently made the timeline scrubbable only by
+        # double-clicking — the board still painted perfectly, so nothing looked broken.
         h = self._history
         if h is None or not len(h):
             return
@@ -718,6 +714,15 @@ class OsHud(QWidget):
             self._scrub_to(pos.x())
         elif self._focus:
             self.set_focus_lanes(None)
+
+    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
+        """Double-click a block to open its source. Nobody reads 10,000 lines of kernel cold, but
+        a student will read the 30 lines behind a block they just watched go dark."""
+        pos = e.position() if hasattr(e, "position") else e.pos()
+        for name, r in self._hit.items():
+            if r.contains(pos) and BLOCK_FILES.get(name):
+                self.open_source.emit(name, list(BLOCK_FILES[name]))
+                return
 
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
         if self._scrub_drag:
@@ -758,17 +763,20 @@ class OsHudController(HudController):
 
     frame_ready = Signal(object, object, object)      # (Frame, events, hart_sub)
 
-    # Deliberately much shorter than the HUD default: a snapshot lands almost every poll on a busy
-    # kernel, and ten minutes of them is an unreadable wall of ticks you cannot aim at.
+    # Default scrubback. Deliberately much shorter than the shared HUD default: a snapshot lands
+    # almost every poll on a busy kernel, and ten minutes of them is an unreadable wall of ticks
+    # you cannot aim at. Adjustable in Settings ("OS HUD timeline") via scrub_getter — a different
+    # axis from the event window, which is how much is on SCREEN rather than how much is RECORDED.
     SCRUBBACK_S = 120.0
 
     def __init__(self, parent, theme, agent_of, window_getter=None, on_source=None,
-                 interval_ms: int = 900) -> None:
+                 scrub_getter=None, interval_ms: int = 900) -> None:
         super().__init__(parent, interval_ms=interval_ms, retain_s=self.SCRUBBACK_S)
         self.hud = OsHud(parent, theme)
         self.hud.set_history(self.history)
         self._agent_of = agent_of
         self._window_getter = window_getter or (lambda: 10)
+        self._scrub_getter = scrub_getter or (lambda: self.SCRUBBACK_S)
         # Double-clicking a block asks for its source. The HUD has no idea what docks exist, so
         # the window supplies the handler; without one, double-click is simply inert.
         if on_source is not None:
@@ -806,8 +814,11 @@ class OsHudController(HudController):
 
     def _on_frame(self, frame, events, hart_sub) -> None:
         now = time.monotonic()
+        # Both Settings values are read every frame rather than captured at construction, so a
+        # change takes effect on the next poll instead of on the next restart.
         try:
             self.window.set_window(self._window_getter() or 10)
+            self.history.set_retain(self._scrub_getter() or self.SCRUBBACK_S)
         except Exception:
             pass
         recent = self.window.add(events, now)
@@ -817,10 +828,6 @@ class OsHudController(HudController):
         if not self.hud.scrubbing:
             self.hud.set_frame(frame, recent, hart_sub)
         self.hud.set_history(self.history)
-
-    def latest_episodes(self) -> list:
-        frame = self.history.latest()
-        return episodes(frame[1]) if frame else []
 
     def show_topright(self) -> None:
         par = self.hud.parentWidget()

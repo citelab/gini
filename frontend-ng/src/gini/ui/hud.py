@@ -52,6 +52,14 @@ class HudHistory:
     def change_times(self) -> list:
         return [t for t, _ in self.snaps]
 
+    def set_retain(self, retain_s: float) -> None:
+        """Change how far back the timeline reaches, live.
+
+        Shortening it drops the excess on the next push rather than immediately, so the change is
+        visible the moment anything happens and costs nothing while the machine is idle.
+        """
+        self.retain_s = max(1.0, float(retain_s))
+
     def push(self, payload, signature, tnow: float | None = None) -> bool:
         """Record `payload`. Returns True when it was a change (a new snapshot)."""
         tnow = time.monotonic() if tnow is None else tnow
