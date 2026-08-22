@@ -40,7 +40,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from ..domain.kernel_board import (
-    DEVICE_BLOCKS, DOOR_HELP, DOORS, Frame, Window, parse, signature,
+    BLOCK_FILES, DEVICE_BLOCKS, DOOR_HELP, DOORS, Frame, Window, parse, signature,
 )
 from ..domain.os_events import (
     LANES, EventWindow, episodes, fault_events, merge, syscall_events, trap_events,
@@ -89,6 +89,7 @@ ROW_H = 22
 ROW_GAP = 8
 GUTTER = 20                          # between the kernel column and the direct lane
 LANE_W = 150                         # only as wide as its text: the kernel column needs the room
+TRAIL_DOTS = 12                      # recent CPU samples drawn; the newest is the marker
 
 
 class OsHud(QWidget):
@@ -108,6 +109,9 @@ class OsHud(QWidget):
         self.window_s: float = 10.0
         self.stale: bool = False          # kernel has no board support (old image)
         self.paint_error: str = ""        # last paint failure, shown in the panel (see paintEvent)
+        self._focus: str = ""             # selected block/door name, "" = none
+        self._hit: dict = {}              # name -> clickable rect, rebuilt every paint
+        self._xray_head = QRectF()        # the X-RAY caption, clicked to collapse the lanes
         self.resize(PANEL_W, PANEL_H)
         self.setMouseTracking(True)
         apply_glass(self)
@@ -131,6 +135,32 @@ class OsHud(QWidget):
     def set_focus_pid(self, pid) -> None:
         self._focus_pid = pid
         self.update()
+
+    # Which swimlanes a board selection reveals. A block or a door is not a pid, so selecting one
+    # filters by SUBSYSTEM rather than by process — "show me what the block cache produced" is the
+    # question the board actually poses.
+    FOCUS_LANES = {
+        "asked": ("syscall", "proc", "fs"), "couldn't": ("memory",), "seized": ("trap",),
+        "syscall": ("syscall",), "proc": ("proc",), "memory": ("memory",),
+        "file": ("fs",), "inode": ("fs",), "log": ("fs",), "bcache": ("fs",),
+        "pipe": ("fs",), "disk": ("fs", "trap"), "console": ("trap",), "plic": ("trap",),
+    }
+
+    def set_focus_lanes(self, name) -> None:
+        """Select a block or door on the board; the swimlanes below narrow to its lanes."""
+        self._focus = name or ""
+        self.update()
+
+    def _block_help(self, name: str) -> str:
+        files = ", ".join(BLOCK_FILES.get(name, ()))
+        n = self._frame.blocks.get(name, 0)
+        ours = self._frame.ours(name)
+        bits = [f"{n} calls in this window"]
+        if ours:
+            bits.append(f"{ours} of them provoked by GINI reading the machine")
+        if files:
+            bits.append(files)
+        return f"{name} — " + "; ".join(bits)
 
     def _resize_to_lanes(self) -> None:
         self.resize(PANEL_W, PANEL_H if self._lanes.get("xray") else PANEL_H_BOARD)
@@ -220,11 +250,13 @@ class OsHud(QWidget):
         # -- the three doors, by AGENCY --------------------------------------------------
         # Not one gate: a fault is not an interrupt, and this is the same three-way split
         # usertrap() itself makes.
+        self._hit = {}
         dw = (kwidth - 2 * ROW_GAP) / 3.0
         for i, name in enumerate(DOORS):
             r = QRectF(kleft + i * (dw + ROW_GAP), y, dw, ROW_H)
+            self._hit[name] = r
             self._chip(p, r, amber, 0.18, name, str(f.doors[i] if i < len(f.doors) else 0),
-                       centre=True)
+                       centre=True, selected=self._focus == name)
         doors_y = y
         # The doors band IS the trap code, so a CPU marker reading "trap" belongs here rather than
         # nowhere. Registered as a target below alongside the blocks.
@@ -266,13 +298,16 @@ class OsHud(QWidget):
         self._paint_edges(p, centres, blue)
 
         for name, r in centres.items():
-            share = f.share(name)
-            # SHADE IS TIME, not calls. Scaled against the busiest kernel block so a quiet
-            # machine still shows contrast, capped so nothing saturates to unreadable.
+            self._hit[name] = r
+            # SHADE IS TIME, not calls — and only when enough samples back it (see
+            # Frame.resid_trustworthy). Scaled against the busiest kernel block so a quiet machine
+            # still shows contrast, capped so nothing saturates to unreadable.
+            share = f.share(name) if f.resid_trustworthy else 0.0
             self._chip(p, r, amber if name in DEVICE_BLOCKS else blue,
                        min(0.42, 0.04 + share * 2.4),
                        BLOCK_LABEL.get(name, name), self._block_note(name),
-                       outline=amber if name in DEVICE_BLOCKS else None, opaque=True)
+                       outline=amber if name in DEVICE_BLOCKS else None, opaque=True,
+                       selected=self._focus == name)
         p.setPen(QColor(t.accent_for("amber")))
         p.setFont(QFont(self.font().family(), 7))
         p.drawText(int(kleft + 8), int(boundary_y), 200, 12, Qt.AlignLeft, "device boundary")
@@ -342,25 +377,45 @@ class OsHud(QWidget):
                    MACHINE_DIRECT[0], MACHINE_DIRECT[1], outline=green)
         y += ROW_H + 6
 
-        # -- the CPU marker: one dot per hart, and it is usually NOT in the kernel --------
+        # -- the CPU marker: a TRAIL of real samples, newest solid ------------------------
+        # Every dot is somewhere the hart actually was, recorded by the kernel on a timer tick.
+        # The alternative — animating a position from the residency distribution — would look
+        # livelier and be a fabrication. Most of the trail sits in the direct lane, which is the
+        # lesson: the CPU is usually not in the kernel at all.
         centres["trap"] = doors_rect          # "in trap code" == in the doorway
-        spot = centres.get(self._hart_sub)
-        mark = QPointF(ax, lane.top() + lane.height() * 0.62) if self._hart_sub == "user" \
-            else (QPointF(spot.right() - 12, spot.center().y()) if spot else None)
-        if mark is not None:
-            orange = QColor(t.accent_for("orange"))
-            p.setPen(QPen(orange, 2))
-            p.setBrush(QColor(orange.red(), orange.green(), orange.blue(), 190))
-            p.drawEllipse(mark, 6, 6)
-            p.setPen(QColor(orange))
-            p.setFont(QFont(self.font().family(), 7))
-            p.drawText(int(mark.x()) + 12, int(mark.y()) - 6, 120, 12, Qt.AlignLeft, "hart 0")
-            p.setFont(small)
+        orange = QColor(t.accent_for("orange"))
+
+        def spot_for(sub, k):
+            if sub == "user":
+                return QPointF(ax, lane.top() + lane.height() * (0.30 + 0.06 * (k % 6)))
+            r = centres.get(sub)
+            return QPointF(r.right() - 12, r.center().y()) if r else None
+
+        recent = list(f.trail)[-TRAIL_DOTS:]
+        for k, sub in enumerate(recent):
+            pt = spot_for(sub, k)
+            if pt is None:
+                continue
+            newest = k == len(recent) - 1
+            a = 210 if newest else int(30 + 90 * (k / max(1, len(recent) - 1)))
+            p.setPen(QPen(orange, 2) if newest else Qt.NoPen)
+            p.setBrush(QColor(orange.red(), orange.green(), orange.blue(), a))
+            p.drawEllipse(pt, 6 if newest else 3, 6 if newest else 3)
+            if newest:
+                p.setPen(QColor(orange))
+                p.setFont(QFont(self.font().family(), 7))
+                p.drawText(int(pt.x()) + 12, int(pt.y()) - 6, 140, 12, Qt.AlignLeft,
+                           "hart 0, last sample")
+                p.setFont(small)
 
         p.setPen(QColor(t.faint))
         p.setFont(QFont(self.font().family(), 7))
-        p.drawText(PAD, int(y), full, 12, Qt.AlignLeft,
-                   "arrow width = calls   ·   shade = CPU time   ·   dashed = configuration")
+        legend = ("arrow = calls   ·   shade = CPU time   ·   grey dashed = GINI observing   ·   "
+                  "blue dashed = configuration")
+        if not f.resid_trustworthy:
+            legend = (f"sampling — only {f.total_resid} residency samples this window; "
+                      "widen it for meaningful shading")
+        p.drawText(PAD, int(y), full, 12, Qt.AlignLeft, legend)
         p.setFont(small)
         return int(y) + 14
 
@@ -380,18 +435,33 @@ class OsHud(QWidget):
         Both are printed because shade alone is colour-as-only-cue, and because the two numbers
         DISAGREEING is the whole point of the board: bcache reads "601 · 2%" right above disk's
         "12 · 12%".
+
+        A trailing "+N" is what GINI's own polling contributed — the console and plic always carry
+        one. The percentage is dropped entirely when too few residency samples back it, rather
+        than printing a confident number derived from two observations.
         """
         f = self._frame
         n = f.blocks.get(name, 0)
+        ours = f.ours(name)
         pct = f.share(name) * 100
-        if not n and pct < 0.5:
+        if not n and not ours and pct < 0.5:
             return "—"
-        return f"{self._num(n)}  {pct:.0f}%" if pct >= 0.5 else self._num(n)
+        s = self._num(n)
+        if ours:
+            s += f"+{self._num(ours)}"
+        if pct >= 0.5 and f.resid_trustworthy:
+            s += f"  {pct:.0f}%"
+        return s
 
     def _chip(self, p: QPainter, r: QRectF, col: QColor, alpha: float,
               label: str, note: str = "", centre: bool = False, outline=None,
-              opaque: bool = False) -> None:
+              opaque: bool = False, selected: bool = False) -> None:
         t = self.theme.theme
+        if selected:
+            sel = QColor(t.accent_for("orange"))
+            p.setPen(QPen(sel, 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(-3, -3, 3, 3), 7, 7)
         if opaque:
             # Blocks are painted over the edge lines, so they need a solid ground first. Without
             # it the tint is translucent and every line that passes behind a block shows through
@@ -432,21 +502,37 @@ class OsHud(QWidget):
 
     def _paint_edges(self, p: QPainter, centres: dict, blue: QColor) -> None:
         """Arrow width encodes CALLS. Never time — that is the block shade's job, and collapsing
-        the two would erase the frequency/cost distinction the board exists to show."""
+        the two would erase the frequency/cost distinction the board exists to show.
+
+        Two sets of edges, drawn differently on purpose:
+
+          solid blue     what the workload did
+          dashed grey    what GINI's own polling provoked — real kernel work, caused by the act of
+                         measuring. On an idle machine most of the console and plic traffic is
+                         this. Hiding it would flatter the board; showing it teaches that
+                         measurement perturbs the thing measured.
+        """
         f = self._frame
-        if not f.edges:
-            return
-        top = max(f.edges.values()) or 1
-        for (src, dst), n in f.edges.items():
-            a, b = centres.get(src), centres.get(dst)
-            if a is None or b is None or a is b:
-                continue
-            p0 = self._exit_point(a, b.center())
-            p1 = self._exit_point(b, a.center())
-            w = 0.8 + 3.2 * (n / top) ** 0.5
-            p.setPen(QPen(blue, w))
-            p.drawLine(p0, p1)
-            self._arrowhead(p, p0, p1, blue, w)
+        grey = QColor(self.theme.theme.muted)
+        top = max(list(f.edges.values()) + list(f.edges_obs.values()) or [1]) or 1
+
+        def draw(edges, col, dashed):
+            for (src, dst), n in edges.items():
+                a, b = centres.get(src), centres.get(dst)
+                if a is None or b is None or a is b:
+                    continue
+                p0 = self._exit_point(a, b.center())
+                p1 = self._exit_point(b, a.center())
+                w = 0.8 + 3.2 * (n / top) ** 0.5
+                pen = QPen(col, w)
+                if dashed:
+                    pen.setStyle(Qt.DashLine)
+                p.setPen(pen)
+                p.drawLine(p0, p1)
+                self._arrowhead(p, p0, p1, col, w)
+
+        draw(f.edges_obs, grey, True)      # ours first, so the workload's edges sit on top
+        draw(f.edges, blue, False)
 
     @staticmethod
     def _arrowhead(p: QPainter, p0: QPointF, p1: QPointF, col: QColor, w: float) -> None:
@@ -472,11 +558,19 @@ class OsHud(QWidget):
         evs_all = self._events
         if self._focus_pid is not None:
             evs_all = [e for e in evs_all if e.pid == self._focus_pid]
+        # A board selection narrows the lanes to the ones it can produce. Lanes outside the
+        # selection stay drawn but empty, so you can see WHAT WAS EXCLUDED rather than having the
+        # rails silently disappear.
+        show = self.FOCUS_LANES.get(self._focus) if self._focus else None
         head = "X-RAY" + (f"  ·  pid {self._focus_pid}" if self._focus_pid is not None
                           else "  ·  all processes")
+        if self._focus:
+            head += f"  ·  from {self._focus}"
         p.setFont(QFont(self.font().family(), 7))
-        p.setPen(QColor(t.faint))
-        p.drawText(PAD, y, 400, 12, Qt.AlignLeft, f"{head}  ·  {len(evs_all)} events")
+        p.setPen(QColor(t.accent if self._focus else t.faint))
+        self._xray_head = QRectF(PAD, y, 400, 12)
+        p.drawText(self._xray_head, Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{head}  ·  {len(evs_all)} events  ·  click to collapse")
         y += 14
 
         left, width = PAD + 56, self.width() - PAD - 70
@@ -488,6 +582,8 @@ class OsHud(QWidget):
 
         for lane in LANES:
             evs = [e for e in evs_all if e.lane == lane]
+            if show is not None and lane not in show:
+                evs = []                                  # excluded by the board selection
             p.setFont(QFont(self.font().family(), 8))
             p.setPen(QColor(t.text if evs else t.faint))
             p.drawText(PAD - 10, y, 60, ROW_H, Qt.AlignVCenter | Qt.AlignRight, lane)
@@ -535,6 +631,20 @@ class OsHud(QWidget):
     # -- interaction --------------------------------------------------------- #
     def mousePressEvent(self, e) -> None:  # noqa: N802
         pos = e.position() if hasattr(e, "position") else e.pos()
+
+        # Click the X-RAY header to collapse the swimlanes; the panel shrinks to the board.
+        if self._xray_head.contains(pos):
+            self.set_lane("xray", not self._lanes.get("xray"))
+            return
+
+        # Click a block or a door to focus the swimlanes on what it produces; click it again, or
+        # anywhere else on the board, to clear. This is what makes the two halves one view rather
+        # than two stacked ones — the map selects, the story below answers.
+        for name, r in self._hit.items():
+            if r.contains(pos):
+                self.set_focus_lanes(None if self._focus == name else name)
+                return
+
         h = self._history
         if h is None or not len(h):
             return
@@ -544,11 +654,24 @@ class OsHud(QWidget):
         if timeline_rect(self.width(), self.height()).contains(pos):
             self._scrub_drag = True
             self._scrub_to(pos.x())
+        elif self._focus:
+            self.set_focus_lanes(None)
 
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
         if self._scrub_drag:
             pos = e.position() if hasattr(e, "position") else e.pos()
             self._scrub_to(pos.x())
+            return
+        # Hover help. The doors are the part students most often misread — a fault is not an
+        # interrupt — so each one says what it means rather than relying on its one-word label.
+        pos = e.position() if hasattr(e, "position") else e.pos()
+        tip = ""
+        for name, r in self._hit.items():
+            if r.contains(pos):
+                tip = DOOR_HELP.get(name) or self._block_help(name)
+                break
+        if tip != self.toolTip():
+            self.setToolTip(tip)
 
     def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
         self._scrub_drag = False
@@ -606,14 +729,9 @@ class OsHudController(HudController):
         self.frame_ready.emit(frame, events, self._hart_sub(frame))
 
     def _hart_sub(self, frame) -> str:
-        """Where to draw the CPU marker.
-
-        Honest about its own resolution: this is the block with the most sampled residency in the
-        window, not an instantaneous reading. At a ~1 Hz poll there IS no meaningful instantaneous
-        position to report, and animating one from the distribution would be fabricating it. The
-        marker's usual stillness in user space is the truth, and it is the lesson.
-        """
-        return frame.busiest or "user"
+        """Kept for the history payload's shape; the marker now draws from frame.trail, which is
+        a ring of REAL samples rather than a window aggregate."""
+        return frame.here or "user"
 
     def _on_frame(self, frame, events, hart_sub) -> None:
         now = time.monotonic()
@@ -632,9 +750,6 @@ class OsHudController(HudController):
     def latest_episodes(self) -> list:
         frame = self.history.latest()
         return episodes(frame[1]) if frame else []
-
-    def door_help(self, name: str) -> str:
-        return DOOR_HELP.get(name, "")
 
     def show_topright(self) -> None:
         par = self.hud.parentWidget()

@@ -151,6 +151,63 @@ def test_wire_order_matches_the_kernel():
     assert set(DEVICE_BLOCKS) <= set(SUBSYSTEMS)
 
 
+# -- GINI's own footprint, the sample count, and the marker ------------------------------------ #
+OBS1 = D1 + "BEOBS 1 11 180\nBEOBS 11 12 200\nBSAMP 40\nBTRAIL 4 0 0 11 0\n"
+OBS2 = D2 + "BEOBS 1 11 360\nBEOBS 11 12 400\nBSAMP 80\nBTRAIL 4 0 11 0 10\n"
+
+
+def test_our_own_polling_is_counted_apart_from_the_workload():
+    """Each Lab poll writes to the serial port and provokes real kernel work. Counted in with the
+    workload it makes console and plic look busy on a machine doing nothing — which is our
+    measurement showing up as the thing measured."""
+    w = Window()
+    w.add(parse(OBS1), 100.0)
+    f = w.add(parse(OBS2), 110.0)
+    assert f.edges_obs[("trap", "console")] == 180
+    assert f.ours("console") == 180 and f.ours("plic") == 200
+    assert f.ours("bcache") == 0                     # nothing we do touches the block cache
+    # and the workload's own numbers are untouched by the split
+    assert f.blocks["bcache"] == 601
+
+
+def test_observation_edges_never_leak_into_the_real_ones():
+    f = Window(); f.add(parse(OBS1), 100.0)
+    fr = f.add(parse(OBS2), 110.0)
+    assert set(fr.edges) & set(fr.edges_obs) == set() or all(
+        fr.edges[k] != fr.edges_obs[k] for k in set(fr.edges) & set(fr.edges_obs))
+    assert ("trap", "console") not in fr.edges
+
+
+def test_residency_is_qualified_by_its_sample_count():
+    """~2 samples/second means a short window cannot support a percentage. The board has to know
+    that before it shades a rectangle."""
+    w = Window()
+    w.add(parse(OBS1), 100.0)
+    f = w.add(parse(OBS2), 110.0)
+    assert f.resid_n == 40
+    assert f.resid_trustworthy                       # 840 ticks of residency in this window
+    thin = Frame(resid={"user": 2})
+    assert not thin.resid_trustworthy                # two samples is not a percentage
+
+
+def test_marker_shows_a_real_position_not_an_average():
+    """`here` is the newest actual observation. The first version used the modal block over the
+    window while labelling it "hart 0 is here", which claimed more than it knew."""
+    w = Window()
+    w.add(parse(OBS1), 100.0)
+    f = w.add(parse(OBS2), 110.0)
+    assert f.trail == ("user", "console", "user", "disk")
+    assert f.here == "disk"                          # the newest sample, whatever it was
+    assert f.here != f.busiest                       # and deliberately not the aggregate
+    assert Frame().here == ""                        # no samples yet: say nothing
+
+
+def test_trail_survives_a_kernel_without_one():
+    s = parse(D1)                                    # no BTRAIL line at all
+    assert s.trail == () and s.resid_n == 0
+    assert s.ok                                      # still a usable board
+
+
 def test_window_reports_whether_the_kernel_supports_the_board():
     """The HUD asks this to decide between "quiet machine" and "rebuild your image" — two very
     different messages that a board of zeros cannot tell apart."""

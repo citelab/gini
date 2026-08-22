@@ -1580,19 +1580,19 @@ append_once("kernel/log.c", _LOGDUMP.replace("PRINTF", PRINT), "GINI-xv6: print 
 regex_once("kernel/console.c",
            r"(case C\('P'\):[^\n]*\n\s*procdump\(\);\n\s*break;)",
            r"\1\n"
-           f"  case C('T'): {PRINT}(\"%c\",30); gini_dump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('T'): gini_obs_begin(); gini_dump(); gini_obs_end(); break;  "
            "// GINI: procs + registers (0x1e/0x1f-bracketed; agent hides it from the console)\n"
-           f"  case C('V'): {PRINT}(\"%c\",30); gini_vmdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('V'): gini_obs_begin(); gini_vmdump(); gini_obs_end(); break;  "
            "// GINI: running-proc page table\n"
-           f"  case C('F'): {PRINT}(\"%c\",30); gini_fsdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('F'): gini_obs_begin(); gini_fsdump(); gini_obs_end(); break;  "
            "// GINI: superblock + write-ahead log\n"
-           f"  case C('S'): {PRINT}(\"%c\",30); gini_scdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('S'): gini_obs_begin(); gini_scdump(); gini_obs_end(); break;  "
            "// GINI: syscall counts + trace ring\n"
-           f"  case C('A'): {PRINT}(\"%c\",30); gini_vmdump_all(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('A'): gini_obs_begin(); gini_vmdump_all(); gini_obs_end(); break;  "
            "// GINI: all user page tables (COW / sharing view)\n"
-           f"  case C('E'): {PRINT}(\"%c\",30); gini_faultdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('E'): gini_obs_begin(); gini_faultdump(); gini_obs_end(); break;  "
            "// GINI: live page-fault ring\n"
-           f"  case C('R'): {PRINT}(\"%c\",30); gini_trapdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('R'): gini_obs_begin(); gini_trapdump(); gini_obs_end(); break;  "
            "// GINI: trap-taxonomy counters + ring\n"
            r"  case C('C'): gini_break(); break;  // GINI: break a hung foreground (no SIGINT in xv6)\n"
            r"  case C(']'): if(sched_quantum < 100) sched_quantum++; break; // GINI: quantum up\n"
@@ -1601,10 +1601,10 @@ regex_once("kernel/console.c",
            r"  case C('B'): sched_policy = 0; break;  // GINI: scheduler policy reset (round-robin)\n"
            r"  case C('K'): gini_shadow[sched_policy].enabled = !gini_shadow[sched_policy].enabled; break;  // GINI: toggle the current policy's shadow\n"
            r"  case C('X'): gini_shadow_reset(); break;  // GINI: clear reject/call counters\n"
-           f"  case C('L'): {PRINT}(\"%c\",30); gini_lockdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('L'): gini_obs_begin(); gini_lockdump(); gini_obs_end(); break;  "
            "// GINI: lock contention (0x1e/0x1f-bracketed)\n"
            r"  case C('Z'): gini_lockreset(); break;  // GINI: zero the lock counters\n"
-           f"  case C('W'): {PRINT}(\"%c\",30); gini_shadowdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('W'): gini_obs_begin(); gini_shadowdump(); gini_obs_end(); break;  "
            "// GINI: shadow manifest (0x1e/0x1f-bracketed)",
            "gini_dump();")
 
@@ -1747,11 +1747,22 @@ append_once("kernel/defs.h", """
 #define GSUB_CONSOLE  11
 #define GSUB_PLIC     12
 #define GSUB_OTHER    13
+#define GINI_TRAIL    64   // ring of real residency samples: where the CPU actually WAS
 extern uint64   gini_edge[GINI_NSUB][GINI_NSUB];
+// Calls made while GINI was reading the machine. The Lab polls several times a second, and each
+// poll raises a UART interrupt and writes a dump — real kernel work, caused by US. Counted apart
+// so the board can draw it grey and dashed instead of passing our footprint off as the workload's.
+extern uint64   gini_edge_obs[GINI_NSUB][GINI_NSUB];
 extern uint64   gini_resid[GINI_NSUB];
+extern uint64   gini_resid_n;      // total residency samples taken — the board's confidence
 extern uint64   gini_door[3];      // 0 asked (ecall) | 1 couldn't (fault) | 2 seized (interrupt)
 extern uint64   gini_uinstr;       // retired user-mode instructions, summed
 extern uint64   gini_uentry;       // kernel entries that contributed to gini_uinstr
+extern int      gini_obs[];        // per-hart: are we inside a GINI dump right now?
+extern uchar    gini_trail[];      // recent residency samples, newest at gini_trail_i-1
+extern uint64   gini_trail_i;
+void            gini_obs_begin(void);
+void            gini_obs_end(void);
 // Declared with no bound: defs.h is included before param.h in some translation units, so it
 // cannot spell NCPU. Defined with the real size in trap.c, and needed HERE because trap.c's own
 // prepare_return hook sits above the definitions.
@@ -1827,12 +1838,17 @@ regex_once("kernel/trap.c",
 append_once("kernel/trap.c", """
 // GINI-xv6 KERNEL BOARD core. See section 4h of gini_patch.py for the design.
 uint64 gini_edge[GINI_NSUB][GINI_NSUB];
+uint64 gini_edge_obs[GINI_NSUB][GINI_NSUB];
 uint64 gini_resid[GINI_NSUB];
+uint64 gini_resid_n;
 uint64 gini_door[3];
 uint64 gini_uinstr;
 uint64 gini_uentry;
 int    gini_sub[NCPU];        // which subsystem each hart is executing in, right now
 uint64 gini_umark[NCPU];      // instret at the moment we last returned to user
+int    gini_obs[NCPU];        // per-hart: inside a GINI dump (see gini_obs_begin)
+uchar  gini_trail[GINI_TRAIL];
+uint64 gini_trail_i;
 
 static char *gini_subname[GINI_NSUB] = {
   "user", "trap", "syscall", "proc", "memory", "file", "pipe",
@@ -1855,9 +1871,34 @@ gini_subenter(int s)
   int h = cpuid();
   int prev = gini_sub[h];
   gini_sub[h] = s;
-  if(prev != s)
-    __sync_fetch_and_add(&gini_edge[prev][s], 1);
+  if(prev != s){
+    if(gini_obs[h])
+      __sync_fetch_and_add(&gini_edge_obs[prev][s], 1);   // this call is OURS, not the workload's
+    else
+      __sync_fetch_and_add(&gini_edge[prev][s], 1);
+  }
   return prev;
+}
+
+// Bracket a GINI dump. The 0x1e/0x1f pair already existed so the agent could strip these dumps
+// from the human console; raising the flag on the same boundary costs nothing and makes every
+// call the dump provokes attributable to the measurement instead of the machine.
+//
+// LIMIT, stated rather than hidden: the UART interrupt that DELIVERS the control character fires
+// before the flag can be raised, so roughly three events per poll (uartintr -> consoleintr) are
+// still counted as real. The dump itself — the overwhelming bulk — is captured.
+void
+gini_obs_begin(void)
+{
+  gini_obs[cpuid()] = 1;
+  %(P)s("%%c", 30);
+}
+
+void
+gini_obs_end(void)
+{
+  %(P)s("%%c", 31);
+  gini_obs[cpuid()] = 0;
 }
 
 void
@@ -1866,12 +1907,32 @@ gini_subleave(int *prev)
   gini_sub[cpuid()] = *prev;
 }
 
-// Is this trap a supervisor TIMER interrupt? Residency is sampled on the timer and nothing else,
-// so the sample rate is the tick rate and the numbers are honestly a statistical estimate.
+// Is this trap a supervisor TIMER interrupt? Residency is sampled on the timer and nothing else.
+//
+// Sampling ONLY on the timer keeps the estimate unbiased — device interrupts arrive correlated
+// with device activity, so sampling on those would systematically over-report the disk and the
+// console. The price is resolution: GINI deliberately slows the tick to ~0.5 s (section 2b, so
+// the scheduler Gantt is watchable), which means residency accrues at about TWO SAMPLES PER
+// SECOND. A 1-second HUD window therefore holds ~2 samples and can only ever report nothing,
+// half, or all of it. That is why gini_resid_n is reported: the board shows the sample count so
+// it never
+// claims a precision it does not have, and the shading is meaningful only over longer windows.
 static int
 gini_is_tick(uint64 c)
 {
   return (c & 0x8000000000000000L) && ((c & 0xff) == 5);
+}
+
+// One residency observation. Also appended to a small ring of REAL positions — the CPU marker
+// draws from this rather than from an aggregate, so every dot on screen is somewhere the hart
+// actually was, never a position synthesised from a distribution.
+static void
+gini_sample(int s)
+{
+  gini_resid[s]++;
+  gini_resid_n++;
+  gini_trail[gini_trail_i %% GINI_TRAIL] = (uchar)s;
+  gini_trail_i++;
 }
 
 // Called from the top of kerneltrap: the CPU was already in the kernel, and gini_sub says which
@@ -1880,7 +1941,7 @@ void
 gini_ktick(void)
 {
   if(gini_is_tick(r_scause()))
-    gini_resid[gini_sub[cpuid()]]++;
+    gini_sample(gini_sub[cpuid()]);
 }
 
 // Called from the top of usertrap, BEFORE anything else touches gini_sub — so the residency
@@ -1892,7 +1953,7 @@ gini_doorrec(void)
   int h = cpuid();
 
   if(gini_is_tick(c))
-    gini_resid[gini_sub[h]]++;          // still USER here: this is the no-kernel path's time
+    gini_sample(gini_sub[h]);           // still USER here: this is the no-kernel path's time
 
   // The three doors, by AGENCY. A fault is not an interrupt, and students conflate them
   // constantly; this is the same three-way split usertrap itself makes a few lines below.
@@ -1919,11 +1980,13 @@ gini_boardreset(void)
   for(int i = 0; i < GINI_NSUB; i++){
     gini_resid[i] = 0;
     for(int j = 0; j < GINI_NSUB; j++)
-      gini_edge[i][j] = 0;
+      gini_edge[i][j] = gini_edge_obs[i][j] = 0;
   }
   gini_door[0] = gini_door[1] = gini_door[2] = 0;
   gini_uinstr = 0;
   gini_uentry = 0;
+  gini_resid_n = 0;
+  gini_trail_i = 0;
 }
 
 // Counters are CUMULATIVE. The frontend differences successive dumps into per-window rates; the
@@ -1935,10 +1998,24 @@ gini_boarddump(void)
   for(int i = 0; i < GINI_NSUB; i++)
     %(P)s("BSUB %%d %%s %%d\\n", i, gini_subname[i], (int)gini_resid[i]);
   for(int i = 0; i < GINI_NSUB; i++)
-    for(int j = 0; j < GINI_NSUB; j++)
+    for(int j = 0; j < GINI_NSUB; j++){
       if(gini_edge[i][j])
         %(P)s("BEDGE %%d %%d %%d\\n", i, j, (int)gini_edge[i][j]);
+      if(gini_edge_obs[i][j])
+        %(P)s("BEOBS %%d %%d %%d\\n", i, j, (int)gini_edge_obs[i][j]);
+    }
   %(P)s("BDOOR %%d %%d %%d\\n", (int)gini_door[0], (int)gini_door[1], (int)gini_door[2]);
+  // How many residency samples the numbers above rest on. At a ~0.5s tick this is small, and
+  // the board says so rather than shading a rectangle as if it knew.
+  %(P)s("BSAMP %%d\\n", (int)gini_resid_n);
+  // The last GINI_TRAIL real positions, oldest first — every one an actual observation.
+  {
+    uint64 n = gini_trail_i < GINI_TRAIL ? gini_trail_i : GINI_TRAIL;
+    %(P)s("BTRAIL %%d", (int)n);
+    for(uint64 k = gini_trail_i - n; k < gini_trail_i; k++)
+      %(P)s(" %%d", (int)gini_trail[k %% GINI_TRAIL]);
+    %(P)s("\\n");
+  }
   // Printed as two numbers rather than a ratio: the frontend differences them, and a ratio
   // cannot be differenced.
   %(P)s("BUSER %%d %%d\\n", (int)(gini_uinstr / 1000), (int)gini_uentry);
@@ -2001,7 +2078,7 @@ for _rel, _sub, _fns in _BOARD_PROBES:
 regex_once("kernel/console.c",
            r"(case C\('L'\):[^\n]*\n)",
            r"\1"
-           f"  case C('D'): {PRINT}(\"%c\",30); gini_boarddump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('D'): gini_obs_begin(); gini_boarddump(); gini_obs_end(); break;  "
            "// GINI: kernel board (0x1e/0x1f-bracketed)\n",
            "GINI: board dump key")
 

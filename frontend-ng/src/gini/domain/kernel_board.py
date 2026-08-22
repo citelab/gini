@@ -69,18 +69,30 @@ BLOCK_FILES = {
 
 _BSUB = re.compile(r"^BSUB (\d+) (\S+) (\d+)\s*$", re.M)
 _BEDGE = re.compile(r"^BEDGE (\d+) (\d+) (\d+)\s*$", re.M)
+_BEOBS = re.compile(r"^BEOBS (\d+) (\d+) (\d+)\s*$", re.M)
 _BDOOR = re.compile(r"^BDOOR (\d+) (\d+) (\d+)\s*$", re.M)
 _BUSER = re.compile(r"^BUSER (\d+) (\d+)\s*$", re.M)
+_BSAMP = re.compile(r"^BSAMP (\d+)\s*$", re.M)
+_BTRAIL = re.compile(r"^BTRAIL (\d+)((?: \d+)*)\s*$", re.M)
+
+# Below this many residency samples in a window, the percentages are noise and the board says so
+# rather than shading a rectangle as if it knew. GINI runs the timer at ~0.5 s so the scheduler
+# Gantt is watchable, which means residency accrues at only ~2 samples/second: a 1-second window
+# holds two. The shading is honest only over the longer windows.
+MIN_RESID_SAMPLES = 8
 
 
 @dataclass(frozen=True)
 class Sample:
     """One raw dump. Every number here is CUMULATIVE — never render a Sample directly."""
     resid: dict = field(default_factory=dict)        # sub -> timer ticks
-    edges: dict = field(default_factory=dict)        # (src, dst) -> calls
+    edges: dict = field(default_factory=dict)        # (src, dst) -> calls made by the workload
+    edges_obs: dict = field(default_factory=dict)    # ... and calls GINI's own polling provoked
     doors: tuple = (0, 0, 0)
     user_kinstr: int = 0                             # thousands of user-mode instructions
     user_entries: int = 0
+    resid_n: int = 0                                 # residency samples behind the numbers above
+    trail: tuple = ()                                # recent REAL positions, oldest first
 
     @property
     def ok(self) -> bool:
@@ -92,44 +104,88 @@ class Sample:
         return bool(self.resid)
 
 
+def _edges(text: str, rx) -> dict:
+    out = {}
+    for m in rx.finditer(text or ""):
+        a, b = int(m.group(1)), int(m.group(2))
+        if a < len(SUBSYSTEMS) and b < len(SUBSYSTEMS):
+            out[(SUBSYSTEMS[a], SUBSYSTEMS[b])] = int(m.group(3))
+    return out
+
+
 def parse(text: str) -> Sample:
     """Parse a `gini_boarddump()` dump. Unknown lines are ignored, so the dump can grow."""
-    resid, edges = {}, {}
+    resid = {}
     for m in _BSUB.finditer(text or ""):
         i = int(m.group(1))
         if i < len(SUBSYSTEMS):
             resid[SUBSYSTEMS[i]] = int(m.group(3))
-    for m in _BEDGE.finditer(text or ""):
-        a, b = int(m.group(1)), int(m.group(2))
-        if a < len(SUBSYSTEMS) and b < len(SUBSYSTEMS):
-            edges[(SUBSYSTEMS[a], SUBSYSTEMS[b])] = int(m.group(3))
     d = _BDOOR.search(text or "")
     doors = (int(d.group(1)), int(d.group(2)), int(d.group(3))) if d else (0, 0, 0)
     u = _BUSER.search(text or "")
-    return Sample(resid=resid, edges=edges, doors=doors,
+    n = _BSAMP.search(text or "")
+    tr = _BTRAIL.search(text or "")
+    trail = ()
+    if tr:
+        trail = tuple(SUBSYSTEMS[int(v)] for v in tr.group(2).split()
+                      if v.isdigit() and int(v) < len(SUBSYSTEMS))
+    return Sample(resid=resid,
+                  edges=_edges(text, _BEDGE), edges_obs=_edges(text, _BEOBS),
+                  doors=doors,
                   user_kinstr=int(u.group(1)) if u else 0,
-                  user_entries=int(u.group(2)) if u else 0)
+                  user_entries=int(u.group(2)) if u else 0,
+                  resid_n=int(n.group(1)) if n else 0,
+                  trail=trail)
 
 
 @dataclass
 class Frame:
     """What the HUD draws: rates over one window, never totals."""
     blocks: dict = field(default_factory=dict)       # name -> calls received in the window
+    blocks_obs: dict = field(default_factory=dict)   # ... of which, provoked by GINI observing
     resid: dict = field(default_factory=dict)        # name -> timer ticks in the window
     edges: dict = field(default_factory=dict)        # (src, dst) -> calls in the window
+    edges_obs: dict = field(default_factory=dict)    # (src, dst) -> OUR calls in the window
     doors: tuple = (0, 0, 0)
     user_kinstr: int = 0
     user_entries: int = 0
+    resid_n: int = 0
+    trail: tuple = ()
     span_s: float = 0.0
 
     @property
     def total_resid(self) -> int:
         return sum(self.resid.values())
 
+    @property
+    def resid_trustworthy(self) -> bool:
+        """Enough residency samples for the percentages to mean anything?
+
+        At ~2 samples/second a short window holds almost none, and a rectangle shaded from two
+        observations asserts a precision that does not exist. The board asks this before it
+        shades, and says "sampling" when the answer is no.
+        """
+        return self.total_resid >= MIN_RESID_SAMPLES
+
     def share(self, name: str) -> float:
         """Fraction of sampled CPU time spent in this block, 0..1 — what shades the rectangle."""
         tot = self.total_resid
         return (self.resid.get(name, 0) / tot) if tot else 0.0
+
+    def ours(self, name: str) -> int:
+        """Calls into this block that GINI's own polling caused. Never zero for console and plic
+        on an idle machine — the Lab is talking to the serial port several times a second."""
+        return self.blocks_obs.get(name, 0)
+
+    @property
+    def here(self) -> str:
+        """Where the CPU most recently actually WAS — the newest real sample, not an aggregate.
+
+        This is what the marker draws. Earlier it drew `busiest`, the modal block over the whole
+        window, under a label reading "hart 0 is here" — which overclaimed. One real observation
+        with an honest label beats a synthesised position with a confident one.
+        """
+        return self.trail[-1] if self.trail else ""
 
     @property
     def kernel_entries(self) -> int:
@@ -203,23 +259,35 @@ class Window:
             return Frame(span_s=0.0)
 
         edges = _delta(s.edges, prev.edges)
-        blocks = {}
-        for (src, dst), n in edges.items():
-            if dst != "user":                        # "user" is not a block you can call into
-                blocks[dst] = blocks.get(dst, 0) + n
+        edges_obs = _delta(s.edges_obs, prev.edges_obs)
+
+        def by_block(e):
+            out = {}
+            for (_src, dst), n in e.items():
+                if dst != "user":                    # "user" is not a block you can call into
+                    out[dst] = out.get(dst, 0) + n
+            return out
+
         doors = tuple(
             (b - a) if b >= a else b
             for a, b in zip(prev.doors, s.doors)
         )
         uk = s.user_kinstr - prev.user_kinstr
         ue = s.user_entries - prev.user_entries
+        rn = s.resid_n - prev.resid_n
         return Frame(
-            blocks=blocks,
+            blocks=by_block(edges),
+            blocks_obs=by_block(edges_obs),
             resid=_delta(s.resid, prev.resid),
             edges=edges,
+            edges_obs=edges_obs,
             doors=doors if len(doors) == 3 else (0, 0, 0),
             user_kinstr=uk if uk >= 0 else s.user_kinstr,
             user_entries=ue if ue >= 0 else s.user_entries,
+            resid_n=rn if rn >= 0 else s.resid_n,
+            # The trail is a ring of recent positions, not a counter — it is carried through
+            # as-is rather than differenced. Differencing it would be meaningless.
+            trail=s.trail,
             span_s=max(0.0, now - prev_t),
         )
 
