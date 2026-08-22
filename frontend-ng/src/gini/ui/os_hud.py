@@ -762,13 +762,17 @@ class OsHudController(HudController):
     # kernel, and ten minutes of them is an unreadable wall of ticks you cannot aim at.
     SCRUBBACK_S = 120.0
 
-    def __init__(self, parent, theme, agent_of, window_getter=None,
+    def __init__(self, parent, theme, agent_of, window_getter=None, on_source=None,
                  interval_ms: int = 900) -> None:
         super().__init__(parent, interval_ms=interval_ms, retain_s=self.SCRUBBACK_S)
         self.hud = OsHud(parent, theme)
         self.hud.set_history(self.history)
         self._agent_of = agent_of
         self._window_getter = window_getter or (lambda: 10)
+        # Double-clicking a block asks for its source. The HUD has no idea what docks exist, so
+        # the window supplies the handler; without one, double-click is simply inert.
+        if on_source is not None:
+            self.hud.open_source.connect(on_source)
         self.board = Window()
         self.window = EventWindow(window_s=float(self._window_getter() or 10))
         self.frame_ready.connect(self._on_frame)

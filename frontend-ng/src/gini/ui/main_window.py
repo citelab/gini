@@ -1492,6 +1492,7 @@ class MainWindow(QMainWindow):
                     self._oshud = OsHudController(
                         self.canvas, self.theme,
                         agent_of=self._xv6_agent,
+                        on_source=self._open_kernel_source,
                         window_getter=lambda: int(
                             getattr(self.ctx.settings, "os_hud_window_s", 10) or 10))
                 self._oshud.show_topright()
@@ -1508,6 +1509,20 @@ class MainWindow(QMainWindow):
             if getattr(d, "type_key", "") == "xv6":
                 return self._machine_state_for(d.id)
         return None
+
+    def _open_kernel_source(self, block: str, files) -> None:
+        """A block on the kernel board was double-clicked: raise the GINI Source tab on it.
+
+        Kept here rather than in the HUD because the HUD has no business knowing what docks
+        exist — it emits "someone wanted this block's source" and the window decides where that
+        lands.
+        """
+        try:
+            self.source_browser.show_block(block, files)
+            self._source_dock.show()
+            self._source_dock.raise_()
+        except Exception as e:                        # noqa: BLE001 - never take the app down
+            self.ctx.bus.log.emit("error", f"GINI Source: {e}")
 
     def _xv6_agent(self):
         """The in-container agent client of that machine, or None when nothing is running.
@@ -1565,6 +1580,19 @@ class MainWindow(QMainWindow):
         asst.setWidget(self.assistant)
         self.addDockWidget(Qt.RightDockWidgetArea, asst)
         self.tabifyDockWidget(insp, asst)
+
+        # GINI Source — the kernel's own code, read-only, in the same pane as the Inspector.
+        # Double-clicking a block on the OS HUD's kernel board raises this tab with that block's
+        # file open and a jump list of the entry points the board counts. The source is served
+        # from inside the container, so it is the PATCHED tree the running kernel was built from.
+        from .source_browser import SourceBrowser
+        self.source_browser = SourceBrowser(self.theme, fetch_fn=self._xv6_agent)
+        srcd = QDockWidget("GINI Source", self)
+        srcd.setObjectName("dock_source")
+        srcd.setWidget(self.source_browser)
+        self.addDockWidget(Qt.RightDockWidgetArea, srcd)
+        self.tabifyDockWidget(asst, srcd)
+        self._source_dock = srcd
         insp.raise_()
 
         self.console = QPlainTextEdit()
