@@ -98,9 +98,17 @@ def test_patcher_applies_and_is_idempotent(tmp_path):
     assert "case C('A')" in con and "case C('E')" in con
     assert "case C('W')" in con and "gini_shadowdump();" in con   # the shadow manifest dump
     assert "case C('L')" in con and "gini_lockdump();" in con     # lock contention (Lock Lab)
-    # every bracketed dump must be BALANCED — an unmatched 30/31 would corrupt the frame the
-    # agent splits on, so compare the counts to each other rather than to a magic number
-    assert con.count('printk("%c",30)') == con.count('printk("%c",31)') >= 9
+    # Every bracketed dump must be BALANCED — an unmatched 30/31 would corrupt the frame the
+    # agent splits on, so compare the counts to each other rather than to a magic number.
+    #
+    # The 0x1e/0x1f pair is now emitted by gini_obs_begin()/gini_obs_end() rather than inline
+    # printk. Those helpers also raise the per-hart "GINI is reading the machine" flag, so the
+    # kernel board can count the traffic OUR polling provokes separately from the workload's —
+    # the bracket already delimited exactly the right region, so it does double duty.
+    assert con.count("gini_obs_begin();") == con.count("gini_obs_end();") >= 9
+    assert 'printk("%c",30)' not in con, "an un-flagged dump would be attributed to the workload"
+    obs = (k / "trap.c").read_text()
+    assert "gini_obs_begin(void)" in obs and "gini_obs[cpuid()] = 1" in obs
     assert "case C('\\\\')" in con                           # quantum reset key intact
     assert "case C('C'): gini_break();" in con              # Ctrl-C -> break a hung foreground
     assert "gini_break" in (k / "proc.c").read_text()       # the kernel-side break function
@@ -136,7 +144,7 @@ def test_patcher_applies_and_is_idempotent(tmp_path):
     assert "gini_traprec(); // GINI-xv6: record the trap" in trap   # the usertrap hook fired
     # captured before the fault ring, both after the saved-PC line, before the timer-yield guard
     assert trap.index("gini_traprec();") < trap.index("gini_qticks[cpuid()]")
-    assert "case C('R'): printk(\"%c\",30); gini_trapdump();" in con
+    assert "case C('R'): gini_obs_begin(); gini_trapdump(); gini_obs_end();" in con
     assert "void            gini_trapdump(void);" in defs
     assert "extern uint64   gini_trapcount[6];" in defs
     assert "struct gini_trap { int pid; int kind;" in defs
