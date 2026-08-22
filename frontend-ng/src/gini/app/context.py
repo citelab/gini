@@ -69,7 +69,12 @@ class Settings:
     connector_style: str = "orthogonal"   # "orthogonal" (bent, rounded) | "straight"
     snap_to_grid: bool = True
     show_minimap: bool = True
-    flow_hud_window_s: int = 60            # Flow HUD: seconds of cwnd history shown (scrolling)
+    flow_hud_window_s: int = 60     # Flow HUD: seconds of cwnd history shown (scrolling)
+    # OS HUD: seconds of kernel events drawn. The kernel's rings are fixed-size circular buffers
+    # (bounded memory), but each poll re-reports their WHOLE contents — so without a window on
+    # this side the same events pile up on screen and never leave. Short is good here: a program
+    # launch is over in microseconds, so 1-5s keeps one launch legible.
+    os_hud_window_s: int = 10
     autosave: bool = False
     server: str = "localhost"
     remote_port: int = 10000

@@ -71,8 +71,21 @@ class SettingsDialog(QDialog):
         _i = self.flow_window.findData(_cur)
         self.flow_window.setCurrentIndex(_i if _i >= 0 else 1)   # default 60 s
         appf.addRow("Flow HUD window", self.flow_window)
-        appf.addRow("", _note("How many seconds of the TCP congestion-window plot the Flow HUD "
-                              "keeps on screen. The plot scrolls within this window."))
+        # Short windows matter here in a way they do not for the Flow HUD: a program launch is
+        # over in microseconds, so 1s or 5s is often the RIGHT setting — it keeps a single
+        # launch on screen instead of burying it under everything that happened since.
+        self.os_window = QComboBox()
+        for _secs in (1, 5, 10, 30, 60):
+            self.os_window.addItem(f"{_secs} second" + ("" if _secs == 1 else "s"), _secs)
+        _cur_os = int(getattr(settings, "os_hud_window_s", 10) or 10)
+        _j = self.os_window.findData(_cur_os)
+        self.os_window.setCurrentIndex(_j if _j >= 0 else 2)     # default 10 s
+        appf.addRow("OS HUD window", self.os_window)
+        appf.addRow("", _note("How much history each HUD keeps on screen. The Flow HUD scrolls "
+                              "its congestion-window plot within its window; the OS HUD drops "
+                              "kernel events older than its window. Short is right for the OS HUD: a "
+                              "program launch is over in microseconds, so 1-5s keeps a single "
+                              "launch legible instead of burying it."))
 
         # --- Networking --------------------------------------------------- #
         netf = _page(tabs, "Networking")
@@ -227,6 +240,7 @@ class SettingsDialog(QDialog):
             "text_size": self.text_size.currentText(),
             "reduced_motion": self.reduced.isChecked(),
             "flow_hud_window_s": int(self.flow_window.currentData() or 60),
+            "os_hud_window_s": int(self.os_window.currentData() or 10),
             "auto_internet": self.auto_internet.isChecked(),
             "autobuild_images": self.autobuild.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),
