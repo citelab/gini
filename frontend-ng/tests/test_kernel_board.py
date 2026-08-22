@@ -5,7 +5,8 @@ total under a "last 10 s" caption. The Mode lane shipped with exactly that bug, 
 most coverage here.
 """
 from gini.domain.kernel_board import (
-    DEVICE_BLOCKS, DOORS, SUBSYSTEMS, Frame, Sample, Window, parse, signature,
+    DEVICE_BLOCKS, DOORS, SUBSYSTEMS, Frame, Sample, Window, deepest, parse, path_steps,
+    signature,
 )
 
 # a dump as the kernel emits it: indices are GSUB_* values, all counters cumulative since boot
@@ -206,6 +207,57 @@ def test_trail_survives_a_kernel_without_one():
     s = parse(D1)                                    # no BTRAIL line at all
     assert s.trail == () and s.resid_n == 0
     assert s.ok                                      # still a usable board
+
+
+# -- the armed trace: the one thing aggregates can never say --------------------------------- #
+# a real read walking down the kernel and back: user->trap->syscall->file->inode->bcache->disk
+TRACE = """BARM 1
+BPATH 900 0 1 7
+BPATH 901 1 2 7
+BPATH 902 2 5 7
+BPATH 903 5 7 7
+BPATH 904 7 9 7
+BPATH 905 9 10 7
+BPATH 906 10 9 7
+BPATH 907 9 0 7
+"""
+
+
+def test_path_is_an_ordered_walk_not_a_bag_of_edges():
+    s = parse(D1 + TRACE)
+    assert s.armed
+    assert s.path[0].src == "user" and s.path[0].dst == "trap"
+    assert path_steps(s.path) == ["user", "trap", "syscall", "file", "inode",
+                                  "bcache", "disk", "bcache", "user"]
+
+
+def test_deepest_point_of_the_path():
+    """What a student means by 'the read went all the way to the disk' — defined by the board's
+    own row order so it matches what they are pointing at on screen."""
+    s = parse(D1 + TRACE)
+    assert deepest(s.path) == "disk"
+    assert deepest(()) == ""
+
+
+def test_repeated_hops_into_the_same_block_are_not_steps():
+    s = parse("BPATH 1 9 10 7\nBPATH 2 10 10 7\nBPATH 3 10 9 7\n")
+    assert path_steps(s.path) == ["bcache", "disk", "bcache"]
+
+
+def test_path_rides_through_the_window_undifferenced():
+    """The path is a ring of observations, not a counter. Differencing it would be nonsense."""
+    w = Window()
+    w.add(parse(D1 + TRACE), 100.0)
+    f = w.add(parse(D2 + TRACE), 110.0)
+    assert f.armed and f.steps[-3:] == ["disk", "bcache", "user"]
+    assert f.deepest == "disk"
+    assert f.edges[("trap", "syscall")] == 1284      # counters still differenced as before
+
+
+def test_unarmed_and_older_kernels_are_quiet():
+    f = Window(); f.add(parse(D1), 100.0)
+    fr = f.add(parse(D2), 110.0)
+    assert not fr.armed and fr.path == () and fr.steps == [] and fr.deepest == ""
 
 
 def test_window_reports_whether_the_kernel_supports_the_board():

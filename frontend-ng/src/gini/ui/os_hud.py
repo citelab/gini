@@ -95,6 +95,10 @@ TRAIL_DOTS = 12                      # recent CPU samples drawn; the newest is t
 class OsHud(QWidget):
     """Pure rendering over a board Frame + an event list. No I/O here."""
 
+    # Double-clicking a block asks for its source. Emitted rather than opened here, because this
+    # widget knows nothing about where the kernel tree lives — that is the app's business.
+    open_source = Signal(str, list)          # (block name, [kernel/foo.c, ...])
+
     def __init__(self, parent, theme) -> None:
         super().__init__(parent)
         self.theme = theme
@@ -415,6 +419,14 @@ class OsHud(QWidget):
         if not f.resid_trustworthy:
             legend = (f"sampling — only {f.total_resid} residency samples this window; "
                       "widen it for meaningful shading")
+        if f.steps:
+            p.setPen(QColor(t.accent_for("orange")))
+            legend = ("TRACE  " + "  ->  ".join(f.steps[:7])
+                      + ("  …" if len(f.steps) > 7 else "")
+                      + f"   ·   deepest: {f.deepest}")
+        elif f.armed:
+            p.setPen(QColor(t.accent_for("orange")))
+            legend = "TRACE ARMED — run a command; Ctrl-Q in the console disarms"
         p.drawText(PAD, int(y), full, 12, Qt.AlignLeft, legend)
         p.setFont(small)
         return int(y) + 14
@@ -533,6 +545,45 @@ class OsHud(QWidget):
 
         draw(f.edges_obs, grey, True)      # ours first, so the workload's edges sit on top
         draw(f.edges, blue, False)
+        self._paint_path(p, centres)
+
+    def _paint_path(self, p: QPainter, centres: dict) -> None:
+        """The armed trace: one real path, in order, ON the board.
+
+        This is why the standalone "railroad" view was cancelled. Its depth axis was genuinely
+        informative, but the board's row order already IS that axis — so drawing the path here
+        gives the same shape without asking a student to learn a second geography. Aggregates say
+        the block cache was asked 601 times; only this says the read went syscall -> file ->
+        inode -> bcache -> disk, in that order.
+        """
+        f = self._frame
+        steps = f.steps
+        if len(steps) < 2:
+            return
+        t = self.theme.theme
+        hot = QColor(t.accent_for("orange"))
+        for i in range(len(steps) - 1):
+            a, b = centres.get(steps[i]), centres.get(steps[i + 1])
+            if a is None or b is None or a is b:
+                continue
+            p0 = self._exit_point(a, b.center())
+            p1 = self._exit_point(b, a.center())
+            p.setPen(QPen(hot, 2.6))
+            p.drawLine(p0, p1)
+            self._arrowhead(p, p0, p1, hot, 2.6)
+        # Number the stops: the order is the whole content of a trace, and an unnumbered path
+        # through a layered board is ambiguous the moment it doubles back.
+        p.setFont(QFont(self.font().family(), 7, QFont.Bold))
+        for i, name in enumerate(steps):
+            r = centres.get(name)
+            if r is None:
+                continue
+            c = QPointF(r.left() + 9, r.center().y())
+            p.setPen(Qt.NoPen)
+            p.setBrush(hot)
+            p.drawEllipse(c, 7, 7)
+            p.setPen(QColor(t.bg))
+            p.drawText(QRectF(c.x() - 7, c.y() - 7, 14, 14), Qt.AlignCenter, str(i + 1))
 
     @staticmethod
     def _arrowhead(p: QPainter, p0: QPointF, p1: QPointF, col: QColor, w: float) -> None:
@@ -640,9 +691,20 @@ class OsHud(QWidget):
         # Click a block or a door to focus the swimlanes on what it produces; click it again, or
         # anywhere else on the board, to clear. This is what makes the two halves one view rather
         # than two stacked ones — the map selects, the story below answers.
+        #
+        # DOUBLE-click opens the block's source. Nobody reads 10,000 lines of kernel cold, but a
+        # student will read the 30 lines behind a block they just watched go dark — which turns
+        # source reading from an assignment into a consequence.
         for name, r in self._hit.items():
             if r.contains(pos):
                 self.set_focus_lanes(None if self._focus == name else name)
+                return
+
+    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
+        pos = e.position() if hasattr(e, "position") else e.pos()
+        for name, r in self._hit.items():
+            if r.contains(pos) and BLOCK_FILES.get(name):
+                self.open_source.emit(name, list(BLOCK_FILES[name]))
                 return
 
         h = self._history

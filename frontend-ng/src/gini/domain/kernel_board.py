@@ -74,6 +74,8 @@ _BDOOR = re.compile(r"^BDOOR (\d+) (\d+) (\d+)\s*$", re.M)
 _BUSER = re.compile(r"^BUSER (\d+) (\d+)\s*$", re.M)
 _BSAMP = re.compile(r"^BSAMP (\d+)\s*$", re.M)
 _BTRAIL = re.compile(r"^BTRAIL (\d+)((?: \d+)*)\s*$", re.M)
+_BARM = re.compile(r"^BARM (\d+)\s*$", re.M)
+_BPATH = re.compile(r"^BPATH (\d+) (\d+) (\d+) (\d+)\s*$", re.M)
 
 # Below this many residency samples in a window, the percentages are noise and the board says so
 # rather than shading a rectangle as if it knew. GINI runs the timer at ~0.5 s so the scheduler
@@ -93,6 +95,8 @@ class Sample:
     user_entries: int = 0
     resid_n: int = 0                                 # residency samples behind the numbers above
     trail: tuple = ()                                # recent REAL positions, oldest first
+    armed: bool = False                              # is the path trace recording?
+    path: tuple = ()                                 # ordered Hops, oldest first
 
     @property
     def ok(self) -> bool:
@@ -102,6 +106,42 @@ class Sample:
         view with a rebuild hint — not a board of zeros that looks like a very quiet machine.
         """
         return bool(self.resid)
+
+
+@dataclass(frozen=True)
+class Hop:
+    """One real subsystem transition on the traced path."""
+    seq: int
+    src: str
+    dst: str
+    pid: int
+
+
+def path_steps(path) -> list:
+    """The traced path as a list of blocks in the order the CPU visited them.
+
+    Collapses the hop pairs into a walk — `[syscall, file, inode, bcache, disk]` — which is what
+    the overlay numbers on the board. Consecutive repeats are dropped: re-entering a block you are
+    already in is not a step of the story.
+    """
+    out = []
+    for h in path:
+        if not out:
+            out.append(h.src)
+        if out[-1] != h.dst:
+            out.append(h.dst)
+    return out
+
+
+def deepest(path) -> str:
+    """The furthest the path got from user space — the point of the trace, usually.
+
+    'Deepest' is defined by the board's own row order, so it means "lowest on screen", which is
+    what a student is pointing at when they say the read "went all the way to the disk".
+    """
+    steps = path_steps(path)
+    return max(steps, key=lambda s: SUBSYSTEMS.index(s) if s in SUBSYSTEMS else -1,
+               default="")
 
 
 def _edges(text: str, rx) -> dict:
@@ -129,13 +169,22 @@ def parse(text: str) -> Sample:
     if tr:
         trail = tuple(SUBSYSTEMS[int(v)] for v in tr.group(2).split()
                       if v.isdigit() and int(v) < len(SUBSYSTEMS))
+    a = _BARM.search(text or "")
+    hops = tuple(
+        Hop(seq=int(m.group(1)), src=SUBSYSTEMS[int(m.group(2))],
+            dst=SUBSYSTEMS[int(m.group(3))], pid=int(m.group(4)))
+        for m in _BPATH.finditer(text or "")
+        if int(m.group(2)) < len(SUBSYSTEMS) and int(m.group(3)) < len(SUBSYSTEMS)
+    )
     return Sample(resid=resid,
                   edges=_edges(text, _BEDGE), edges_obs=_edges(text, _BEOBS),
                   doors=doors,
                   user_kinstr=int(u.group(1)) if u else 0,
                   user_entries=int(u.group(2)) if u else 0,
                   resid_n=int(n.group(1)) if n else 0,
-                  trail=trail)
+                  trail=trail,
+                  armed=bool(a and int(a.group(1))),
+                  path=hops)
 
 
 @dataclass
@@ -151,7 +200,17 @@ class Frame:
     user_entries: int = 0
     resid_n: int = 0
     trail: tuple = ()
+    armed: bool = False
+    path: tuple = ()
     span_s: float = 0.0
+
+    @property
+    def steps(self) -> list:
+        return path_steps(self.path)
+
+    @property
+    def deepest(self) -> str:
+        return deepest(self.path)
 
     @property
     def total_resid(self) -> int:
@@ -285,9 +344,11 @@ class Window:
             user_kinstr=uk if uk >= 0 else s.user_kinstr,
             user_entries=ue if ue >= 0 else s.user_entries,
             resid_n=rn if rn >= 0 else s.resid_n,
-            # The trail is a ring of recent positions, not a counter — it is carried through
-            # as-is rather than differenced. Differencing it would be meaningless.
+            # The trail and the path are rings of recent observations, not counters — carried
+            # through as-is. Differencing them would be meaningless.
             trail=s.trail,
+            armed=s.armed,
+            path=s.path,
             span_s=max(0.0, now - prev_t),
         )
 

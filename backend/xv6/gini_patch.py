@@ -1748,6 +1748,7 @@ append_once("kernel/defs.h", """
 #define GSUB_PLIC     12
 #define GSUB_OTHER    13
 #define GINI_TRAIL    64   // ring of real residency samples: where the CPU actually WAS
+#define GINI_PATH    128   // ring of real subsystem transitions, recorded only while ARMED
 extern uint64   gini_edge[GINI_NSUB][GINI_NSUB];
 // Calls made while GINI was reading the machine. The Lab polls several times a second, and each
 // poll raises a UART interrupt and writes a dump — real kernel work, caused by US. Counted apart
@@ -1763,6 +1764,15 @@ extern uchar    gini_trail[];      // recent residency samples, newest at gini_t
 extern uint64   gini_trail_i;
 void            gini_obs_begin(void);
 void            gini_obs_end(void);
+// THE TRACE. Aggregates say the block cache was asked 601 times; they cannot say the read went
+// syscall -> file -> inode -> bcache -> disk IN THAT ORDER. This ring records the real ordered
+// path, and only while armed: unarmed it costs one predictable branch, so the board stays
+// always-on and the expensive thing stays opt-in.
+struct gini_hop { uint64 seq; uchar from; uchar to; uchar pid; };
+extern struct gini_hop gini_path[];
+extern uint64   gini_path_i;
+extern int      gini_path_arm;
+void            gini_path_toggle(void);
 // Declared with no bound: defs.h is included before param.h in some translation units, so it
 // cannot spell NCPU. Defined with the real size in trap.c, and needed HERE because trap.c's own
 // prepare_return hook sits above the definitions.
@@ -1849,6 +1859,9 @@ uint64 gini_umark[NCPU];      // instret at the moment we last returned to user
 int    gini_obs[NCPU];        // per-hart: inside a GINI dump (see gini_obs_begin)
 uchar  gini_trail[GINI_TRAIL];
 uint64 gini_trail_i;
+struct gini_hop gini_path[GINI_PATH];
+uint64 gini_path_i;
+int    gini_path_arm;         // 0 = off; recording costs nothing until a student asks for it
 
 static char *gini_subname[GINI_NSUB] = {
   "user", "trap", "syscall", "proc", "memory", "file", "pipe",
@@ -1874,10 +1887,31 @@ gini_subenter(int s)
   if(prev != s){
     if(gini_obs[h])
       __sync_fetch_and_add(&gini_edge_obs[prev][s], 1);   // this call is OURS, not the workload's
-    else
+    else {
       __sync_fetch_and_add(&gini_edge[prev][s], 1);
+      // The ordered path, when a student has armed it. Our own polling is excluded here for the
+      // same reason it is excluded above: a trace of GINI reading the machine teaches nothing.
+      if(gini_path_arm){
+        uint64 k = __sync_fetch_and_add(&gini_path_i, 1) %% GINI_PATH;
+        struct proc *pp = myproc();
+        gini_path[k].seq = gini_stamp();
+        gini_path[k].from = (uchar)prev;
+        gini_path[k].to = (uchar)s;
+        gini_path[k].pid = (uchar)(pp ? pp->pid : 0);
+      }
+    }
   }
   return prev;
+}
+
+// Arm or disarm the trace, clearing the ring each time it is armed so a student always gets ONE
+// clean path rather than the tail of whatever happened earlier.
+void
+gini_path_toggle(void)
+{
+  gini_path_arm = !gini_path_arm;
+  if(gini_path_arm)
+    gini_path_i = 0;
 }
 
 // Bracket a GINI dump. The 0x1e/0x1f pair already existed so the agent could strip these dumps
@@ -2016,6 +2050,15 @@ gini_boarddump(void)
       %(P)s(" %%d", (int)gini_trail[k %% GINI_TRAIL]);
     %(P)s("\\n");
   }
+  // The armed trace: the real ordered path, oldest hop first.
+  %(P)s("BARM %%d\\n", gini_path_arm);
+  {
+    uint64 n = gini_path_i < GINI_PATH ? gini_path_i : GINI_PATH;
+    for(uint64 k = gini_path_i - n; k < gini_path_i; k++){
+      struct gini_hop *hp = &gini_path[k %% GINI_PATH];
+      %(P)s("BPATH %%d %%d %%d %%d\\n", (int)hp->seq, (int)hp->from, (int)hp->to, (int)hp->pid);
+    }
+  }
   // Printed as two numbers rather than a ratio: the frontend differences them, and a ratio
   // cannot be differenced.
   %(P)s("BUSER %%d %%d\\n", (int)(gini_uinstr / 1000), (int)gini_uentry);
@@ -2079,7 +2122,8 @@ regex_once("kernel/console.c",
            r"(case C\('L'\):[^\n]*\n)",
            r"\1"
            f"  case C('D'): gini_obs_begin(); gini_boarddump(); gini_obs_end(); break;  "
-           "// GINI: kernel board (0x1e/0x1f-bracketed)\n",
+           "// GINI: kernel board (0x1e/0x1f-bracketed)\n"
+           r"  case C('Q'): gini_path_toggle(); break;  // GINI: arm/disarm the kernel-path trace" "\n",
            "GINI: board dump key")
 
 
