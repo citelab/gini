@@ -17,6 +17,7 @@ TRACE 7 16 0x2010 0x400 112"""
 FLT = """FLT 7 15 0x0000000000004000 0x0000000000000072 109
 FLT 7 13 0x0000000000005000 0x0000000000000080 110"""
 TR = """TR 7 3 0x8000000000000009 0x72 0x0 0x20 0x222 0x20 108
+TR 7 4 0x0000000000000002 0x72 0x0 0x20 0x222 0x20 108
 TR 7 2 0x8000000000000005 0x72 0x0 0x20 0x222 0x20 111"""
 
 
@@ -48,6 +49,7 @@ def test_timer_traps_are_excluded_by_default():
 def test_syscall_and_fault_traps_are_not_double_reported():
     # the syscall and fault rings already tell those stories in richer form
     kinds = {e.kind for e in trap_events(TR)}
+    assert kinds, "fixture must contain a trap that survives filtering, or this is vacuous"
     assert "syscall" not in kinds and "pagefault" not in kinds
 
 
@@ -83,3 +85,52 @@ def test_episode_lanes_cover_the_swimlanes():
 def test_empty_is_safe():
     assert merge() == [] and episodes([]) == []
     assert Episode(pid=1).span == (0, 0)
+
+
+# -- the window: the kernel keeps re-reporting, so the HUD must age events out ------------------ #
+def _ev(seq):
+    from gini.domain.os_events import OsEvent
+    return OsEvent(seq=seq, pid=7, lane="fs", kind="read")
+
+
+def _cumulative(n):
+    """What a poll actually returns: the kernel ring's whole contents, so consecutive polls
+    overlap almost entirely."""
+    return [_ev(i) for i in range(1, n + 1)]
+
+
+def test_window_ages_events_out():
+    from gini.domain.os_events import EventWindow
+    w = EventWindow(window_s=10.0)
+    assert [e.seq for e in w.add(_cumulative(3), 100.0)] == [1, 2, 3]
+    assert [e.seq for e in w.add(_cumulative(5), 105.0)] == [1, 2, 3, 4, 5]
+    assert [e.seq for e in w.add(_cumulative(5), 111.0)] == [4, 5]     # 1..3 older than 10s
+
+
+def test_retired_events_never_come_back():
+    """The bug this class exists for: a re-reported event that has already aged out must NOT be
+    treated as new, or it gets a fresh timestamp and lives on screen forever."""
+    from gini.domain.os_events import EventWindow
+    w = EventWindow(window_s=10.0)
+    w.add(_cumulative(5), 100.0)
+    assert w.add(_cumulative(5), 120.0) == []
+    assert w.add(_cumulative(5), 130.0) == []                          # and stays gone
+    assert [e.seq for e in w.add(_cumulative(7), 131.0)] == [6, 7]     # new ones still land
+
+
+def test_window_caps_a_burst():
+    from gini.domain.os_events import EventWindow
+    w = EventWindow(window_s=999)
+    out = w.add([_ev(i) for i in range(1000)], 0.0)
+    assert len(out) == EventWindow.MAX_EVENTS and out[-1].seq == 999   # newest kept
+
+
+def test_device_traps_excluded_by_default():
+    """Device traps are mostly OUR OWN polling: each dump request writes a control byte to the
+    serial, raising a UART interrupt the kernel records as a device trap. Left on, the trap lane
+    shows the measurement rather than the machine."""
+    from gini.domain.os_events import trap_events
+    tr = ("TR 7 3 0x8000000000000009 0x72 0x0 0x20 0x222 0x20 108\n"     # device = our poll
+          "TR 7 4 0x2 0x90 0x0 0x20 0x222 0x20 115\n")                   # illegal = real
+    assert [e.kind for e in trap_events(tr)] == ["illegal"]
+    assert [e.kind for e in trap_events(tr, include_device=True)] == ["device", "illegal"]

@@ -1476,8 +1476,9 @@ class MainWindow(QMainWindow):
             self.ctx.bus.log.emit("error", f"Multicast HUD: {e}")
 
     def _toggle_os_hud(self, checked: bool) -> None:
-        """Show/hide the OS HUD — the kernel's own X-ray. Needs a RUNNING xv6 Machine: the events
-        come from that kernel's rings, merged by the global event clock."""
+        """Show/hide the OS HUD — the kernel board, with the X-ray swimlanes beneath it. Needs a
+        RUNNING xv6 Machine: the board comes from that kernel's subsystem counters and the events
+        from its rings, merged by the global event clock."""
         try:
             if checked:
                 for other, act_name in (("_rhud", "_rhud_act"), ("_fhud", "_fhud_act"),
@@ -1491,7 +1492,8 @@ class MainWindow(QMainWindow):
                     self._oshud = OsHudController(
                         self.canvas, self.theme,
                         agent_of=self._xv6_agent,
-                        mode_of=self._xv6_modetime)
+                        window_getter=lambda: int(
+                            getattr(self.ctx.settings, "os_hud_window_s", 10) or 10))
                 self._oshud.show_topright()
             elif getattr(self, "_oshud", None) is not None:
                 self._oshud.close()
@@ -1513,11 +1515,12 @@ class MainWindow(QMainWindow):
         st = self._xv6_state()
         return getattr(getattr(st, "provider", None), "agent", None) if st else None
 
-    def _xv6_modetime(self) -> dict:
-        """The kernel's user/kernel/idle tick counters, for the Mode lane."""
-        st = self._xv6_state()
-        snap = getattr(st, "latest", None) if st else None
-        return dict(getattr(snap, "modetime", {}) or {}) if snap else {}
+    # The Mode lane retired with the board: its user/kernel split and boundary-crossing ticks are
+    # both done better by the board's user strip and its three doors, and it carried a real defect
+    # — it reported SINCE-BOOT tick counters under a "last 10 s" caption. The board differences
+    # every counter into per-window rates (domain/kernel_board.Window), so that class of lie has
+    # one place it can be fixed rather than one place per view. `modetime` itself is untouched and
+    # still feeds the Machine Lab.
 
     def _refresh_icons(self) -> None:
         t = self.theme.theme
@@ -2349,7 +2352,6 @@ class MainWindow(QMainWindow):
         (getent/DNS Probe) and ping/reach ride the DRAWN gini0 network instead of Docker's bridge.
         Off the GUI thread — it's a docker exec per machine. Containers are fresh each run, so no
         accumulation. This is the 'small Phase-2.x': it makes reachability follow the topology."""
-        import base64
         import subprocess
         import threading
         from ..services.compiler import _role, _svc, overlay_hosts
@@ -2368,28 +2370,37 @@ class MainWindow(QMainWindow):
         # /etc/hosts, so a getent/ping for the machine's own name would hit the bridge unless our
         # overlay line comes first. `> /etc/hosts` truncates-in-place (works on the bind mount; `mv`
         # wouldn't). Docker's original lines stay below, so nothing that needs the bridge id breaks.
-        block = "\n".join(f"{ip}\t{nm}" for nm, ip in hosts.items()) + "\n"
-        # Ship the block as base64: a single bare ASCII token with no spaces, tabs, newlines or
-        # quotes. Passing the raw block meant an argv element containing tabs AND newlines, which
-        # Windows mangles on its way through CreateProcess (Python quotes it, the CLI re-splits it)
-        # — the exec then failed, silently, and names fell back to Docker's bridge DNS (172.x)
-        # instead of the drawn 10/8 network. base64 removes that whole class of quoting hazard.
-        blob = base64.b64encode(block.encode("utf-8")).decode("ascii")
-        script = (f"echo {blob} | base64 -d > /tmp/gini_hosts && "
-                  "cat /etc/hosts >> /tmp/gini_hosts && "
+        # Build the block as printf ESCAPES (literal \t and \n two-char sequences), never real
+        # tabs/newlines: the payload stays one flat single-line argv element, which survives
+        # Windows' CreateProcess command-line round-trip. printf expands the escapes inside the
+        # container. Deliberately not base64 — busybox (the lean Alpine tier) may be built without
+        # the base64 applet, and a missing applet would break this on every platform.
+        esc = "".join(f"{ip}\\t{nm}\\n" for nm, ip in hosts.items())
+        script = (f"{{ printf '{esc}'; cat /etc/hosts; }} > /tmp/gini_hosts && "
                   "cat /tmp/gini_hosts > /etc/hosts")
 
         def work():
+            import time
             failed = []
             for dev in devs:
                 cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", script]
-                try:
-                    r = subprocess.run(cmd, cwd=str(wd) if wd else None,
-                                       capture_output=True, timeout=8)
-                    if r.returncode != 0:
-                        failed.append(f"{dev.name}: {(r.stderr or b'').decode(errors='replace').strip()[:120]}")
-                except Exception as e:           # noqa: BLE001 — best-effort; a slow box just misses
-                    failed.append(f"{dev.name}: {e}")
+                err = ""
+                # Retry: this fires right after `up` returns, and a container may not be accepting
+                # execs yet — native Linux docker returns from `up` far sooner than Docker Desktop,
+                # so the race is platform-sensitive. The write is idempotent, so retrying is safe.
+                for attempt in range(4):
+                    try:
+                        r = subprocess.run(cmd, cwd=str(wd) if wd else None,
+                                           capture_output=True, timeout=8)
+                        if r.returncode == 0:
+                            err = ""
+                            break
+                        err = (r.stderr or b"").decode(errors="replace").strip()[:120]
+                    except Exception as e:       # noqa: BLE001 — best-effort
+                        err = str(e)[:120]
+                    time.sleep(0.75 * (attempt + 1))
+                if err:
+                    failed.append(f"{dev.name}: {err}")
             if failed:
                 # Don't fail silently: without these lines, names resolve to the Docker bridge and
                 # experiments see 172.x addresses instead of the topology's 10/8 ones.

@@ -531,6 +531,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x0c"), ctype="text/plain")
         elif path == "/traps":
             self._send(_SERIAL.dump(b"\x12"), ctype="text/plain")   # Ctrl-R -> gini_trapdump()
+        elif path == "/board":                        # Ctrl-D -> gini_boarddump(): the kernel map
+            self._send(_SERIAL.dump(b"\x04"), ctype="text/plain")
         else:
             self._send({"error": "not found"})
 
