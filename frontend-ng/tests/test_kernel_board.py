@@ -267,9 +267,52 @@ def test_window_reports_whether_the_kernel_supports_the_board():
     assert w.board_supported and not w.has_baseline      # optimistic before any sample
     w.add(parse(D1), 100.0)
     assert w.board_supported and w.has_baseline
-    old = Window()
-    old.add(parse("boot messages, no board here\n"), 100.0)
-    assert not old.board_supported
+
+
+# -- a slow machine drops a dump now and then; that is not a missing feature ------------------ #
+JUNK = "some console noise but no board here\n"
+
+
+def test_one_missed_read_does_not_claim_the_kernel_lacks_a_board():
+    """The reported bug: on a slower Linux host the board flashed "no board support" every ~20 s
+    while working perfectly in between. One dump that did not finish inside the agent's wait was
+    being reported as a permanent statement about the kernel."""
+    w = Window()
+    w.add(parse(D1), 100.0)
+    assert w.add(parse(JUNK), 101.0) is None             # skip the poll, do not paint it
+    assert w.board_supported, "one dropped dump must not read as a missing feature"
+
+
+def test_a_kernel_that_never_answers_does_get_the_rebuild_message():
+    """An image built before the board fails every single time, so it must still trip."""
+    w = Window()
+    for i in range(Window.MAX_MISSES):
+        w.add(parse(JUNK), 100.0 + i)
+    assert not w.board_supported
+    assert w.misses >= Window.MAX_MISSES
+
+
+def test_a_missed_read_is_not_adopted_as_the_baseline():
+    """The subtler half of the same bug. A failed read used to overwrite the baseline, so the next
+    good read was differenced against nothing — every counter looked like it had leapt from zero
+    and the board painted one enormous phantom burst right after each flash."""
+    w = Window()
+    w.add(parse(D1), 100.0)
+    w.add(parse(JUNK), 101.0)
+    f = w.add(parse(D2), 102.0)
+    assert f is not None
+    assert f.edges[("trap", "syscall")] == 1284          # spans the gap: 2284-1000, not 2284
+    assert f.blocks["bcache"] == 601
+
+
+def test_recovery_clears_the_miss_count():
+    w = Window()
+    w.add(parse(D1), 100.0)
+    w.add(parse(JUNK), 101.0)
+    w.add(parse(JUNK), 102.0)
+    assert w.misses == 2 and w.board_supported
+    w.add(parse(D2), 103.0)
+    assert w.misses == 0                                 # a good read forgives the run
 
 
 def test_hottest_edge_and_empty_safety():

@@ -788,6 +788,11 @@ class OsHudController(HudController):
     def deliver(self, payload) -> None:
         sample, events = payload
         frame = self.board.add(sample, time.monotonic())
+        if frame is None:
+            # This read did not bring a board back. Drop the poll on the floor rather than
+            # painting it: the panel keeps its last good frame, which is what a student on a slow
+            # machine should see instead of a message flashing past every twenty seconds.
+            return
         self.frame_ready.emit(frame, events, self._hart_sub(frame))
 
     def _hart_sub(self, frame) -> str:

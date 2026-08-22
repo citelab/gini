@@ -292,9 +292,21 @@ class Window:
     a time window. It is the one place that conversion happens.
     """
 
+    # A read can come back empty for two completely different reasons, and conflating them is
+    # what made a healthy machine flash "no board support" every twenty seconds:
+    #
+    #   the kernel has no board      permanent — the image predates it, and a rebuild is the fix
+    #   this ONE read did not land   transient — the dump did not finish inside the agent's wait,
+    #                                which happens on a slow host, especially under `grind`
+    #
+    # Only a sustained run of failures means the first thing. A single miss means keep calm and
+    # show the last good frame.
+    MAX_MISSES = 4
+
     def __init__(self) -> None:
         self._prev: Sample | None = None
         self._prev_t: float = 0.0
+        self._misses: int = 0
 
     @property
     def has_baseline(self) -> bool:
@@ -302,16 +314,34 @@ class Window:
         return self._prev is not None
 
     @property
-    def board_supported(self) -> bool:
-        """False when the running kernel answers /board with nothing — an image built before the
-        board existed. The view says so and offers a rebuild rather than drawing zeros, which
-        would look exactly like a very quiet machine and send a student hunting a ghost."""
-        return self._prev.ok if self._prev is not None else True
+    def misses(self) -> int:
+        """Consecutive reads that came back with no board in them."""
+        return self._misses
 
-    def add(self, s: Sample, now: float) -> Frame:
+    @property
+    def board_supported(self) -> bool:
+        """False only after MAX_MISSES reads in a row came back empty.
+
+        An image built before the board fails every single time, so it trips this within a few
+        seconds and gets the rebuild message it deserves. A slow machine that drops one dump does
+        not, and keeps its board.
+        """
+        return self._misses < self.MAX_MISSES
+
+    def add(self, s: Sample, now: float):
+        """Fold a sample in. Returns a Frame, or None meaning "skip this poll entirely"."""
+        if not s.ok:
+            self._misses += 1
+            # Deliberately NOT adopting a failed read as the baseline. Doing so used to mean the
+            # next good read was differenced against nothing, so every counter looked like it had
+            # leapt from zero and the board painted one enormous phantom burst right after each
+            # flash. Keeping the old baseline means the next good read spans the gap correctly.
+            return None if self._prev is not None else Frame(span_s=0.0)
+
+        self._misses = 0
         prev, prev_t = self._prev, self._prev_t
         self._prev, self._prev_t = s, now
-        if prev is None or not s.ok:
+        if prev is None:
             # First sample establishes the baseline. Rendering it as a frame would show
             # since-boot totals under a "last 10 s" caption, which is the exact lie this class
             # exists to prevent.
@@ -355,6 +385,7 @@ class Window:
     def reset(self) -> None:
         self._prev = None
         self._prev_t = 0.0
+        self._misses = 0
 
 
 def signature(f: Frame) -> int:

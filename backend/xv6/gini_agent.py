@@ -554,7 +554,14 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/traps":
             self._send(_SERIAL.dump(b"\x12"), ctype="text/plain")   # Ctrl-R -> gini_trapdump()
         elif path == "/board":                        # Ctrl-D -> gini_boarddump(): the kernel map
-            self._send(_SERIAL.dump(b"\x04"), ctype="text/plain")
+            # The board is by far the largest dump — 14 subsystem lines, the call matrix, our own
+            # observation matrix, a 64-entry trail and, when armed, up to 128 path hops. On a slow
+            # host, or under `grind`, it does not always finish inside the 0.35 s the small dumps
+            # need, and a truncated dump parses to nothing.
+            #
+            # Raising the ceiling costs nothing now that dump() returns the moment the sentinel
+            # lands: `wait` bounds a stall, it is not a sleep.
+            self._send(_SERIAL.dump(b"\x04", wait=1.5), ctype="text/plain")
         else:
             self._send({"error": "not found"})
 
