@@ -335,7 +335,10 @@ _GINI_FAULT = '''
 // GINI-xv6: live page-fault ring — captured in usertrap, dumped over the serial (no gdb halt).
 struct gini_flt { int pid; uint64 scause; uint64 va; uint64 epc; uint64 seq; };
 struct gini_flt gini_flt[GINI_RING];
-int gini_flt_i;
+// uint64, NOT int: this counts every event forever. At int width it would wrap negative
+// after ~2 billion events and `k % GINI_RING` would then index BEFORE the array — an
+// out-of-bounds kernel write. Unsigned wrap is well-defined and, at 64 bits, unreachable.
+uint64 gini_flt_i;
 
 void
 gini_fault_note(void)
@@ -356,9 +359,9 @@ gini_fault_note(void)
 void
 gini_faultdump(void)
 {
-  int total = gini_flt_i;
-  int start = total > GINI_RING ? total - GINI_RING : 0;
-  for(int k = start; k < total; k++){
+  uint64 total = gini_flt_i;
+  uint64 start = total > GINI_RING ? total - GINI_RING : 0;
+  for(uint64 k = start; k < total; k++){
     struct gini_flt *e = &gini_flt[k % GINI_RING];
     PRINTF("FLT %d %d %p %p %d\\n", e->pid, (int)e->scause, (void*)e->va, (void*)e->epc,
            (int)e->seq);
@@ -405,7 +408,10 @@ gini_stamp(void)
 
 uint64 gini_trapcount[GT_NKIND];
 struct gini_trap gini_traps[GINI_RING];
-int gini_traps_i;
+// uint64, NOT int: this counts every event forever. At int width it would wrap negative
+// after ~2 billion events and `k % GINI_RING` would then index BEFORE the array — an
+// out-of-bounds kernel write. Unsigned wrap is well-defined and, at 64 bits, unreachable.
+uint64 gini_traps_i;
 
 static int
 gini_kind(uint64 c)
@@ -448,9 +454,9 @@ gini_trapdump(void)
   static char *kn[GT_NKIND] = {"syscall","pagefault","timer","device","illegal","other"};
   for(int k = 0; k < GT_NKIND; k++)
     PRINTF("TC %d %s %d\\n", k, kn[k], (int)gini_trapcount[k]);
-  int total = gini_traps_i;
-  int start = total > GINI_RING ? total - GINI_RING : 0;
-  for(int k = start; k < total; k++){
+  uint64 total = gini_traps_i;
+  uint64 start = total > GINI_RING ? total - GINI_RING : 0;
+  for(uint64 k = start; k < total; k++){
     struct gini_trap *e = &gini_traps[k % GINI_RING];
     PRINTF("TR %d %d %p %p %p %p %p %p %d\\n", e->pid, e->kind,
            (void*)e->cause, (void*)e->epc, (void*)e->tval,
@@ -978,7 +984,7 @@ extern int      sched_quantum;
 struct gini_sc { int pid; int num; uint64 a0; uint64 ret; uint64 seq; };
 extern uint64   gini_sccount[64];
 extern struct gini_sc gini_ring[GINI_RING];
-extern int      gini_ring_i;
+extern uint64   gini_ring_i;
 """, "GINI-xv6 additions")
 
 # 4a2) defs.h — prototypes for the VM/paging additions (fault ring + all-procs page-table dump).
@@ -1003,7 +1009,7 @@ struct gini_trap { int pid; int kind; uint64 cause; uint64 epc; uint64 tval;
 extern uint64   gini_vmf_ok, gini_vmf_fail;   // vm shadow: handled vs. fell-through
 extern uint64   gini_trapcount[6];
 extern struct gini_trap gini_traps[GINI_RING];
-extern int      gini_traps_i;
+extern uint64   gini_traps_i;
 """, "GINI-xv6 trap-taxonomy additions")
 
 # 4a2) defs.h — the SHADOW types + prototypes (used by proc.c/console.c; declared before use).
@@ -1574,19 +1580,19 @@ append_once("kernel/log.c", _LOGDUMP.replace("PRINTF", PRINT), "GINI-xv6: print 
 regex_once("kernel/console.c",
            r"(case C\('P'\):[^\n]*\n\s*procdump\(\);\n\s*break;)",
            r"\1\n"
-           f"  case C('T'): {PRINT}(\"%c\",30); gini_dump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('T'): gini_obs_begin(); gini_dump(); gini_obs_end(); break;  "
            "// GINI: procs + registers (0x1e/0x1f-bracketed; agent hides it from the console)\n"
-           f"  case C('V'): {PRINT}(\"%c\",30); gini_vmdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('V'): gini_obs_begin(); gini_vmdump(); gini_obs_end(); break;  "
            "// GINI: running-proc page table\n"
-           f"  case C('F'): {PRINT}(\"%c\",30); gini_fsdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('F'): gini_obs_begin(); gini_fsdump(); gini_obs_end(); break;  "
            "// GINI: superblock + write-ahead log\n"
-           f"  case C('S'): {PRINT}(\"%c\",30); gini_scdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('S'): gini_obs_begin(); gini_scdump(); gini_obs_end(); break;  "
            "// GINI: syscall counts + trace ring\n"
-           f"  case C('A'): {PRINT}(\"%c\",30); gini_vmdump_all(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('A'): gini_obs_begin(); gini_vmdump_all(); gini_obs_end(); break;  "
            "// GINI: all user page tables (COW / sharing view)\n"
-           f"  case C('E'): {PRINT}(\"%c\",30); gini_faultdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('E'): gini_obs_begin(); gini_faultdump(); gini_obs_end(); break;  "
            "// GINI: live page-fault ring\n"
-           f"  case C('R'): {PRINT}(\"%c\",30); gini_trapdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('R'): gini_obs_begin(); gini_trapdump(); gini_obs_end(); break;  "
            "// GINI: trap-taxonomy counters + ring\n"
            r"  case C('C'): gini_break(); break;  // GINI: break a hung foreground (no SIGINT in xv6)\n"
            r"  case C(']'): if(sched_quantum < 100) sched_quantum++; break; // GINI: quantum up\n"
@@ -1595,10 +1601,10 @@ regex_once("kernel/console.c",
            r"  case C('B'): sched_policy = 0; break;  // GINI: scheduler policy reset (round-robin)\n"
            r"  case C('K'): gini_shadow[sched_policy].enabled = !gini_shadow[sched_policy].enabled; break;  // GINI: toggle the current policy's shadow\n"
            r"  case C('X'): gini_shadow_reset(); break;  // GINI: clear reject/call counters\n"
-           f"  case C('L'): {PRINT}(\"%c\",30); gini_lockdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('L'): gini_obs_begin(); gini_lockdump(); gini_obs_end(); break;  "
            "// GINI: lock contention (0x1e/0x1f-bracketed)\n"
            r"  case C('Z'): gini_lockreset(); break;  // GINI: zero the lock counters\n"
-           f"  case C('W'): {PRINT}(\"%c\",30); gini_shadowdump(); {PRINT}(\"%c\",31); break;  "
+           f"  case C('W'): gini_obs_begin(); gini_shadowdump(); gini_obs_end(); break;  "
            "// GINI: shadow manifest (0x1e/0x1f-bracketed)",
            "gini_dump();")
 
@@ -1666,7 +1672,10 @@ _SCDUMP = '''
 // GINI-xv6: per-syscall counters + recent-call trace ring (Machine Lab histogram + strace).
 uint64 gini_sccount[64];
 struct gini_sc gini_ring[GINI_RING];
-int gini_ring_i;
+// uint64, NOT int: this counts every event forever. At int width it would wrap negative
+// after ~2 billion events and `k % GINI_RING` would then index BEFORE the array — an
+// out-of-bounds kernel write. Unsigned wrap is well-defined and, at 64 bits, unreachable.
+uint64 gini_ring_i;
 
 void
 gini_scdump(void)
@@ -1674,9 +1683,9 @@ gini_scdump(void)
   for(int i = 0; i < 64; i++)
     if(gini_sccount[i])
       PRINTF("SC %d %d\\n", i, (int)gini_sccount[i]);
-  int total = gini_ring_i;
-  int start = total > GINI_RING ? total - GINI_RING : 0;
-  for(int k = start; k < total; k++){
+  uint64 total = gini_ring_i;
+  uint64 start = total > GINI_RING ? total - GINI_RING : 0;
+  for(uint64 k = start; k < total; k++){
     struct gini_sc *e = &gini_ring[k % GINI_RING];
     PRINTF("TRACE %d %d %p %p %d\\n", e->pid, e->num, (void*)e->a0,
            (void*)e->ret, (int)e->seq);
@@ -1697,6 +1706,425 @@ regex_once("kernel/syscall.c",
            "    gini_ring[gsi].a0 = gsc_a0; gini_ring[gsi].ret = p->trapframe->a0;\n"
            "    gini_ring[gsi].seq = gini_stamp();               // GINI: event clock",
            "GINI: histogram")
+
+
+# ---------------------------------------------------------------------------------------------
+# 4h) THE KERNEL BOARD — subsystem residency, the exact call matrix between subsystems, the three
+#     doors into the kernel, and the size of the path that does NOT go through the kernel at all.
+#
+#     Why this exists: students believe the kernel is AMBIENT — always running, everywhere, in
+#     parallel with their program. It is not. It is code that runs on their process's CPU, between
+#     their instructions, and then gets out of the way. Everything below is in service of making
+#     that measurable rather than merely asserted.
+#
+#     Three separate measurements, deliberately not conflated:
+#
+#       gini_edge[a][b]  EXACT count of calls that crossed from subsystem a into subsystem b.
+#                        Frequency. Drawn as arrow width.
+#       gini_resid[s]    Timer-sampled CPU residency per subsystem. COST. Drawn as block shade.
+#                        These two DISAGREE, and the disagreement is the lesson: bcache is asked
+#                        601 times for 2% of the time; the disk is asked 12 times for 12% of it.
+#       gini_uinstr      Retired instructions executed in USER mode between kernel entries. This
+#                        is the path that never touches the kernel, and it dwarfs everything else.
+#
+#     Cost: GINI_NSUB^2 + GINI_NSUB uint64s ~ 1.3 KB, fixed forever, plus ~4 instructions per
+#     instrumented call. No rings, so no overflow question and nothing to arm — it is always on.
+append_once("kernel/defs.h", """
+// GINI-xv6 KERNEL BOARD: which subsystem is the CPU in, who called whom, and how much ran with
+// no kernel involvement at all. See section 4h of gini_patch.py.
+#define GINI_NSUB     14
+#define GSUB_USER      0   // not in the kernel at all — the wide path
+#define GSUB_TRAP      1
+#define GSUB_SYSCALL   2
+#define GSUB_PROC      3
+#define GSUB_MEM       4
+#define GSUB_FILE      5
+#define GSUB_PIPE      6
+#define GSUB_INODE     7
+#define GSUB_LOG       8
+#define GSUB_BCACHE    9
+#define GSUB_DISK     10
+#define GSUB_CONSOLE  11
+#define GSUB_PLIC     12
+#define GSUB_OTHER    13
+#define GINI_TRAIL    64   // ring of real residency samples: where the CPU actually WAS
+#define GINI_PATH    128   // ring of real subsystem transitions, recorded only while ARMED
+extern uint64   gini_edge[GINI_NSUB][GINI_NSUB];
+// Calls made while GINI was reading the machine. The Lab polls several times a second, and each
+// poll raises a UART interrupt and writes a dump — real kernel work, caused by US. Counted apart
+// so the board can draw it grey and dashed instead of passing our footprint off as the workload's.
+extern uint64   gini_edge_obs[GINI_NSUB][GINI_NSUB];
+extern uint64   gini_resid[GINI_NSUB];
+extern uint64   gini_resid_n;      // total residency samples taken — the board's confidence
+extern uint64   gini_door[3];      // 0 asked (ecall) | 1 couldn't (fault) | 2 seized (interrupt)
+extern uint64   gini_uinstr;       // retired user-mode instructions, summed
+extern uint64   gini_uentry;       // kernel entries that contributed to gini_uinstr
+extern int      gini_obs[];        // per-hart: are we inside a GINI dump right now?
+extern uchar    gini_trail[];      // recent residency samples, newest at gini_trail_i-1
+extern uint64   gini_trail_i;
+void            gini_obs_begin(void);
+void            gini_obs_end(void);
+// THE TRACE. Aggregates say the block cache was asked 601 times; they cannot say the read went
+// syscall -> file -> inode -> bcache -> disk IN THAT ORDER. This ring records the real ordered
+// path, and only while armed: unarmed it costs one predictable branch, so the board stays
+// always-on and the expensive thing stays opt-in.
+struct gini_hop { uint64 seq; uchar from; uchar to; uchar pid; };
+extern struct gini_hop gini_path[];
+extern uint64   gini_path_i;
+extern int      gini_path_arm;
+void            gini_path_toggle(void);
+// Declared with no bound: defs.h is included before param.h in some translation units, so it
+// cannot spell NCPU. Defined with the real size in trap.c, and needed HERE because trap.c's own
+// prepare_return hook sits above the definitions.
+extern int      gini_sub[];        // which subsystem each hart is in, right now
+extern uint64   gini_umark[];      // instret when each hart last returned to user
+int             gini_subenter(int);
+void            gini_subleave(int *);
+void            gini_boarddump(void);
+void            gini_boardreset(void);
+void            gini_doorrec(void);
+void            gini_ktick(void);
+// One line at the top of a subsystem entry point. The cleanup attribute restores the previous
+// subsystem on EVERY exit path — early returns, gotos, all of them — so there is no exit
+// bookkeeping to get wrong and nothing to forget when the function grows a new return.
+#define GINI_SUB(s) int __gsub __attribute__((cleanup(gini_subleave), unused)) = gini_subenter(s)
+""", "GINI-xv6 KERNEL BOARD")
+
+# 4h1) riscv.h — read the retired-instruction counter. This is what makes the no-kernel path
+# COUNTABLE instead of hand-waved; without it the widest path on the board would be the only
+# unmeasured one.
+# NOT append_once: riscv.h wraps its C in `#ifndef __ASSEMBLER__ ... #endif` because
+# trampoline.S includes it, so anything appended past the guard is handed to the ASSEMBLER and
+# the build dies on "unrecognized opcode `static inline uint64'". Anchor inside the guard instead,
+# next to r_time(), which is the same kind of CSR read.
+regex_once("kernel/riscv.h",
+           r"(// machine-mode cycle counter\n)",
+           "// GINI-xv6: r_instret — retired instruction count. Readable from supervisor mode only\n"
+           "// because start.c sets mcounteren bit 2 (IR). This is what makes the path that never\n"
+           "// enters the kernel MEASURABLE rather than merely asserted.\n"
+           "static inline uint64\n"
+           "r_instret()\n"
+           "{\n"
+           "  uint64 x;\n"
+           "  asm volatile(\"csrr %0, instret\" : \"=r\" (x) );\n"
+           "  return x;\n"
+           "}\n\n"
+           r"\1",
+           "GINI-xv6: r_instret")
+
+# 4h2) start.c — xv6 enables only the TIME counter for supervisor mode (bit 1). Add bit 2 (IR) so
+# the kernel may read `instret` at all. Without this the csrr above traps as an illegal
+# instruction, which is a spectacular way to discover you forgot one bit.
+regex_once("kernel/start.c",
+           r"w_mcounteren\(r_mcounteren\(\) \| 2\);",
+           "w_mcounteren(r_mcounteren() | 6);  // GINI-xv6: mcounteren INSTRET (bit1 TIME + bit2 IR)",
+           "GINI-xv6: mcounteren INSTRET")
+
+# 4h3) trap.c — the three doors, and the user-instruction accounting that brackets them.
+# Anchored on the existing gini_fault_note() hook, which is already the first thing usertrap does
+# after saving the user pc, so gini_sub[] still says USER when gini_doorrec() reads it.
+regex_once("kernel/trap.c",
+           r"(  gini_fault_note\(\); // GINI-xv6: record page faults into the live ring\n)",
+           r"\1  gini_doorrec();    // GINI-xv6: classify the door, bank user instructions\n",
+           "GINI-xv6: doorrec")
+
+# The other end of the bracket: we are about to sret back to user, so start the user-instruction
+# clock and mark the CPU as no longer being in the kernel. `w_sepc(p->trapframe->epc);` appears
+# only in prepare_return (kerneltrap uses a local `sepc`).
+regex_once("kernel/trap.c",
+           r"(  w_sepc\(p->trapframe->epc\);\n)",
+           r"\1  gini_umark[cpuid()] = r_instret();  // GINI-xv6: user-instruction clock starts\n"
+           "  gini_sub[cpuid()] = GSUB_USER;      // GINI-xv6: leaving the kernel entirely\n",
+           "GINI-xv6: user instret mark")
+
+# Timer ticks that arrive while the CPU is already in the kernel. usertrap's sample is taken by
+# gini_doorrec (where the subsystem still reads USER); this is the kernel-side half, and without
+# it every kernel subsystem would show zero residency.
+regex_once("kernel/trap.c",
+           r"(uint64 scause = r_scause\(\);)",
+           r"\1\n  gini_ktick();  // GINI-xv6: sample which subsystem this hart is in",
+           "GINI-xv6: ktick")
+
+append_once("kernel/trap.c", """
+// GINI-xv6 KERNEL BOARD core. See section 4h of gini_patch.py for the design.
+uint64 gini_edge[GINI_NSUB][GINI_NSUB];
+uint64 gini_edge_obs[GINI_NSUB][GINI_NSUB];
+uint64 gini_resid[GINI_NSUB];
+uint64 gini_resid_n;
+uint64 gini_door[3];
+uint64 gini_uinstr;
+uint64 gini_uentry;
+int    gini_sub[NCPU];        // which subsystem each hart is executing in, right now
+uint64 gini_umark[NCPU];      // instret at the moment we last returned to user
+int    gini_obs[NCPU];        // per-hart: inside a GINI dump (see gini_obs_begin)
+uchar  gini_trail[GINI_TRAIL];
+uint64 gini_trail_i;
+struct gini_hop gini_path[GINI_PATH];
+uint64 gini_path_i;
+int    gini_path_arm;         // 0 = off; recording costs nothing until a student asks for it
+
+static char *gini_subname[GINI_NSUB] = {
+  "user", "trap", "syscall", "proc", "memory", "file", "pipe",
+  "inode", "log", "bcache", "disk", "console", "plic", "other",
+};
+
+// Enter a subsystem. Returns the previous one so the cleanup handler can restore it.
+//
+// The edge is counted only when the subsystem actually CHANGES, which is what makes the numbers
+// mean "calls this block received from outside" rather than "calls, including internal ones".
+// A bio function calling another bio function is not block traffic and must not look like it.
+//
+// cpuid() is read without disabling interrupts: a migration between the read and the store would
+// misattribute a single event. That is sampling-grade error on a counter used for shading a
+// rectangle, and paying push_off/pop_off on every instrumented call to avoid it would cost far
+// more than it is worth — and would drag the lock subsystem onto this path.
+int
+gini_subenter(int s)
+{
+  int h = cpuid();
+  int prev = gini_sub[h];
+  gini_sub[h] = s;
+  if(prev != s){
+    if(gini_obs[h])
+      __sync_fetch_and_add(&gini_edge_obs[prev][s], 1);   // this call is OURS, not the workload's
+    else {
+      __sync_fetch_and_add(&gini_edge[prev][s], 1);
+      // The ordered path, when a student has armed it. Our own polling is excluded here for the
+      // same reason it is excluded above: a trace of GINI reading the machine teaches nothing.
+      if(gini_path_arm){
+        uint64 k = __sync_fetch_and_add(&gini_path_i, 1) %% GINI_PATH;
+        struct proc *pp = myproc();
+        gini_path[k].seq = gini_stamp();
+        gini_path[k].from = (uchar)prev;
+        gini_path[k].to = (uchar)s;
+        gini_path[k].pid = (uchar)(pp ? pp->pid : 0);
+      }
+    }
+  }
+  return prev;
+}
+
+// Arm or disarm the trace, clearing the ring each time it is armed so a student always gets ONE
+// clean path rather than the tail of whatever happened earlier.
+void
+gini_path_toggle(void)
+{
+  gini_path_arm = !gini_path_arm;
+  if(gini_path_arm)
+    gini_path_i = 0;
+}
+
+// Bracket a GINI dump. The 0x1e/0x1f pair already existed so the agent could strip these dumps
+// from the human console; raising the flag on the same boundary costs nothing and makes every
+// call the dump provokes attributable to the measurement instead of the machine.
+//
+// LIMIT, stated rather than hidden: the UART interrupt that DELIVERS the control character fires
+// before the flag can be raised, so roughly three events per poll (uartintr -> consoleintr) are
+// still counted as real. The dump itself — the overwhelming bulk — is captured.
+void
+gini_obs_begin(void)
+{
+  gini_obs[cpuid()] = 1;
+  %(P)s("%%c", 30);
+}
+
+void
+gini_obs_end(void)
+{
+  %(P)s("%%c", 31);
+  gini_obs[cpuid()] = 0;
+}
+
+void
+gini_subleave(int *prev)
+{
+  gini_sub[cpuid()] = *prev;
+}
+
+// Is this trap a supervisor TIMER interrupt? Residency is sampled on the timer and nothing else.
+//
+// Sampling ONLY on the timer keeps the estimate unbiased — device interrupts arrive correlated
+// with device activity, so sampling on those would systematically over-report the disk and the
+// console. The price is resolution: GINI deliberately slows the tick to ~0.5 s (section 2b, so
+// the scheduler Gantt is watchable), which means residency accrues at about TWO SAMPLES PER
+// SECOND. A 1-second HUD window therefore holds ~2 samples and can only ever report nothing,
+// half, or all of it. That is why gini_resid_n is reported: the board shows the sample count so
+// it never
+// claims a precision it does not have, and the shading is meaningful only over longer windows.
+static int
+gini_is_tick(uint64 c)
+{
+  return (c & 0x8000000000000000L) && ((c & 0xff) == 5);
+}
+
+// One residency observation. Also appended to a small ring of REAL positions — the CPU marker
+// draws from this rather than from an aggregate, so every dot on screen is somewhere the hart
+// actually was, never a position synthesised from a distribution.
+static void
+gini_sample(int s)
+{
+  gini_resid[s]++;
+  gini_resid_n++;
+  gini_trail[gini_trail_i %% GINI_TRAIL] = (uchar)s;
+  gini_trail_i++;
+}
+
+// Called from the top of kerneltrap: the CPU was already in the kernel, and gini_sub says which
+// subsystem, so this attributes the tick to whatever was actually running.
+void
+gini_ktick(void)
+{
+  if(gini_is_tick(r_scause()))
+    gini_sample(gini_sub[cpuid()]);
+}
+
+// Called from the top of usertrap, BEFORE anything else touches gini_sub — so the residency
+// sample below still sees GSUB_USER and user time is counted rather than swallowed by the trap.
+void
+gini_doorrec(void)
+{
+  uint64 c = r_scause();
+  int h = cpuid();
+
+  if(gini_is_tick(c))
+    gini_sample(gini_sub[h]);           // still USER here: this is the no-kernel path's time
+
+  // The three doors, by AGENCY. A fault is not an interrupt, and students conflate them
+  // constantly; this is the same three-way split usertrap itself makes a few lines below.
+  if(c & 0x8000000000000000L)
+    gini_door[2]++;                     // seized: a device or the timer wanted attention
+  else if(c == 8)
+    gini_door[0]++;                     // asked: the program executed ecall
+  else
+    gini_door[1]++;                     // couldn't: page fault, illegal instruction, ...
+
+  // Bank the instructions that ran in user mode since we last returned there. gini_umark is 0
+  // before the first return to user, and that one sample is skipped rather than counted as a
+  // gigantic bogus run.
+  if(gini_umark[h]){
+    gini_uinstr += r_instret() - gini_umark[h];
+    gini_uentry++;
+  }
+  gini_sub[h] = GSUB_TRAP;
+}
+
+void
+gini_boardreset(void)
+{
+  for(int i = 0; i < GINI_NSUB; i++){
+    gini_resid[i] = 0;
+    for(int j = 0; j < GINI_NSUB; j++)
+      gini_edge[i][j] = gini_edge_obs[i][j] = 0;
+  }
+  gini_door[0] = gini_door[1] = gini_door[2] = 0;
+  gini_uinstr = 0;
+  gini_uentry = 0;
+  gini_resid_n = 0;
+  gini_trail_i = 0;
+}
+
+// Counters are CUMULATIVE. The frontend differences successive dumps into per-window rates; the
+// kernel never resets them on its own, so a missed poll costs resolution but never correctness.
+void
+gini_boarddump(void)
+{
+  %(P)s("BOARDN %%d\\n", GINI_NSUB);
+  for(int i = 0; i < GINI_NSUB; i++)
+    %(P)s("BSUB %%d %%s %%d\\n", i, gini_subname[i], (int)gini_resid[i]);
+  for(int i = 0; i < GINI_NSUB; i++)
+    for(int j = 0; j < GINI_NSUB; j++){
+      if(gini_edge[i][j])
+        %(P)s("BEDGE %%d %%d %%d\\n", i, j, (int)gini_edge[i][j]);
+      if(gini_edge_obs[i][j])
+        %(P)s("BEOBS %%d %%d %%d\\n", i, j, (int)gini_edge_obs[i][j]);
+    }
+  %(P)s("BDOOR %%d %%d %%d\\n", (int)gini_door[0], (int)gini_door[1], (int)gini_door[2]);
+  // How many residency samples the numbers above rest on. At a ~0.5s tick this is small, and
+  // the board says so rather than shading a rectangle as if it knew.
+  %(P)s("BSAMP %%d\\n", (int)gini_resid_n);
+  // The last GINI_TRAIL real positions, oldest first — every one an actual observation.
+  {
+    uint64 n = gini_trail_i < GINI_TRAIL ? gini_trail_i : GINI_TRAIL;
+    %(P)s("BTRAIL %%d", (int)n);
+    for(uint64 k = gini_trail_i - n; k < gini_trail_i; k++)
+      %(P)s(" %%d", (int)gini_trail[k %% GINI_TRAIL]);
+    %(P)s("\\n");
+  }
+  // The armed trace: the real ordered path, oldest hop first.
+  %(P)s("BARM %%d\\n", gini_path_arm);
+  {
+    uint64 n = gini_path_i < GINI_PATH ? gini_path_i : GINI_PATH;
+    for(uint64 k = gini_path_i - n; k < gini_path_i; k++){
+      struct gini_hop *hp = &gini_path[k %% GINI_PATH];
+      %(P)s("BPATH %%d %%d %%d %%d\\n", (int)hp->seq, (int)hp->from, (int)hp->to, (int)hp->pid);
+    }
+  }
+  // Printed as two numbers rather than a ratio: the frontend differences them, and a ratio
+  // cannot be differenced.
+  %(P)s("BUSER %%d %%d\\n", (int)(gini_uinstr / 1000), (int)gini_uentry);
+}
+""" % {"P": PRINT}, "GINI-xv6 KERNEL BOARD core")
+
+# 4h4) The probes themselves. One line at the top of each subsystem ENTRY POINT — the functions
+# other subsystems call — and nothing internal. That is what makes the counts mean "traffic this
+# block received", and it also keeps the patch surface to the module boundaries, which are the
+# part of xv6 least likely to be reshuffled by a student.
+#
+# NOT instrumented, deliberately:
+#   spinlock.c / sleeplock.c  acquire() is called from everywhere; as a subsystem it would either
+#                             swallow the board or vanish. Contention is already measured by the
+#                             lock telemetry (3f) and belongs on block BORDERS, not as a block.
+#   string.c / printk.c       same problem, no teaching value.
+#   anything named gini_*     OUR OWN instrumentation. The Lab polls these several times a second,
+#                             so counting them would show the disk and console busy because we are
+#                             measuring, not because the machine is. Third time this observer
+#                             effect has bitten (the CSR strip, the HUD trap lane, now this), so
+#                             it is a rule here rather than a case-by-case fix.
+_BOARD_PROBES = [
+    ("kernel/syscall.c", "SYSCALL", ["syscall"]),
+    ("kernel/proc.c", "PROC", ["kfork", "kexit", "kwait", "growproc", "yield", "sleep",
+                               "wakeup", "kkill", "allocproc", "freeproc"]),
+    ("kernel/exec.c", "PROC", ["kexec"]),
+    ("kernel/vm.c", "MEM", ["uvmalloc", "uvmdealloc", "uvmcopy", "uvmunmap", "mappages",
+                            "walkaddr", "copyout", "copyin", "uvmcreate", "uvmfree"]),
+    ("kernel/kalloc.c", "MEM", ["kalloc", "kfree"]),
+    ("kernel/file.c", "FILE", ["fileread", "filewrite", "fileclose", "filealloc", "filedup",
+                               "filestat"]),
+    ("kernel/pipe.c", "PIPE", ["piperead", "pipewrite", "pipealloc", "pipeclose"]),
+    ("kernel/fs.c", "INODE", ["readi", "writei", "namei", "nameiparent", "ialloc", "iupdate",
+                              "iget", "ilock", "iunlock", "iput", "itrunc", "dirlookup",
+                              "dirlink", "balloc", "bfree"]),
+    ("kernel/log.c", "LOG", ["begin_op", "end_op", "log_write"]),
+    ("kernel/bio.c", "BCACHE", ["bread", "bwrite", "brelse", "bpin", "bunpin", "bget"]),
+    ("kernel/virtio_disk.c", "DISK", ["virtio_disk_rw", "virtio_disk_intr"]),
+    ("kernel/uart.c", "CONSOLE", ["uartwrite", "uartputc_sync", "uartintr"]),
+    ("kernel/console.c", "CONSOLE", ["consoleread", "consolewrite", "consoleintr", "consputc"]),
+    ("kernel/plic.c", "PLIC", ["plic_claim", "plic_complete"]),
+]
+
+for _rel, _sub, _fns in _BOARD_PROBES:
+    for _fn in _fns:
+        # xv6's house style puts the return type on its own line, so the function NAME starts a
+        # line — which makes this anchor unambiguous. A prototype ends in ';' and a call is
+        # indented, so neither can match. `(?m)` because regex_once does not pass re.M and the
+        # anchor is worthless without it (this cost 69 silently skipped probes to discover).
+        #
+        # The inserted comment carries the per-function marker so re-running the patcher on an
+        # already-patched tree is a no-op — the Docker build does exactly that.
+        regex_once(_rel,
+                   r"(?m)(^[A-Za-z_][\w \*]*\n" + _fn + r"\([^;{]*\)\n\{\n)",
+                   r"\1  GINI_SUB(GSUB_" + _sub + f");  // GINI-xv6: board probe {_fn}\n",
+                   f"GINI-xv6: board probe {_fn}")
+
+# 4h5) console.c — Ctrl-D dumps the board. (Ctrl-D is not special in xv6's consoleintr; the shell
+# has no EOF handling that would swallow it.)
+regex_once("kernel/console.c",
+           r"(case C\('L'\):[^\n]*\n)",
+           r"\1"
+           f"  case C('D'): gini_obs_begin(); gini_boarddump(); gini_obs_end(); break;  "
+           "// GINI: kernel board (0x1e/0x1f-bracketed)\n"
+           r"  case C('Q'): gini_path_toggle(); break;  // GINI: arm/disarm the kernel-path trace" "\n",
+           "GINI: board dump key")
 
 
 # 5) launchable long-running user programs, so the Machine Lab can spawn real work to watch

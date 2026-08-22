@@ -48,7 +48,7 @@ class DockerProbeRunner:
         wd = getattr(self.orch, "workdir", None)
         try:
             r = subprocess.run(cmd, cwd=str(wd) if wd else None,
-                               capture_output=True, text=True, timeout=self.timeout)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=self.timeout)
             return r.returncode, (r.stdout or "") + (r.stderr or "")
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return 124, ""

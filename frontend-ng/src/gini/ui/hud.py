@@ -112,9 +112,16 @@ def paint_timeline(p: QPainter, theme, hist: HudHistory, w: int, h: int,
 
     p.setPen(QPen(QColor(t.line), 2))
     p.drawLine(int(tl.left()), int(cy), int(tl.right()), int(cy))
+    # Thin the ticks: on a busy machine a snapshot is recorded almost every poll, and drawing all
+    # of them turns the timeline into a solid bar that says nothing and cannot be aimed at. One
+    # tick per 4px keeps it readable and still shows where activity clustered.
     p.setPen(QPen(QColor(t.accent), 2))
+    last_x = -99
     for ct in hist.change_times():
         x = int(X(ct))
+        if x - last_x < 4:
+            continue
+        last_x = x
         p.drawLine(x, int(cy) - 5, x, int(cy) + 5)
 
     cur = scrub_t if scrub_t is not None else hist.t_end
@@ -122,6 +129,14 @@ def paint_timeline(p: QPainter, theme, hist: HudHistory, w: int, h: int,
     p.setBrush(knob)
     p.setPen(QPen(knob, 1))
     p.drawEllipse(QRectF(X(cur) - 5, cy - 5, 10, 10))
+
+    # How far back the scrub reaches. It grows until the retention cap and then stops — saying so
+    # turns "is this thing bounded?" from a guess into a reading.
+    reach = hist.t_end - hist.t_start
+    p.setFont(QFont(p.font().family(), 7))
+    p.setPen(QColor(t.faint))
+    p.drawText(int(tl.left()), int(tl.bottom()) - 2, 90, 10, Qt.AlignLeft,
+               f"−{reach:.0f}s / {hist.retain_s:.0f}s")
 
     lr = live_rect(w, h)
     p.setFont(QFont(p.font().family(), 8, QFont.Bold))

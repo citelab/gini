@@ -211,7 +211,7 @@ def cut_default_route() -> None:
 def _wan_iface() -> str | None:
     """The interface attached to the external `wan` bridge (its IP is in WAN_SUBNET)."""
     out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     for line in out.splitlines():
         parts = line.split()              # "<idx>: <ifname>    inet <ip>/<pfx> ..."
         if len(parts) >= 4 and parts[1] != "lo" and parts[3].startswith(WAN_SUBNET_PREFIX):

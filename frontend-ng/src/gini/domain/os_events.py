@@ -87,11 +87,20 @@ def fault_events(text: str) -> list:
     return out
 
 
-def trap_events(text: str, include_timer: bool = False) -> list:
+def trap_events(text: str, include_timer: bool = False, include_device: bool = False) -> list:
     """`TR <pid> <kind> <cause> <epc> <tval> [csrs] <seq>` -> trap-lane events.
 
-    Timer interrupts are excluded by default: they are by far the most numerous events and would
-    bury the story of a launch. Turn them on to teach preemption specifically.
+    Two kinds are excluded by default, for different reasons:
+
+    * **timer** — by far the most numerous events; they would bury the story of a launch. Turn
+      them on to teach preemption specifically.
+    * **device** — these are mostly *us*. Every dump the HUD requests is a control byte written to
+      the serial port, which raises a UART interrupt, which is recorded as a device trap. Polling
+      three endpoints a second manufactures a steady stream of them, so leaving them on fills the
+      trap lane with a picture of the measurement rather than of the machine. (Same observer
+      effect the CSR strip has, where `scause` permanently reads "external int".) Turn them on to
+      teach device interrupts — ideally while doing real disk I/O, where the virtio traps are the
+      interesting ones.
     """
     out = []
     for m in _TR_RE.finditer(text or ""):
@@ -100,6 +109,8 @@ def trap_events(text: str, include_timer: bool = False) -> list:
             continue
         kind = trap_kind_name(int(m.group(2)))
         if kind == "timer" and not include_timer:
+            continue
+        if kind == "device" and not include_device:
             continue
         if kind in ("syscall", "pagefault"):
             continue          # already told, in richer form, by the syscall and fault rings
@@ -172,6 +183,64 @@ def episodes(events: list) -> list:
         seen[e.pid].events.append(e)
     order.sort(key=lambda ep: ep.span[0], reverse=True)
     return order
+
+
+class EventWindow:
+    """Keep only the recent past — the fix for a HUD that fills up and never empties.
+
+    The kernel rings are CUMULATIVE: every poll returns the last `GINI_RING` events *ever*, not
+    the recent ones. Drawn naively the HUD accumulates forever, the time axis stretches across all
+    of history, and a fresh launch is squeezed into a sliver at the right-hand edge.
+
+    Events carry `seq` (a logical clock), not wall-clock time, so ageing needs a timestamp. We use
+    FIRST OBSERVATION: an event seen for the first time at poll `t` is at most one poll interval
+    older than `t`, which is ample for a window measured in seconds. Events already seen keep
+    their original stamp, so nothing drifts forward as it is re-reported.
+
+    Layout stays in seq space (exact ordering); the window only decides what is still on screen.
+    """
+
+    MAX_EVENTS = 400          # hard cap: `grind` can emit thousands a second
+
+    def __init__(self, window_s: float = 10.0) -> None:
+        self.window_s = window_s
+        self._seen: dict = {}          # seq -> first-observed time
+        self._events: dict = {}        # seq -> OsEvent
+        # Highest seq ever admitted. Needed because the kernel ring keeps re-reporting events we
+        # have already aged out: without this they look brand new on the next poll, get a fresh
+        # timestamp, and never leave the screen. The clock is monotonic, so "at or below the
+        # high-water mark" is a complete test for "already dealt with".
+        self._hwm: int = -1
+
+    def add(self, events: list, now: float) -> list:
+        """Fold a freshly polled batch in, age out the old, return what should be drawn."""
+        for e in events:
+            if e.seq <= self._hwm:
+                continue               # already on screen, or already retired — never re-stamp
+            self._seen[e.seq] = now
+            self._events[e.seq] = e
+            self._hwm = e.seq
+        cutoff = now - self.window_s
+        for seq in [s for s, t in self._seen.items() if t < cutoff]:
+            self._seen.pop(seq, None)
+            self._events.pop(seq, None)
+        keep = sorted(self._events)[-self.MAX_EVENTS:]
+        if len(keep) < len(self._events):                  # trim the oldest beyond the cap
+            for seq in [s for s in self._events if s < keep[0]]:
+                self._seen.pop(seq, None)
+                self._events.pop(seq, None)
+        return [self._events[s] for s in keep]
+
+    def set_window(self, window_s: float) -> None:
+        self.window_s = max(1.0, float(window_s))
+
+    def clear(self) -> None:
+        self._seen.clear()
+        self._events.clear()
+        self._hwm = -1
+
+    def __len__(self) -> int:
+        return len(self._events)
 
 
 def launch_of(events: list, pid: int) -> Episode:

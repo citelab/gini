@@ -108,7 +108,7 @@ class RiderSessions:
         wd = getattr(self.orch, "workdir", None)
         try:
             proc = self._popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True, bufsize=1, cwd=str(wd) if wd else None)
+                               text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=str(wd) if wd else None)
         except (FileNotFoundError, OSError) as e:
             return {"ok": False, "error": f"couldn't start: {e}"}
 

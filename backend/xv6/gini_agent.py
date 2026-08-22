@@ -166,12 +166,32 @@ class SerialLink:
         """Append-only console delta for the Terminal: text after `since`, plus the new cursor."""
         return self._console_slice(since)
 
-    def dump(self, ctrl, wait=0.35):
+    def dump(self, ctrl, wait=0.35, poll=0.005):
         """Send a console control char that makes the kernel print a dump, and return just that
         dump's text — WITHOUT halting the kernel (unlike gdb). Prefers the sentinel-framed block
         captured at ingest (robust); falls back to a monotonic raw-byte window for a pre-marker
         kernel. Monotonic offset, NOT len(buf): the ring buffer evicts old bytes, so len(buf)
-        saturates at maxlen and a `buf[before:]` slice would go permanently empty once full."""
+        saturates at maxlen and a `buf[before:]` slice would go permanently empty once full.
+
+        THE LOCK MUST SPAN THE WHOLE EXCHANGE, not just the send.
+        -------------------------------------------------------
+        There is one serial line and it can carry one dump at a time, so this method has to be
+        serialised end to end. It previously released the lock before waiting, which meant two
+        callers could both send, both wait, and both then read `_last_dump` — and `_dump_seq >
+        seq0` only proves that *a* dump arrived, never that it was YOURS. A request for /board
+        would come back holding the /procs dump, which parses to nothing, and the OS HUD would
+        correctly report "no board support" every other poll while the polls that won the race
+        drew a perfect board. The symptom looked like an intermittent kernel; it was two readers
+        on one wire.
+
+        WAIT ONLY AS LONG AS IT TAKES.
+        ------------------------------
+        Serialising would be expensive with the old fixed 0.35 s sleep: the OS HUD alone asks for
+        four dumps a poll, which would monopolise the line for 1.4 s and starve the Machine Lab.
+        A framed dump normally lands in a few milliseconds, so poll for the sentinel and return
+        the moment it arrives, keeping `wait` as a ceiling rather than a cost. Same contract,
+        typically an order of magnitude less serial time held.
+        """
         with self._lock:
             if self._sock is None:
                 self._connect()
@@ -182,13 +202,15 @@ class SerialLink:
                     self._sock.sendall(ctrl)
             except Exception:
                 self._sock = None
-        time.sleep(wait)
-        if self._dump_seq > seq0:                         # a framed dump arrived -> use it
-            return self._last_dump.decode(errors="replace")
-        n = self._total - before                          # pre-marker kernel -> raw window
-        if n <= 0:
-            return ""
-        return bytes(self.buf)[-min(n, len(self.buf)):].decode(errors="replace")
+            deadline = time.time() + wait
+            while self._dump_seq == seq0 and time.time() < deadline:
+                time.sleep(poll)
+            if self._dump_seq > seq0:                     # our framed dump arrived -> use it
+                return self._last_dump.decode(errors="replace")
+            n = self._total - before                      # pre-marker kernel -> raw window
+            if n <= 0:
+                return ""
+            return bytes(self.buf)[-min(n, len(self.buf)):].decode(errors="replace")
 
     def procdump(self, wait=0.35):
         return self.dump(b"\x14", wait)     # Ctrl-T -> gini_dump() (procs + running-proc regs)
@@ -531,6 +553,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x0c"), ctype="text/plain")
         elif path == "/traps":
             self._send(_SERIAL.dump(b"\x12"), ctype="text/plain")   # Ctrl-R -> gini_trapdump()
+        elif path == "/board":                        # Ctrl-D -> gini_boarddump(): the kernel map
+            # The board is by far the largest dump — 14 subsystem lines, the call matrix, our own
+            # observation matrix, a 64-entry trail and, when armed, up to 128 path hops. On a slow
+            # host, or under `grind`, it does not always finish inside the 0.35 s the small dumps
+            # need, and a truncated dump parses to nothing.
+            #
+            # Raising the ceiling costs nothing now that dump() returns the moment the sentinel
+            # lands: `wait` bounds a stall, it is not a sleep.
+            self._send(_SERIAL.dump(b"\x04", wait=1.5), ctype="text/plain")
         else:
             self._send({"error": "not found"})
 

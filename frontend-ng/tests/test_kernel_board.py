@@ -1,0 +1,324 @@
+"""The kernel board: cumulative counters in, per-window rates out.
+
+Most of these tests are about the one defect that makes a live view lie — rendering a since-boot
+total under a "last 10 s" caption. The Mode lane shipped with exactly that bug, so it gets the
+most coverage here.
+"""
+from gini.domain.kernel_board import (
+    DEVICE_BLOCKS, DOORS, SUBSYSTEMS, Frame, Sample, Window, deepest, parse, path_steps,
+    signature,
+)
+
+# a dump as the kernel emits it: indices are GSUB_* values, all counters cumulative since boot
+D1 = """BOARDN 14
+BSUB 0 user 700
+BSUB 1 trap 20
+BSUB 2 syscall 10
+BSUB 9 bcache 20
+BSUB 10 disk 120
+BEDGE 1 2 1000
+BEDGE 2 5 300
+BEDGE 5 7 260
+BEDGE 7 9 600
+BEDGE 9 10 12
+BDOOR 1000 3 120
+BUSER 210000 1123
+"""
+D2 = """BOARDN 14
+BSUB 0 user 1400
+BSUB 1 trap 40
+BSUB 2 syscall 20
+BSUB 9 bcache 40
+BSUB 10 disk 240
+BEDGE 1 2 2284
+BEDGE 2 5 612
+BEDGE 5 7 528
+BEDGE 7 9 1201
+BEDGE 9 10 24
+BDOOR 2284 6 240
+BUSER 420000 2246
+"""
+
+
+def test_parse_maps_indices_to_names():
+    s = parse(D1)
+    assert s.ok
+    assert s.resid["user"] == 700 and s.resid["disk"] == 120
+    assert s.edges[("bcache", "disk")] == 12
+    assert s.doors == (1000, 3, 120)
+    assert (s.user_kinstr, s.user_entries) == (210000, 1123)
+
+
+def test_a_kernel_without_the_board_is_not_a_quiet_machine():
+    """An older image answers /board with nothing. That must read as "no data", not as a board of
+    zeros — which would look like a perfectly idle kernel and send a student hunting a ghost."""
+    assert not parse("").ok
+    assert not parse("some unrelated console noise\n").ok
+
+
+def test_first_sample_renders_nothing():
+    """The baseline sample holds since-boot totals. Drawing it under a per-window caption is the
+    exact lie this module exists to prevent."""
+    f = Window().add(parse(D1), 100.0)
+    assert f.blocks == {} and f.resid == {} and f.doors == (0, 0, 0)
+    assert f.instr_per_entry == 0.0
+
+
+def test_second_sample_is_a_difference_not_a_total():
+    w = Window()
+    w.add(parse(D1), 100.0)
+    f = w.add(parse(D2), 110.0)
+    assert f.edges[("trap", "syscall")] == 1284          # 2284 - 1000, not 2284
+    assert f.edges[("bcache", "disk")] == 12
+    assert f.resid["user"] == 700
+    assert f.doors == (1284, 3, 120)
+    assert f.span_s == 10.0
+
+
+def test_block_totals_are_the_calls_received():
+    w = Window()
+    w.add(parse(D1), 100.0)
+    f = w.add(parse(D2), 110.0)
+    assert f.blocks["syscall"] == 1284
+    assert f.blocks["bcache"] == 601                     # 1201 - 600
+    assert f.blocks["disk"] == 12
+    assert "user" not in f.blocks                        # user is not a block you can call into
+
+
+def test_frequency_and_cost_disagree_and_both_survive():
+    """The whole reason the board draws calls and time in separate channels. If this test ever
+    fails because someone shaded blocks by call count, the lesson is gone."""
+    w = Window()
+    w.add(parse(D1), 100.0)
+    f = w.add(parse(D2), 110.0)
+    assert f.blocks["bcache"] > 40 * f.blocks["disk"]    # asked ~50x more often
+    assert f.share("disk") > 5 * f.share("bcache")       # yet holds far more time
+    assert f.busiest == "user"                           # and most time is not in the kernel
+
+
+def test_instructions_per_kernel_entry():
+    w = Window()
+    w.add(parse(D1), 100.0)
+    f = w.add(parse(D2), 110.0)
+    # 210,000 k-instructions over 1,123 entries
+    assert round(f.instr_per_entry) == round(210000 * 1000 / 1123)
+    assert f.instr_per_entry > 100_000                   # the no-kernel path dwarfs everything
+
+
+def test_no_entries_is_zero_not_infinity():
+    assert Frame(user_kinstr=5, user_entries=0).instr_per_entry == 0.0
+    assert Frame().kernel_entries == 0
+
+
+def test_reboot_does_not_produce_negative_rates():
+    """Counters restart at zero on reboot. Subtracting the old baseline would paint a huge
+    negative rate; the new value is taken as-is instead, which self-corrects next poll."""
+    w = Window()
+    w.add(parse(D2), 100.0)                              # high baseline
+    f = w.add(parse(D1), 110.0)                          # ... then the kernel restarts
+    assert all(v >= 0 for v in f.edges.values())
+    assert all(v >= 0 for v in f.resid.values())
+    assert all(d >= 0 for d in f.doors)
+    assert f.user_kinstr >= 0 and f.instr_per_entry >= 0
+    assert f.edges[("trap", "syscall")] == 1000          # took the post-reboot value
+
+
+def test_share_is_a_fraction_and_safe_when_empty():
+    f = Frame(resid={"user": 3, "disk": 1})
+    assert f.share("user") == 0.75 and f.share("nope") == 0.0
+    assert Frame().share("user") == 0.0                  # no divide-by-zero on an idle window
+
+
+def test_quiet_machine_records_one_snapshot():
+    """signature() drives HudHistory dedupe: unchanged counters must produce an identical
+    signature so the scrub timeline's ticks each mean a real change."""
+    w = Window()
+    w.add(parse(D1), 100.0)
+    a = w.add(parse(D2), 110.0)
+    w2 = Window()
+    w2.add(parse(D1), 100.0)
+    b = w2.add(parse(D2), 110.0)
+    assert signature(a) == signature(b)
+    assert signature(a) != signature(Frame())
+
+
+def test_wire_order_matches_the_kernel():
+    """SUBSYSTEMS is the wire format: index IS the GSUB_* constant. Reordering it silently
+    mislabels every block, so pin the ones the kernel hardcodes."""
+    assert SUBSYSTEMS[0] == "user" and SUBSYSTEMS[1] == "trap"
+    assert SUBSYSTEMS.index("bcache") == 9 and SUBSYSTEMS.index("disk") == 10
+    assert len(SUBSYSTEMS) == 14
+    assert DOORS == ("asked", "couldn't", "seized")
+    assert set(DEVICE_BLOCKS) <= set(SUBSYSTEMS)
+
+
+# -- GINI's own footprint, the sample count, and the marker ------------------------------------ #
+OBS1 = D1 + "BEOBS 1 11 180\nBEOBS 11 12 200\nBSAMP 40\nBTRAIL 4 0 0 11 0\n"
+OBS2 = D2 + "BEOBS 1 11 360\nBEOBS 11 12 400\nBSAMP 80\nBTRAIL 4 0 11 0 10\n"
+
+
+def test_our_own_polling_is_counted_apart_from_the_workload():
+    """Each Lab poll writes to the serial port and provokes real kernel work. Counted in with the
+    workload it makes console and plic look busy on a machine doing nothing — which is our
+    measurement showing up as the thing measured."""
+    w = Window()
+    w.add(parse(OBS1), 100.0)
+    f = w.add(parse(OBS2), 110.0)
+    assert f.edges_obs[("trap", "console")] == 180
+    assert f.ours("console") == 180 and f.ours("plic") == 200
+    assert f.ours("bcache") == 0                     # nothing we do touches the block cache
+    # and the workload's own numbers are untouched by the split
+    assert f.blocks["bcache"] == 601
+
+
+def test_observation_edges_never_leak_into_the_real_ones():
+    f = Window(); f.add(parse(OBS1), 100.0)
+    fr = f.add(parse(OBS2), 110.0)
+    assert set(fr.edges) & set(fr.edges_obs) == set() or all(
+        fr.edges[k] != fr.edges_obs[k] for k in set(fr.edges) & set(fr.edges_obs))
+    assert ("trap", "console") not in fr.edges
+
+
+def test_residency_is_qualified_by_its_sample_count():
+    """~2 samples/second means a short window cannot support a percentage. The board has to know
+    that before it shades a rectangle."""
+    w = Window()
+    w.add(parse(OBS1), 100.0)
+    f = w.add(parse(OBS2), 110.0)
+    assert f.resid_n == 40
+    assert f.resid_trustworthy                       # 840 ticks of residency in this window
+    thin = Frame(resid={"user": 2})
+    assert not thin.resid_trustworthy                # two samples is not a percentage
+
+
+def test_marker_shows_a_real_position_not_an_average():
+    """`here` is the newest actual observation. The first version used the modal block over the
+    window while labelling it "hart 0 is here", which claimed more than it knew."""
+    w = Window()
+    w.add(parse(OBS1), 100.0)
+    f = w.add(parse(OBS2), 110.0)
+    assert f.trail == ("user", "console", "user", "disk")
+    assert f.here == "disk"                          # the newest sample, whatever it was
+    assert f.here != f.busiest                       # and deliberately not the aggregate
+    assert Frame().here == ""                        # no samples yet: say nothing
+
+
+def test_trail_survives_a_kernel_without_one():
+    s = parse(D1)                                    # no BTRAIL line at all
+    assert s.trail == () and s.resid_n == 0
+    assert s.ok                                      # still a usable board
+
+
+# -- the armed trace: the one thing aggregates can never say --------------------------------- #
+# a real read walking down the kernel and back: user->trap->syscall->file->inode->bcache->disk
+TRACE = """BARM 1
+BPATH 900 0 1 7
+BPATH 901 1 2 7
+BPATH 902 2 5 7
+BPATH 903 5 7 7
+BPATH 904 7 9 7
+BPATH 905 9 10 7
+BPATH 906 10 9 7
+BPATH 907 9 0 7
+"""
+
+
+def test_path_is_an_ordered_walk_not_a_bag_of_edges():
+    s = parse(D1 + TRACE)
+    assert s.armed
+    assert s.path[0].src == "user" and s.path[0].dst == "trap"
+    assert path_steps(s.path) == ["user", "trap", "syscall", "file", "inode",
+                                  "bcache", "disk", "bcache", "user"]
+
+
+def test_deepest_point_of_the_path():
+    """What a student means by 'the read went all the way to the disk' — defined by the board's
+    own row order so it matches what they are pointing at on screen."""
+    s = parse(D1 + TRACE)
+    assert deepest(s.path) == "disk"
+    assert deepest(()) == ""
+
+
+def test_repeated_hops_into_the_same_block_are_not_steps():
+    s = parse("BPATH 1 9 10 7\nBPATH 2 10 10 7\nBPATH 3 10 9 7\n")
+    assert path_steps(s.path) == ["bcache", "disk", "bcache"]
+
+
+def test_path_rides_through_the_window_undifferenced():
+    """The path is a ring of observations, not a counter. Differencing it would be nonsense."""
+    w = Window()
+    w.add(parse(D1 + TRACE), 100.0)
+    f = w.add(parse(D2 + TRACE), 110.0)
+    assert f.armed and f.steps[-3:] == ["disk", "bcache", "user"]
+    assert f.deepest == "disk"
+    assert f.edges[("trap", "syscall")] == 1284      # counters still differenced as before
+
+
+def test_unarmed_and_older_kernels_are_quiet():
+    f = Window(); f.add(parse(D1), 100.0)
+    fr = f.add(parse(D2), 110.0)
+    assert not fr.armed and fr.path == () and fr.steps == [] and fr.deepest == ""
+
+
+def test_window_reports_whether_the_kernel_supports_the_board():
+    """The HUD asks this to decide between "quiet machine" and "rebuild your image" — two very
+    different messages that a board of zeros cannot tell apart."""
+    w = Window()
+    assert w.board_supported and not w.has_baseline      # optimistic before any sample
+    w.add(parse(D1), 100.0)
+    assert w.board_supported and w.has_baseline
+
+
+# -- a slow machine drops a dump now and then; that is not a missing feature ------------------ #
+JUNK = "some console noise but no board here\n"
+
+
+def test_one_missed_read_does_not_claim_the_kernel_lacks_a_board():
+    """The reported bug: on a slower Linux host the board flashed "no board support" every ~20 s
+    while working perfectly in between. One dump that did not finish inside the agent's wait was
+    being reported as a permanent statement about the kernel."""
+    w = Window()
+    w.add(parse(D1), 100.0)
+    assert w.add(parse(JUNK), 101.0) is None             # skip the poll, do not paint it
+    assert w.board_supported, "one dropped dump must not read as a missing feature"
+
+
+def test_a_kernel_that_never_answers_does_get_the_rebuild_message():
+    """An image built before the board fails every single time, so it must still trip."""
+    w = Window()
+    for i in range(Window.MAX_MISSES):
+        w.add(parse(JUNK), 100.0 + i)
+    assert not w.board_supported
+    assert w.misses >= Window.MAX_MISSES
+
+
+def test_a_missed_read_is_not_adopted_as_the_baseline():
+    """The subtler half of the same bug. A failed read used to overwrite the baseline, so the next
+    good read was differenced against nothing — every counter looked like it had leapt from zero
+    and the board painted one enormous phantom burst right after each flash."""
+    w = Window()
+    w.add(parse(D1), 100.0)
+    w.add(parse(JUNK), 101.0)
+    f = w.add(parse(D2), 102.0)
+    assert f is not None
+    assert f.edges[("trap", "syscall")] == 1284          # spans the gap: 2284-1000, not 2284
+    assert f.blocks["bcache"] == 601
+
+
+def test_recovery_clears_the_miss_count():
+    w = Window()
+    w.add(parse(D1), 100.0)
+    w.add(parse(JUNK), 101.0)
+    w.add(parse(JUNK), 102.0)
+    assert w.misses == 2 and w.board_supported
+    w.add(parse(D2), 103.0)
+    assert w.misses == 0                                 # a good read forgives the run
+
+
+def test_hottest_edge_and_empty_safety():
+    w = Window()
+    w.add(parse(D1), 100.0)
+    f = w.add(parse(D2), 110.0)
+    assert f.hottest_edge()[0] == ("trap", "syscall")
+    assert Frame().hottest_edge() == ((None, None), 0)
+    assert Frame().busiest == ""
