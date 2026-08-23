@@ -16,6 +16,8 @@ So these tests parse the document, and separately look for duplicate service-lev
 duplicate check matters on its own because PyYAML silently accepts duplicates (last wins) while
 Docker rejects them, so `yaml.safe_load` alone would have stayed green through the bug.
 """
+from pathlib import Path
+
 import pytest
 
 yaml = pytest.importorskip("yaml")
@@ -79,6 +81,34 @@ def test_compose_parses_and_has_no_duplicate_keys(shape, internet):
     dups = _duplicate_keys(txt)
     assert not dups, f"{shape}: duplicate service keys -> {dups}"
     yaml.safe_load(txt)
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_the_written_port_map_agrees_with_the_published_ports(shape, tmp_path):
+    """gini-terminals.json is the ONLY way the Terminal panel learns a container's port — fabric
+    elements are emitted as raw compose lines, so there is no `ports` list for the UI to read back.
+
+    This test exists because the file silently stopped being written: _compose built the map
+    internally and threw it away, so every element had a live ttyd on a published port while the
+    panel reported "nothing is running" forever. Nothing else in the suite noticed — the compose
+    was valid, the ports were right, the panel's own tests passed against a hand-written map. Only
+    comparing the two artefacts catches it.
+    """
+    import json
+    from gini.services.orchestrator import TTYD_PORT, TERMINALS_FILE, write_project
+    cfg = RuntimeCompiler().compile(_topo(**SHAPES[shape]))
+    doc = yaml.safe_load(_compose(cfg))
+    published = {name: int(str(p).split(":")[1])
+                 for name, svc in (doc.get("services") or {}).items()
+                 for p in ((svc or {}).get("ports") or []) if str(p).endswith(f":{TTYD_PORT}")}
+
+    work = write_project(cfg, str(tmp_path), str(tmp_path))
+    written = json.loads((Path(work) / TERMINALS_FILE).read_text())
+
+    assert bool(written) == bool(published), (
+        f"{shape}: compose published {len(published)} terminals but the map holds {len(written)}")
+    assert {k: v["port"] for k, v in written.items()} == published, (
+        f"{shape}: the map and the compose file disagree about ports")
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))

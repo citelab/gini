@@ -175,6 +175,15 @@ TTYD_HOST_BASE = 37600
 # that list.
 TERMINALS_FILE = "gini-terminals.json"
 
+# element name -> {"port", "cmd"}, refreshed by every _compose(). Module level because _compose
+# returns a string and has nowhere else to put it, while write_project needs it immediately
+# afterwards; one write per Run, on one thread, so there is no sharing hazard.
+#
+# Without this the map is built inside _compose and thrown away, TERMINALS_FILE is never written,
+# and the Terminal panel reports "nothing is running" forever — with the containers up and their
+# ttyd ports published. Nothing else notices, which is exactly why it needs a test.
+_LAST_TERMINALS: dict = {}
+
 _TTYD_STAGE = f"""FROM alpine:3.20 AS ttyd
 RUN apk add --no-cache curl \\
  && curl -fsSL -o /ttyd "https://github.com/tsl0922/ttyd/releases/download/{_TTYD_VER}/ttyd.$(uname -m)" \\
@@ -192,9 +201,18 @@ def _ttyd_layers() -> str:
     is what lets routers and OVS switches share the gRouter image and still front different
     things — the value comes from compose, per element, not from the image.
     """
+    # The double quotes around the expansion are PLAIN, not backslash-escaped. `\"` is not a
+    # portable printf escape: GNU coreutils printf quietly turns it into `"`, but the printf a
+    # Dockerfile RUN actually uses is the shell's BUILTIN (busybox ash on Alpine, dash on Debian)
+    # and that one emits the backslash literally. The launcher then read
+    #     ttyd ... /bin/sh -c \"${TTYD_CMD:-exec /bin/sh}\"
+    # so ttyd received `"exec` and `/bin/sh"` as separate words and every terminal died with
+    #     "/bin/sh": line 0: syntax error: unterminated quoted string
+    # Plain quotes are safe here because the whole format string is already inside the RUN's
+    # single quotes, which is also what the hand-written grouter/sdn Dockerfiles do.
     script = (r"#!/bin/sh\n"
               r"exec /usr/local/bin/ttyd -W -p %d -i 0.0.0.0 "
-              r"/bin/sh -c \"${TTYD_CMD:-exec /bin/sh}\"\n") % TTYD_PORT
+              r'/bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n') % TTYD_PORT
     return ("COPY --from=ttyd /ttyd /usr/local/bin/ttyd\n"
             f"RUN printf '{script}' > /usr/local/bin/gini-term "
             "&& chmod +x /usr/local/bin/gini-term\n")
@@ -716,6 +734,10 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
         (work / "k8s" / k.svc).mkdir(parents=True, exist_ok=True)
         _put(work / "k8s" / k.svc / "manifests.yaml", k.manifests or "")
     _put(work / "docker-compose.yml", _compose(config, auto_internet, laptop_id))
+    # The element -> terminal-port map, written AFTER _compose has populated it. Fabric elements
+    # are emitted as raw compose lines rather than ServiceSpecs, so the UI has no `ports` list to
+    # read back; this file is that list.
+    _put(work / TERMINALS_FILE, json.dumps(_LAST_TERMINALS, indent=2, sort_keys=True))
     return work
 
 
@@ -825,8 +847,15 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
     # `tun` links are pure userspace UDP, so no NET_ADMIN / /dev/net/tun needed.
     for r in rt["routers"]:
         # A router's terminal fronts the gRouter CLI, not a shell — that is what a student came
-        # for. `grconsole` exits back into the container shell if they quit it.
-        term = _term_port(r["name"], "exec python3 /build/grouter-build/grconsole.py")
+        # for. grconsole is a CLIENT of the running daemon and needs the control socket path:
+        # <confdir>/<name>.ctl, and the image sets GINI_HOME=/run. Without the argument it prints
+        # its usage to stderr and exits 2, so the tab showed "usage: grconsole.py <socket>" and
+        # then ttyd's "Press Enter to Reconnect". Same form the external-terminal button uses.
+        # No `exec`: when the student quits the CLI they land in a shell in the router's own
+        # container rather than having the session die under them.
+        term = _term_port(r["name"],
+                          f"python3 /build/grouter-build/grconsole.py /run/{r['name']}.ctl; "
+                          f"exec /bin/sh")
         lines += [
             f"  {r['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -1020,6 +1049,8 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             pubs.append(f'      - "{m["novnc_port"]}:6080"')
         lines += ["    ports:", *pubs]
         lines += _cpu_limit_lines(m.get("cpus"))
+    _LAST_TERMINALS.clear()                  # hand the port map to write_project
+    _LAST_TERMINALS.update(_term)
     return "\n".join(_cap_service_logs(lines)) + "\n"
 
 
