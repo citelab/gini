@@ -1194,7 +1194,45 @@ class CanvasScene(QGraphicsScene):
                 return e
         return None
 
+    def _prune_dead(self) -> None:
+        """Drop tracked items whose C++ object Qt has already deleted.
+
+        Python dict membership and Qt object lifetime are INDEPENDENT: an item can be destroyed
+        underneath us (a scene clear, a parent going away, deleteLater) while our wrapper is still
+        sitting in self.nodes, and the next attribute access on it raises
+
+            RuntimeError: Internal C++ object (NodeItem) already deleted.
+
+        That was reaching the user as a bare traceback out of a bus handler, which also stopped
+        every later slot on that signal from running — so an overlay stayed on screen with no
+        explanation. Pruning makes the state converge instead: whatever went wrong, the next clear
+        is clean.
+
+        The log line is deliberate and names the element. This is a GUARD, not a root-cause fix —
+        the path that orphans the item has not been reproduced, and that message is the evidence
+        needed to find it.
+        """
+        for name, book in (("node", self.nodes), ("edge", self.edges), ("group", self.groups)):
+            for key, item in list(book.items()):
+                try:
+                    item.opacity()                     # cheapest call that touches the C++ object
+                except RuntimeError:
+                    book.pop(key, None)
+                    self.ctx.bus.log.emit(
+                        "error", f"canvas: dropped a deleted {name} still tracked as {key} — "
+                                 f"please report this with what you had just done")
+        for attr in ("_spotlit", "_highlit", "_callouts"):
+            live = []
+            for item in getattr(self, attr, []):
+                try:
+                    item.opacity()
+                    live.append(item)
+                except RuntimeError:
+                    pass
+            setattr(self, attr, live)
+
     def _on_clear_stage(self) -> None:
+        self._prune_dead()                             # never raise out of a bus handler
         for n in self._spotlit:
             n.set_spotlight(False)
         for n in self._highlit:

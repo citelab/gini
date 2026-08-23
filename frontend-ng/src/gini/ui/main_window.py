@@ -3268,7 +3268,12 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"{dev.name}: no desktop console — is it running as a Desktop (gui) host?",
                          "info")
             return
-        url = f"http://localhost:{port}/vnc.html?autoconnect=1&resize=remote"
+        # resize=scale, not remote: `remote` asks the VNC server to change the framebuffer size to
+        # match the window, and x11vnc serves a fixed Xvfb screen, so it refuses every time —
+        # "Server did not accept the resize request: Resize is administratively prohibited" on the
+        # console, once per connect. `scale` fits the same framebuffer to the window client-side,
+        # which is what we actually wanted.
+        url = f"http://localhost:{port}/vnc.html?autoconnect=1&resize=scale"
         try:
             from .zoo_lab import ZooLab
         except Exception as e:                    # QtWebEngine missing -> browser fallback

@@ -1190,7 +1190,10 @@ class RuntimeCompiler:
                 command=[], env=env, privileged=needs_priv,
                 # the noVNC web console (the Zoo Lab embeds this) + the raw VNC port.
                 ports=[{"container": 6080, "host": host_port, "label": "screen",
-                        "web": True, "path": "/vnc.html?autoconnect=1&resize=remote"},
+                        # resize=scale: the guest's framebuffer is fixed, so asking the server to
+                        # resize it (resize=remote) is refused on every connect — "Resize is
+                        # administratively prohibited". Scaling fits it to the window client-side.
+                        "web": True, "path": "/vnc.html?autoconnect=1&resize=scale"},
                        {"container": 5900, "host": host_port + 1, "label": "vnc",
                         "web": False, "path": ""}],
                 volumes=volumes, cpus=_cpus_for(d), networks=["gini"]))
