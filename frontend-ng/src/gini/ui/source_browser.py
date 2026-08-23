@@ -112,6 +112,31 @@ class LuaHighlighter(QSyntaxHighlighter):
             self.setFormat(m.start(), len(text) - m.start(), self._f_comment)
 
 
+# The jump list carries two completely different payloads: a LINE to scroll to (kernel source)
+# and a FILE PATH to open (router Lua modules). They used to share Qt.UserRole and be told apart
+# by a `_mode` flag on the widget — which crashed, because the flag and the list contents can
+# disagree:
+#
+#   ValueError: invalid literal for int() with base 10:
+#               '/Users/…/.gini/scripts/rip_reference.lua'
+#
+# `show_none()` sets the mode and THEN clears the list, and QListWidget reassigns "current" to
+# surviving rows as it removes them — so currentItemChanged fires with path-bearing items while
+# the mode already says "none". `show_block()` has the same shape, and worse: its load is async,
+# so the stale list outlives the mode change until the reply arrives.
+#
+# So the ITEM says what it is. No flag to fall out of step with the list.
+ROLE_KIND = Qt.UserRole          # "line" | "path"
+ROLE_VALUE = Qt.UserRole + 1     # int line number, or str path
+
+
+def _jump_item(label: str, kind: str, value) -> "QListWidgetItem":
+    it = QListWidgetItem(label)
+    it.setData(ROLE_KIND, kind)
+    it.setData(ROLE_VALUE, value)
+    return it
+
+
 class SourceBrowser(QWidget):
     """Read-only kernel source with a jump list. Fetches off the GUI thread."""
 
@@ -235,9 +260,7 @@ class SourceBrowser(QWidget):
         self._jump.blockSignals(True)
         self._jump.clear()
         for m in mods:
-            it = QListWidgetItem(m.label)
-            it.setData(Qt.UserRole, str(m.path))
-            self._jump.addItem(it)
+            self._jump.addItem(_jump_item(m.label, "path", str(m.path)))
         self._jump.blockSignals(False)
 
         if not mods:
@@ -273,7 +296,9 @@ class SourceBrowser(QWidget):
         self._block = ""
         self._set_lua_highlight(False)
         self._files.setVisible(False)
+        self._jump.blockSignals(True)
         self._jump.clear()
+        self._jump.blockSignals(False)
         self._view.setPlainText("")
         self._title.setText(f"GINI Source  ·  {what}" if what else "GINI Source")
         self._sub.setText(
@@ -330,7 +355,9 @@ class SourceBrowser(QWidget):
     def _on_loaded(self, rel: str, text: str) -> None:
         sf = parse_source(rel, text)
         self._sf = sf
+        self._jump.blockSignals(True)
         self._jump.clear()
+        self._jump.blockSignals(False)
         if not sf.ok:
             self._sub.setText(sf.error or "could not read that file")
             self._view.setPlainText("")
@@ -342,19 +369,25 @@ class SourceBrowser(QWidget):
             + (f"{probed} entry points the board counts" if probed
                else f"{len(sf.entries)} functions (no board probes in this file)"))
         for e in sf.entries:
-            it = QListWidgetItem(e.label)
-            it.setData(Qt.UserRole, e.line)
-            self._jump.addItem(it)
+            self._jump.addItem(_jump_item(e.label, "line", e.line))
 
     def _on_jump(self, item) -> None:
         if item is None:
             return
-        if self._mode == "scripts":          # the list holds file paths, not line numbers
-            path = item.data(Qt.UserRole)
-            if path:
-                self._open_script(str(path))
+        # Dispatch on what the ITEM carries. A `_mode` check here was the crash: the flag and the
+        # list contents can disagree while a clear is in flight or an async load is pending.
+        kind = item.data(ROLE_KIND)
+        value = item.data(ROLE_VALUE)
+        if kind == "path":
+            if value:
+                self._open_script(str(value))
             return
-        line = int(item.data(Qt.UserRole) or 0)
+        if kind != "line":                   # an item from some future mode: ignore, never crash
+            return
+        try:
+            line = int(value or 0)
+        except (TypeError, ValueError):
+            return
         if line <= 0:
             return
         doc = self._view.document()

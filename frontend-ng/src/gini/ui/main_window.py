@@ -190,8 +190,12 @@ class MainWindow(QMainWindow):
         self._make_docks()
         from PySide6.QtWidgets import QApplication
         _app = QApplication.instance()
-        if _app is not None:                 # backstop so ⌘Q / app-menu Quit is blocked while running
-            _app.installEventFilter(self)
+        if _app is not None:
+            # Backstop so ⌘Q / app-menu Quit is blocked while running. A CALLBACK on the
+            # application, never an application-wide event filter: the filter form tapped every
+            # event for every QObject and segfaulted the moment the mouse crossed the OS Zoo /
+            # Desktop screen's embedded QWebEngineView. See ui/app.py for the crash report.
+            _app.quit_guard = self._quit_blocked
         self._make_statusbar()
         self._wire_llm()
 
@@ -1371,14 +1375,17 @@ class MainWindow(QMainWindow):
         drain()
         super().closeEvent(e)
 
-    def eventFilter(self, obj, event):       # noqa: N802
-        # Backstop for macOS ⌘Q / the app-menu Quit, which can bypass closeEvent: block the app-level
-        # Quit while a topology is running (the window close-button path is handled by closeEvent).
-        from PySide6.QtCore import QEvent
-        if event.type() == QEvent.Type.Quit and self._running:
+    def _quit_blocked(self) -> bool:
+        """Backstop for macOS ⌘Q / the app-menu Quit, which can bypass closeEvent: refuse the
+        application-level Quit while a topology is running. (The window close-button path is
+        handled by closeEvent.) True = consume the quit.
+
+        Called by GiniApplication.event(). Deliberately NOT an eventFilter — see ui/app.py.
+        """
+        if self._running:
             self.ctx.log("The topology is still running — press Stop before quitting.", "error")
-            return True                      # consume the quit
-        return super().eventFilter(obj, event)
+            return True
+        return False
 
     def _toggle_routing_hud(self, checked: bool) -> None:
         """Show/hide the Routing HUD — a model view of the whole network's authentic routing state
@@ -1596,6 +1603,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, srcd)
         self.tabifyDockWidget(asst, srcd)
         self._source_dock = srcd
+
         insp.raise_()
 
         self.console = QPlainTextEdit()
