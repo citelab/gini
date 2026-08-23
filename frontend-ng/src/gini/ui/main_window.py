@@ -1604,6 +1604,27 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(asst, srcd)
         self._source_dock = srcd
 
+        # Terminal — a real shell (or the gRouter CLI) on whichever element is selected, served by
+        # ttyd from inside that element's own container. Follows the selection quietly; it never
+        # raises itself, so it cannot steal the pane from the Inspector mid-read. The view inside
+        # is built only when this tab is actually visible — see terminal_panel.py.
+        from .terminal_panel import TerminalPanel
+        self.terminal_panel = TerminalPanel(
+            self.theme,
+            workdir_fn=lambda: str(getattr(self, "_workdir", "") or ""),
+            running_fn=lambda: bool(getattr(self, "_running", False)),
+        )
+        termd = QDockWidget("Terminal", self)
+        termd.setObjectName("dock_terminal")
+        termd.setWidget(self.terminal_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, termd)
+        self.tabifyDockWidget(srcd, termd)
+        self._terminal_dock = termd
+        # selection_changed is Signal(object) — the device id ALONE. The panel needs the topology
+        # to resolve it, so it goes through an adapter rather than being connected directly.
+        # (TerminalPanel subscribes to theme.themeChanged itself, as SourceBrowser does.)
+        self.ctx.bus.selection_changed.connect(self._on_selection_terminal)
+
         insp.raise_()
 
         self.console = QPlainTextEdit()
@@ -2779,6 +2800,20 @@ class MainWindow(QMainWindow):
             dev = self.ctx.topology.devices.get(device_id)   # is ignored (mode stays on,
             if dev:                                           # exit via the Explain toggle)
                 a.explain_selected(dev.name)
+
+    def _on_selection_terminal(self, device_id) -> None:
+        """Point the Terminal tab at the selected element. Fills quietly — never raises the tab,
+        so it cannot steal the pane from the Inspector while a student is reading it.
+
+        Exists because bus.selection_changed is Signal(object) and carries the id alone; the panel
+        needs the topology to turn that into a service name."""
+        tp = getattr(self, "terminal_panel", None)
+        if tp is None:
+            return
+        try:
+            tp.on_selection(device_id, self.ctx.topology)
+        except Exception as e:                # noqa: BLE001 - a panel must never break selection
+            self.ctx.bus.log.emit("error", f"Terminal: {e}")
 
     def _on_selection_source(self, device_id) -> None:
         """Selecting a router points GINI Source at ~/.gini/scripts, the module directory

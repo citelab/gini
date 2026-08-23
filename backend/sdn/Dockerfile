@@ -2,6 +2,13 @@
 # Build once:  cd backend/sdn && docker build -t gini-pox .
 # POX (gar) officially supports Python 3.6–3.9; pin to 3.9 so its version check is happy
 # and we avoid subtle stdlib-removal breakage on newer interpreters.
+# ttyd — the terminal server the gBuilder Terminal tab connects to. One static musl binary,
+# fetched in a throwaway stage so this image needs no curl of its own.
+FROM alpine:3.20 AS ttyd
+RUN apk add --no-cache curl \
+ && curl -fsSL -o /ttyd "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.$(uname -m)" \
+ && chmod +x /ttyd
+
 FROM python:3.9-slim
 
 WORKDIR /opt
@@ -46,5 +53,10 @@ RUN sed -i 's/\r$//' /usr/local/bin/run-pox.sh && chmod +x /usr/local/bin/run-po
 ENV POX_APP=gini.samples.switch \
     POX_PORT=6633
 
-EXPOSE 6633
-CMD ["/usr/local/bin/run-pox.sh"]
+COPY --from=ttyd /ttyd /usr/local/bin/ttyd
+RUN printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
+    > /usr/local/bin/gini-term && chmod +x /usr/local/bin/gini-term
+
+EXPOSE 6633 7681
+# POX keeps PID 1 via exec; the terminal server is a background child that dies with it.
+CMD ["sh", "-c", "gini-term & exec /usr/local/bin/run-pox.sh"]
