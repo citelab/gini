@@ -20,6 +20,7 @@ from .theme import ThemeManager, icons
 
 
 class RouterLab(QDialog):
+    worker_done = Signal()      # one live-poll worker finished (queued to the GUI thread)
     flows_ready = Signal(list)  # parsed FlowEntry rows (from a worker thread)
     tablestats_ready = Signal(object)  # OpenFlow table-level stats dict
     routes_ready = Signal(list)  # parsed RouteEntry rows (from a worker thread)
@@ -132,6 +133,7 @@ class RouterLab(QDialog):
             root.addWidget(self._build_qos_panel())
             root.addWidget(foot_w)
 
+        self.worker_done.connect(self._round_worker_done)
         self._rebuild()
 
         # poll the live table (flows for an OVS, routes + queue stats otherwise) while open
@@ -357,10 +359,18 @@ class RouterLab(QDialog):
         lay.addWidget(tabs)
         return w
 
-    def _refresh_flows(self) -> None:
+    def _refresh_flows(self, counted: bool = True) -> None:
+        """Read the live OpenFlow table. Driven only by the poll timer, so `counted` defaults True.
+
+        `counted` marks this call as part of a timed poll round. Ad-hoc refreshes (after
+        applying a policy, say) pass False so they do not decrement the round's worker
+        count and let the next tick start while the round's own workers are still out.
+        """
         if self.query_fn is None:
             self._set_flow_status("not running — press Run, then reopen to see live flows")
             return
+        if not self._round_begin(1):
+            return                              # previous round still out; skip this tick
         import threading
         self._set_flow_status("reading flow table…")
         qf = self.query_fn
@@ -376,6 +386,8 @@ class RouterLab(QDialog):
                 pass
             self.flows_ready.emit(rows)
             self.tablestats_ready.emit(stats)
+            if counted:
+                self.worker_done.emit()
         threading.Thread(target=work, daemon=True).start()
 
     def _on_flows(self, rows: list) -> None:
@@ -453,7 +465,13 @@ class RouterLab(QDialog):
         lay.addWidget(self.route_table)
         return w
 
-    def _refresh_routes(self) -> None:
+    def _refresh_routes(self, counted: bool = False) -> None:
+        """Read the live route table.
+
+        `counted` marks this call as part of a timed poll round. Ad-hoc refreshes (after
+        applying a policy, say) pass False so they do not decrement the round's worker
+        count and let the next tick start while the round's own workers are still out.
+        """
         if self.query_fn is None:
             self._set_route_status("not running — press Run to see the live route table")
             return
@@ -471,6 +489,8 @@ class RouterLab(QDialog):
                 pass
             self.routes_ready.emit(rows)
             self.chain_ready.emit(chain)
+            if counted:
+                self.worker_done.emit()
         threading.Thread(target=work, daemon=True).start()
 
     def _on_routes(self, rows: list) -> None:
@@ -487,10 +507,48 @@ class RouterLab(QDialog):
             self.route_status.setText(text)
 
     # Traffic & QoS (classifier + weighted queues + scheduler) --------------
+    # -- live polling ------------------------------------------------------- #
+    # Every tick of the 2.5s timer fires SEVERAL `docker compose exec` calls — routes, the gpipe
+    # chain and queue stats for a router; three openflow queries for an OVS. Each one is a whole
+    # docker CLI invocation plus a round trip to the gRouter's control socket.
+    #
+    # On a fast machine a round finishes well inside the interval. On a slow one it does not, and
+    # without a guard the timer starts another round on top of the last: threads pile up
+    # unboundedly, every round re-sets the status to "reading…", and the spinner never clears —
+    # the Lab looks hung while the router is perfectly healthy. Worse, the pile-up is
+    # self-sustaining, because the extra execs are themselves what make each round slow.
+    #
+    # So: one round at a time, and if a round overruns the interval, back the interval off to fit.
+    MIN_POLL_MS = 2500
+    MAX_POLL_MS = 20000
+
+    def _round_begin(self, n: int) -> bool:
+        """Claim the poll for `n` workers. False if a round is still running."""
+        import time
+        if getattr(self, "_inflight", 0) > 0:
+            return False
+        self._inflight = n
+        self._round_started = time.monotonic()
+        return True
+
+    def _round_worker_done(self) -> None:
+        """One worker finished (queued to the GUI thread, so this is not a race)."""
+        import time
+        self._inflight = max(0, getattr(self, "_inflight", 0) - 1)
+        if self._inflight or not getattr(self, "_live_timer", None):
+            return
+        took_ms = (time.monotonic() - getattr(self, "_round_started", 0)) * 1000
+        # Leave the machine half the wall clock to itself rather than polling flat out.
+        want = int(min(self.MAX_POLL_MS, max(self.MIN_POLL_MS, took_ms * 2)))
+        if want != self._live_timer.interval():
+            self._live_timer.setInterval(want)
+
     def _refresh_router_live(self) -> None:
         """Live poll for the router/firewall face: routes and per-queue stats."""
-        self._refresh_routes()
-        self._refresh_qstats()
+        if not self._round_begin(2):
+            return                              # previous round still out; skip this tick
+        self._refresh_routes(counted=True)
+        self._refresh_qstats(counted=True)
 
     def _build_qos_panel(self) -> QWidget:
         t = self.theme.theme
@@ -580,7 +638,13 @@ class RouterLab(QDialog):
             self._set_qos_status("could not add class/queue")
         self._refresh_qstats()
 
-    def _refresh_qstats(self) -> None:
+    def _refresh_qstats(self, counted: bool = False) -> None:
+        """Read live per-queue stats.
+
+        `counted` marks this call as part of a timed poll round. Ad-hoc refreshes (after
+        applying a policy, say) pass False so they do not decrement the round's worker
+        count and let the next tick start while the round's own workers are still out.
+        """
         if self.query_fn is None:
             self._set_qos_status("not running — press Run to see live queue stats")
             return
@@ -595,6 +659,8 @@ class RouterLab(QDialog):
             except Exception:
                 pass
             self.qstats_ready.emit(payload)
+            if counted:
+                self.worker_done.emit()
         threading.Thread(target=work, daemon=True).start()
 
     def _on_qstats(self, payload) -> None:
