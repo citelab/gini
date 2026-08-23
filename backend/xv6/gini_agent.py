@@ -220,6 +220,52 @@ _SERIAL = SerialLink(SERIAL)
 
 
 # --------------------------------------------------------------------------- #
+# Kernel source, read-only — what the GINI Source tab browses.
+#
+# Serving from INSIDE the container is the whole point: /opt/xv6-riscv is the PATCHED tree this
+# kernel was compiled from, so a student who double-clicks `bcache` on the board sees
+#
+#     bread(uint dev, uint blockno)
+#     {
+#       GINI_SUB(GSUB_BCACHE);  // GINI-xv6: board probe bread
+#
+# and can see why the board knows what it knows. Shipping pristine xv6 from the repo would be
+# showing a different program than the one on screen.
+#
+# READ-ONLY, deliberately. Editing kernel source belongs to the shadow files, which have Load and
+# Revert and a workflow around them; a second, editable path into the same tree would be a good
+# way to leave a student with a kernel that will not build and no idea why.
+# --------------------------------------------------------------------------- #
+_SRC_ROOT = os.path.realpath(XV6_DIR)
+_SRC_SUFFIXES = (".c", ".h", ".S", ".ld", ".pl")
+_SRC_MAX = 512 * 1024
+
+
+def _read_source(query):
+    """Serve one file from the kernel tree. "Give me a file by name" is a path-traversal hole
+    unless it is nailed shut, so this resolves the real path and refuses anything that escapes
+    the tree — `..`, absolute paths and symlinks out all land outside _SRC_ROOT and are rejected
+    by the same check rather than by three separate ones."""
+    rel = (query.get("file") or [""])[0]
+    if not rel:
+        return "// no file requested"
+    target = os.path.realpath(os.path.join(_SRC_ROOT, rel))
+    if target != _SRC_ROOT and not target.startswith(_SRC_ROOT + os.sep):
+        return "// refused: outside the kernel tree"
+    if not target.endswith(_SRC_SUFFIXES):
+        return "// refused: not a source file"
+    try:
+        if os.path.getsize(target) > _SRC_MAX:
+            return "// refused: too large"
+        with open(target, "r", errors="replace") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return f"// not found: {rel}"
+    except OSError as e:
+        return f"// unreadable: {e}"
+
+
+# --------------------------------------------------------------------------- #
 # QEMU lifecycle — the agent owns QEMU so the Load loop can rebuild + relaunch it.
 # --------------------------------------------------------------------------- #
 def _qemu_cmd():
@@ -551,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x05"), ctype="text/plain")   # Ctrl-E -> gini_faultdump()
         elif path == "/locks":                        # Ctrl-L -> gini_lockdump() (contention)
             self._send(_SERIAL.dump(b"\x0c"), ctype="text/plain")
+        elif path == "/source":
+            self._send(_read_source(parse_qs(urlparse(self.path).query)), ctype="text/plain")
         elif path == "/traps":
             self._send(_SERIAL.dump(b"\x12"), ctype="text/plain")   # Ctrl-R -> gini_trapdump()
         elif path == "/board":                        # Ctrl-D -> gini_boarddump(): the kernel map

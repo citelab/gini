@@ -87,6 +87,24 @@ class SettingsDialog(QDialog):
                               "program launch is over in microseconds, so 1-5s keeps a single "
                               "launch legible instead of burying it."))
 
+        # A DIFFERENT axis from the window above, and worth keeping separate: the window is how
+        # much is on screen at once, this is how far back you can scrub to. Long recordings are
+        # cheap (a snapshot is only kept when something CHANGES) but the timeline gets denser, so
+        # aiming the playhead at a particular moment gets harder the further back it reaches.
+        self.os_scrub = QComboBox()
+        for _secs in (30, 60, 120, 300, 600):
+            self.os_scrub.addItem(f"{_secs} seconds" if _secs < 120 else f"{_secs // 60} minutes",
+                                  _secs)
+        _cur_scrub = int(getattr(settings, "os_hud_scrub_s", 120) or 120)
+        _k = self.os_scrub.findData(_cur_scrub)
+        self.os_scrub.setCurrentIndex(_k if _k >= 0 else 2)      # default 2 minutes
+        appf.addRow("OS HUD timeline", self.os_scrub)
+        appf.addRow("", _note("How far back the OS HUD's scrub timeline reaches. Kernel events "
+                              "happen in microseconds, so the HUD is a recorder first and "
+                              "scrubbing is the main way to read it. Longer keeps more to go back "
+                              "to; shorter makes the playhead easier to aim, because every tick "
+                              "on the timeline marks a moment something actually changed."))
+
         # --- Networking --------------------------------------------------- #
         netf = _page(tabs, "Networking")
         self.auto_internet = QCheckBox("Containers get internet automatically (default eth)")
@@ -241,6 +259,7 @@ class SettingsDialog(QDialog):
             "reduced_motion": self.reduced.isChecked(),
             "flow_hud_window_s": int(self.flow_window.currentData() or 60),
             "os_hud_window_s": int(self.os_window.currentData() or 10),
+            "os_hud_scrub_s": int(self.os_scrub.currentData() or 120),
             "auto_internet": self.auto_internet.isChecked(),
             "autobuild_images": self.autobuild.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),

@@ -119,6 +119,7 @@ PERSISTED_KEYS = (
     "connector_style",                  # bent ↔ straight, toggled from the toolbar
     "flow_hud_window_s",                # Flow HUD scrolling window (seconds)
     "os_hud_window_s",                  # OS HUD event window (seconds)
+    "os_hud_scrub_s",                   # OS HUD scrub timeline reach (seconds)
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
     "show_help_on_launch",
     "tc_url", "tc_course", "tc_student", "tc_token",   # Teaching Center enrolment

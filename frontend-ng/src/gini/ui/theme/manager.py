@@ -262,18 +262,59 @@ class ThemeManager(QObject):
         self.font_scale = font_scale or 1.0
         # Fusion respects QPalette + QSS identically on macOS/Linux/Windows, so the
         # dark theme reaches every widget (the native macOS style does not).
-        self._app.setStyle("Fusion")
+        #
+        # Guarded for the same reason as apply(): setStyle re-polishes every live widget, and a
+        # ThemeManager is built per MainWindow, so re-asserting a style that is already active
+        # costs O(live widgets) for no effect at all — it profiled at 2.6 s of a 3.3 s window
+        # construction once a dozen windows existed.
+        #
+        # The flag lives on the APPLICATION rather than on self, because each MainWindow builds
+        # its own ThemeManager and a per-manager flag would miss every time. Do NOT test
+        # `style().objectName()`: it does not report "fusion" after setStyle("Fusion"), so that
+        # check silently never matches and the guard does nothing.
+        if not getattr(self._app, "_gini_fusion", False):
+            self._app.setStyle("Fusion")
+            self._app._gini_fusion = True
 
     def apply(self) -> None:
+        """Push the theme onto the application.
+
+        RE-SETTING AN UNCHANGED STYLESHEET IS NOT FREE. `QApplication.setStyleSheet` makes Qt
+        re-polish EVERY live widget in the process, whether or not the sheet actually changed.
+        Since `apply()` runs during every MainWindow construction, opening the Nth window
+        re-styles all N-1 that came before it — quadratic, and very visible once a few windows
+        exist:
+
+            window  1   0.14 s     284 live widgets
+            window  5   1.72 s   1,424
+            window 15  15.20 s   4,274
+
+        Qt applies the application stylesheet to newly created widgets automatically, so a window
+        opened later inherits it without any re-set. Skipping the redundant assignment is
+        therefore invisible to behaviour and removes the re-polish entirely. The guard is on the
+        rendered QSS string, not on the theme name, so a font-scale change still gets through.
+        """
         global _ACTIVE_SCALE
         _ACTIVE_SCALE = self.font_scale          # publish for custom-painted widgets (canvas, etc.)
         # Scale the app font too, so widgets that read the application font (and any not pinned by
         # the stylesheet) grow with the setting, not just the QSS-styled ones.
+        # setFont and setPalette walk every widget too, for the same reason — so they get the same
+        # guard. Skipping setStyleSheet alone took window 15 from 15.2 s to 2.9 s; with all three
+        # guarded it stays flat.
         f = self._app.font()
-        f.setPointSizeF(10.0 * self.font_scale)
-        self._app.setFont(f)
-        self._app.setPalette(build_palette(self.theme))
-        self._app.setStyleSheet(build_qss(self.theme, self.font_scale))
+        if abs(f.pointSizeF() - 10.0 * self.font_scale) > 0.01:
+            f.setPointSizeF(10.0 * self.font_scale)
+            self._app.setFont(f)
+        pal = build_palette(self.theme)
+        if pal != self._app.palette():
+            self._app.setPalette(pal)
+        qss = build_qss(self.theme, self.font_scale)
+        if qss != getattr(self._app, "_gini_qss", None):
+            self._app.setStyleSheet(qss)
+            # Cached on the APPLICATION, not on self: several ThemeManagers can exist over one
+            # app (every MainWindow builds its own), and a per-manager cache would miss every
+            # time and defeat the point.
+            self._app._gini_qss = qss
 
     def set_theme(self, name: str) -> None:
         self.theme = get_theme(name)

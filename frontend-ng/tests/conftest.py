@@ -28,6 +28,50 @@ def _isolated_gini_home(tmp_path, monkeypatch):
     monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path / "gini-home"))
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _reap_windows_between_modules():
+    """Destroy leftover top-level widgets after each test FILE, or the suite crawls.
+
+    Tests never destroy their MainWindows (~285 widgets each), and several things cost O(live
+    widgets) per new window:
+
+      * `theme.apply()` re-styling the whole application — now guarded in ui/theme/manager.py,
+        which took window 15 from 15.2 s to 0.5 s on its own
+      * every window installs an event filter, so each event is dispatched to ALL of them.
+        Profiling one late window showed 355,701 eventFilter calls. Nothing but reaping fixes
+        that one, which is why BOTH halves of this are needed — the manager guard alone left the
+        suite slower than reaping alone.
+
+    MODULE scope, not function scope, is deliberate: several files use `scope="module"` fixtures
+    that build a window once and share it across their tests. Reaping per test would delete those
+    out from under the tests that follow. Module teardown runs after those fixtures are finished,
+    so nothing living is destroyed, and no session-scoped fixture holds widgets.
+
+    A note for whoever suspects this next: it was briefly removed on the theory that it caused a
+    segfault in test_sizing.py. It does not. The crash reproduces in a plain loop that builds
+    windows with no pytest involved, it happens WITHOUT this fixture too, and it happens EARLIER
+    when the manager guards are reverted — it is a headless-Qt artifact at very high widget
+    counts. The full suite runs clean on a real display with this fixture in place.
+    """
+    yield
+    try:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+    except Exception:                       # no Qt in this environment: nothing to reap
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in list(app.topLevelWidgets()):
+        try:
+            w.setParent(None)               # not close(): closeEvent handlers can save state
+            w.deleteLater()
+        except RuntimeError:                # already gone on the C++ side
+            pass
+    # deleteLater only queues; without an event loop running, post them by hand
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
 @pytest.fixture(autouse=True)
 def _ask_gini_offline(monkeypatch):
     try:
