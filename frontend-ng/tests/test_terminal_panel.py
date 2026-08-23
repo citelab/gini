@@ -282,6 +282,67 @@ def test_a_listening_port_gets_a_view(app, theme, tmp_path):
         srv.close()
 
 
+def test_switching_elements_reuses_one_render_process(app, theme, tmp_path):
+    """A QWebEngineView is a Chromium process, and spawning one is expensive enough to be felt.
+
+    Double-clicking a router changes the selection AND opens the Router Lab. Rebuilding the view
+    on every selection put a process spawn on top of the Lab's three `docker compose exec` calls,
+    and on a slow Linux box the two starved each other — the Lab sat spinning. The natural
+    experiment that proved it: the Machine Lab on an xv6 element pops up instantly, and xv6 is on
+    this panel's exclusion list, so it builds no view at all.
+
+    Reuse is safe now that sessions live in tmux inside the container: navigating replaces the
+    page, so no element's shell shows under another's name, and the element navigated away from
+    keeps running.
+    """
+    if not _has_webengine():
+        pytest.skip("QtWebEngine not installed — no view is ever built here")
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        p = _panel(theme, _project(tmp_path, {"a": {"port": port, "cmd": ""},
+                                              "b": {"port": port, "cmd": ""}}))
+        p.show()
+        p.show_device("a", "A")
+        assert _spin(lambda: p._view is not None)
+        first = p._view
+        for name in ("b", "a", "b", "a"):
+            p.show_device(name, name.upper())
+            _spin(lambda: False, 0.05)
+        assert p._view is first, "rebuilt the render process instead of navigating"
+    finally:
+        srv.close()
+
+
+def test_deselecting_parks_the_view_rather_than_destroying_it(app, theme, tmp_path):
+    """Clicking empty canvas clears the selection. Tearing the process down there and rebuilding
+    it on the next click is the same churn by another route."""
+    if not _has_webengine():
+        pytest.skip("QtWebEngine not installed — no view is ever built here")
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        p = _panel(theme, _project(tmp_path, {"a": {"port": port, "cmd": ""}}))
+        p.show()
+        p.show_device("a", "A")
+        assert _spin(lambda: p._view is not None)
+        first = p._view
+        p.show_none()
+        assert p._view is first, "destroyed the render process on a deselect"
+        assert not first.isVisible(), "left a stale terminal on screen with nothing selected"
+        p.show_device("a", "A")
+        _spin(lambda: p._view.isVisible(), 1.0)
+        assert p._view is first and p._view.isVisible(), "did not bring the parked view back"
+    finally:
+        srv.close()
+
+
 def test_no_application_wide_event_filter_creeps_back_in(app, theme, tmp_path):
     """This panel was blamed for a segfault that was really MainWindow's app-wide event filter:
     PySide cannot wrap the QtQuick objects inside a QWebEngineView, so hovering ANY web view

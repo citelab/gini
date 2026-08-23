@@ -143,13 +143,23 @@ class TerminalPanel(QWidget):
         self._name = ""
         self._pending = None
         self._drop_probe()                 # nothing to wait for any more
-        self._drop_view()
+        # HIDE the view, do not destroy it. Clicking empty canvas clears the selection, and
+        # tearing down a Chromium render process every time the student deselects — then building
+        # a new one the moment they select again — is exactly the churn that made the Router Lab
+        # crawl. The page keeps its socket to a terminal that is still there.
+        self._park_view()
         self._title.setText(f"Terminal  ·  {what}" if what else "Terminal")
         self._sub.setText(why or "Select a machine, router, switch or controller to open a "
                                  "terminal on it.")
 
     # -- internals ---------------------------------------------------------- #
+    def _park_view(self) -> None:
+        """Hide the view without destroying it — see show_none()."""
+        if self._view is not None:
+            self._view.hide()
+
     def _drop_view(self) -> None:
+        """Destroy the render process. Only for teardown; NOT for switching elements."""
         if self._view is not None:
             self._view.setParent(None)
             self._view.deleteLater()
@@ -163,10 +173,17 @@ class TerminalPanel(QWidget):
         self._title.setText(f"Terminal  ·  {name}")
         self._sub.setText(f"{kind}  ·  {url}")
         self._pending = (url, name, cmd)
-        self._drop_view()                  # the previous element's shell must not linger
-        # Cancel any probe still waiting on the PREVIOUS element, or it would fire later and build
-        # that element's terminal under this element's name.
-        self._drop_probe()
+        # The view is REUSED, not rebuilt. A QWebEngineView is a Chromium render process, and
+        # spawning one is expensive enough to be felt: double-clicking a router changes the
+        # selection AND opens the Router Lab, so on a slow machine the process spawn landed on top
+        # of the Lab's `docker compose exec` calls and the two starved each other — the Lab sat
+        # spinning while a terminal nobody had asked for was being built.
+        #
+        # Rebuilding was originally there so one element's live shell could not linger under
+        # another element's name. tmux made that moot: the session lives in the container, so
+        # navigating this view to the new URL both shows the right element AND leaves the previous
+        # element's work running, ready to re-attach.
+        self._drop_probe()                 # a probe for the PREVIOUS element must not fire later
         if self.isVisible():               # tab is on top: build it now
             self._realise()
 
@@ -175,8 +192,17 @@ class TerminalPanel(QWidget):
         super().showEvent(e)
         self._realise()
 
+    def _showing(self) -> str:
+        """URL the live view is already on, or ""."""
+        if self._view is None:
+            return ""
+        try:
+            return self._view.url().toString()
+        except Exception:                      # noqa: BLE001 - a torn-down view has no url
+            return ""
+
     def _realise(self) -> None:
-        """Wait for the container's ttyd to be listening, THEN construct the view.
+        """Wait for the container's ttyd to be listening, THEN point the view at it.
 
         `docker compose up` returns as soon as the containers are created; ttyd inside them binds
         its port a moment later, and later still on a cold build or a slow machine. Loading the
@@ -188,8 +214,11 @@ class TerminalPanel(QWidget):
         loadFinished to report — the failure is a fetch INSIDE the page. Hence a port probe up
         front rather than a reload-on-error.
         """
-        if self._pending is None or self._view is not None or self._probe is not None:
+        if self._pending is None or self._probe is not None:
             return
+        if self._showing() == self._pending[0]:
+            self._view.show()                  # may have been parked by a deselect
+            return                             # already on this element: no navigation needed
         url, _name, cmd = self._pending
         kind = "router CLI" if "grconsole" in cmd else "shell"
         try:
@@ -242,16 +271,28 @@ class TerminalPanel(QWidget):
         QTimer.singleShot(self.PROBE_MS, self._probe_port)
 
     def _build_view(self) -> None:
-        if self._pending is None or self._view is not None:
+        """Point the view at the pending element, creating it only the first time.
+
+        ONE render process for the whole panel. Spawning a QWebEngineView is not cheap — it is a
+        Chromium process — and doing it per selection was heavy enough to be felt: double-clicking
+        a router changes the selection AND opens the Router Lab, so the spawn landed on top of the
+        Lab's docker exec calls and left it spinning on a slow machine.
+
+        Navigating instead of rebuilding is safe now that sessions live in tmux inside the
+        container: the page is replaced, so no element's shell appears under another's name, and
+        the element we navigate AWAY from keeps running, ready to re-attach.
+        """
+        if self._pending is None:
             return
         from PySide6.QtCore import QUrl
         from PySide6.QtWebEngineWidgets import QWebEngineView
         url, _name, cmd = self._pending
         kind = "router CLI" if "grconsole" in cmd else "shell"
         self._sub.setText(f"{kind}  ·  {url}")    # clear any "waiting…" line
-        # Rebuilt per element rather than reused: a web view keeps its page's state, and carrying
-        # one element's live shell over to another element's tab would be worse than a reload.
-        # The SESSION survives anyway — it is a tmux session in the container, not in this view.
+        if self._view is not None:                # reuse: just navigate
+            self._view.setUrl(QUrl(url))
+            self._view.show()                     # may have been parked by a deselect
+            return
         self._view = QWebEngineView(self._holder)
         self._holder_lay.addWidget(self._view)
         self._view.setUrl(QUrl(url))
