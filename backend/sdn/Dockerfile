@@ -54,7 +54,11 @@ ENV POX_APP=gini.samples.switch \
     POX_PORT=6633
 
 COPY --from=ttyd /ttyd /usr/local/bin/ttyd
-RUN printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
+# tmux keeps a Terminal session alive across tab switches — see the machine images.
+RUN apt-get update && apt-get install -y --no-install-recommends tmux \
+ && rm -rf /var/lib/apt/lists/*
+RUN printf 'set -g status off\nset -g history-limit 10000\nset -g mouse on\n' > /etc/tmux.conf \
+ && printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
     > /usr/local/bin/gini-term && chmod +x /usr/local/bin/gini-term
 
 EXPOSE 6633 7681

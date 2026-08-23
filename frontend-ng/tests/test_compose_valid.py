@@ -137,10 +137,16 @@ def test_terminals_are_loopback_only():
 
 def test_a_router_fronts_its_cli_and_a_host_gets_a_shell():
     """Routers and OVS switches share the gRouter image, so what the terminal FRONTS has to come
-    from compose rather than from the image."""
+    from compose rather than from the image.
+
+    A host used to be identified by the ABSENCE of TTYD_CMD, falling through to the launcher's
+    default shell. That stopped being true when every element gained a tmux command for session
+    persistence, so the distinction is now what the command RUNS: grconsole, or just a shell.
+    """
     doc = yaml.safe_load(_compose(RuntimeCompiler().compile(_topo(sdn=True))))
-    env = {n: (s.get("environment") or {}) for n, s in doc["services"].items()}
+    env = {n: ((s or {}).get("environment") or {}) for n, s in (doc.get("services") or {}).items()}
     routers = [n for n, e in env.items() if "grconsole" in str(e.get("TTYD_CMD", ""))]
     assert routers, "no router fronts the gRouter CLI"
-    hosts = [n for n, e in env.items() if n.startswith("m") and "TTYD_CMD" not in e]
-    assert hosts, "a host should get a plain shell (no TTYD_CMD)"
+    hosts = [n for n, e in env.items()
+             if n.startswith("m") and "grconsole" not in str(e.get("TTYD_CMD", ""))]
+    assert hosts, "a host should get a shell, not the router CLI"

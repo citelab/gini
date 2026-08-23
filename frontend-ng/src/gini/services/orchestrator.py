@@ -175,6 +175,11 @@ TTYD_HOST_BASE = 37600
 # that list.
 TERMINALS_FILE = "gini-terminals.json"
 
+# One tmux session per container, so re-opening an element's Terminal re-attaches to the work
+# already in flight rather than starting a fresh shell. The name is fixed because each container
+# runs its own tmux server — there is nothing to collide with.
+TMUX_SESSION = "gini"
+
 # element name -> {"port", "cmd"}, refreshed by every _compose(). Module level because _compose
 # returns a string and has nowhere else to put it, while write_project needs it immediately
 # afterwards; one write per Run, on one thread, so there is no sharing hazard.
@@ -213,9 +218,35 @@ def _ttyd_layers() -> str:
     script = (r"#!/bin/sh\n"
               r"exec /usr/local/bin/ttyd -W -p %d -i 0.0.0.0 "
               r'/bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n') % TTYD_PORT
+    # tmux is what makes a session OUTLIVE its browser tab: leave a ping running on M1, look at
+    # M2, come back, and the ping is still there with its scrollback. Without it the view is torn
+    # down on every switch, the WebSocket closes, and ttyd's child dies with it.
+    #
+    # Status bar off: students are here to look at a shell, not to learn tmux, and a green bar
+    # across the bottom reads as part of GINI rather than part of the terminal. The prefix is left
+    # at the default — nothing in the labs asks them to use it.
+    conf = r"set -g status off\nset -g history-limit 10000\nset -g mouse on\n"
     return ("COPY --from=ttyd /ttyd /usr/local/bin/ttyd\n"
-            f"RUN printf '{script}' > /usr/local/bin/gini-term "
+            f"RUN printf '{conf}' > /etc/tmux.conf "
+            f"&& printf '{script}' > /usr/local/bin/gini-term "
             "&& chmod +x /usr/local/bin/gini-term\n")
+
+
+def _persist(cmd: str = "") -> str:
+    """A TTYD_CMD that re-attaches instead of starting over.
+
+    `new -A` is attach-or-create: the first connection starts the session, every later one joins
+    the SAME one. Plain `new` would silently start a second session per reconnect, which looks
+    identical on screen and loses the work — hence the test pinning `-A`.
+
+    Deliberately not `exec tmux`: if exec cannot find the binary the shell exits outright, so an
+    image built before tmux landed would serve a dead terminal. Written this way, an old image
+    prints tmux's "not found" and drops the student into a working shell — degraded, not broken.
+    Same reason the trailing shell is there: quitting tmux leaves you in the container rather than
+    killing the session under you.
+    """
+    inner = f' "{cmd}; exec /bin/sh"' if cmd else ""
+    return f"tmux new -A -s {TMUX_SESSION}{inner}; exec /bin/sh"
 
 
 def _with_ttyd(cmd: str) -> str:
@@ -230,7 +261,7 @@ def _with_ttyd(cmd: str) -> str:
 # telnetd — those are what made the old image huge, and they belong to the `full` toolkit.
 _MACHINE_TOOLS_LEAN = (
     "python3 iproute2 iputils busybox-extras tcpdump curl wget bind-tools "
-    "netcat-openbsd socat iperf3 nmap ethtool traceroute mtr bridge-utils iptables"
+    "netcat-openbsd socat iperf3 nmap ethtool traceroute mtr bridge-utils iptables tmux"
 )
 
 _DOCKERFILE_MACHINE_LEAN = f"""{_TTYD_STAGE}FROM alpine:3.20
@@ -246,7 +277,7 @@ MACHINE_BASE = "Debian (python:3.12-slim)"
 _MACHINE_TOOLS = (
     "iproute2 net-tools iputils-ping iputils-tracepath iputils-arping traceroute "
     "mtr-tiny dnsutils netcat-openbsd socat curl wget nmap tcpdump tshark iperf3 "
-    "ethtool bridge-utils telnet telnetd hping3 iptables procps nano less ca-certificates "
+    "ethtool bridge-utils telnet telnetd hping3 iptables procps nano less ca-certificates tmux "
     # services + tools the GINI book experiments stand up, so a topology runs them offline
     # (no in-container apt). DNS: bind9 (named). Mail: postfix + mailutils (the `mail` MUA).
     # Web caching: squid (forward proxy). Load balancing: haproxy. Security: dsniff
@@ -853,9 +884,8 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         # then ttyd's "Press Enter to Reconnect". Same form the external-terminal button uses.
         # No `exec`: when the student quits the CLI they land in a shell in the router's own
         # container rather than having the session die under them.
-        term = _term_port(r["name"],
-                          f"python3 /build/grouter-build/grconsole.py /run/{r['name']}.ctl; "
-                          f"exec /bin/sh")
+        term = _term_port(r["name"], _persist(
+            f"python3 /build/grouter-build/grconsole.py /run/{r['name']}.ctl"))
         lines += [
             f"  {r['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -872,7 +902,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
 
     # SDN controllers = POX (Python 3) containers, one per controller
     for c in rt["controllers"]:
-        term = _term_port(c["name"])            # a shell: POX itself owns the foreground
+        term = _term_port(c["name"], _persist())   # a shell: POX itself owns the foreground
         lines += [
             f"  {c['name']}:",
             f"    image: {POX_IMAGE}",
@@ -882,6 +912,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    environment:",
             f"      POX_APP: '{c['app']}'",
             f"      POX_PORT: '{c['port']}'",
+            *_term_env(c["name"]),
         ]
 
     # SDN switches = the real gRouter in OpenFlow mode (own container), pointed at
@@ -896,7 +927,8 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         depends = ([f"    depends_on: [{o['controller']}]"] if o.get("controller") else [])
         # Same image as a router, but a SHELL: on a switch the student wants ovs-style
         # inspection and the gRouter's `openflow …` CLI, not to be dropped straight into one.
-        term = _term_port(o["name"])
+        term = _term_port(o["name"], _persist())
+        env += _term_env(o["name"])       # AFTER _term_port: that call is what registers it
         lines += [
             f"  {o['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -1022,7 +1054,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         # tags a separate <project>-<service> image per host and walks the build for each.
         tk = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT)
         image, dockerfile = _MACHINE_IMAGE.get(tk, _MACHINE_IMAGE[MACHINE_LEAN])
-        term = _term_port(m["name"])            # a plain shell — it is a host
+        term = _term_port(m["name"], _persist())   # a plain shell — it is a host
         lines += [
             f"  {m['name']}:",
             f"    hostname: {m.get('hostname', m['name'])}",   # `hostname` = the canvas label
@@ -1033,6 +1065,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             f"    networks: {nets}",
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
+            *_term_env(m["name"]),
         ]
         from ..app.paths import captures_dir, shared_dir
         # every station mounts ~/.gini/shared at /shared: students edit sources on the

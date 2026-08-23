@@ -66,8 +66,10 @@ FROM debian:bookworm-slim
 # runtime shared libs only (libreadline8 / libncurses6 / liblua5.4-0 — the -dev packages above
 # were build-time). If the router ever fails here with a missing .so, add the runtime lib, never
 # the -dev one.
+# tmux keeps a Terminal session alive across tab switches: leave a capture running here, look at
+# another element, come back to the same session rather than a fresh shell.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 iproute2 libreadline8 libncurses6 liblua5.4-0 \
+        python3 iproute2 libreadline8 libncurses6 liblua5.4-0 tmux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/local/bin/grouter /usr/local/bin/grouter
@@ -80,7 +82,8 @@ COPY --from=ttyd /ttyd /usr/local/bin/ttyd
 # What the terminal fronts is per-ELEMENT: this one image serves both gRouters and OVS switches,
 # and a student wants the router CLI on one and a shell on the other. TTYD_CMD carries that from
 # compose; it defaults to a shell so the terminal always works even if compose says nothing.
-RUN printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
+RUN printf 'set -g status off\nset -g history-limit 10000\nset -g mouse on\n' > /etc/tmux.conf \
+ && printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
     > /usr/local/bin/gini-term && chmod +x /usr/local/bin/gini-term
 
 WORKDIR /run

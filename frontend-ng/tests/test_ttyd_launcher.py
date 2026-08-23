@@ -51,10 +51,15 @@ def _images() -> dict:
 
 
 def _launcher(dockerfile: str) -> str:
-    """The gini-term script as the IMAGE BUILD would actually write it."""
-    m = re.search(r"RUN printf '(.*?)' *[\\\n>]", dockerfile, re.S)
-    assert m, "no `RUN printf '...' > gini-term` layer found"
-    return subprocess.run(["sh", "-c", 'printf "$1"', "_", m.group(1)],
+    """The gini-term script as the IMAGE BUILD would actually write it.
+
+    Picks the printf that writes the LAUNCHER specifically. The same RUN also writes /etc/tmux.conf
+    now, and matching the first printf silently tested that file instead — the assertions then
+    passed or failed for reasons having nothing to do with ttyd.
+    """
+    fmts = [f for f in re.findall(r"printf '(.*?)'", dockerfile, re.S) if "ttyd" in f]
+    assert len(fmts) == 1, f"expected one gini-term launcher printf, found {len(fmts)}"
+    return subprocess.run(["sh", "-c", 'printf "$1"', "_", fmts[0]],
                           capture_output=True, text=True).stdout
 
 
