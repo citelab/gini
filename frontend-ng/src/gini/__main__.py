@@ -70,9 +70,24 @@ def _setup_preflight() -> None:
 
 def main() -> int:
     args = set(sys.argv[1:])
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    # QtWebEngine requires AA_ShareOpenGLContexts to be set BEFORE the application object is
+    # constructed. The OS Zoo and the headful Desktop screen both embed a QWebEngineView, and both
+    # import QtWebEngine LAZILY — inside the double-click handler, so a normal launch never pays
+    # Chromium's start-up cost. That laziness means the import lands after QApplication exists,
+    # which is the exact case this attribute covers; without it, constructing the first
+    # QWebEngineView segfaults the process. Setting the attribute is cheap (a flag on
+    # QCoreApplication — it does not load QtWebEngine), so it costs nothing on the launches that
+    # never open a Zoo guest.
+    #
+    # The documented alternative is to `import PySide6.QtWebEngineWidgets` up here instead, but
+    # that pulls Chromium into EVERY launch, and makes PySide6-Addons a hard requirement rather
+    # than the optional extra the browser fallback in main_window is built around.
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+    from .ui.app import GiniApplication          # QApplication + the ⌘Q guard, see ui/app.py
+    app = QApplication.instance() or GiniApplication(sys.argv)
     _apply_branding(app)
     from .ui import MainWindow
 
