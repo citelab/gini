@@ -272,9 +272,14 @@ class NodeItem(QGraphicsObject):
     def _resizable(self) -> bool:
         return pricing.resizable(self.inst.type_key)
 
-    # xv6 caps at L (2 vCPU): QEMU harts are capped at 2 for a legible 1-2 core scheduler demo, so
-    # the Size must never advertise more cores than the machine actually runs.
-    _XV6_MAX_LEVEL = 3        # L
+    # xv6 goes up to XL (4 vCPU). The Size must never advertise more cores than the machine
+    # actually runs, and everything below this already handles four: SIZE_TIERS maps XL to 4.0
+    # vCPU, `_xv6_harts` clamps to min(4, ...), and xv6's own NCPU is 8. This constant was the
+    # only thing holding it at L.
+    #
+    # Four is worth having: contention is impossible on one core and thin on two, so the Lock Lab
+    # and the scheduler's Gantt only get interesting as harts are added.
+    _XV6_MAX_LEVEL = 4        # XL
 
     def _size(self) -> int:
         if not self._resizable():

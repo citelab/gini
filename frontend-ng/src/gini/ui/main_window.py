@@ -222,6 +222,7 @@ class MainWindow(QMainWindow):
         self.ctx.xv6_rider_toggle = self._toggle_xv6_rider
         self.ctx.xv6_rider_running = lambda rid: rid in self._xv6_rider_sessions
         self.ctx.bus.selection_changed.connect(self._on_selection_explain)
+        self.ctx.bus.selection_changed.connect(self._on_selection_source)
         self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self.palette.element_selected.connect(self._on_palette_explain)
         self.assistant.status_changed.connect(self.mode_indicator.set_status)
@@ -2771,6 +2772,31 @@ class MainWindow(QMainWindow):
             if dev:                                           # exit via the Explain toggle)
                 a.explain_selected(dev.name)
 
+    def _on_selection_source(self, device_id) -> None:
+        """Selecting a router points GINI Source at ~/.gini/scripts, the module directory
+        every router shares. The tab is not raised: it fills quietly, so a student who wants
+        to read a module before loading it finds it already there."""
+        sb = getattr(self, "source_browser", None)
+        if sb is None or device_id is None:
+            return
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        from ..services.compiler import _role
+        tk = getattr(dev, "type_key", "")
+        try:
+            if _role(tk) == "router":
+                sb.show_scripts(dev.name)
+            elif tk == "xv6":
+                pass          # its source is the kernel board's to open; leave that view alone
+            else:
+                # anything else has no source yet. Clear, so the pane never keeps showing the
+                # last router's module as though it belonged to what was just clicked.
+                label = getattr(getattr(dev, "type", None), "label", "") or tk or "this element"
+                sb.show_none(f"{dev.name} ({label})")
+        except Exception as e:                # noqa: BLE001 - a browser must never break selection
+            self.ctx.bus.log.emit("error", f"GINI Source: {e}")
+
     def _on_warning_explain(self, device_id: str) -> None:
         dev = self.ctx.topology.devices.get(device_id)
         if dev:
@@ -3534,6 +3560,8 @@ class MainWindow(QMainWindow):
         # the pill widget paints its own font — nudge it to re-measure/repaint at the new text size
         if getattr(self, "mode_indicator", None) is not None:
             self.mode_indicator.updateGeometry(); self.mode_indicator.update()
+        # Widgets that style themselves from theme tokens subscribe to theme.themeChanged
+        # themselves (see SourceBrowser and Dashboard), so there is nothing to poke here.
         self._update_status()
 
     def _on_log(self, level: str, message: str) -> None:

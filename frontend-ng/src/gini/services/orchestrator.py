@@ -149,6 +149,65 @@ MACHINE_LEAN, MACHINE_FULL, MACHINE_SECURITY = "lean", "full", "security"
 MACHINE_GUI = "gui"                       # a HEADFUL machine: lean tools + a light X desktop
 MACHINE_TOOLKIT_DEFAULT = MACHINE_LEAN
 
+# --------------------------------------------------------------------------------------------- #
+# ttyd — the in-container terminal server the gBuilder Terminal tab connects to.
+#
+# IN the container rather than on the host, deliberately: the container is always Linux, so this
+# behaves identically on macOS, Linux and Windows. A host-side ttyd would need a Windows build.
+#
+# Fetched in a throwaway Alpine stage and COPYed in, so no base image needs curl or ca-certificates
+# and every image gets a byte-identical binary. It is a single static executable (~1 MB, musl,
+# no runtime deps), which is why it works unchanged on both Alpine and Debian bases.
+#
+# `ttyd.$(uname -m)` is exactly how the project names its release assets — uname reports x86_64 and
+# aarch64, matching ttyd.x86_64 and ttyd.aarch64. Both were verified to exist before this landed.
+TTYD_PORT = 7681
+_TTYD_VER = "1.7.7"
+
+# Host ports for the per-element terminals. Deliberately a long way from the other fixed ports
+# (GBRIDGE 39098, CLOUDFABRIC 39099) and bound to 127.0.0.1 in compose — ttyd runs writable with
+# no password, so it must never be reachable off the machine.
+TTYD_HOST_BASE = 37600
+
+# Where the element -> host-port map is written, so the Terminal panel can find a container's
+# terminal without re-deriving compose's numbering. Fabric elements are emitted as raw compose
+# lines rather than ServiceSpecs, so there is no `ports` list for the UI to read; this file is
+# that list.
+TERMINALS_FILE = "gini-terminals.json"
+
+_TTYD_STAGE = f"""FROM alpine:3.20 AS ttyd
+RUN apk add --no-cache curl \\
+ && curl -fsSL -o /ttyd "https://github.com/tsl0922/ttyd/releases/download/{_TTYD_VER}/ttyd.$(uname -m)" \\
+ && chmod +x /ttyd
+"""
+
+def _ttyd_layers() -> str:
+    """The COPY + launcher-script layers.
+
+    Written with printf and \\n escapes so the whole thing is ONE Dockerfile instruction — a
+    literal newline inside the string would end the RUN and leave the rest as garbage.
+
+    `${TTYD_CMD:-exec /bin/sh}` survives to runtime because it sits inside single quotes: the
+    build shell leaves it alone, and the launcher expands it when a student opens a terminal. That
+    is what lets routers and OVS switches share the gRouter image and still front different
+    things — the value comes from compose, per element, not from the image.
+    """
+    script = (r"#!/bin/sh\n"
+              r"exec /usr/local/bin/ttyd -W -p %d -i 0.0.0.0 "
+              r"/bin/sh -c \"${TTYD_CMD:-exec /bin/sh}\"\n") % TTYD_PORT
+    return ("COPY --from=ttyd /ttyd /usr/local/bin/ttyd\n"
+            f"RUN printf '{script}' > /usr/local/bin/gini-term "
+            "&& chmod +x /usr/local/bin/gini-term\n")
+
+
+def _with_ttyd(cmd: str) -> str:
+    """Wrap an image's CMD so the terminal server runs beside the real workload.
+
+    The workload keeps PID 1 semantics via `exec`, so container stop/restart behave exactly as
+    before; ttyd is a background child that dies with it.
+    """
+    return f'CMD ["sh", "-c", "gini-term & exec {cmd}"]\n'
+
 # Alpine package names (musl). Deliberately NOT: bind9, postfix, ettercap, haproxy, dsniff, lynx,
 # telnetd — those are what made the old image huge, and they belong to the `full` toolkit.
 _MACHINE_TOOLS_LEAN = (
@@ -156,11 +215,11 @@ _MACHINE_TOOLS_LEAN = (
     "netcat-openbsd socat iperf3 nmap ethtool traceroute mtr bridge-utils iptables"
 )
 
-_DOCKERFILE_MACHINE_LEAN = f"""FROM alpine:3.20
+_DOCKERFILE_MACHINE_LEAN = f"""{_TTYD_STAGE}FROM alpine:3.20
 RUN apk add --no-cache {_MACHINE_TOOLS_LEAN}
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["python3", "-m", "dataplane.shuttle"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & exec python3 -m dataplane.shuttle"]
 """
 
 # The FULL image ships "batteries included" — the heavy services the GINI book experiments stand
@@ -216,7 +275,7 @@ def machine_tools(toolkit: str) -> str:
     return MACHINE_TOOLS_HUMAN if toolkit == MACHINE_FULL else MACHINE_TOOLS_LEAN_HUMAN
 
 
-_DOCKERFILE_MACHINE = f"""FROM python:3.12-slim
+_DOCKERFILE_MACHINE = f"""{_TTYD_STAGE}FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
         | debconf-set-selections \\
@@ -225,10 +284,10 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["python", "-m", "dataplane.shuttle"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & exec python -m dataplane.shuttle"]
 """
 
-_DOCKERFILE_MACHINE_SECURITY = f"""FROM python:3.12-slim
+_DOCKERFILE_MACHINE_SECURITY = f"""{_TTYD_STAGE}FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
         | debconf-set-selections \\
@@ -237,7 +296,7 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["python", "-m", "dataplane.shuttle"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & exec python -m dataplane.shuttle"]
 """
 
 # The HEADFUL machine: lean Alpine host + a light X desktop, served over noVNC on :6080. The
@@ -250,7 +309,7 @@ _GUI_START = (
     "websockify --web=/usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 & "
     "exec python3 -m dataplane.shuttle"
 )
-_DOCKERFILE_MACHINE_GUI = f"""FROM alpine:3.20
+_DOCKERFILE_MACHINE_GUI = f"""{_TTYD_STAGE}FROM alpine:3.20
 RUN apk add --no-cache {_MACHINE_TOOLS_LEAN} \\
         xvfb x11vnc fluxbox xterm pcmanfm dillo novnc websockify font-dejavu
 # Ready-made desktop shortcuts so students see a Terminal and Dillo on the desktop at startup
@@ -262,7 +321,7 @@ RUN mkdir -p /root/Desktop \\
 ENV DISPLAY=:0 HOME=/root
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["sh", "-c", "{_GUI_START}"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & {_GUI_START}"]
 """
 
 # toolkit -> (compose image name, dockerfile path). Explicit image names so N hosts of one tier
@@ -586,15 +645,20 @@ while True:
 
 def _seed_examples(scripts: Path, shared: Path) -> None:
     """Copy the examples GINI ships (packaged under gini/data/examples) into the user's
-    ~/.gini dirs, so the book's instructions work out of the box: mcast_tree.lua appears
-    in ~/.gini/scripts (loadable as /scripts/mcast_tree.lua on every router), and the
-    Multicast File Distribution starter kit in ~/.gini/shared/multicast_fs (visible at
-    /shared/multicast_fs on every station). Never overwrites a file the user edited."""
+    ~/.gini dirs, so the book's instructions work out of the box: the reference Lua
+    control-plane modules appear in ~/.gini/scripts (loadable as /scripts/<name>.lua on
+    every router), and the Multicast File Distribution starter kit in
+    ~/.gini/shared/multicast_fs (visible at /shared/multicast_fs on every station).
+
+    Note the reference modules are deliberately NOT named after the files the book asks a
+    student to write (the routing experiment writes rip.lua), so seeding never lands the
+    finished answer on top of an exercise. Never overwrites a file the user edited."""
     ex = Path(__file__).resolve().parents[1] / "data" / "examples"
     try:
-        src = ex / "mcast_tree.lua"
-        if src.exists() and not (scripts / src.name).exists():
-            shutil.copy(src, scripts / src.name)
+        for name in ("mcast_tree.lua", "rip_reference.lua"):
+            src = ex / name
+            if src.exists() and not (scripts / name).exists():
+                shutil.copy(src, scripts / name)
         kit = ex / "multicast_fs"
         if kit.is_dir():
             dst = shared / "multicast_fs"
@@ -697,6 +761,30 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             net.append("    internal: true")
         if vnet.get("cidr"):
             net += ["    ipam:", "      config:", f"        - subnet: {vnet['cidr']}"]
+    # One terminal per element. The port is allocated in emission order and recorded so the
+    # Terminal panel can look it up by element name; `TTYD_CMD` decides what the terminal
+    # FRONTS, which differs per element even when the image is shared (a gRouter and an OVS
+    # switch are both the gRouter image, but a student wants the router CLI on one).
+    _term: dict = {}
+
+    def _term_port(name: str, cmd: str = "") -> str:
+        """Publish this element's terminal and remember the port. Returns the ENTRY only.
+
+        Deliberately NOT the `ports:` header: a service can publish more than one thing — a GUI
+        host also publishes noVNC — and emitting a header here produced a second `ports:` key,
+        which compose rejects outright ("mapping key \\"ports\\" already defined"). Call sites
+        gather every entry and emit ONE block. Same reasoning as `_term_env`: never emit a
+        top-level service key that somebody else might also emit.
+        """
+        port = TTYD_HOST_BASE + len(_term)
+        _term[name] = {"port": port, "cmd": cmd}
+        return f'      - "127.0.0.1:{port}:{TTYD_PORT}"'
+
+    def _term_env(name: str) -> list:
+        cmd = _term.get(name, {}).get("cmd", "")
+        return [f"      TTYD_CMD: '{cmd}'"] if cmd else []
+
+
     lines = ["name: gini-lab", "networks:", *net, "services:"]
 
     # fabric = the L2 switch substrate only (skip entirely if there are no switches)
@@ -736,6 +824,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
     # each router = its own real C gRouter container (prebuilt image). The gRouter's
     # `tun` links are pure userspace UDP, so no NET_ADMIN / /dev/net/tun needed.
     for r in rt["routers"]:
+        # A router's terminal fronts the gRouter CLI, not a shell — that is what a student came
+        # for. `grconsole` exits back into the container shell if they quit it.
+        term = _term_port(r["name"], "exec python3 /build/grouter-build/grconsole.py")
         lines += [
             f"  {r['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -744,17 +835,21 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    volumes:",
             f'      - "{cap_host}:/captures"',   # tap VNF .pcap files land on the host here
             f'      - "{scr_host}:/scripts:ro"', # student Lua modules: `gpipe add lua /scripts/x.lua`
+            "    ports:", term,
             "    environment:",
             f"      ROUTER_CONFIG: '{json.dumps(r)}'",
+            *_term_env(r["name"]),
         ]
 
     # SDN controllers = POX (Python 3) containers, one per controller
     for c in rt["controllers"]:
+        term = _term_port(c["name"])            # a shell: POX itself owns the foreground
         lines += [
             f"  {c['name']}:",
             f"    image: {POX_IMAGE}",
             "    pull_policy: never",
             "    networks: [gini]",
+            "    ports:", term,
             "    environment:",
             f"      POX_APP: '{c['app']}'",
             f"      POX_PORT: '{c['port']}'",
@@ -770,6 +865,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if o.get("controller"):
             env.append(f"      GINI_OF_CONTROLLER: '{o['controller']}:{o['controller_port']}'")
         depends = ([f"    depends_on: [{o['controller']}]"] if o.get("controller") else [])
+        # Same image as a router, but a SHELL: on a switch the student wants ovs-style
+        # inspection and the gRouter's `openflow …` CLI, not to be dropped straight into one.
+        term = _term_port(o["name"])
         lines += [
             f"  {o['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -778,6 +876,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    volumes:",
             f'      - "{cap_host}:/captures"',   # tap VNF .pcap files land on the host here
             f'      - "{scr_host}:/scripts:ro"', # student Lua modules: `gpipe add lua /scripts/x.lua`
+            "    ports:", term,
             *depends,
             *env,
         ]
@@ -894,6 +993,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         # tags a separate <project>-<service> image per host and walks the build for each.
         tk = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT)
         image, dockerfile = _MACHINE_IMAGE.get(tk, _MACHINE_IMAGE[MACHINE_LEAN])
+        term = _term_port(m["name"])            # a plain shell — it is a host
         lines += [
             f"  {m['name']}:",
             f"    hostname: {m.get('hostname', m['name'])}",   # `hostname` = the canvas label
@@ -913,8 +1013,12 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
             vols.append(f'      - "{_hostpath(captures_dir())}:/captures"')
         lines += ['    volumes:'] + vols
+        # ONE ports block per service: the terminal, plus noVNC on a headful host. Two
+        # separate blocks is a duplicate YAML key and compose refuses to start the lab.
+        pubs = [term]
         if tk == MACHINE_GUI and m.get("novnc_port"):   # headful host: publish its noVNC console
-            lines += ['    ports:', f'      - "{m["novnc_port"]}:6080"']
+            pubs.append(f'      - "{m["novnc_port"]}:6080"')
+        lines += ["    ports:", *pubs]
         lines += _cpu_limit_lines(m.get("cpus"))
     return "\n".join(_cap_service_logs(lines)) + "\n"
 

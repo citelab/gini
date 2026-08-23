@@ -65,7 +65,15 @@ class ProcessTree(QTreeWidget):
             it = QTreeWidgetItem(parent_item if parent_item is not None else self)
             it.setText(0, p.name)
             it.setText(1, str(p.pid))
-            it.setText(2, p.state)
+            # "sleeping" says a process is stopped; the wait channel says who will start it again.
+            # Without it a blocked process is a dead end — with it the student can follow the
+            # chain: this one waits for a disk block, so look at the disk.
+            wait = getattr(p, "waiting_on", None)
+            it.setText(2, f"{p.state} · {wait.label}" if wait else p.state)
+            if wait:
+                it.setToolTip(2, f"wakeup({wait.chan:#x})"
+                                 + (f" — {wait.name}" if wait.known else
+                                    " — an address this build does not name (a pipe, most likely)"))
             color = QColor(t.accent_for(_STATE_ACCENT.get(p.state, "slate")))
             it.setForeground(2, color)
             if p.pid in running:
@@ -75,7 +83,7 @@ class ProcessTree(QTreeWidget):
                 for c in (0, 1, 2):
                     it.setForeground(c, QColor(t.faint))
             if p.pid in flags:                        # scheduling badge (e.g. starvation)
-                reason = flags[p.pid]
+                reason = flags[p.pid]                 # outranks the wait channel: it is a problem
                 it.setText(2, f"{p.state}  ⚠ {reason}")
                 it.setForeground(2, QColor(t.accent_for("red")))
                 it.setToolTip(2, reason)

@@ -33,6 +33,9 @@ class Proc:
     tickets: int | None = None    # lottery weight
     level: int | None = None      # MLFQ queue level (student policies)
     wait_ticks: int | None = None  # aging counter (slices spent RUNNABLE)
+    # What this process is blocked on, when the kernel reports it. "sleeping" says a process is
+    # stopped; this says who is going to start it again.
+    waiting_on: "WaitOn | None" = None
 
     @property
     def running(self) -> bool:
@@ -182,6 +185,48 @@ def parse_proc_sched(text: str) -> dict:
     return out
 
 
+# -- sleep channels: what a blocked process is waiting FOR ------------------------------------- #
+# `state == sleeping` says a process is blocked; it never said WHY, or who would wake it. In xv6
+# the answer is an address: sleep_prepare(chan) records it, sleep() blocks, and wakeup(chan)
+# matches on the same address and clears it. The kernel now names the well-known ones, so the most
+# important question about a blocked process becomes readable.
+_WAIT_RE = re.compile(r"^WAIT\s+(\d+)\s+(0x[0-9a-fA-F]+)\s*(.*)$", re.M)
+
+
+@dataclass(frozen=True)
+class WaitOn:
+    """One process's wait channel."""
+    chan: int                      # the raw address wakeup() will match on
+    name: str = ""                 # "a child to exit", "the log", … or "" when unregistered
+
+    @property
+    def label(self) -> str:
+        """What to show. Unregistered channels — pipes, mainly — fall back to the address, which
+        still beats a bare "sleeping" with no object at all."""
+        return self.name or f"{self.chan:#x}"
+
+    @property
+    def known(self) -> bool:
+        return bool(self.name)
+
+
+def parse_waits(text: str) -> dict:
+    """gini_dump's `WAIT <pid> <chan> <name>` lines -> {pid: WaitOn}. Empty on an older build.
+
+    A line appears for any process with a non-zero chan, not only SLEEPING ones: this xv6 splits
+    the old sleep(chan, lk) into sleep_prepare(chan) then sleep(), so there is a window where a
+    process is armed to sleep but still runnable. That window is the whole point of the split —
+    it is what makes a wakeup arriving early impossible to miss — so it is worth showing.
+    """
+    out: dict = {}
+    for m in _WAIT_RE.finditer(text or ""):
+        name = (m.group(3) or "").strip()
+        if name == "?":                     # kernel's marker for an address it does not recognise
+            name = ""
+        out[int(m.group(1))] = WaitOn(chan=int(m.group(2), 16), name=name)
+    return out
+
+
 # -- mode-time + control CSRs (the CPU face) --------------------------------------------------- #
 _MODETIME_RE = re.compile(r"MODETIME\s+user\s+(\d+)\s+kernel\s+(\d+)\s+idle\s+(\d+)")
 _CSR_RE = re.compile(
@@ -316,6 +361,19 @@ def apply_proc_sched(procs, text: str) -> list:
         if s:
             p.priority, p.tickets = s["priority"], s["tickets"]
             p.level, p.wait_ticks = s["level"], s["wait_ticks"]
+    return procs
+
+
+def apply_waits(procs, text: str) -> list:
+    """Attach each process's wait channel from the `WAIT …` lines. No-op on an older kernel.
+
+    Kept separate from apply_proc_sched rather than folded in: that one is about scheduling
+    parameters the student can set, this is about a fact the kernel reports. Returns the same list
+    for chaining.
+    """
+    waits = parse_waits(text)
+    for p in procs:
+        p.waiting_on = waits.get(p.pid)
     return procs
 
 

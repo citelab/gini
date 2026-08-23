@@ -273,6 +273,7 @@ class MachineLab(QDialog):
         self._sched_win = None
 
         self._busy = False
+        self._read_fails = 0                      # consecutive failed reads (see _on_poll's worker)
         self._closed = False                      # set on close; guards worker-thread callbacks
         self.snap_ready.connect(self._on_snap)
         self.load_result.connect(self._on_load_result)
@@ -1288,12 +1289,26 @@ class MachineLab(QDialog):
         import threading
 
         def work():
+            # ALWAYS signal, even on failure. `_busy` is cleared in _on_snap, so a read that
+            # raised and returned without emitting used to leave it set forever — every later
+            # poll then returned at the guard above and the Lab silently stopped updating until
+            # it was closed and reopened. One timed-out read was enough, and under load (the
+            # agent is single-threaded, so dumps queue) a timeout is exactly what happens.
+            err = ""
             try:
                 self.state.step() if step else self.state.refresh()
+            except (Exception, RuntimeError) as e:   # incl. dialog closed mid-read
+                err = f"{type(e).__name__}: {e}"
+            try:
                 if not self._closed:            # don't signal a dialog that's being torn down
-                    self.snap_ready.emit(None)  # marshal back to the GUI thread
-            except (Exception, RuntimeError):
-                pass                        # incl. dialog closed mid-read
+                    self.snap_ready.emit(None)  # marshal back to the GUI thread — clears _busy
+            except RuntimeError:
+                return                          # dialog went away between the check and the emit
+            # Report a run of failures once rather than every poll: a single dropped read is
+            # normal under load, a sustained run means the machine is gone.
+            self._read_fails = (self._read_fails + 1) if err else 0
+            if err and self._read_fails == 5:
+                self._log("error", f"Machine Lab: readings are failing — {err}")
         threading.Thread(target=work, daemon=True).start()
 
     def _on_snap(self, _obj) -> None:

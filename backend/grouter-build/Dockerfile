@@ -52,6 +52,15 @@ RUN sed -i 's/\r$//' ./grouter-build/build.sh \
 # --------------------------------------------------------------------------------------------- #
 # RUNTIME: the binary + the shared libraries it links against + python3 for the entrypoint +
 # iproute2 for the tun setup. NOT the compiler, not the source tree.
+# ttyd — the terminal server the gBuilder Terminal tab connects to. Fetched in a throwaway stage
+# so this image needs no curl or ca-certificates of its own; it is one static musl binary (~1 MB)
+# with no runtime dependencies, which is why the same binary works on Alpine and Debian bases.
+# `ttyd.$(uname -m)` matches the project's release asset names (ttyd.x86_64 / ttyd.aarch64).
+FROM alpine:3.20 AS ttyd
+RUN apk add --no-cache curl \
+ && curl -fsSL -o /ttyd "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.$(uname -m)" \
+ && chmod +x /ttyd
+
 FROM debian:bookworm-slim
 
 # runtime shared libs only (libreadline8 / libncurses6 / liblua5.4-0 — the -dev packages above
@@ -67,8 +76,16 @@ COPY --from=build /usr/local/bin/grouter /usr/local/bin/grouter
 # has to exist in the runtime image — not just in the builder.
 COPY --from=build /build/grouter-build/ /build/grouter-build/
 
+COPY --from=ttyd /ttyd /usr/local/bin/ttyd
+# What the terminal fronts is per-ELEMENT: this one image serves both gRouters and OVS switches,
+# and a student wants the router CLI on one and a shell on the other. TTYD_CMD carries that from
+# compose; it defaults to a shell so the terminal always works even if compose says nothing.
+RUN printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
+    > /usr/local/bin/gini-term && chmod +x /usr/local/bin/gini-term
+
 WORKDIR /run
 ENV GINI_HOME=/run
 # entrypoint turns a ROUTER_CONFIG env (our fabric wiring) into the gRouter's
-# native config (ifconfig add tun…, route add…) and launches it.
-CMD ["python3", "/build/grouter-build/run_grouter.py"]
+# native config (ifconfig add tun…, route add…) and launches it. The terminal server runs beside
+# it as a background child; `exec` keeps the router as PID 1 so stop/restart are unchanged.
+CMD ["sh", "-c", "gini-term & exec python3 /build/grouter-build/run_grouter.py"]

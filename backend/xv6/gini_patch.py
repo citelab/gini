@@ -1366,6 +1366,12 @@ gini_dump(void)
     // (via the Syscall Builder) that DRIVE them, and this line is the live proof it works.
     PRINTF("ALARM %d %d %d %p %d\\n", p->pid, p->gini_alarm_interval, p->gini_alarm_ticks,
            (void*)p->gini_alarm_handler, p->gini_alarm_on);
+    // What this process is waiting FOR. p->chan is set by sleep_prepare and CLEARED by wakeup,
+    // so a non-zero chan on a RUNNABLE process is not a bug — it is the moment between "armed to
+    // sleep" and actually sleeping, which is exactly the race sleep_prepare exists to close.
+    // Printed for every process rather than only sleepers so that moment is visible too.
+    if(p->chan)
+      PRINTF("WAIT %d %p %s\\n", p->pid, p->chan, gini_chan_name(p->chan));
   }
   PRINTF("SCHED policy %d quantum %d\\n", sched_policy, sched_quantum);
   // policy roster (id -> display name) so the UI's selector is DATA-DRIVEN: add a policy in the
@@ -1764,6 +1770,17 @@ extern uchar    gini_trail[];      // recent residency samples, newest at gini_t
 extern uint64   gini_trail_i;
 void            gini_obs_begin(void);
 void            gini_obs_end(void);
+// SLEEP CHANNELS. `state == SLEEPING` says a process is blocked; it does not say what will wake
+// it. xv6 sleeps on an ADDRESS — sleep(chan, lk) — and wakeup(chan) matches on that address, so
+// the answer to "who is going to wake you?" is sitting in p->chan and is invisible to a student.
+//
+// A raw pointer teaches nothing, so each subsystem registers the address (or range) it sleeps on
+// together with a name a human can read. Registration rather than a lookup table because the
+// interesting structs — bcache, log, cons — are STATIC to their own files and cannot be named
+// from anywhere else.
+#define GINI_NCHAN 12
+void            gini_chan_add(void *lo, void *hi, char *name);
+char*           gini_chan_name(void *chan);
 // THE TRACE. Aggregates say the block cache was asked 601 times; they cannot say the read went
 // syscall -> file -> inode -> bcache -> disk IN THAT ORDER. This ring records the real ordered
 // path, and only while armed: unarmed it costs one predictable branch, so the board stays
@@ -2008,6 +2025,39 @@ gini_doorrec(void)
   gini_sub[h] = GSUB_TRAP;
 }
 
+// ---- sleep-channel registry -----------------------------------------------------------------
+// Each entry claims an address or a half-open range [lo, hi). Ranges matter: the block cache and
+// the process table are arrays, and a process sleeping on buf 12 or waiting for child slot 7 is
+// sleeping on an address INSIDE them, never on the array itself.
+struct gini_chanreg { void *lo; void *hi; char *name; };
+static struct gini_chanreg gini_chans[GINI_NCHAN];
+static int gini_nchan;
+
+void
+gini_chan_add(void *lo, void *hi, char *name)
+{
+  if(gini_nchan >= GINI_NCHAN || lo == 0)
+    return;
+  gini_chans[gini_nchan].lo = lo;
+  gini_chans[gini_nchan].hi = hi ? hi : (void*)((char*)lo + 1);
+  gini_chans[gini_nchan].name = name;
+  gini_nchan++;
+}
+
+char*
+gini_chan_name(void *chan)
+{
+  if(chan == 0)
+    return "";
+  for(int i = 0; i < gini_nchan; i++)
+    if(chan >= gini_chans[i].lo && chan < gini_chans[i].hi)
+      return gini_chans[i].name;
+  // A process sleeping on its OWN proc struct is inside wait(), which is by far the most common
+  // sleep in a quiet system — worth naming even though proc[] is registered as a range, because
+  // "a child to exit" says far more than "the process table".
+  return "?";
+}
+
 void
 gini_boardreset(void)
 {
@@ -2064,6 +2114,48 @@ gini_boarddump(void)
   %(P)s("BUSER %%d %%d\\n", (int)(gini_uinstr / 1000), (int)gini_uentry);
 }
 """ % {"P": PRINT}, "GINI-xv6 KERNEL BOARD core")
+
+# 4h6) SLEEP CHANNELS — naming the thing a blocked process is waiting for.
+#
+# `state == SLEEPING` says a process is blocked. It does not say WHY, or who will wake it. In this
+# xv6 the answer is in `p->chan`: sleep_prepare(chan) records an address, sleep() blocks, and
+# wakeup(chan) matches on that same address and clears it. The whole mechanism is a pointer
+# comparison, and it is completely invisible from outside.
+#
+# Each subsystem registers the address (or array range) it sleeps on, at its own init, because the
+# interesting structs — bcache, itable, log, cons — are STATIC to their own files and cannot be
+# named from anywhere else. Ranges matter: a process blocked on buf 12 or waiting for child slot 7
+# is sleeping on an address INSIDE an array, never on the array itself.
+#
+# Not registered: pipes. They are allocated per pipe, so there is no fixed address to claim; a
+# pipe wait shows its raw channel instead, which is still better than "sleeping" with no object.
+_CHAN_REG = [
+    ("kernel/console.c", r"(consoleinit\(void\)\n\{\n)",
+     '  gini_chan_add(&cons.r, 0, "console input");   // a keystroke\n'),
+    ("kernel/log.c", r"(initlog\(int dev, struct superblock \*sb\)\n\{\n)",
+     '  gini_chan_add(&log, &log + 1, "the log");     // commit / space in a transaction\n'),
+    ("kernel/proc.c", r"(procinit\(void\)\n\{\n)",
+     '  gini_chan_add(proc, &proc[NPROC], "a child to exit");   // wait()\n'),
+    ("kernel/bio.c", r"(binit\(void\)\n\{\n)",
+     '  gini_chan_add(bcache.buf, &bcache.buf[NBUF], "a disk block");  // buf + its sleeplock\n'),
+    ("kernel/fs.c", r"(iinit\(\)\n\{\n)",
+     '  gini_chan_add(itable.inode, &itable.inode[NINODE], "an inode");  // inode sleeplock\n'),
+    ("kernel/uart.c", r"(uartinit\(void\)\n\{\n)",
+     '  gini_chan_add(&tx_chan, 0, "room in the UART buffer");\n'),
+    ("kernel/virtio_disk.c", r"(virtio_disk_init\(void\)\n\{\n)",
+     '  gini_chan_add(&disk.free[0], &disk.free[NUM], "a free disk descriptor");\n'),
+]
+for _rel, _anchor, _line in _CHAN_REG:
+    regex_once(_rel, _anchor, r"\1" + _line, "gini_chan_add")
+
+# `&ticks` is sys_sleep's channel and lives in trap.c, where the registry itself is — registered
+# from trapinit rather than from a subsystem, since ticks belongs to no subsystem.
+regex_once("kernel/trap.c",
+           r"(trapinit\(void\)\n\{\n)",
+           # NOT one raw string: `\"` inside an r"" stays a literal backslash-quote and lands in
+           # the C source as `\"the next timer tick\"`, which does not compile.
+           r"\1" + '  gini_chan_add(&ticks, &ticks + 1, "the next timer tick");  // sys_sleep\n',
+           "GINI-xv6: ticks chan")
 
 # 4h4) The probes themselves. One line at the top of each subsystem ENTRY POINT — the functions
 # other subsystems call — and nothing internal. That is what makes the counts mean "traffic this

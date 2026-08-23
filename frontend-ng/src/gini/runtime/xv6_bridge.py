@@ -16,7 +16,8 @@ import json
 import urllib.request
 
 from ..domain.xv6 import (
-    Snapshot, apply_proc_sched, parse_backtrace, parse_cpu_lines, parse_cpu_regs, parse_csr,
+    Snapshot, apply_proc_sched, apply_waits, parse_backtrace, parse_cpu_lines, parse_cpu_regs,
+    parse_csr,
     parse_modetime, parse_policies, parse_procdump, parse_registers, parse_regs_line, parse_sched,
     parse_shadow_manifest, running_pid,
 )
@@ -165,6 +166,7 @@ class Xv6Bridge:
         self._seq += 1
         txt = self.agent.get_text("/procs")
         procs = apply_proc_sched(parse_procdump(txt), txt)   # procs + priority/tickets/level/aging
+        apply_waits(procs, txt)                              # ...and what each blocked one waits for
         sched = parse_sched(txt)                     # the kernel's ACTUAL quantum + policy
         if sched:
             self.kernel_quantum = sched.get("quantum")

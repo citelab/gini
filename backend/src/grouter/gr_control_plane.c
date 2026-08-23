@@ -333,24 +333,21 @@ pthread_t gr_cp_thread_init(void)
 }
 
 /* ---- control-module registry -------------------------------------------- */
-extern gr_cp_module_t *gr_cp_hello_create(void);   /* the B2.3 demo module */
-extern gr_cp_module_t *gr_cp_dhcp_create(void);    /* B2.4 DHCP server */
-extern gr_cp_module_t *gr_cp_rip_create(void);     /* B2.4 distance-vector routing */
-extern gr_cp_module_t *gr_cp_igmp_create(void);    /* B3 IGMP snooping */
-#ifdef GR_LUA
-extern gr_cp_module_t *gr_cp_lua_create(void);     /* control-plane Lua: routing in Lua */
-#endif
+/* Lua is the gRouter's ONE control-plane surface. The services above (send, timers, the
+ * route table, interface list) are the C substrate; protocols are written in Lua on top
+ * of them and loaded with `cp add lua <script>`. Reference modules ship with GINI and are
+ * seeded into ~/.gini/scripts, which every router sees at /scripts.
+ *
+ * There were once C protocol modules here (rip, dhcp, igmp, a hello demo) built directly
+ * against the same services. They were removed deliberately: two parallel implementations
+ * of the same protocols meant two things to document, two to teach from, and two to keep
+ * working, for no gain the Lua tier did not already provide. */
+extern gr_cp_module_t *gr_cp_lua_create(void);     /* control-plane Lua: protocols in Lua */
 
 typedef struct { const char *name; gr_cp_module_t *(*ctor)(void); } gr_cp_reg_t;
 
 static const gr_cp_reg_t CP_REGISTRY[] = {
-    { "hello", gr_cp_hello_create },
-    { "dhcp",  gr_cp_dhcp_create  },
-    { "rip",   gr_cp_rip_create   },
-    { "igmp",  gr_cp_igmp_create  },
-#ifdef GR_LUA
     { "lua",   gr_cp_lua_create   },   /* gpipe cp add lua <script> — implement a protocol */
-#endif
 };
 
 const char *gr_cp_names(void)

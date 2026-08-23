@@ -21,39 +21,31 @@ OUT="${OUT:-$HERE/grouter}"
 # override for a user-prefix build (e.g. PREFIX=/tmp/prefix ./build.sh).
 PREFIX="${PREFIX:-/usr/local}"
 
-# gr_mod_lua.c needs lua.h and is only built with -DGR_LUA; exclude it from the default glob
-# unless LUA=1 (the default): the chapter-7 scripting tier needs it, and the Docker image
-# installs liblua5.4-dev. Set LUA=0 for a no-Lua build.
-LUA="${LUA:-1}"
-if [ "$LUA" = "1" ]; then
-    SRCS=$(ls "$SRC"/*.c)
-    LUA_FLAGS="-DGR_LUA"
-    # locate lua.h + lib. Debian's liblua5.4-dev puts headers in /usr/include/lua5.4
-    # (NOT on the default include path), so we must add -I explicitly. Prefer
-    # pkg-config; fall back to common Debian/Homebrew locations.
-    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists lua5.4 2>/dev/null; then
-        LUA_FLAGS="$LUA_FLAGS $(pkg-config --cflags lua5.4)"
-        LUA_LIBS="$(pkg-config --libs lua5.4)"
-    else
-        LUA_INC=""
-        for d in /usr/include/lua5.4 /usr/local/include/lua5.4 \
-                 /opt/homebrew/include/lua5.4 /usr/local/include /usr/include; do
-            if [ -f "$d/lua.h" ]; then LUA_INC="-I$d"; break; fi
-        done
-        if [ -z "$LUA_INC" ]; then
-            echo "build.sh: lua.h not found — building WITHOUT the Lua module "
-            echo "          (install liblua5.4-dev, or run with LUA=0 to silence this)." >&2
-            SRCS=$(ls "$SRC"/*.c | grep -vE '/gr_mod_lua\.c$|/gr_cp_lua\.c$')
-            LUA_FLAGS=""; LUA_LIBS=""
-        else
-            LUA_FLAGS="$LUA_FLAGS $LUA_INC"
-            LUA_LIBS="-llua5.4"
-        fi
-    fi
+# Lua is REQUIRED, not optional. It is the gRouter's only control-plane surface: protocols
+# are Lua modules loaded with `cp add lua <script>` (the C protocol modules that once sat
+# beside them were removed, so a no-Lua build would have no control plane at all). It is
+# also the scripting tier for data-plane modules. Debian's liblua5.4-dev puts headers in
+# /usr/include/lua5.4, NOT on the default include path, so -I must be explicit.
+SRCS=$(ls "$SRC"/*.c)
+LUA_FLAGS="-DGR_LUA"
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists lua5.4 2>/dev/null; then
+    LUA_FLAGS="$LUA_FLAGS $(pkg-config --cflags lua5.4)"
+    LUA_LIBS="$(pkg-config --libs lua5.4)"
 else
-    SRCS=$(ls "$SRC"/*.c | grep -vE '/gr_mod_lua\.c$|/gr_cp_lua\.c$')
-    LUA_FLAGS=""
-    LUA_LIBS=""
+    LUA_INC=""
+    for d in /usr/include/lua5.4 /usr/local/include/lua5.4 \
+             /opt/homebrew/include/lua5.4 /usr/local/include /usr/include; do
+        if [ -f "$d/lua.h" ]; then LUA_INC="-I$d"; break; fi
+    done
+    if [ -z "$LUA_INC" ]; then
+        echo "build.sh: lua.h not found, and Lua is required." >&2
+        echo "          The gRouter's control plane IS Lua: without it the router still" >&2
+        echo "          forwards packets, but no protocol can be loaded and every" >&2
+        echo "          'cp add lua' fails. Install liblua5.4-dev and build again." >&2
+        exit 1
+    fi
+    LUA_FLAGS="$LUA_FLAGS $LUA_INC"
+    LUA_LIBS="-llua5.4"
 fi
 
 # Legacy-C build flags (this is ~20k lines of pre-C99-style GINI code that predates modern
