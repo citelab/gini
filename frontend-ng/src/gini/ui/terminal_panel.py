@@ -48,6 +48,12 @@ def _scss(s: str) -> str:
 class TerminalPanel(QWidget):
     """Read the element -> port map, then embed that element's ttyd."""
 
+    # How long to keep waiting for a container's ttyd to bind its port. Generous on purpose: a
+    # cold `docker compose up --build` on a slow machine can take a while, and giving up early
+    # looks to the student exactly like the feature being broken.
+    PROBE_MS = 600
+    MAX_PROBES = 40                       # ~24s
+
     def __init__(self, theme, workdir_fn=None, running_fn=None, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
@@ -61,6 +67,8 @@ class TerminalPanel(QWidget):
         self._view = None                 # QWebEngineView, created lazily (it is a whole process)
         self._name = ""
         self._pending = None              # (url, name, cmd) waiting for the tab to become visible
+        self._probe = None                # QTcpSocket checking whether ttyd is listening yet
+        self._tries = 0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -134,6 +142,7 @@ class TerminalPanel(QWidget):
         """No terminal for this selection. Say why — a blank pane looks broken."""
         self._name = ""
         self._pending = None
+        self._drop_probe()                 # nothing to wait for any more
         self._drop_view()
         self._title.setText(f"Terminal  ·  {what}" if what else "Terminal")
         self._sub.setText(why or "Select a machine, router, switch or controller to open a "
@@ -155,6 +164,9 @@ class TerminalPanel(QWidget):
         self._sub.setText(f"{kind}  ·  {url}")
         self._pending = (url, name, cmd)
         self._drop_view()                  # the previous element's shell must not linger
+        # Cancel any probe still waiting on the PREVIOUS element, or it would fire later and build
+        # that element's terminal under this element's name.
+        self._drop_probe()
         if self.isVisible():               # tab is on top: build it now
             self._realise()
 
@@ -164,22 +176,82 @@ class TerminalPanel(QWidget):
         self._realise()
 
     def _realise(self) -> None:
-        """Actually construct the QWebEngineView for whatever is pending."""
-        if self._pending is None or self._view is not None:
+        """Wait for the container's ttyd to be listening, THEN construct the view.
+
+        `docker compose up` returns as soon as the containers are created; ttyd inside them binds
+        its port a moment later, and later still on a cold build or a slow machine. Loading the
+        page into that gap gives the student a broken terminal that never recovers:
+
+            js: [ttyd] fetch http://127.0.0.1:37601/token: TypeError: Failed to fetch
+
+        The page has already loaded at that point, so there is nothing for QWebEngineView's
+        loadFinished to report — the failure is a fetch INSIDE the page. Hence a port probe up
+        front rather than a reload-on-error.
+        """
+        if self._pending is None or self._view is not None or self._probe is not None:
             return
         url, _name, cmd = self._pending
         kind = "router CLI" if "grconsole" in cmd else "shell"
         try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView
+            from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401 - availability check
         except Exception as e:                    # noqa: BLE001 - QtWebEngine is optional
             self._sub.setText(
                 f"{kind}  ·  {url}\n"
                 f"Open that in a browser — the embedded view needs PySide6-Addons "
                 f"(QtWebEngine): {e}")
             return
+        self._tries = 0
+        self._probe_port()
+
+    def _probe_port(self) -> None:
+        """Async connect to the ttyd port. QTcpSocket, not a blocking connect: this runs on the
+        GUI thread and a container that is still starting would freeze the whole app."""
+        if self._pending is None:
+            return
+        from PySide6.QtNetwork import QTcpSocket
+        url = self._pending[0]
+        port = int(url.rsplit(":", 1)[1].rstrip("/"))
+        self._probe = QTcpSocket(self)
+        self._probe.connected.connect(self._probe_ok)
+        self._probe.errorOccurred.connect(self._probe_failed)
+        self._probe.connectToHost("127.0.0.1", port)
+
+    def _drop_probe(self):
+        if self._probe is not None:
+            self._probe.abort()
+            self._probe.deleteLater()
+            self._probe = None
+
+    def _probe_ok(self) -> None:
+        self._drop_probe()
+        self._build_view()
+
+    def _probe_failed(self, *_a) -> None:
+        from PySide6.QtCore import QTimer
+        self._drop_probe()
+        self._tries += 1
+        if self._pending is None:
+            return                                # student moved on; abandon quietly
+        if self._tries > self.MAX_PROBES:
+            url = self._pending[0]
+            self._sub.setText(f"{url}\nNo terminal answered there. Is the element still starting? "
+                              f"Re-select it to try again.")
+            return
+        if self._tries == 2:                      # only say it once it is actually slow
+            self._sub.setText(f"{self._sub.text().splitlines()[0]}\nwaiting for the container…")
+        QTimer.singleShot(self.PROBE_MS, self._probe_port)
+
+    def _build_view(self) -> None:
+        if self._pending is None or self._view is not None:
+            return
         from PySide6.QtCore import QUrl
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        url, _name, cmd = self._pending
+        kind = "router CLI" if "grconsole" in cmd else "shell"
+        self._sub.setText(f"{kind}  ·  {url}")    # clear any "waiting…" line
         # Rebuilt per element rather than reused: a web view keeps its page's state, and carrying
         # one element's live shell over to another element's tab would be worse than a reload.
+        # The SESSION survives anyway — it is a tmux session in the container, not in this view.
         self._view = QWebEngineView(self._holder)
         self._holder_lay.addWidget(self._view)
         self._view.setUrl(QUrl(url))
