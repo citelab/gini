@@ -343,6 +343,55 @@ def test_deselecting_parks_the_view_rather_than_destroying_it(app, theme, tmp_pa
         srv.close()
 
 
+def test_it_does_not_re_navigate_to_the_page_it_is_already_loading(app, theme, tmp_path):
+    """The spinning cursor, finally.
+
+    The "already showing this URL" guard used to ask self._view.url(). QWebEngineView does not
+    report a new URL until the load COMMITS, so right after setUrl() it still returns the old one:
+    the guard never matched, every showEvent navigated again, and each navigation cancelled the
+    one in flight. The console filled with
+
+        js: Blocked attempt to show a 'beforeunload' confirmation panel ...    (x8 per Lab open)
+
+    and a page permanently mid-load keeps QtWebEngine's busy cursor up — which is why opening a
+    Router Lab span the cursor while the Machine Lab never did (xv6 serves no terminal, so there
+    was no view to navigate).
+
+    The guard now uses OUR OWN record of what we asked for, which does not depend on Qt's timing.
+    """
+    p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
+    p.show()
+    navigations = []
+
+    class _FakeView:                           # stand in for the Chromium process
+        def show(self): pass
+
+    def _fake_build():
+        navigations.append(p._pending[0])
+        p._shown_url = p._pending[0]
+        p._view = p._view or _FakeView()
+
+    p._build_view = _fake_build
+    p.show_device("m1", "Machine")
+    p._probe_ok()                              # pretend ttyd answered
+    assert navigations == ["http://127.0.0.1:1/"]
+    from PySide6.QtGui import QShowEvent
+    for _ in range(5):                         # more showEvents / re-selections
+        p._realise()
+        p.showEvent(QShowEvent())
+    assert navigations == ["http://127.0.0.1:1/"], (
+        f"re-navigated {len(navigations)} times to the same page — this is the load loop that "
+        f"keeps the busy cursor up")
+
+
+def test_the_warm_up_blank_page_is_not_mistaken_for_an_element(app, theme, tmp_path):
+    """warm_up parks the view on about:blank. If that counted as 'already showing', the first
+    element selected would never load."""
+    p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
+    p.warm_up()
+    assert p._showing() == "", "about:blank would satisfy the already-showing guard"
+
+
 def test_no_application_wide_event_filter_creeps_back_in(app, theme, tmp_path):
     """This panel was blamed for a segfault that was really MainWindow's app-wide event filter:
     PySide cannot wrap the QtQuick objects inside a QWebEngineView, so hovering ANY web view

@@ -359,6 +359,26 @@ class RouterLab(QDialog):
         lay.addWidget(tabs)
         return w
 
+    def _emit(self, signal, *args) -> bool:
+        """Emit from a worker thread, tolerating this dialog having been destroyed meanwhile.
+
+        A query can sit in `docker compose exec` for up to 12s. If the window is closed and
+        retired in that time, MainWindow._retire_lab deletes the C++ object and the worker's emit
+        lands on nothing:
+
+            RuntimeError: Signal source has been deleted
+
+        which killed the thread with an unhandled traceback on the console. There is no reliable
+        way to ask from another thread whether a QObject is still alive — checking and then
+        emitting is a race — so the emit itself is the check. Returns False if the dialog is gone,
+        which lets a worker stop early instead of running the rest of its queries for nobody.
+        """
+        try:
+            signal.emit(*args)
+            return True
+        except RuntimeError:
+            return False
+
     def _refresh_flows(self, counted: bool = True) -> None:
         """Read the live OpenFlow table. Driven only by the poll timer, so `counted` defaults True.
 
@@ -384,10 +404,11 @@ class RouterLab(QDialog):
                 stats = parse_table_stats(qf("openflow stats table"))
             except Exception:
                 pass
-            self.flows_ready.emit(rows)
-            self.tablestats_ready.emit(stats)
+            if not self._emit(self.flows_ready, rows):
+                return
+            self._emit(self.tablestats_ready, stats)
             if counted:
-                self.worker_done.emit()
+                self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_flows(self, rows: list) -> None:
@@ -487,10 +508,11 @@ class RouterLab(QDialog):
                 chain = qf("gpipe list")     # the live deployed service chain
             except Exception:
                 pass
-            self.routes_ready.emit(rows)
-            self.chain_ready.emit(chain)
+            if not self._emit(self.routes_ready, rows):
+                return
+            self._emit(self.chain_ready, chain)
             if counted:
-                self.worker_done.emit()
+                self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_routes(self, rows: list) -> None:
@@ -685,9 +707,9 @@ class RouterLab(QDialog):
                 payload = parse_queue_stats(qf("queue stats"))
             except Exception:
                 pass
-            self.qstats_ready.emit(payload)
+            self._emit(self.qstats_ready, payload)
             if counted:
-                self.worker_done.emit()
+                self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_qstats(self, payload) -> None:
@@ -777,7 +799,7 @@ class RouterLab(QDialog):
                 listing = qf("gpipe list") if qf is not None else cf("list")
             except Exception as e:
                 listing = f"(deploy failed: {e})"
-            self.chain_ready.emit(listing)
+            self._emit(self.chain_ready, listing)
         threading.Thread(target=work, daemon=True).start()
 
     def _set_fw_status(self, text: str) -> None:
@@ -886,7 +908,7 @@ class RouterLab(QDialog):
                 out = qf("delay show")
             except Exception as e:
                 out = f"(apply failed: {e})"
-            self.delay_ready.emit(out.strip() or "applied")
+            self._emit(self.delay_ready, out.strip() or "applied")
         threading.Thread(target=work, daemon=True).start()
 
     def _clear_delay(self) -> None:
@@ -907,8 +929,8 @@ class RouterLab(QDialog):
             try:
                 qf("delay clear")
             except Exception as e:
-                self.delay_ready.emit(f"(clear failed: {e})"); return
-            self.delay_ready.emit("cleared")
+                self._emit(self.delay_ready, f"(clear failed: {e})"); return
+            self._emit(self.delay_ready, "cleared")
         threading.Thread(target=work, daemon=True).start()
 
     def _set_delay_status(self, text: str) -> None:
@@ -967,7 +989,7 @@ class RouterLab(QDialog):
                 listing = qf("gpipe list") if qf is not None else cf("list")
             except Exception as e:
                 listing = f"(deploy failed: {e})"
-            self.chain_ready.emit(listing)
+            self._emit(self.chain_ready, listing)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_chain(self, text: str) -> None:

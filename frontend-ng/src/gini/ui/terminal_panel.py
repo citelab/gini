@@ -70,6 +70,7 @@ class TerminalPanel(QWidget):
         self._probe = None                # QTcpSocket checking whether ttyd is listening yet
         self._tries = 0
         self._warmed = False              # QtWebEngine start-up cost paid? see warm_up()
+        self._shown_url = ""              # what we last told the view to load; see _showing()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -161,6 +162,7 @@ class TerminalPanel(QWidget):
 
     def _drop_view(self) -> None:
         """Destroy the render process. Only for teardown; NOT for switching elements."""
+        self._shown_url = ""
         if self._view is not None:
             self._view.setParent(None)
             self._view.deleteLater()
@@ -219,17 +221,28 @@ class TerminalPanel(QWidget):
             return
         self._view = QWebEngineView(self._holder)
         self._holder_lay.addWidget(self._view)
+        # _shown_url deliberately stays "" — about:blank is not an element, and must never
+        # satisfy the already-showing guard in _realise. No assignment needed: warm_up only runs
+        # while there is no view at all, so nothing can have set it yet. (Setting it explicitly
+        # here was dead code — removing it failed no test.)
         self._view.setUrl(QUrl("about:blank"))
         self._view.hide()                          # parked until an element is selected
 
     def _showing(self) -> str:
-        """URL the live view is already on, or ""."""
-        if self._view is None:
-            return ""
-        try:
-            return self._view.url().toString()
-        except Exception:                      # noqa: BLE001 - a torn-down view has no url
-            return ""
+        """URL we have already told the view to load, or "".
+
+        OUR OWN record, deliberately — not `self._view.url()`. QWebEngineView does not report a
+        new URL until the load COMMITS, so asking it right after setUrl() still returns the old
+        one. The "already showing this" guard therefore never matched, every showEvent navigated
+        again, and each navigation cancelled the one in flight:
+
+            js: Blocked attempt to show a 'beforeunload' confirmation panel ...   (x8 per open)
+
+        A page permanently mid-load keeps QtWebEngine's busy cursor up, which is the spinning
+        cursor that appeared whenever a Router Lab opened — and never appeared for the Machine
+        Lab, because xv6 serves no terminal and there is no view to navigate.
+        """
+        return self._shown_url
 
     def _realise(self) -> None:
         """Wait for the container's ttyd to be listening, THEN point the view at it.
@@ -246,7 +259,7 @@ class TerminalPanel(QWidget):
         """
         if self._pending is None or self._probe is not None:
             return
-        if self._showing() == self._pending[0]:
+        if self._view is not None and self._showing() == self._pending[0]:
             self._view.show()                  # may have been parked by a deselect
             return                             # already on this element: no navigation needed
         url, _name, cmd = self._pending
@@ -320,9 +333,11 @@ class TerminalPanel(QWidget):
         kind = "router CLI" if "grconsole" in cmd else "shell"
         self._sub.setText(f"{kind}  ·  {url}")    # clear any "waiting…" line
         if self._view is not None:                # reuse: just navigate
+            self._shown_url = url
             self._view.setUrl(QUrl(url))
             self._view.show()                     # may have been parked by a deselect
             return
+        self._shown_url = url
         self._view = QWebEngineView(self._holder)
         self._holder_lay.addWidget(self._view)
         self._view.setUrl(QUrl(url))
