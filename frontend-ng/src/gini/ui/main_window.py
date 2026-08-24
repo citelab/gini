@@ -3095,6 +3095,26 @@ class MainWindow(QMainWindow):
         else:
             node.set_status("ready" if self._running else "idle")
 
+    def _retire_lab(self, attr: str) -> None:
+        """Close and destroy a previously opened lab window before opening another.
+
+        These dialogs are parented to MainWindow, so rebinding the attribute does NOT free them:
+        Qt keeps every one alive as a child, timers and all. The Router Lab polls `docker compose
+        exec` every 2.5s, so each abandoned window left a permanent background load on the machine
+        — invisible, cumulative over a session, and eventually enough to make a slow box look like
+        it had stalled.
+        """
+        old = getattr(self, attr, None)
+        if old is None:
+            return
+        setattr(self, attr, None)
+        try:
+            old.close()
+            old.setParent(None)
+            old.deleteLater()
+        except RuntimeError:
+            pass                              # already gone; nothing to retire
+
     def _open_router_lab(self, device_id: str) -> None:
         from ..domain.router_modules import RouterProgram
         from ..services.compiler import _role
@@ -3113,6 +3133,7 @@ class MainWindow(QMainWindow):
         # raw CLI query used by the live panels: `openflow …` for an OVS, `route`/`arp`
         # for a router. Same control socket as the console.
         qf = ((lambda c, n=dev.name: self.element_query(n, c)) if self._running else None)
+        self._retire_lab("_router_lab")
         self._router_lab = RouterLab(
             self, self.theme, dev, program,
             on_console=lambda: self._open_terminal(device_id),
@@ -3228,6 +3249,7 @@ class MainWindow(QMainWindow):
         dev = self.ctx.topology.devices[device_id]
         ms = self._machine_state_for(device_id)
         try:
+            self._retire_lab("_machine_lab")
             self._machine_lab = MachineLab(
                 self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
                 on_console=lambda: self._open_terminal(device_id),
@@ -3283,6 +3305,7 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
                          f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
             return
+        self._retire_lab("_desktop_lab")
         self._desktop_lab = ZooLab(self, self.theme, dev, url)
         self._desktop_lab.show()
         self._desktop_lab.raise_()
@@ -3321,6 +3344,7 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
                          f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
             return
+        self._retire_lab("_zoo_lab")
         self._zoo_lab = ZooLab(self, self.theme, dev, url)
         self._zoo_lab.show()
         self._zoo_lab.raise_()

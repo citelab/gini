@@ -543,6 +543,33 @@ class RouterLab(QDialog):
         if want != self._live_timer.interval():
             self._live_timer.setInterval(want)
 
+    # -- the poll must not outlive the window ------------------------------- #
+    # This dialog is parented to MainWindow, so Qt keeps it alive after it is closed and after
+    # main_window rebinds self._router_lab to a newer one. Nothing stopped the timer, so every
+    # Router Lab ever opened left a PERMANENT background poller behind, each firing three
+    # `docker compose exec` calls every 2.5s at a router nobody was looking at.
+    #
+    # That is what the py-spy dump showed: four live query threads for what should be one round,
+    # and two still running after the window was closed. The main thread was idle throughout —
+    # the app was not stalled, the machine was saturated. On Linux the window manager then paints
+    # a busy cursor because the app misses its _NET_WM_PING deadlines, which is the "spinner" that
+    # kept appearing while the route table filled in perfectly well. It got worse the longer a
+    # session ran, and a slow box crossed the threshold first.
+    def hideEvent(self, e):                  # noqa: N802 - Qt naming
+        """Stop polling whenever the window stops being visible.
+
+        hideEvent alone, deliberately — closing a dialog hides it, so a closeEvent override that
+        also stopped the timer was dead code: removing it changed no test. Hiding is the broader
+        condition anyway, and it covers being hidden without a close.
+        """
+        self._live_timer.stop()
+        super().hideEvent(e)
+
+    def showEvent(self, e):                  # noqa: N802 - Qt naming
+        if self.query_fn is not None and not self._live_timer.isActive():
+            self._live_timer.start(max(self.MIN_POLL_MS, self._live_timer.interval()))
+        super().showEvent(e)
+
     def _refresh_router_live(self) -> None:
         """Live poll for the router/firewall face: routes and per-queue stats."""
         if not self._round_begin(2):
