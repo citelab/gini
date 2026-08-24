@@ -166,6 +166,70 @@ def test_a_key_press_emits_bytes(app):
     assert sent == [b"\x03"]
 
 
+def test_the_font_tracks_settings_text_size(app):
+    """The terminal should not have a size of its own — change Settings › Text size and it moves
+    with the Inspector beside it, rather than staying pinned while everything else grows."""
+    from gini.ui.terminal_view import FONT_RATIO, UI_BASE_PT
+    from gini.ui.theme import ThemeManager
+    tm = ThemeManager(app)
+    tm.set_font_scale(1.0)
+    v = TerminalView(tm)
+    v.resize(700, 380)
+    small = v._font.pointSizeF()
+
+    tm.set_font_scale(1.6)
+    v.refresh_theme()
+    assert v._font.pointSizeF() > small, "text size went up and the terminal did not follow"
+    assert v._font.pointSizeF() == pytest.approx(UI_BASE_PT * 1.6 * FONT_RATIO, abs=0.6)
+
+    tm.set_font_scale(1.0)
+    v.refresh_theme()
+    assert v._font.pointSizeF() == pytest.approx(small, abs=0.01)
+
+
+def test_it_is_smaller_than_the_ui_font_not_equal(app):
+    """A monospace face at the same nominal point size reads noticeably larger and wider than the
+    UI's proportional font, so matching exactly makes the pane look oversized — and costs columns,
+    which a terminal feels more than any other pane."""
+    from gini.ui.terminal_view import FONT_RATIO
+    assert 0.8 <= FONT_RATIO < 1.0, "the terminal should be near the UI size, slightly under"
+
+
+def test_a_text_size_change_reflows_the_grid(app):
+    """Bigger glyphs mean fewer columns, and the PTY has to be told or output wraps at a width
+    nothing on screen is using."""
+    from gini.ui.theme import ThemeManager
+    tm = ThemeManager(app)
+    tm.set_font_scale(1.0)
+    v = TerminalView(tm)
+    v.resize(700, 380)
+    v._refit()
+    wide = v._screen.columns
+    seen = []
+    v.size_changed.connect(lambda c, r: seen.append((c, r)))
+    tm.set_font_scale(1.6)
+    v.refresh_theme()
+    assert v._screen.columns < wide, "font grew but the grid kept its width"
+    assert seen, "the PTY was never told the new geometry"
+    tm.set_font_scale(1.0)
+
+
+def test_an_explicit_size_overrides_the_setting_until_cleared(app):
+    from gini.ui.theme import ThemeManager
+    tm = ThemeManager(app)
+    tm.set_font_scale(1.0)
+    v = TerminalView(tm)
+    v.resize(700, 380)
+    v.set_font_size(20)
+    assert v._font.pointSizeF() == 20
+    tm.set_font_scale(1.5)
+    v.refresh_theme()
+    assert v._font.pointSizeF() == 20, "an explicit size should not be overwritten by the setting"
+    v.clear_font_override()
+    assert v._font.pointSizeF() != 20, "clearing the override did not return to tracking"
+    tm.set_font_scale(1.0)
+
+
 def test_default_geometry_is_a_sane_terminal(app):
     v = TerminalView()
     assert (v._screen.columns, v._screen.lines) == (DEFAULT_COLS, DEFAULT_ROWS)

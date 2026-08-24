@@ -116,10 +116,11 @@ class TerminalPanel(QWidget):
         """Theme switched. Takes *_a because themeChanged carries the new theme's name.
 
         The terminal itself now follows too — it is painted by Qt from the theme's tokens, which
-        the xterm.js page never could.
+        the xterm.js page never could. ThemeManager emits this for a TEXT SIZE change as well as a
+        palette change, so it is also how Settings › Text size reaches the terminal font.
         """
         self._apply_theme()
-        self._view.update()
+        self._view.refresh_theme()
 
     # -- the port map ------------------------------------------------------- #
     def _terminals(self) -> dict:

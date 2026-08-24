@@ -235,6 +235,29 @@ def test_the_terminal_follows_the_theme(app, theme, tmp_path):
     p.refresh_theme("green")                     # must not raise
 
 
+def test_a_text_size_change_reaches_the_terminal_font(app, theme, tmp_path):
+    """ThemeManager emits themeChanged for a TEXT SIZE change as well as a palette change, so the
+    panel's handler is the wire that carries Settings › Text size to the terminal.
+
+    Tested through the PANEL, not the view: mutation testing showed that a handler which only
+    repainted (rather than re-deriving the font) left every view-level test green while the
+    setting did nothing.
+    """
+    p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
+    p.resize(700, 380)
+    theme.set_font_scale(1.0)
+    p.refresh_theme("dark")
+    before = p._view._font.pointSizeF()
+    theme.set_font_scale(1.6)
+    p.refresh_theme("dark")
+    try:
+        assert p._view._font.pointSizeF() > before, (
+            "Settings › Text size changed and the terminal font did not")
+    finally:
+        theme.set_font_scale(1.0)
+        p.refresh_theme("dark")
+
+
 def test_no_application_wide_event_filter_creeps_back_in(app, theme, tmp_path):
     """An app-wide filter segfaulted gBuilder once already (ui/app.py)."""
     import ast

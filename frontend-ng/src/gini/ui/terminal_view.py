@@ -26,6 +26,8 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+from .theme.manager import sp as _sp   # point size scaled by Settings > Text size
+
 # pyte names the 8 ANSI colours; everything else arrives as a hex string or "default".
 _ANSI = {
     "black": "#3b4048", "red": "#e06c75", "green": "#98c379", "brown": "#d19a66",
@@ -59,6 +61,18 @@ def _in_selection(sel, doc: int, col: int) -> bool:
 # "icmp_seq=1", and dragging the punctuation along means editing it out of every paste.
 _WORD_EXTRA = "._-/+@~"
 
+# The terminal tracks the rest of the UI rather than having a size of its own: change Settings >
+# Text size and this changes with it. UI_BASE_PT is what ThemeManager sets the application font
+# to at scale 1.0, so sp(UI_BASE_PT) is "whatever the UI is using right now".
+#
+# The 0.9 is deliberate. A monospace face at the same nominal point size reads noticeably larger
+# and wider than the UI's proportional font, so matching the number exactly makes the terminal
+# look oversized next to the Inspector beside it — and costs columns, which a terminal feels more
+# than any other pane.
+UI_BASE_PT = 10.0
+FONT_RATIO = 0.9
+MIN_PT = 7.0
+
 MIN_COLS, MIN_ROWS = 20, 4
 DEFAULT_COLS, DEFAULT_ROWS = 80, 24
 SCROLLBACK = 5000
@@ -83,8 +97,8 @@ class TerminalView(QWidget):
         self._font = QFont("Menlo")
         self._font.setStyleHint(QFont.Monospace)     # falls back to DejaVu Sans Mono / Consolas
         self._font.setFixedPitch(True)
-        self._font.setPointSize(11)
-        self._metrics()
+        self._override_pt = None                     # set only by an explicit set_font_size()
+        self._apply_font()
 
         import pyte
         self._screen = pyte.HistoryScreen(DEFAULT_COLS, DEFAULT_ROWS, history=SCROLLBACK,
@@ -128,9 +142,28 @@ class TerminalView(QWidget):
             self.size_changed.emit(cols, rows)
         self.update()
 
-    def set_font_size(self, pt: int) -> None:
-        self._font.setPointSize(max(6, int(pt)))
+    def _apply_font(self) -> None:
+        """Size the terminal from the UI text-size setting (or an explicit override)."""
+        pt = self._override_pt if self._override_pt else max(MIN_PT, _sp(UI_BASE_PT) * FONT_RATIO)
+        self._font.setPointSizeF(float(pt))
         self._metrics()
+
+    def refresh_theme(self, *_a) -> None:
+        """Theme or text size changed. ThemeManager emits themeChanged for BOTH, so this is where
+        a Settings > Text size change reaches the terminal."""
+        self._apply_font()
+        self._refit()                                # the grid changes with the glyph size
+        self.update()
+
+    def set_font_size(self, pt: int) -> None:
+        """Pin an explicit size, overriding the UI setting until cleared."""
+        self._override_pt = max(MIN_PT, float(pt))
+        self._apply_font()
+        self._refit()
+
+    def clear_font_override(self) -> None:
+        self._override_pt = None
+        self._apply_font()
         self._refit()
 
     # -- input from the container ------------------------------------------- #
