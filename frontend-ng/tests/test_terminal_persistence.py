@@ -79,6 +79,30 @@ def test_quitting_the_router_cli_stays_inside_the_session():
     assert "grconsole.py /run/" in cmd, "grconsole still needs its control socket path"
 
 
+def test_tmux_is_given_a_TERM():
+    """From a live container log:
+
+        TERM environment variable not set.
+        sh: 1: cls: not found
+
+    tmux refuses to start without TERM, so the command fell straight through to the `; exec
+    /bin/sh` fallback — the student got a working shell with NO persistence, and nothing said so.
+    A silent loss of the feature is worse than a visible failure.
+    """
+    for svc, cmd in _cmds().items():
+        assert "TERM=" in cmd, f"{svc}: tmux will refuse to start — {cmd}"
+        assert cmd.index("TERM=") < cmd.index("tmux"), f"{svc}: TERM set after tmux runs"
+
+
+def test_the_composed_command_is_valid_shell():
+    """It is handed to `/bin/sh -c` inside the container, where a quoting error is invisible from
+    here and shows up as a terminal that opens on a bare shell."""
+    import subprocess
+    for svc, cmd in _cmds().items():
+        r = subprocess.run(["sh", "-n", "-c", cmd], capture_output=True, text=True)
+        assert r.returncode == 0, f"{svc}: not valid shell — {r.stderr.strip()}"
+
+
 def test_a_plain_shell_command_carries_no_stray_quoting():
     """_persist() with no command must not emit an empty quoted argument — tmux would try to run
     the empty string as a command and exit immediately."""

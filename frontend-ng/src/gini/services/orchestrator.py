@@ -246,7 +246,13 @@ def _persist(cmd: str = "") -> str:
     killing the session under you.
     """
     inner = f' "{cmd}; exec /bin/sh"' if cmd else ""
-    return f"tmux new -A -s {TMUX_SESSION}{inner}; exec /bin/sh"
+    # TERM must be set or tmux refuses to start — "TERM environment variable not set." — and the
+    # student silently gets the fallback shell with no persistence instead. ttyd does set TERM for
+    # its PTY child, but the launcher runs `/bin/sh -c "$TTYD_CMD"` and not every sh passes it
+    # through the way tmux needs; setting it here costs nothing and removes the doubt. `${TERM:-…}`
+    # keeps whatever ttyd did provide.
+    return (f'TERM="${{TERM:-xterm-256color}}" tmux new -A -s {TMUX_SESSION}{inner}'
+            f"; exec /bin/sh")
 
 
 def _with_ttyd(cmd: str) -> str:
