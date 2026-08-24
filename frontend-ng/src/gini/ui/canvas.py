@@ -1451,7 +1451,7 @@ class CanvasView(QGraphicsView):
         self._lp_start = None
         self._lp_timer = QTimer(self)
         self._lp_timer.setSingleShot(True)
-        self._lp_timer.timeout.connect(self._fire_xray)
+        self._lp_timer.timeout.connect(self._on_lp_timeout)
         self._xray_on = False
         self._xray_items: list = []             # ghost cards + connector lines on the scene
         self._ghosts: list = []                 # the clickable ghost cards
@@ -1560,6 +1560,28 @@ class CanvasView(QGraphicsView):
 
     # -- X-ray: long-press spawns ghost previews of the valid neighbours ----- #
     MAX_GHOSTS = 8                               # cap the ring so it stays readable
+
+    def _on_lp_timeout(self) -> None:
+        """The long-press timer expired. Decide whether it was REALLY a long press.
+
+        Stopping the timer on release is not enough on its own. If the GUI thread stalls between
+        the press and the release — which it does on a slow machine while something expensive is
+        being built — the queued timer expiry is delivered BEFORE the queued mouse release, and an
+        ordinary click opens the X-ray ring. Reported as "I click on the router and it is
+        immediately registered as a long press. I never long-pressed."
+
+        Qt's live button state is not queued, so it reports what the mouse is doing NOW rather
+        than what the event backlog has got round to. If the button is already up, this was a
+        click that the stall made look slow.
+
+        The gesture decision lives here and the ring lives in _fire_xray, so the two can be
+        tested apart: the X-ray's CONTENT does not depend on a physical button being held.
+        """
+        from PySide6.QtWidgets import QApplication
+        if not (QApplication.mouseButtons() & Qt.LeftButton):
+            self._lp_node = None
+            return
+        self._fire_xray()
 
     def _fire_xray(self) -> None:
         from ..domain import connection_rules as cr

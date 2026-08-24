@@ -69,6 +69,7 @@ class TerminalPanel(QWidget):
         self._pending = None              # (url, name, cmd) waiting for the tab to become visible
         self._probe = None                # QTcpSocket checking whether ttyd is listening yet
         self._tries = 0
+        self._warmed = False              # QtWebEngine start-up cost paid? see warm_up()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -191,6 +192,35 @@ class TerminalPanel(QWidget):
         """The tab just became visible. Build the view we deferred, if any."""
         super().showEvent(e)
         self._realise()
+
+    def warm_up(self) -> None:
+        """Pay QtWebEngine's one-time start-up cost NOW, while nothing is waiting on it.
+
+        Constructing the first QWebEngineView initialises Chromium, and that happens on the GUI
+        THREAD. On a slow machine with software GL it stalls the whole app for seconds. It landed
+        on the worst possible moment: double-clicking a router both opens the Router Lab and
+        changes the selection, so the stall arrived while the Lab was trying to draw — spinning
+        cursor, and an ordinary click misread as a long-press because the queued long-press timer
+        was delivered ahead of the queued mouse release.
+
+        Called once from MainWindow after the window is up. Subsequent views are cheap, so from
+        then on switching elements is a navigation and costs nothing noticeable.
+
+        Best-effort by design: if QtWebEngine is not installed there is nothing to warm and the
+        panel's browser fallback handles it.
+        """
+        if self._warmed or self._view is not None:
+            return
+        self._warmed = True
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+        except Exception:                          # noqa: BLE001 - optional dependency
+            return
+        self._view = QWebEngineView(self._holder)
+        self._holder_lay.addWidget(self._view)
+        self._view.setUrl(QUrl("about:blank"))
+        self._view.hide()                          # parked until an element is selected
 
     def _showing(self) -> str:
         """URL the live view is already on, or ""."""
