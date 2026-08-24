@@ -20,6 +20,8 @@ the xterm.js route rather than a requirement, and buying it back cost more than 
 """
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -35,6 +37,27 @@ _BRIGHT = {
     "yellow": "#e5c07b", "blue": "#7cc7ff", "magenta": "#e2a5f0", "cyan": "#69d9db",
     "white": "#ffffff",
 }
+
+def _in_selection(sel, doc: int, col: int) -> bool:
+    """Is this cell inside the (start, end) selection? Free function: it is pure index arithmetic
+    and gets called for every cell of every repaint."""
+    (r0, c0), (r1, c1) = sel
+    if doc < r0 or doc > r1:
+        return False
+    if r0 == r1:
+        return c0 <= col < c1
+    if doc == r0:
+        return col >= c0
+    if doc == r1:
+        return col < c1
+    return True
+
+
+# What a double-click treats as one word, beyond letters and digits. Tuned for what is actually
+# worth copying out of these panes: addresses and masks (10.0.1.10, /24), interface names (tun0,
+# eth0-1), paths (/run/r1.ctl). Deliberately NOT ':' or '=' — ping prints "from 10.0.1.10:" and
+# "icmp_seq=1", and dragging the punctuation along means editing it out of every paste.
+_WORD_EXTRA = "._-/+@~"
 
 MIN_COLS, MIN_ROWS = 20, 4
 DEFAULT_COLS, DEFAULT_ROWS = 80, 24
@@ -68,6 +91,10 @@ class TerminalView(QWidget):
                                           ratio=0.2)
         self._stream = pyte.ByteStream(self._screen)   # BYTE stream: it holds partial UTF-8
         self._scroll = 0                               # lines scrolled back from the live screen
+        self._sel_anchor = None                        # (doc_row, col) where the drag started
+        self._sel_head = None                          # (doc_row, col) where it is now
+        self._selecting = False
+        self.setMouseTracking(False)                   # only track while a button is held
 
     # -- geometry ----------------------------------------------------------- #
     def _metrics(self) -> None:
@@ -128,6 +155,12 @@ class TerminalView(QWidget):
         fg = getattr(t, "text", None) or "#dcdfe4"
         return bg, fg
 
+    def _sel_colour(self) -> str:
+        """Highlight colour. From the theme so selection reads as part of GINI rather than as the
+        operating system's idea of blue."""
+        t = getattr(self.theme, "theme", None)
+        return getattr(t, "line", None) or getattr(t, "muted", None) or "#3a4150"
+
     def _colour(self, name: str, default: str, bold: bool = False) -> QColor:
         if not name or name == "default":
             return QColor(default)
@@ -154,11 +187,18 @@ class TerminalView(QWidget):
         p.fillRect(self.rect(), QColor(bg))
         p.setFont(self._font)
         rows = self._visible_lines()
+        sel = self._ordered_selection()
+        doc0 = self._doc_top()
+        sel_bg = QColor(self._sel_colour())
         for y, line in enumerate(rows):
             top = y * self._ch
+            doc = doc0 + y
             for x in range(self._screen.columns):
                 ch = line[x]
-                if ch.bg != "default":
+                if sel is not None and _in_selection(sel, doc, x):
+                    p.fillRect(int(x * self._cw), int(top), int(self._cw) + 1, int(self._ch) + 1,
+                               sel_bg)
+                elif ch.bg != "default":
                     p.fillRect(int(x * self._cw), int(top), int(self._cw) + 1, int(self._ch) + 1,
                                self._colour(ch.bg, bg))
                 if ch.data and ch.data != " ":
@@ -185,9 +225,167 @@ class TerminalView(QWidget):
         self._scroll = max(0, min(len(self._screen.history.top), self._scroll + step))
         self.update()
 
+    # -- selection ----------------------------------------------------------- #
+    # Positions are DOCUMENT rows, not screen rows: index 0 is the oldest line still in
+    # scrollback. A selection anchored to the screen would slide up the moment new output
+    # arrived, so highlighting a captured packet and then reading on would leave the highlight
+    # pointing at something else.
+    def _doc_top(self) -> int:
+        """Document index of the top visible row."""
+        return len(self._screen.history.top) - self._scroll
+
+    def _line_at(self, doc: int):
+        """One document row — from scrollback if it has scrolled off, else from the screen."""
+        top = self._screen.history.top
+        if doc < len(top):
+            return top[doc]
+        y = doc - len(top)
+        return self._screen.buffer[y] if 0 <= y < self._screen.lines else None
+
+    def _cell_at(self, pos) -> tuple[int, int]:
+        col = max(0, min(self._screen.columns - 1, int(pos.x() / self._cw)))
+        row = max(0, min(self._screen.lines - 1, int(pos.y() / self._ch)))
+        return self._doc_top() + row, col
+
+    def _ordered_selection(self):
+        """(start, end) with start <= end, or None. Both are (doc_row, col)."""
+        if self._sel_anchor is None or self._sel_head is None:
+            return None
+        a, b = self._sel_anchor, self._sel_head
+        return (a, b) if a <= b else (b, a)
+
+    def has_selection(self) -> bool:
+        sel = self._ordered_selection()
+        return sel is not None and sel[0] != sel[1]
+
+    def clear_selection(self) -> None:
+        self._sel_anchor = self._sel_head = None
+        self.update()
+
+    def selected_text(self) -> str:
+        """The selection as text, trailing blanks trimmed per line.
+
+        Trimming matters: a terminal row is padded to the full width, so without it every copied
+        line drags 40 spaces along and pasting into a document looks wrong.
+        """
+        sel = self._ordered_selection()
+        if sel is None:
+            return ""
+        (r0, c0), (r1, c1) = sel
+        out = []
+        for doc in range(r0, r1 + 1):
+            line = self._line_at(doc)
+            if line is None:
+                continue
+            start = c0 if doc == r0 else 0
+            end = c1 if doc == r1 else self._screen.columns
+            out.append("".join(line[x].data for x in range(start, min(end, self._screen.columns)))
+                       .rstrip())
+        return "\n".join(out)
+
+    def select_all(self) -> None:
+        last = len(self._screen.history.top) + self._screen.lines - 1
+        self._sel_anchor, self._sel_head = (0, 0), (last, self._screen.columns)
+        self.update()
+
+    def copy(self) -> bool:
+        """Copy the selection. False when there is nothing selected, so a caller can fall through
+        (Ctrl-C with no selection must still interrupt)."""
+        text = self.selected_text()
+        if not text:
+            return False
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text)
+        return True
+
+    def paste(self) -> None:
+        """Send the clipboard to the PTY.
+
+        Newlines become carriage returns: a shell expects CR for "run this", and pasting LF gives
+        a line that looks entered but never executes. Multi-line pastes therefore run every line,
+        which is what a student pasting a block of commands means.
+        """
+        from PySide6.QtWidgets import QApplication
+        text = QApplication.clipboard().text()
+        if not text:
+            return
+        self._scroll = 0
+        self.key_bytes.emit(text.replace("\r\n", "\r").replace("\n", "\r").encode("utf-8"))
+
+    # -- mouse ---------------------------------------------------------------- #
+    def mousePressEvent(self, e) -> None:             # noqa: N802 - Qt naming
+        if e.button() == Qt.LeftButton:
+            self._sel_anchor = self._sel_head = self._cell_at(e.position())
+            self._selecting = True
+            self.update()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:              # noqa: N802 - Qt naming
+        if self._selecting:
+            self._sel_head = self._cell_at(e.position())
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:           # noqa: N802 - Qt naming
+        self._selecting = False
+        if not self.has_selection():
+            self.clear_selection()                    # a plain click just dismisses the highlight
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e) -> None:       # noqa: N802 - Qt naming
+        """Double-click selects a word — usually an IP address or an interface name here, which
+        is the thing most worth copying out of this pane."""
+        doc, col = self._cell_at(e.position())
+        line = self._line_at(doc)
+        if line is None:
+            return
+        def is_word(x):
+            ch = line[x].data
+            return bool(ch) and (ch.isalnum() or ch in _WORD_EXTRA)
+        if not is_word(col):
+            return
+        start = col
+        while start > 0 and is_word(start - 1):
+            start -= 1
+        end = col
+        while end < self._screen.columns - 1 and is_word(end + 1):
+            end += 1
+        self._sel_anchor, self._sel_head = (doc, start), (doc, end + 1)
+        self.update()
+
+    def contextMenuEvent(self, e) -> None:            # noqa: N802 - Qt naming
+        """Right-click menu. The keyboard chords differ per platform and are not discoverable;
+        this is."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_copy = menu.addAction("Copy")
+        act_copy.setEnabled(self.has_selection())
+        act_paste = menu.addAction("Paste")
+        menu.addSeparator()
+        act_all = menu.addAction("Select All")
+        chosen = menu.exec(e.globalPos())
+        if chosen is act_copy:
+            self.copy()
+        elif chosen is act_paste:
+            self.paste()
+        elif chosen is act_all:
+            self.select_all()
+
     # -- keyboard ------------------------------------------------------------ #
     def keyPressEvent(self, e) -> None:               # noqa: N802 - Qt naming
-        data = encode_key(e.key(), e.modifiers(), e.text())
+        mods, key = e.modifiers(), e.key()
+        if clipboard_chord(mods):
+            # Ctrl+Shift+C (Cmd-C on macOS). With nothing selected this does nothing at all,
+            # which is what every terminal does — and crucially it is NOT the interrupt: plain
+            # Ctrl-C carries no Shift, so it reaches encode_key and becomes \x03.
+            if key == Qt.Key_C:
+                self.copy()
+                return
+            if key == Qt.Key_V:
+                self.paste(); return
+            if key == Qt.Key_A:
+                self.select_all(); return
+        data = encode_key(key, mods, e.text())
         if data:
             self._scroll = 0                          # typing returns to the live screen
             self.key_bytes.emit(data)
@@ -211,13 +409,40 @@ _SPECIAL = {
 }
 
 
+_MAC = sys.platform == "darwin"
+
+
+def terminal_ctrl(mods) -> bool:
+    """Is the TERMINAL's Control key down?
+
+    On macOS Qt swaps them: Qt.ControlModifier is Command and Qt.MetaModifier is Control. Reading
+    ControlModifier as "Ctrl" therefore sends \\x03 when the student presses Cmd-C to COPY, and
+    sends nothing at all when they press the real Ctrl-C to interrupt — so on a Mac, copy killed
+    your command and interrupt did nothing.
+    """
+    return bool(mods & (Qt.MetaModifier if _MAC else Qt.ControlModifier))
+
+
+def clipboard_chord(mods) -> bool:
+    """The platform's copy/paste modifier: Cmd on macOS, Ctrl+Shift elsewhere.
+
+    Ctrl+Shift, not Ctrl, because Ctrl-C must stay SIGINT — that is the whole reason terminals
+    everywhere use the longer chord.
+    """
+    if _MAC:
+        return bool(mods & Qt.ControlModifier)          # Command
+    return bool(mods & Qt.ControlModifier and mods & Qt.ShiftModifier)
+
+
 def encode_key(key: int, mods, text: str) -> bytes:
     """One key press -> the bytes a PTY expects, or b"" to let Qt handle it.
 
     Ctrl-C, Ctrl-D and Ctrl-Z matter more here than anywhere else: a student who cannot interrupt
     a `ping` has no way out of it, and Ctrl-D is how they leave the gRouter CLI.
     """
-    if mods & Qt.ControlModifier:
+    if clipboard_chord(mods) and key in (Qt.Key_C, Qt.Key_V, Qt.Key_A):
+        return b""                                      # the widget handles copy/paste/select-all
+    if terminal_ctrl(mods):
         if Qt.Key_A <= key <= Qt.Key_Z:
             return bytes([key - Qt.Key_A + 1])        # Ctrl-A..Ctrl-Z -> 0x01..0x1a
         if key == Qt.Key_BracketLeft:
