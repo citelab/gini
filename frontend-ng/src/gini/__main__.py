@@ -116,13 +116,6 @@ def main() -> int:
     win.show()
     from PySide6.QtCore import QTimer
     QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted
-    # Pay QtWebEngine's one-time Chromium start-up here, idle, rather than the first time a
-    # student opens a terminal — which is also the moment they are opening a Lab. See
-    # TerminalPanel.warm_up. Deliberately driven from the entry point, not from MainWindow:
-    # the test suite builds many windows and must not spawn a render process for each.
-    tp = getattr(win, "terminal_panel", None)
-    if tp is not None:
-        QTimer.singleShot(1500, tp.warm_up)
     return app.exec()
 
 

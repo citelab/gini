@@ -1,9 +1,16 @@
 """Terminal — a real shell (or router CLI) in the right-hand pane, following the selection.
 
 Each running element serves its own terminal from inside its container: ttyd, on a loopback-only
-host port, rendering with xterm.js. That choice is what makes this file short — cursor keys,
-history, Ctrl-C, colours and even `vim` all work because a real PTY and a real terminal emulator
-are doing the work. There is no escape-sequence interpreter here to write, or to keep correct.
+host port. The PTY therefore lives in Linux no matter what the student is running gBuilder on, so
+macOS, Linux and Windows behave identically with no host-side pseudo-terminal code.
+
+The SCREEN is drawn by Qt — see terminal_view.py, which puts pyte behind a painted cell grid. It
+used to be ttyd's own xterm.js page in a QWebEngineView, which meant a Chromium render process
+per terminal: ~150MB, a start-up cost heavy enough to stall a slow machine, a page that could not
+follow GINI's themes, and a run of failures that cost a day (an app-wide event filter meeting
+Chromium's internals, a navigation loop pinning the busy cursor, a start-up flicker). The Zoo and
+Desktop screens keep QtWebEngine, where booting an OS is a deliberate, occasional act and nobody
+minds the cost. A terminal is on every click.
 
 What the terminal FRONTS is decided per element by compose (`TTYD_CMD`), not here: a gRouter
 opens straight into the gRouter CLI, a switch and a host get a shell. The panel only needs to
@@ -15,17 +22,9 @@ Two elements deliberately have no terminal here:
   * Container / Instance / Kata Instance — they run arbitrary user-chosen images we cannot bake
     ttyd into, so they keep the external-terminal button.
 
-WHY THE VIEW IS BUILT LAZILY. A QWebEngineView is a Chromium render process, not a widget. The
-first version created one on every selection change, so clicking through ten elements with the
-Inspector tab showing spawned ten render processes for a pane nobody was looking at. Now the
-panel records what it should show and builds the view when the tab actually becomes visible
-(`showEvent`), so an unopened Terminal tab costs nothing.
-
-This panel is also where a segfault was wrongly blamed. Hovering ANY QWebEngineView crashed
-gBuilder, because MainWindow had installed an application-wide event filter and PySide could not
-wrap the QtQuick objects inside the view. The Terminal was simply the first thing to put a web
-view under the mouse often enough to notice; the OS Zoo and Desktop screens had the same latent
-bug. Fixed in ui/app.py — do not reintroduce an app-wide event filter.
+CONNECTING IS LAZY. Nothing is opened until the tab is actually visible: an unopened Terminal tab
+costs a widget and no socket. Switching elements re-points the one widget and the one client
+rather than creating anything.
 
 Follows the conventions in source_browser.py: `show_*` methods per mode, a `refresh_theme` that
 re-derives colours on a theme switch, and an honest empty state that says WHY rather than sitting
@@ -43,6 +42,11 @@ from ..services.orchestrator import TERMINALS_FILE
 
 def _scss(s: str) -> str:
     return s
+
+
+def _hostport(url: str) -> str:
+    """http://127.0.0.1:37600/ -> 127.0.0.1:37600, for the subtitle."""
+    return url.split("//", 1)[-1].rstrip("/")
 
 
 class TerminalPanel(QWidget):
@@ -64,13 +68,11 @@ class TerminalPanel(QWidget):
         # last time, so without this the panel would embed a terminal for a container that is not
         # running — at startup, before the student has pressed anything.
         self.running_fn = running_fn or (lambda: True)
-        self._view = None                 # QWebEngineView, created lazily (it is a whole process)
         self._name = ""
         self._pending = None              # (url, name, cmd) waiting for the tab to become visible
         self._probe = None                # QTcpSocket checking whether ttyd is listening yet
         self._tries = 0
-        self._warmed = False              # QtWebEngine start-up cost paid? see warm_up()
-        self._shown_url = ""              # what we last told the view to load; see _showing()
+        self._connected_to = ""           # URL the client is attached to; "" when detached
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -82,11 +84,19 @@ class TerminalPanel(QWidget):
         root.addWidget(self._title)
         root.addWidget(self._sub)
 
-        self._holder = QWidget()
-        self._holder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._holder_lay = QVBoxLayout(self._holder)
-        self._holder_lay.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._holder, 1)
+        # ONE terminal widget and ONE client for the life of the panel. Selecting another element
+        # re-points them; nothing is constructed per element, which is the whole reason this is
+        # not a web view any more.
+        from ..services.ttyd_client import TtydClient
+        from .terminal_view import TerminalView
+        self._view = TerminalView(theme, self)
+        root.addWidget(self._view, 1)
+        self._client = TtydClient(self)
+        self._client.output.connect(self._view.feed)
+        self._client.failed.connect(self._on_failed)
+        self._client.closed.connect(self._on_closed)
+        self._view.key_bytes.connect(self._client.send_input)
+        self._view.size_changed.connect(self._client.send_resize)
 
         # Subscribe to theme changes ourselves, the SourceBrowser/Dashboard convention —
         # MainWindow._on_theme_changed deliberately pokes nobody.
@@ -105,10 +115,11 @@ class TerminalPanel(QWidget):
     def refresh_theme(self, *_a) -> None:
         """Theme switched. Takes *_a because themeChanged carries the new theme's name.
 
-        The embedded terminal is a web page rendering with its own colours, so it does NOT
-        follow — same as the OS Zoo screen. Only the chrome around it restyles.
+        The terminal itself now follows too — it is painted by Qt from the theme's tokens, which
+        the xterm.js page never could.
         """
         self._apply_theme()
+        self._view.update()
 
     # -- the port map ------------------------------------------------------- #
     def _terminals(self) -> dict:
@@ -145,133 +156,54 @@ class TerminalPanel(QWidget):
         self._name = ""
         self._pending = None
         self._drop_probe()                 # nothing to wait for any more
-        # HIDE the view, do not destroy it. Clicking empty canvas clears the selection, and
-        # tearing down a Chromium render process every time the student deselects — then building
-        # a new one the moment they select again — is exactly the churn that made the Router Lab
-        # crawl. The page keeps its socket to a terminal that is still there.
-        self._park_view()
+        # The widget stays; only the session is dropped. The work itself is safe either way — it
+        # is a tmux session in the container, waiting to be re-attached.
+        self._detach()
         self._title.setText(f"Terminal  ·  {what}" if what else "Terminal")
         self._sub.setText(why or "Select a machine, router, switch or controller to open a "
                                  "terminal on it.")
 
     # -- internals ---------------------------------------------------------- #
-    def _park_view(self) -> None:
-        """Hide the view without destroying it — see show_none()."""
-        if self._view is not None:
-            self._view.hide()
+    def _detach(self) -> None:
+        """Close the session and clear the screen. The tmux session in the container survives."""
+        self._connected_to = ""
+        self._client.disconnect_from()
+        self._view.reset()
 
-    def _drop_view(self) -> None:
-        """Destroy the render process. Only for teardown; NOT for switching elements."""
-        self._shown_url = ""
-        if self._view is not None:
-            self._view.setParent(None)
-            self._view.deleteLater()
-            self._view = None
+    def _on_failed(self, why: str) -> None:
+        self._connected_to = ""
+        self._sub.setText(f"could not attach: {why}")
+
+    def _on_closed(self) -> None:
+        self._connected_to = ""
 
     def _embed(self, url: str, name: str, cmd: str) -> None:
-        # WHAT it is stays in the subtitle on both paths. The fallback used to replace the whole
-        # line, so a student without QtWebEngine lost the one thing that distinguishes a router's
-        # CLI from a switch's shell — the two share an image and differ only by TTYD_CMD.
         kind = "router CLI" if "grconsole" in cmd else "shell"
         self._title.setText(f"Terminal  ·  {name}")
-        self._sub.setText(f"{kind}  ·  {url}")
+        # The port stays on screen: it is the one thing that makes a wrong-element or
+        # not-yet-listening terminal diagnosable without reading gini-terminals.json by hand.
+        self._sub.setText(f"{kind}  ·  {_hostport(url)}")
         self._pending = (url, name, cmd)
-        # The view is REUSED, not rebuilt. A QWebEngineView is a Chromium render process, and
-        # spawning one is expensive enough to be felt: double-clicking a router changes the
-        # selection AND opens the Router Lab, so on a slow machine the process spawn landed on top
-        # of the Lab's `docker compose exec` calls and the two starved each other — the Lab sat
-        # spinning while a terminal nobody had asked for was being built.
-        #
-        # Rebuilding was originally there so one element's live shell could not linger under
-        # another element's name. tmux made that moot: the session lives in the container, so
-        # navigating this view to the new URL both shows the right element AND leaves the previous
-        # element's work running, ready to re-attach.
         self._drop_probe()                 # a probe for the PREVIOUS element must not fire later
-        if self.isVisible():               # tab is on top: build it now
+        if self.isVisible():               # tab is on top: connect now
             self._realise()
 
     def showEvent(self, e) -> None:        # noqa: N802 - Qt naming
-        """The tab just became visible. Build the view we deferred, if any."""
+        """The tab just became visible. Connect to whatever we deferred, if any."""
         super().showEvent(e)
         self._realise()
 
-    def warm_up(self) -> None:
-        """Pay QtWebEngine's one-time start-up cost NOW, while nothing is waiting on it.
-
-        Constructing the first QWebEngineView initialises Chromium, and that happens on the GUI
-        THREAD. On a slow machine with software GL it stalls the whole app for seconds. It landed
-        on the worst possible moment: double-clicking a router both opens the Router Lab and
-        changes the selection, so the stall arrived while the Lab was trying to draw — spinning
-        cursor, and an ordinary click misread as a long-press because the queued long-press timer
-        was delivered ahead of the queued mouse release.
-
-        Called once from MainWindow after the window is up. Subsequent views are cheap, so from
-        then on switching elements is a navigation and costs nothing noticeable.
-
-        Best-effort by design: if QtWebEngine is not installed there is nothing to warm and the
-        panel's browser fallback handles it.
-        """
-        if self._warmed or self._view is not None:
-            return
-        self._warmed = True
-        try:
-            from PySide6.QtCore import QUrl
-            from PySide6.QtWebEngineWidgets import QWebEngineView
-        except Exception:                          # noqa: BLE001 - optional dependency
-            return
-        self._view = QWebEngineView(self._holder)
-        self._holder_lay.addWidget(self._view)
-        # _shown_url deliberately stays "" — about:blank is not an element, and must never
-        # satisfy the already-showing guard in _realise. No assignment needed: warm_up only runs
-        # while there is no view at all, so nothing can have set it yet. (Setting it explicitly
-        # here was dead code — removing it failed no test.)
-        self._view.setUrl(QUrl("about:blank"))
-        self._view.hide()                          # parked until an element is selected
-
-    def _showing(self) -> str:
-        """URL we have already told the view to load, or "".
-
-        OUR OWN record, deliberately — not `self._view.url()`. QWebEngineView does not report a
-        new URL until the load COMMITS, so asking it right after setUrl() still returns the old
-        one. The "already showing this" guard therefore never matched, every showEvent navigated
-        again, and each navigation cancelled the one in flight:
-
-            js: Blocked attempt to show a 'beforeunload' confirmation panel ...   (x8 per open)
-
-        A page permanently mid-load keeps QtWebEngine's busy cursor up, which is the spinning
-        cursor that appeared whenever a Router Lab opened — and never appeared for the Machine
-        Lab, because xv6 serves no terminal and there is no view to navigate.
-        """
-        return self._shown_url
-
     def _realise(self) -> None:
-        """Wait for the container's ttyd to be listening, THEN point the view at it.
+        """Wait for the container's ttyd to be listening, THEN connect.
 
         `docker compose up` returns as soon as the containers are created; ttyd inside them binds
-        its port a moment later, and later still on a cold build or a slow machine. Loading the
-        page into that gap gives the student a broken terminal that never recovers:
-
-            js: [ttyd] fetch http://127.0.0.1:37601/token: TypeError: Failed to fetch
-
-        The page has already loaded at that point, so there is nothing for QWebEngineView's
-        loadFinished to report — the failure is a fetch INSIDE the page. Hence a port probe up
-        front rather than a reload-on-error.
+        its port a moment later, and later still on a cold build or a slow machine. Connecting
+        into that gap fails, and a WebSocket that failed once does not retry itself.
         """
         if self._pending is None or self._probe is not None:
             return
-        if self._view is not None and self._showing() == self._pending[0]:
-            self._view.show()                  # may have been parked by a deselect
-            return                             # already on this element: no navigation needed
-        url, _name, cmd = self._pending
-        kind = "router CLI" if "grconsole" in cmd else "shell"
-        try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401 - availability check
-        except Exception as e:                    # noqa: BLE001 - QtWebEngine is optional
-            self._sub.setText(
-                f"{kind}  ·  {url}\n"
-                f"Open that in a browser — the embedded view needs PySide6-Addons "
-                f"(QtWebEngine): {e}")
-            return
+        if self._connected_to == self._pending[0]:
+            return                         # already attached to this element
         self._tries = 0
         self._probe_port()
 
@@ -288,7 +220,7 @@ class TerminalPanel(QWidget):
         self._probe.errorOccurred.connect(self._probe_failed)
         self._probe.connectToHost("127.0.0.1", port)
 
-    def _drop_probe(self):
+    def _drop_probe(self) -> None:
         if self._probe is not None:
             self._probe.abort()
             self._probe.deleteLater()
@@ -296,7 +228,7 @@ class TerminalPanel(QWidget):
 
     def _probe_ok(self) -> None:
         self._drop_probe()
-        self._build_view()
+        self._attach()
 
     def _probe_failed(self, *_a) -> None:
         from PySide6.QtCore import QTimer
@@ -305,43 +237,30 @@ class TerminalPanel(QWidget):
         if self._pending is None:
             return                                # student moved on; abandon quietly
         if self._tries > self.MAX_PROBES:
-            url = self._pending[0]
-            self._sub.setText(f"{url}\nNo terminal answered there. Is the element still starting? "
-                              f"Re-select it to try again.")
+            self._sub.setText("No terminal answered there. Is the element still starting? "
+                              "Re-select it to try again.")
             return
         if self._tries == 2:                      # only say it once it is actually slow
             self._sub.setText(f"{self._sub.text().splitlines()[0]}\nwaiting for the container…")
         QTimer.singleShot(self.PROBE_MS, self._probe_port)
 
-    def _build_view(self) -> None:
-        """Point the view at the pending element, creating it only the first time.
+    def _attach(self) -> None:
+        """Point the ONE terminal widget at the pending element.
 
-        ONE render process for the whole panel. Spawning a QWebEngineView is not cheap — it is a
-        Chromium process — and doing it per selection was heavy enough to be felt: double-clicking
-        a router changes the selection AND opens the Router Lab, so the spawn landed on top of the
-        Lab's docker exec calls and left it spinning on a slow machine.
-
-        Navigating instead of rebuilding is safe now that sessions live in tmux inside the
-        container: the page is replaced, so no element's shell appears under another's name, and
-        the element we navigate AWAY from keeps running, ready to re-attach.
+        One widget and one client for the life of the panel — switching elements re-points them.
+        There is no per-element process here to spawn or reap: that was the QWebEngineView design,
+        and it cost a Chromium start-up on every click.
         """
         if self._pending is None:
             return
-        from PySide6.QtCore import QUrl
-        from PySide6.QtWebEngineWidgets import QWebEngineView
         url, _name, cmd = self._pending
         kind = "router CLI" if "grconsole" in cmd else "shell"
-        self._sub.setText(f"{kind}  ·  {url}")    # clear any "waiting…" line
-        if self._view is not None:                # reuse: just navigate
-            self._shown_url = url
-            self._view.setUrl(QUrl(url))
-            self._view.show()                     # may have been parked by a deselect
-            return
-        self._shown_url = url
-        self._view = QWebEngineView(self._holder)
-        self._holder_lay.addWidget(self._view)
-        self._view.setUrl(QUrl(url))
-        self._view.show()
+        self._sub.setText(f"{kind}  ·  {_hostport(url)}")
+        self._connected_to = url
+        self._view.reset()                 # the previous element's screen must not linger
+        cols, rows = self._view.cols_rows()
+        self._client.connect_to(url, cols, rows)
+        self._view.setFocus()
 
     # -- selection ---------------------------------------------------------- #
     def on_selection(self, device_id, topology=None) -> None:

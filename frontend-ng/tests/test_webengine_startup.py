@@ -1,23 +1,21 @@
-"""AA_ShareOpenGLContexts must be set BEFORE the QApplication is built.
+"""AA_ShareOpenGLContexts must be set BEFORE the application is built.
 
-This is a real crash, twice over. The OS Zoo and the headful Desktop screen embed a
-QWebEngineView and import QtWebEngine lazily, inside the double-click handler, so that a normal
-launch never pays Chromium's start-up cost. Qt requires AA_ShareOpenGLContexts to be set before
-the application object exists precisely for that case; without it, constructing the first
-QWebEngineView segfaults the process — no exception, no traceback, just:
+Still required after the Terminal moved off QtWebEngine: the OS Zoo and the headful Desktop screen
+both embed a QWebEngineView, and both import QtWebEngine LAZILY — inside the double-click handler,
+so a normal launch never pays Chromium's start-up cost. That laziness means the import lands after
+the application object exists, which is exactly the case this attribute covers. Without it,
+constructing the first QWebEngineView segfaults the process:
 
     zsh: segmentation fault  gbuilder
 
-The attribute has no visible effect on any launch that never opens a Zoo guest, which is exactly
-what makes it easy to delete during unrelated cleanup and not notice. It was deleted once. This
-test is here so the next deletion fails loudly instead of silently.
+The attribute has no visible effect on any launch that never opens a Zoo guest, which is what
+makes it easy to delete during unrelated cleanup and not notice. It has been deleted once already.
 
-ORDER is the whole point, so the test reads the AST rather than the running app: setting the
-attribute AFTER QApplication() leaves testAttribute() returning True while Qt has already ignored
-it, so a runtime check would pass with the bug present. A source check cannot be fooled that way.
+ORDER is the whole point, so these read the AST rather than the running app: setting the attribute
+AFTER the application is constructed leaves testAttribute() returning True while Qt has already
+ignored it, so a runtime check would pass with the bug present.
 """
 import ast
-
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "gini" / "__main__.py"
@@ -30,7 +28,6 @@ def _main_body() -> list:
 
 
 def _line_of(pred) -> int:
-    """Line number of the first node in main() satisfying `pred`, or -1."""
     return next((n.lineno for n in _main_body() if pred(n)), -1)
 
 
@@ -44,9 +41,8 @@ def _is_app_construction(n) -> bool:
     """The application CONSTRUCTOR call, not QApplication.instance().
 
     Matches any *Application name so this keeps working as the class changes — it is currently
-    GiniApplication (QApplication plus the ⌘Q guard, see ui/app.py). Pinning it to the literal
-    name "QApplication" made this test fail the moment that landed, which is a false alarm: what
-    matters is the ORDER, not which subclass gets built.
+    GiniApplication (QApplication plus the ⌘Q guard, see ui/app.py). What matters is the ORDER,
+    not which subclass gets built.
     """
     return (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
             and n.func.id.endswith("Application"))
@@ -60,20 +56,19 @@ def test_the_attribute_is_set_at_all():
 
 def test_it_is_set_before_the_application_is_constructed():
     attr, app = _line_of(_is_share_contexts), _line_of(_is_app_construction)
-    assert app > 0, "could not find the QApplication(...) construction in main()"
+    assert app > 0, "could not find the application construction in main()"
     assert attr < app, (
-        f"AA_ShareOpenGLContexts is set on line {attr}, after QApplication is constructed on line "
-        f"{app}. Qt ignores it at that point and QWebEngineView will segfault.")
+        f"AA_ShareOpenGLContexts is set on line {attr}, after the application is constructed on "
+        f"line {app}. Qt ignores it at that point and QWebEngineView will segfault.")
 
 
 def test_qtwebengine_is_not_imported_at_start_up():
-    """The flip side: the attribute exists so the import can stay LAZY. An eager import would
-    pull Chromium into every launch and make PySide6-Addons a hard requirement, breaking the
-    browser fallback that lets gBuilder run without it.
+    """The flip side: the attribute exists so the Zoo/Desktop imports can stay LAZY. An eager
+    import would pull Chromium into every launch — the cost the Terminal was rewritten to avoid —
+    and make PySide6-Addons mandatory for the browser-fallback path too.
 
-    Checks IMPORT NODES, not source text — the first version of this test grepped for the string
-    "QtWebEngine" and so failed on the explanatory comment above the attribute, which is the one
-    thing in the file that should never have counted.
+    Checks IMPORT NODES, not source text: an earlier version grepped for "QtWebEngine" and failed
+    on the explanatory comment, which is the one thing that should never have counted.
     """
     tree = ast.parse(SRC.read_text())
     bad = []
@@ -82,6 +77,4 @@ def test_qtwebengine_is_not_imported_at_start_up():
             bad.append(n.module)
         elif isinstance(n, ast.Import):
             bad += [a.name for a in n.names if "QtWebEngine" in a.name]
-    assert not bad, (
-        f"__main__ imports {bad} — that costs every launch Chromium's start-up and makes "
-        f"PySide6-Addons mandatory. Keep it lazy; the attribute above is what makes that safe.")
+    assert not bad, f"__main__ imports {bad}; keep it lazy"
