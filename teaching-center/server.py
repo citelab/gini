@@ -113,6 +113,12 @@ def _merge_profiles(a: dict, b: dict) -> dict:
     return out
 
 
+def _ticket_pretty(code: str) -> str:
+    """A vended code in the grouped form a student reads off the screen."""
+    from gini.domain.ticket import Ticket
+    return Ticket(code).pretty
+
+
 def _course_api():
     """The teacher console's API. Imported lazily so the student endpoints keep working even if the
     GINI package isn't importable (e.g. a bare relay deployment)."""
@@ -270,6 +276,84 @@ class Handler(BaseHTTPRequestHandler):
             return {**res, "ai": posted.get("message")}
         return res
 
+    # -- activities: the public page + the two CODE-authenticated endpoints ---- #
+    def _activity_routes(self) -> bool:
+        """Everything about activities that is NOT behind a teacher session.
+
+        **This must be dispatched before `_teacher_routes`.** That method claims every path under
+        `/api/` and 401s it without a teacher session, so `/api/activity` — which authenticates by
+        the student's *code*, not a session — would never reach a handler otherwise.
+
+        These are the only unauthenticated write surfaces in the server, so both are deliberately
+        narrow: one reads a released plan for a code the TC itself issued, one accepts a submission
+        for that same code. Neither can name a student, and neither reveals whether some *other*
+        code would have worked.
+        """
+        p = self.path.split("?")[0]
+        if p not in ("/getcode", "/api/activity", "/api/activity/submit"):
+            return False
+
+        import activities as _act
+        course = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        one = lambda k: (course.get(k) or [""])[0]                        # noqa: E731
+
+        if p == "/getcode":
+            if self.command != "GET":
+                return self._send(405, {"error": "GET only"}) or True
+            html = (Path(__file__).parent / "static" / "getcode.html").read_text()
+            return self._send(200, text=html, ctype="text/html; charset=utf-8") or True
+
+        if p == "/api/activity" and self.command == "GET":
+            # Two shapes: without a code it describes the activity and vends one (what the public
+            # page calls); with a code it returns the PLAN (what gBuilder calls at arming).
+            code = _act.normalize(one("code"))
+            if code:
+                row = _STORE.code(code)
+                act = _STORE.activity(row["activity"]) if row else None
+                ok, why = _act.check_code(row, act)
+                if not ok:
+                    return self._send(403, {"ok": False, "reason": why,
+                                            "error": _act.message(why)}) or True
+                return self._send(200, {
+                    "ok": True, "activity": act["id"], "title": act["title"],
+                    "plan": json.loads(act["plan"]), "plan_hash": act["plan_hash"],
+                    "session_minutes": act["session_minutes"],
+                    "valid_until": row["valid_until"]}) or True
+
+            act = _STORE.activity(_act.activity_id(one("course"), one("lab")))
+            ok, why = _act.vending_open(act)
+            if not ok:
+                return self._send(200, {"ok": False, "reason": why,
+                                        "error": _act.message(why),
+                                        "title": (act or {}).get("title", "")}) or True
+            issued = _act.mint_code(act)
+            _STORE.code_put(issued)
+            return self._send(200, {
+                "ok": True, "activity": act["id"], "title": act["title"],
+                "code": _ticket_pretty(issued["code"]),
+                "vend_until": act["vend_until"], "valid_until": issued["valid_until"],
+                "session_minutes": act["session_minutes"]}) or True
+
+        if p == "/api/activity/submit" and self.command == "POST":
+            body = self._body()
+            code = _act.normalize(str(body.get("code") or ""))
+            row = _STORE.code(code)
+            act = _STORE.activity(row["activity"]) if row else None
+            try:
+                rec = _act.prepare(body, row, act)
+            except _act.Rejected as e:
+                return self._send(409, {"ok": False, "reason": e.reason, "error": str(e)}) or True
+            if not _STORE.submission_put(rec):
+                # Uniqueness is the schema's, not a prior read's: two submissions racing would both
+                # pass a check-then-insert, and the loser must be told rather than silently lost.
+                return self._send(409, {"ok": False, "reason": _act.DUPLICATE,
+                                        "error": _act.message(_act.DUPLICATE)}) or True
+            _STORE.code_mark_used(code)
+            return self._send(200, {"ok": True, "receipt": rec["receipt"],
+                                    "within_session": _act.within_session(rec, act)}) or True
+
+        return self._send(405, {"error": "method not allowed here"}) or True
+
     # -- teacher console (UI + API) — TEACHER SESSION REQUIRED ---------------- #
     def _teacher_routes(self) -> bool:
         p = self.path.split("?")[0]
@@ -294,6 +378,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, t.vocabulary())
             elif p == "/api/lessons":
                 self._send(200, C.lessons())
+            elif p == "/api/activities":
+                self._send(200, C.activities())
+            elif p == "/api/activities/receipt":
+                # The teacher's lookup: a student hands over a receipt, this returns everything
+                # recorded under it — plus any OTHER submission built from the same topology, which
+                # is the collusion signal a receipt alone cannot see.
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                got = _STORE.submission_by_receipt((q.get("receipt") or [""])[0].strip().upper())
+                if not got:
+                    self._send(404, {"error": "No submission with that receipt."})
+                else:
+                    self._send(200, {**got, "data": json.loads(got.get("data") or "{}"),
+                                     "twins": _STORE.artifact_twins(got.get("artifact_hash", ""),
+                                                                    exclude_code=got["code"])})
             elif p == "/api/roster":
                 # enrich each row with a live-status + photo so the console can show real faces and
                 # who's on right now. Read-only join over presence + accounts.
@@ -338,6 +436,44 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, C.save_lesson(b.get("spec") or {}, release=b.get("release", ""),
                                               due=b.get("due", ""), attempts=b.get("attempts", 3),
                                               release_now=bool(b.get("release_now", False))))
+            elif p == "/api/activities/draft":
+                # The ONLY model-touching route. `ai.Ollama.chat(system, user)` takes two args and
+                # the selector calls llm(prompt) with one — it owns its own system prompt — so the
+                # adapter is required. Passing chat directly raises TypeError, which draft()
+                # reports to the teacher as "the model could not be reached": a signature bug
+                # wearing a network fault's clothes.
+                import ai as _ai
+                from gini.agent import aop_selector as _sel
+                _llm = _stack()["prof"].llm if _stack().get("prof") else _ai.Ollama()
+                d = _sel.draft(b.get("intent", ""), lambda prompt: _llm.chat("", prompt),
+                               params={"starting_point": "blank",
+                                       "guidance": bool(b.get("guidance"))},
+                               answers=tuple(b.get("answers") or ()),
+                               deadline_s=b.get("deadline_s"))
+                if not d.ok:
+                    self._send(200, {"ok": False, "error": d.error, "questions": d.questions,
+                                     "note": d.note})
+                else:
+                    from gini.domain import aop_assemble as _asm
+                    plan = _asm.assemble(d.selection, gini_version="tc")
+                    self._send(200, {"ok": True, "note": d.note, "questions": d.questions,
+                                     "selection": d.selection.to_dict(),
+                                     "plan": plan.to_dict(),
+                                     "describe": _asm.describe(plan),
+                                     "prose": _sel.back_translate(
+                                         plan, lambda prompt: _llm.chat("", prompt))})
+            elif p == "/api/activities/save":
+                self._send(200, C.save_activity(
+                    b.get("lab", ""), title=b.get("title", ""), intent=b.get("intent", ""),
+                    selection=b.get("selection"), plan=b.get("plan"),
+                    vend_until=float(b.get("vend_until") or 0),
+                    session_minutes=int(b.get("session_minutes") or 60)))
+            elif p == "/api/activities/release":
+                self._send(200, C.release_activity(
+                    b.get("lab", ""), vend_until=float(b.get("vend_until") or 0),
+                    session_minutes=int(b.get("session_minutes") or 0)))
+            elif p == "/api/activities/unrelease":
+                self._send(200, C.unrelease_activity(b.get("lab", "")))
             elif p == "/api/lessons/playtest":       # teacher confirmed a canvas playtest
                 self._send(200, C.mark_playtested(b.get("id", "")))
             elif p == "/api/lessons/approve":
@@ -397,7 +533,10 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "message": posted["message"]}
 
     def do_GET(self):  # noqa: N802
-        if self._auth_routes() or self._teacher_routes() or self._social_routes():
+        # _activity_routes FIRST: _teacher_routes claims every /api/ path and 401s it without a
+        # teacher session, which would swallow the code-authenticated endpoints.
+        if (self._activity_routes() or self._auth_routes()
+                or self._teacher_routes() or self._social_routes()):
             return
         if not self._authed():
             return self._send(401)
@@ -434,7 +573,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(204)
 
     def do_POST(self):  # noqa: N802
-        if self._auth_routes() or self._teacher_routes() or self._social_routes():
+        if (self._activity_routes() or self._auth_routes()
+                or self._teacher_routes() or self._social_routes()):
             return
         me = self._who()
         if me is None:

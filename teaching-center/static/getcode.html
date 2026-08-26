@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GINI — your activity code</title>
+<!--
+  The public page. No login, nothing writable, no field that could carry a name — the privacy
+  property is visible here, not just in the schema.
+
+  Every load vends a NEW code. Unused codes are expected and harmless: a student may look, practise
+  first, and come back for a code when they are ready. What matters is that a code is a scope, not
+  an identity, so handing one to a friend gives them nothing — a proof is a *chain* recorded under
+  it, and only doing the work produces one.
+-->
+<style>
+  :root {
+    --ink:#16202b; --muted:#5b6b7c; --line:#dde5ec; --bg:#f6f8fa; --card:#fff;
+    --accent:#1a6fd4; --warn:#8a5300; --warnbg:#fff6e5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e7edf3; --muted:#9fb0c0; --line:#2b3947; --bg:#0f1620; --card:#161f2a;
+            --accent:#6ba7f0; --warn:#e9c07a; --warnbg:#2c2415; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:2rem 1rem; background:var(--bg); color:var(--ink);
+         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:34rem; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:1.5rem 1.6rem; }
+  h1 { font-size:1.05rem; margin:0 0 .2rem; letter-spacing:.02em; color:var(--muted);
+       text-transform:uppercase; font-weight:600; }
+  h2 { font-size:1.5rem; margin:0 0 1.2rem; font-weight:650; }
+  .code { font:700 clamp(1.6rem,7vw,2.4rem)/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;
+          letter-spacing:.06em; margin:.2rem 0 .1rem; word-break:break-all; }
+  .label { font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:.45rem 1.1rem; margin:1.4rem 0 0;
+       font-size:.94rem; }
+  dt { color:var(--muted); }
+  dd { margin:0; }
+  .note { margin-top:1.4rem; padding-top:1.1rem; border-top:1px solid var(--line);
+          font-size:.88rem; color:var(--muted); }
+  .closed { background:var(--warnbg); color:var(--warn); border-radius:10px;
+            padding:1rem 1.1rem; font-size:.95rem; }
+  button { font:inherit; margin-top:1.2rem; padding:.55rem 1rem; border-radius:9px;
+           border:1px solid var(--line); background:transparent; color:var(--accent);
+           cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1 id="course">GINI activity</h1>
+  <h2 id="title">…</h2>
+  <div id="out">Fetching a code…</div>
+</main>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const course = qs.get("course") || "", lab = qs.get("lab") || "";
+const when = t => t ? new Date(t * 1000).toLocaleString() : "—";
+const esc = s => String(s).replace(/[<>&]/g, c => ({ "<":"&lt;", ">":"&gt;", "&":"&amp;" }[c]));
+
+document.getElementById("course").textContent = course ? `${course} · ${lab}` : "GINI activity";
+
+fetch(`/api/activity?course=${encodeURIComponent(course)}&lab=${encodeURIComponent(lab)}`)
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById("title").textContent = d.title || lab || "Activity";
+    const out = document.getElementById("out");
+    if (!d.ok) {
+      // Say what happened plainly. No retry button when vending has closed — offering one would
+      // invite a student to keep trying at a door that is shut on purpose.
+      out.innerHTML = `<div class="closed">${esc(d.error || "No code is available.")}</div>`;
+      return;
+    }
+    out.innerHTML = `
+      <div class="label">Your code</div>
+      <div class="code">${esc(d.code)}</div>
+      <dl>
+        <dt>Enter it in</dt><dd>gBuilder, before you start</dd>
+        <dt>You then have</dt><dd>${d.session_minutes} minutes to finish</dd>
+        <dt>Codes stop</dt><dd>${when(d.vend_until)}</dd>
+        <dt>This code expires</dt><dd>${when(d.valid_until)}</dd>
+      </dl>
+      <div class="note">
+        This code is yours for one attempt. You can practise as much as you like first and come
+        back for a fresh code when you are ready — every visit to this page issues a new one.
+        Your work is submitted automatically when you finish, and gBuilder will show you a short
+        receipt to give your instructor.
+      </div>
+      <button onclick="location.reload()">Give me a different code</button>`;
+  })
+  .catch(() => {
+    document.getElementById("out").innerHTML =
+      `<div class="closed">Could not reach the course server. Are you on the school network?</div>`;
+  });
+</script>
+</body>
+</html>

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import hashlib
 import secrets
+import time
 from pathlib import Path
 
 import yaml
@@ -467,3 +468,116 @@ class Course:
                     d["mastered"] += 1
         cons = sorted(concepts.values(), key=lambda d: d["mastered"] / max(1, d["attempted"]))
         return {"stuck": rows[:20], "concepts": cons}
+
+
+# --------------------------------------------------------------------------- #
+# Activities — free-form assessed work observed against a frozen AOP.
+#
+# Deliberately mirrors the LESSON lifecycle above rather than inventing a parallel gate: an
+# activity is a draft until approved, and changing the plan clears the approval, exactly as a
+# changed `pack_hash` clears `playtested`. The reasoning is the same one written there — a sign-off
+# cannot be inherited by different content.
+#
+# These are methods on Course because an activity belongs to a course, like a lesson does. The rows
+# live in SQLite rather than in files because codes and submissions need uniqueness constraints
+# that a directory cannot give.
+# --------------------------------------------------------------------------- #
+def _activity_methods():
+    """Attached below; kept in one block so the activity surface reads as a unit."""
+
+
+def activity_id(course: str, lab: str) -> str:
+    return f"{course}/{lab}"
+
+
+def _save_activity(self, lab: str, *, title: str = "", intent: str = "",
+                   selection: dict | None = None, plan: dict | None = None,
+                   vend_until: float = 0.0, session_minutes: int = 60) -> dict:
+    """Write (or rewrite) an activity as a DRAFT.
+
+    A re-save whose PLAN changed drops the activity back to draft even if it was released, because
+    the released plan is the instrument students are being measured by and it must not change under
+    them silently. Codes already vended keep naming the old plan_hash and stop validating (see
+    `activities.check_code`), which is the intended, visible consequence.
+    """
+    import json as _json
+
+    from gini.domain import aop as _aop
+
+    aid = activity_id(self.course, lab)
+    prev = self.store.activity(aid) or {}
+    plan_obj = plan if plan is not None else (_json.loads(prev["plan"]) if prev.get("plan") else None)
+    plan_hash = _aop.plan_hash(_aop.Aop.from_dict(plan_obj)) if plan_obj else ""
+
+    unchanged = bool(prev) and prev.get("plan_hash") == plan_hash
+    rec = {"id": aid, "course": self.course, "lab": lab,
+           "title": title or prev.get("title", "") or lab,
+           "intent": intent or prev.get("intent", ""),
+           "selection": _json.dumps(selection, sort_keys=True) if selection is not None
+                        else prev.get("selection", ""),
+           "plan": _json.dumps(plan_obj, sort_keys=True) if plan_obj else prev.get("plan", ""),
+           "plan_hash": plan_hash,
+           "status": prev.get("status", "draft") if unchanged else "draft",
+           "vend_until": vend_until or prev.get("vend_until", 0.0),
+           "session_minutes": int(session_minutes or prev.get("session_minutes", 60)),
+           "created": prev.get("created") or time.time(),
+           "released": prev.get("released", 0.0) if unchanged else 0.0}
+    self.store.activity_put(rec)
+    return {"ok": True, "activity": aid, "status": rec["status"], "plan_hash": plan_hash}
+
+
+def _release_activity(self, lab: str, *, vend_until: float = 0.0,
+                      session_minutes: int = 0) -> dict:
+    """Open vending. Refuses an activity with no plan — there would be nothing to observe."""
+    aid = activity_id(self.course, lab)
+    row = self.store.activity(aid)
+    if not row:
+        return {"ok": False, "error": "no such activity"}
+    if not row.get("plan_hash"):
+        return {"ok": False, "error": "this activity has no plan yet"}
+    row = dict(row)
+    row["status"] = "released"
+    row["released"] = time.time()
+    if vend_until:
+        row["vend_until"] = vend_until
+    if session_minutes:
+        row["session_minutes"] = int(session_minutes)
+    self.store.activity_put(row)
+    return {"ok": True, "activity": aid, "status": "released"}
+
+
+def _unrelease_activity(self, lab: str) -> dict:
+    """Close vending. Codes already issued keep working — a student mid-session must not have the
+    activity pulled out from under them; the deadline is what ends the activity, not this."""
+    aid = activity_id(self.course, lab)
+    row = self.store.activity(aid)
+    if not row:
+        return {"ok": False, "error": "no such activity"}
+    row = dict(row)
+    row["status"] = "draft"
+    self.store.activity_put(row)
+    return {"ok": True, "activity": aid, "status": "draft"}
+
+
+def _activities(self) -> list[dict]:
+    """The teacher's index: status, how many codes went out, how many came back.
+
+    `vended` minus `submitted` is expected to be large and is not a problem — a student may take a
+    code to look at it, or practise first and take one when ready.
+    """
+    out = []
+    for row in self.store.activities(self.course):
+        codes = self.store.codes_for(row["id"])
+        out.append({**{k: row[k] for k in
+                       ("id", "lab", "title", "status", "vend_until", "session_minutes",
+                        "plan_hash")},
+                    "vended": len(codes),
+                    "submitted": len(self.store.activity_submissions(row["id"]))})
+    return out
+
+
+Course.activity_id = staticmethod(activity_id)
+Course.save_activity = _save_activity
+Course.release_activity = _release_activity
+Course.unrelease_activity = _unrelease_activity
+Course.activities = _activities
