@@ -47,7 +47,11 @@ class TtydClient(QObject):
         self._base = base_url
         self._cols, self._rows = max(1, columns), max(1, rows)
         from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
-        self._net = QNetworkAccessManager(self)
+        # Built ONCE and reused. Every QNetworkAccessManager owns a thread, and this used to
+        # make a fresh one per connection: reconnecting or switching elements a few dozen
+        # times left a few dozen live threads behind, all of them still there at shutdown.
+        if self._net is None:
+            self._net = QNetworkAccessManager(self)
         req = QNetworkRequest(QUrl(proto.token_url(base_url)))
         self._reply = self._net.get(req)
         self._reply.finished.connect(self._on_token)
@@ -59,6 +63,16 @@ class TtydClient(QObject):
             self._reply = None
         if self._sock is not None:
             sock, self._sock = self._sock, None
+            try:
+                # Cut the signals first. Closing raises `disconnected`, and a slot that runs
+                # during deliberate teardown can only re-enter the path we are already on.
+                sock.disconnected.disconnect()
+                sock.errorOccurred.disconnect()
+                sock.binaryMessageReceived.disconnect()
+                sock.textMessageReceived.disconnect()
+                sock.connected.disconnect()
+            except (RuntimeError, TypeError):
+                pass                       # already gone, or nothing was connected
             try:
                 sock.close()
             except RuntimeError:
@@ -92,7 +106,14 @@ class TtydClient(QObject):
             self.failed.emit(f"terminal needs PySide6-Addons (QtWebSockets): {e}")
             return
         from PySide6.QtNetwork import QNetworkRequest
+        # PARENTED, deliberately. An unparented QObject is owned by Python, so the C++
+        # QWebSocket dies the moment the last Python reference does. A socket still has a
+        # read notification registered with the run loop, and when that fires into freed
+        # memory the process segfaults on the main thread inside
+        # QAbstractSocketPrivate::canReadNotification(). Giving it a parent hands ownership
+        # to Qt, so the wrapper going away can no longer destroy it.
         self._sock = QWebSocket()
+        self._sock.setParent(self)         # plain QObject call: no reliance on ctor kwargs
         self._sock.binaryMessageReceived.connect(self._on_binary)
         self._sock.textMessageReceived.connect(lambda s: self._on_binary(s.encode("utf-8")))
         self._sock.connected.connect(lambda: self._on_connected(token))
@@ -117,7 +138,14 @@ class TtydClient(QObject):
         self.connected.emit()
 
     def _on_disconnected(self) -> None:
-        self._sock = None
+        # This slot runs INSIDE the socket's own signal emission, and Qt goes on touching the
+        # socket after it returns. So the reference is handed to deleteLater rather than
+        # simply dropped: destruction then happens back in the event loop, once the emission
+        # has finished. Dropping it here is what made quitting crash — stopping the topology
+        # kills ttyd, the peer closes, and this fired while Qt was still mid-disconnect.
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            sock.deleteLater()
         self.closed.emit()
 
     # -- traffic -------------------------------------------------------------- #
