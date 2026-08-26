@@ -76,6 +76,15 @@ _SPEC: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      ("ovs",)),
     ("ovs", "host", "Attach end machines to the SDN switch.", ()),
     ("ovs", "ovs", "Build a multi-switch SDN fabric.", ()),
+    # HYBRID topologies: an SDN segment inside an ordinary routed network. The compiler
+    # already treats an OVS as an L2 domain exactly like a switch, so these links get the
+    # same subnet treatment as their switch equivalents -- an OVS segment can be uplinked
+    # to a router and peer with classic LANs. Without these rows the links were legal
+    # (the grammar is advisory) but invisible: X-ray would not offer them and the Wizard
+    # would not propose them, so the most realistic SDN deployment story -- a controlled
+    # island inside a network that is otherwise routed the old way -- was undiscoverable.
+    ("ovs", "router", "Uplink the SDN segment to a router so it can reach other subnets.", ()),
+    ("ovs", "switch", "Peer the SDN segment with a classic switched LAN.", ()),
 
     # ---- containers & Kubernetes ----------------------------------------- #
     ("pod", "k8s_cluster", "A Pod needs a Cluster to run in — this is where it deploys.",
