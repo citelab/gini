@@ -211,8 +211,8 @@ class _FakeLive:
         return self.snapshot()
     def set_timeslice(self, v):
         self.timeslice = v
-    def run(self, prog):
-        self.ran.append(prog); return True
+    def run(self, prog, args=""):
+        self.ran.append(prog if not args else f"{prog} {args}"); return True
     def kill(self, pid):
         self.killed.append(pid)
     def console(self):
@@ -269,6 +269,39 @@ def test_live_lab_launch_and_kill_call_provider(app):
         if prov.ran and prov.killed:
             break
     assert prov.ran == ["alloc"] and prov.killed == [5]
+    lab.close()
+
+
+def test_launch_passes_the_argument_box_through(app):
+    """sgrind 20 fits the buffer cache and sgrind 60 does not — that contrast is a whole round of
+    the observation guide, and it only works if the number reaches the shell."""
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    import time
+    prov = _FakeLive()
+    ms = MachineState(prov, device_id="d1", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    lab._prog_combo.setCurrentText("sgrind")
+    lab._prog_args.setText("60")
+    lab._launch()
+    for _ in range(50):
+        app.processEvents(); time.sleep(0.005)
+        if prov.ran:
+            break
+    assert prov.ran == ["sgrind 60"]
+    lab.close()
+
+
+def test_the_argument_box_is_disabled_for_programs_that_ignore_it(app):
+    """A box that accepts text and then throws it away is worse than no box at all."""
+    from gini.domain.machine_state import MachineState
+    from gini.ui.machine_lab import MachineLab
+    ms = MachineState(_FakeLive(), device_id="d1", vm=object(), fs=object())
+    lab = MachineLab(None, _theme(app), _Dev(), state=ms, live=True)
+    lab._prog_combo.setCurrentText("sgrind")
+    assert lab._prog_args.isEnabled() and lab._prog_args.placeholderText()
+    lab._prog_combo.setCurrentText("forktest")             # takes no argument
+    assert not lab._prog_args.isEnabled()
     lab.close()
 
 

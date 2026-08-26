@@ -58,7 +58,24 @@ _LOCK = threading.Lock()   # one gdb at a time (defensive; also serialises stub 
 
 # long-running programs the Machine Lab offers to launch (gini_patch.py adds spin/alloc/writer;
 # grind/forktest are stock). init/sh are never launchable/killable.
-PROGRAMS = ["spin", "busy", "alloc", "writer", "grind", "forktest"]
+# Keep in step with _LAUNCHABLE in ui/machine_lab.py — the UI offers this list, the agent accepts
+# it, and a name in one but not the other is either a dead menu entry or a launch that is refused.
+PROGRAMS = ["spin", "busy", "walker", "toucher", "alloc", "writer", "sgrind", "mgrind",
+            "grind", "forktest"]
+
+
+def _safe_args(s: str) -> str:
+    """Sanitise the argument string for a launch.
+
+    /run writes its command into a real shell, so an unfiltered argument string is a command
+    injection: `walker 48; rm -rf /` would be obeyed. Several programs are useless without their
+    argument though — sgrind's whole lesson is the number K — so the arguments are allowed but
+    reduced to what those programs actually take: lowercase words and numbers, nothing else. No
+    shell metacharacters survive, and there is a length cap so a long string cannot wedge the
+    line-buffered console.
+    """
+    out = [c for c in s.strip().lower() if c.isalnum() or c == " "]
+    return " ".join("".join(out).split())[:32]
 
 
 class SerialLink:
@@ -597,6 +614,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x05"), ctype="text/plain")   # Ctrl-E -> gini_faultdump()
         elif path == "/locks":                        # Ctrl-L -> gini_lockdump() (contention)
             self._send(_SERIAL.dump(b"\x0c"), ctype="text/plain")
+        elif path == "/programs":
+            # What THIS agent will accept. The agent ships inside the image, so after a program is
+            # added to the source the running container still holds the old list until the image is
+            # rebuilt — and a launch then fails for a reason nothing on screen explains. This
+            # endpoint makes that mismatch visible instead of mysterious.
+            self._send({"programs": PROGRAMS})
         elif path == "/source":
             self._send(_read_source(parse_qs(urlparse(self.path).query)), ctype="text/plain")
         elif path == "/traps":
@@ -660,8 +683,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": True, "out": out})
         elif u.path == "/run":                       # launch a program in the background
             prog = (q.get("prog", [""])[0] or "").strip()
-            ok = bool(prog) and prog in PROGRAMS and _SERIAL.write(prog + " &\n")
-            self._send({"ok": ok, "prog": prog})
+            args = _safe_args(q.get("args", [""])[0] or "")
+            cmd = (prog + (" " + args if args else "")) + " &\n"
+            if not prog:
+                self._send({"ok": False, "prog": prog, "error": "no program named"})
+            elif prog not in PROGRAMS:
+                # Almost always a stale container: the name was added to the source but this image
+                # predates it. Say so, rather than returning a bare false that looks like a hang.
+                self._send({"ok": False, "prog": prog, "error":
+                            f"this xv6 image does not know '{prog}' — it was built before the "
+                            f"program was added. Rebuild the image. Known: "
+                            f"{', '.join(PROGRAMS)}"})
+            else:
+                self._send({"ok": bool(_SERIAL.write(cmd)), "prog": prog, "args": args})
         elif u.path == "/kill":                       # CONTROL-PLANE kill (init/sh guarded by UI)
             try:
                 pid = int(q.get("pid", ["0"])[0])

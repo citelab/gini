@@ -43,7 +43,28 @@ _POLICIES = ["round-robin", "priority", "lottery"]
 # 500 iterations) can corrupt a dump — a mangled process line drops that process from the table,
 # a mangled frame marker leaves the table showing the last good snapshot. Any student program
 # that prints does this too; the fix is a dedicated dump channel, not dropping the program.
-_LAUNCHABLE = ["spin", "busy", "alloc", "writer", "grind", "forktest"]
+# Ordered by which resource each one presses on, so the menu reads as a tour of the machine:
+# CPU · CPU-with-a-moving-PC · memory-by-pattern · memory-lazily · storage · storage-under-pressure
+# · allocator-under-pressure · everything-at-once · the process table.
+# Must stay in step with PROGRAMS in backend/xv6/gini_agent.py.
+_LAUNCHABLE = ["spin", "busy", "walker", "toucher", "alloc", "writer", "sgrind", "mgrind",
+               "grind", "forktest"]
+
+# Programs whose argument carries the lesson, and what to show in the argument box for each. A
+# program absent from this map takes no argument, and its box is disabled rather than ignored —
+# a box that accepts text it then discards is worse than no box.
+#
+# Each entry mirrors the program's own argv handling in _UPROGS (backend/xv6/gini_patch.py); the
+# default shown here is the one the C code falls back to when the argument is absent.
+_PROG_ARGS = {
+    "spin":    "seconds",            # argv[1] seconds, else forever
+    "busy":    "seconds",            # argv[1] seconds, else forever
+    "walker":  "pages ticks laps",   # argv[1] pages (64), argv[2] dwell (1), argv[3] laps (0=∞)
+    "toucher": "pages [rand]",       # argv[1] pages (48), argv[2] seq|rand|stride
+    "alloc":   "pages",              # argv[1] pages (48)
+    "sgrind":  "blocks (30 fits)",   # argv[1] K blocks (20); the cache holds 30
+    "mgrind":  "pages",              # argv[1] pages per round (16)
+}
 
 
 def _pid_color(pid) -> str:
@@ -204,6 +225,7 @@ class MachineLab(QDialog):
     snap_ready = Signal(object)   # a Snapshot pushed from a worker thread (live mode)
     load_result = Signal(bool, str, str)   # (ok, log, action) from a Load/Revert worker thread
     shadows_ready = Signal(object)         # {name: ShadowStatus} from a worker thread
+    launch_failed = Signal(str)            # a refused launch, from the worker thread that tried it
 
     def __init__(self, parent, theme: ThemeManager, device, state: MachineState | None = None,
                  live=False, on_console=None, on_log=None) -> None:
@@ -723,18 +745,43 @@ class MachineLab(QDialog):
             f"QComboBox{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
             "border-radius:6px;padding:3px 8px;}")
         lay.addWidget(self._prog_combo)
+        # Argument box. Three of these programs are parameterised and the parameter IS the lesson:
+        # sgrind 20 fits the buffer cache and sgrind 60 does not, and that contrast is the whole
+        # exercise. Without this the launcher could only ever run the default.
+        self._prog_args = QLineEdit()
+        self._prog_args.setFixedWidth(124)   # fits "pages ticks laps"
+        self._prog_args.setStyleSheet(
+            f"QLineEdit{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
+            "border-radius:6px;padding:3px 8px;}")
+        self._prog_args.returnPressed.connect(self._launch)
+        lay.addWidget(self._prog_args)
+        self._prog_combo.currentTextChanged.connect(self._sync_args_hint)
+        self._sync_args_hint(self._prog_combo.currentText())
         launch = QPushButton("  Launch")
         launch.setIcon(icons.icon("play", t.accent_for("green"), 14))
         launch.setStyleSheet(self._btn_css())
         launch.clicked.connect(self._launch)
         lay.addWidget(launch)
-        hint = QLabel("spin = CPU loop · busy = varied CPU work · alloc = grows memory · "
-                      "writer = file writes · grind = heavy KERNEL-mode syscall mix · "
+        hint = QLabel("spin = CPU loop (PC parks on one instruction) · busy = varied CPU work "
+                      "(PC moves) · walker = the PC itself walks a corridor of NOPs, one page "
+                      "at a time, slowly enough to watch · "
+                      "toucher = touches N pages TWICE, second pass faults zero times · "
+                      "alloc = grows memory lazily · writer = file writes · "
+                      "sgrind = reads K blocks round and round (cache holds 30) · "
+                      "mgrind = hammers the page allocator and fork · "
+                      "grind = heavy KERNEL-mode syscall mix · "
                       "forktest = fills the process table, then exits. "
                       "Use ✕ in the table to kill one.")
         hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
         lay.addWidget(hint); lay.addStretch(1)
         root.addWidget(bar)
+        # Refusals land here rather than nowhere. Hidden until something actually fails.
+        self._launch_msg = QLabel(); self._launch_msg.setWordWrap(True)
+        self._launch_msg.setStyleSheet(
+            _scss(f"color:{t.accent_for('red')};font-size:11px;padding:2px 12px;"))
+        self._launch_msg.setVisible(False)
+        root.addWidget(self._launch_msg)
+        self.launch_failed.connect(self._on_launch_failed)
 
     def _build_sched_controls(self, root) -> None:
         """Per-process priority + ticket setters (control-plane) — so priority/lottery have real
@@ -908,9 +955,32 @@ class MachineLab(QDialog):
         import threading
         threading.Thread(target=fn, daemon=True).start()
 
+    def _sync_args_hint(self, prog: str) -> None:
+        """Show what this program's argument means, in the box itself. The placeholder is the only
+        clue a student gets that `sgrind` even takes a number."""
+        self._prog_args.setPlaceholderText(_PROG_ARGS.get(prog, ""))
+        self._prog_args.setEnabled(bool(_PROG_ARGS.get(prog)))
+        if not _PROG_ARGS.get(prog):
+            self._prog_args.clear()
+
     def _launch(self) -> None:
         prog = self._prog_combo.currentText()
-        self._bg(lambda: self._act_then_refresh(lambda: self.state.provider.run(prog)))
+        args = self._prog_args.text().strip() if _PROG_ARGS.get(prog) else ""
+
+        def go():
+            ok = self.state.provider.run(prog, args)
+            if not ok:
+                # Do not let this vanish. The commonest cause is an xv6 image built before the
+                # program existed, and a silent failure is indistinguishable from a slow launch.
+                why = getattr(self.state.provider, "last_run_error", "") or f"could not launch {prog}"
+                self.launch_failed.emit(why)
+        self._bg(lambda: self._act_then_refresh(go))
+
+    def _on_launch_failed(self, why: str) -> None:
+        self._launch_msg.setText(why)
+        self._launch_msg.setVisible(True)
+        if self.on_log:
+            self.on_log("error", f"xv6: {why}")
 
     def _kill(self, pid: int) -> None:
         self._bg(lambda: self._act_then_refresh(lambda: self.state.provider.kill(pid)))
