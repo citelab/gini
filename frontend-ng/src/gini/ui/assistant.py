@@ -1471,6 +1471,15 @@ class Assistant(QWidget):
             self.mission_ui_op.emit(("busy", True))      # the game master is reasoning (LLM)
             try:
                 getattr(self._mission_ctrl, method)(*args)
+                if method == "run_check":
+                    # Proof of activity: the live probe verdicts are the strongest entries in the
+                    # chain — facts GINI measured on the RUNNING network, which no imported file
+                    # can produce. The objectives come along so the entry records the PROBE, not
+                    # just the label on it.
+                    rec = getattr(self.ctx, "proof_recorder", None)
+                    m = getattr(self._mission_ctrl, "mission", None)
+                    if rec is not None and m is not None:
+                        rec.note_check(m.last_results, m.lesson.objectives)
             except Exception:
                 pass
             finally:
