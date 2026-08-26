@@ -272,9 +272,47 @@ _DEVICES: list[DeviceType] = [
         # apps are GINI's own (they clear the Flow Switch's match-all -> NORMAL
         # default first, so the controller actually sees packet-ins); the
         # forwarding.* / misc.* apps are stock POX. Runs in the controller container.
+        #
+        # An App may name SEVERAL POX modules separated by spaces -- that is how POX
+        # composes behaviour, and run-pox.sh word-splits POX_APP for exactly this.
+        # The two multi-module entries below give the controller a NETWORK-WIDE view,
+        # which is what a multi-switch fabric needs:
+        #   openflow.discovery  -- learns the topology by sending LLDP out every port
+        #                          (installs its own LLDP->CONTROLLER rule at priority
+        #                          65000, which outranks the Flow Switch's match-all
+        #                          -> NORMAL default, so it bootstraps on its own).
+        #   forwarding.l2_multi -- computes shortest paths across the discovered graph
+        #                          and installs them end to end, instead of each switch
+        #                          learning independently.
+        #   openflow.spanning_tree -- disables flooding on non-tree ports via PORT_MOD
+        #                          (OFPPC_NO_FLOOD). REQUIRED if the fabric has a LOOP:
+        #                          l2_multi still floods unknown/broadcast traffic with
+        #                          plain OFPP_FLOOD, so without this a loop multiplies
+        #                          those frames forever.
+        #
+        # Deliberately NO --no-flood / --hold-down here, though they look right.
+        # spanning_tree's LinkEvent handler bails out early when BOTH ends of the
+        # reported link are already marked not-flooding:
+        #     if _prev[dp1][p1] is False and _prev[dp2][p2] is False: return
+        # and --no-flood sets _prev[port] = False for EVERY port at ConnectionUp. So
+        # with that flag no LinkEvent ever reaches _update_tree(); the only trigger left
+        # is the one-shot --hold-down timer, which fires while discovery is still on its
+        # first cycle, computes a tree from an incomplete graph, and never recomputes.
+        # Ports that should open stay blocked forever and nothing forwards.
+        # Without the flags, _prev defaults to None (not False), the early return never
+        # fires, and the tree is recomputed on every link change -- which is what works.
+        # The cost is a brief unrestricted-flood window at boot before the tree
+        # converges; on a looped topology that is a few seconds of noise, not a failure.
+        # Keeping both variants is deliberate -- running the one WITHOUT spanning_tree
+        # on a looped topology is how a student sees the problem before seeing the fix.
         property_choices={"App": ("gini.samples.switch", "gini.samples.packet_loss",
                                   "gini.samples.port_knock", "gini.samples.l4_lb",
                                   "gini.samples.ids", "gini.samples.redirect",
+                                  "openflow.discovery forwarding.l2_multi",
+                                  "openflow.discovery openflow.spanning_tree"
+                                  " forwarding.l2_multi",
+                                  "log.level --DEBUG openflow.discovery"
+                                  " forwarding.l2_multi",
                                   "forwarding.l2_learning", "forwarding.hub",
                                   "misc.of_tutorial")},
     ),

@@ -193,21 +193,37 @@ static int32_t openflow_ctrl_iface_send(void *data, uint32_t len)
 
 		if (ret < 0)
 		{
+			if (errno == EINTR)
+				continue;                       /* interrupted, not an error */
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+			{
+				counter += 1;                   /* buffer full: back off, retry */
+				sleep(1);
+				continue;
+			}
 			pthread_mutex_unlock(&ofc_socket_mutex);
 			verbose(1, "[openflow_ctrl_iface_send]:: Unknown error occurred"
 					" while sending message.");
 			return OPENFLOW_CTRL_IFACE_ERR_UNKNOWN;
 		}
-		else if (ret == 0)
+		if (ret == 0)
 		{
 			counter += 1;
 			sleep(1);
+			continue;
 		}
-		else if (ret < len - sent)
-		{
-			sent += ret;
-			sleep(1);
-		}
+
+		/* Advance by what was ACTUALLY written -- exactly once.
+		 *
+		 * This used to add `ret` twice on a short write (once in a
+		 * `ret < len - sent` branch, then again unconditionally below). `sent`
+		 * therefore overshot, the loop exited believing the message was complete,
+		 * and the message went out TRUNCATED. A truncated OpenFlow message
+		 * desynchronises the controller's byte stream -- it reads the tail of one
+		 * message as the header of the next -- so the controller drops the
+		 * connection. That is what made switches flap connect/disconnect under
+		 * load, which in turn reset topology discovery before it could ever
+		 * converge. Short writes are normal on a busy socket; they are not errors. */
 		sent += ret;
 	}
 
@@ -523,8 +539,30 @@ static int32_t openflow_ctrl_iface_recv_features_req(ofp_header *msg)
  */
 static int32_t openflow_ctrl_iface_send_features_rep(uint32_t xid)
 {
+	// Advertise only the ports that actually EXIST, not all
+	// OPENFLOW_MAX_PHYSICAL_PORTS (1024) slots.
+	//
+	// Advertising every slot is not merely wasteful (a 49KB features reply for a
+	// switch with two links), it breaks topology discovery: a controller running
+	// openflow.discovery registers every advertised port and probes each one with
+	// LLDP, so a four-switch topology yields 4096 phantom ports and the discovery
+	// timer degenerates to send_cycle_time/4096. The real ports are then never
+	// probed in practice, no LLDP is ever exchanged, no links are found, and any
+	// app that needs a network-wide view (forwarding.l2_multi, openflow.spanning_tree)
+	// silently does nothing.
+	//
+	// A port "exists" if GNET has an interface behind it. Ports that exist but are
+	// administratively or physically down are still advertised, with their state
+	// bits set -- that is what a controller expects to see.
+	uint32_t i;
+	uint32_t n_ports = 0;
+	for (i = 0; i < OPENFLOW_MAX_PHYSICAL_PORTS; i++)
+	{
+		if (findInterface(i) != NULL) n_ports++;
+	}
+
 	uint16_t msg_len = sizeof(ofp_switch_features)
-	        + (OPENFLOW_MAX_PHYSICAL_PORTS * sizeof(ofp_phy_port));
+	        + (n_ports * sizeof(ofp_phy_port));
 	ofp_header *msg = openflow_ctrl_iface_create_msg(OFPT_FEATURES_REPLY,
 	        msg_len);
 	msg->xid = xid;
@@ -534,16 +572,24 @@ static int32_t openflow_ctrl_iface_send_features_rep(uint32_t xid)
 	        ((uint8_t *) &switch_features) + sizeof(ofp_header),
 	        sizeof(ofp_switch_features) - sizeof(ofp_header));
 
-	uint32_t i;
+	uint32_t slot = 0;
 	for (i = 0; i < OPENFLOW_MAX_PHYSICAL_PORTS; i++)
 	{
+		if (findInterface(i) == NULL) continue;
+
 		ofp_phy_port *src = openflow_config_get_phy_port(
 		        openflow_config_get_of_port_num(i));
+		if (src == NULL) continue;
+
 		uint8_t *dest = ((uint8_t *) msg) + sizeof(switch_features)
-		        + (i * sizeof(ofp_phy_port));
+		        + (slot * sizeof(ofp_phy_port));
 		memcpy(dest, src, sizeof(ofp_phy_port));
 		free(src);
+		slot++;
 	}
+
+	verbose(2, "[openflow_ctrl_iface_send_features_rep]:: Advertising %u port(s)"
+			" in features reply (%u bytes).", slot, (unsigned) msg_len);
 
 	int32_t ret = openflow_ctrl_iface_send(msg, msg_len);
 	free(msg);
@@ -693,17 +739,31 @@ static int32_t openflow_ctrl_iface_recv_packet_out(ofp_packet_out *msg)
 		return OPENFLOW_CTRL_IFACE_ERR_OPENFLOW;
 	}
 
+	// bzero, not an uninitialised stack struct: only src_interface was ever assigned
+	// (and only conditionally), so every other frame field -- including the pkt_len
+	// added below -- would otherwise be whatever was on the stack.
 	gpacket_t packet;
+	bzero(&packet, sizeof(gpacket_t));
+
 	uint16_t in_port = openflow_config_get_gnet_port_num(ntohs(msg->in_port));
 	if (in_port < MAX_INTERFACES && findInterface(in_port) != NULL)
 	{
 		packet.frame.src_interface = in_port;
 	}
-	memcpy(&packet.data, ((uint8_t *) msg->actions) + htons(msg->actions_len),
-	        ntohs(msg->header.length) - sizeof(ofp_packet_out)
-	                - ntohs(msg->actions_len));
 
-	uint32_t actions = htons(msg->actions_len) / sizeof(ofp_action_header);
+	// Length of the frame the controller handed us. Record it: without it the send
+	// path cannot derive a size for a non-IP/ARP frame and pads it to 1518 bytes,
+	// which is what stopped openflow.discovery's LLDP from ever arriving.
+	int data_len = (int) ntohs(msg->header.length) - (int) sizeof(ofp_packet_out)
+	        - (int) ntohs(msg->actions_len);
+	if (data_len < 0) data_len = 0;
+	if (data_len > (int) sizeof(pkt_data_t)) data_len = (int) sizeof(pkt_data_t);
+	packet.frame.pkt_len = data_len;
+
+	memcpy(&packet.data, ((uint8_t *) msg->actions) + ntohs(msg->actions_len),
+	        data_len);
+
+	uint32_t actions = ntohs(msg->actions_len) / sizeof(ofp_action_header);
 	uint32_t i;
 	for (i = 0; i < actions; i++)
 	{
@@ -1351,10 +1411,30 @@ static int32_t openflow_ctrl_iface_parse_message(ofp_header *msg)
 			ret = openflow_ctrl_iface_send_barrier_rep(barrier_request->xid);
 			break;
 		}
+		case OFPT_FEATURES_REQUEST:
+		{
+			// A features request is legal AT ANY TIME, not only during the opening
+			// handshake -- and controllers do re-ask. openflow.spanning_tree sends one
+			// after every port modification (see its _invalidate_ports: the port config
+			// bits it just changed make the controller's cached copy stale, so it
+			// re-reads them). Falling through to `default` here answered a routine
+			// request with OFPBRC_BAD_TYPE and dropped the connection, so the switch
+			// flapped connect/disconnect for as long as spanning_tree kept adjusting
+			// ports -- which looked like "spanning_tree doesn't work" while every other
+			// app, none of which touches ports, was fine.
+			ret = openflow_ctrl_iface_recv_features_req(msg);
+			if (ret < 0) return ret;
+			ret = openflow_ctrl_iface_send_features_rep(msg->xid);
+			break;
+		}
 		default:
 		{
+			// NOTE the "%": this read `" message type " PRIu8 "found..."`, so the
+			// format specifier was a bare "hhu"/"u" with no argument marker -- the type
+			// was never printed and the line came out as "message type ufound". An
+			// unknown-message log that hides the message number is worse than useless.
 			verbose(1, "[openflow_ctrl_iface_parse_message]:: Unexpected"
-					" message type " PRIu8 "found in message from controller.",
+					" message type %" PRIu8 " found in message from controller.",
 			        msg->type);
 			if (msg->type == OFPT_VENDOR)
 			{

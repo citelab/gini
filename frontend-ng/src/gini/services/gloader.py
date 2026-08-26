@@ -94,6 +94,10 @@ class GLoader:
         """Live-change a running container's CPU cap (vertical scaling), no restart."""
         return self._orch.update_cpus(service, cpus)
 
+    def set_controller_app(self, service: str, app: str) -> tuple[bool, str]:
+        """Point a running SDN controller at a different POX app, restarting only it."""
+        return self._orch.set_controller_app(service, app)
+
     def stats(self, service: str) -> dict | None:
         """One CPU%/memory sample for a running container (for the Live tab plots)."""
         return self._orch.stats(service)

@@ -94,7 +94,7 @@ void *toRawDev(void *arg)
 		if(inpkt->data.header.prot == htons(ICMP_PROTOCOL)){
 			printf("\nICMP Request over raw\n");
 		}		
-		pkt_size = findPacketSize(&(inpkt->data));
+		pkt_size = gpacketSize(inpkt);
 		verbose(2, "[toRawDev]:: raw_sendto called for interface %d.. ", iface->interface_id);
 		raw_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
 		free(inpkt);          // finally destroy the memory allocated to the packet..

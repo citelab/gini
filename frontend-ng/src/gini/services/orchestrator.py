@@ -1350,6 +1350,49 @@ class Orchestrator:
                 states[svc] = "running" if "running" in raw or "up" in raw else raw
         return states
 
+    def set_controller_app(self, service: str, app: str,
+                           workdir: str | Path | None = None) -> tuple[bool, str]:
+        """Point a RUNNING controller at a different POX app, restarting only it.
+
+        POX loads its components once at process start (`pox.py openflow.of_01 <modules>`)
+        and has no hot-reload, so a new App means a new controller process. What it does
+        NOT need is a full topology restart: the switches reconnect on their own, which
+        makes trying a different controller app a few seconds' work instead of a
+        stop/start cycle.
+
+        The app is baked into the compose file as POX_APP, and `docker compose restart`
+        re-runs a container with its EXISTING config — so the value has to be rewritten
+        first and the container recreated. Only that one service's environment line is
+        touched (not a full project regeneration), so nothing else in a running lab can
+        shift underneath the containers already up.
+        """
+        wd = workdir or self.workdir
+        if not wd:
+            return False, "not running"
+        compose = Path(wd) / "docker-compose.yml"
+        if not compose.exists():
+            return False, "no docker-compose.yml in the project directory"
+
+        # Rewrite POX_APP inside THIS service's block only. The file is generated with a
+        # fixed two-space service indent, so the block runs from "  <service>:" to the
+        # next line at that indent.
+        out, in_block, replaced = [], False, False
+        for line in compose.read_text().splitlines():
+            if line.startswith("  ") and line.rstrip().endswith(":") and not line.startswith("   "):
+                in_block = (line.strip().rstrip(":") == service)
+            if in_block and line.strip().startswith("POX_APP:"):
+                out.append(f"      POX_APP: '{app}'")
+                replaced = True
+                continue
+            out.append(line)
+        if not replaced:
+            return False, f"no POX_APP entry found for service '{service}'"
+        compose.write_text("\n".join(out) + "\n")
+
+        # --no-deps so only the controller is touched; --force-recreate so the new
+        # environment is actually picked up rather than the old container restarted.
+        return self._compose("up", "-d", "--force-recreate", "--no-deps", service)
+
     def update_cpus(self, service: str, cpus: float,
                     workdir: str | Path | None = None) -> tuple[bool, str]:
         """Live-change a running container's CPU cap (vertical scaling), no restart, via

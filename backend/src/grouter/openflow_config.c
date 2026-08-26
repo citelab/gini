@@ -150,6 +150,12 @@ void openflow_config_update_phy_port(int32_t openflow_port_num)
 	else
 	{
 		COPY_MAC(phy_ports[gnet_port_num].hw_addr, iface->mac_addr);
+		// Clear LINK_DOWN as well as setting it. Without this the bit is
+		// sticky: a port marked down (at init, or when a link drops) could
+		// never come back up, so the controller would keep seeing a dead
+		// port and openflow_pkt_proc_forward_packet_to_port() would go on
+		// silently discarding everything sent to it.
+		phy_ports[gnet_port_num].state &= ~htonl(OFPPS_LINK_DOWN);
 	}
 
 	openflow_ctrl_iface_send_port_status(&phy_ports[gnet_port_num],

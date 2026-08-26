@@ -1275,11 +1275,11 @@ void setCmd()
         {
             level = atoi(next_tok);
             if ((level >= 0) && (level <= 6))
-                prog_set_verbosity_level(level);
+                gr_rctl_set_verbosity(level);
             else
                 verbose(1, "[setCmd]:: ERROR!! level should be in [0..6] \n");
         } else
-            printf("\nVerbose level: %ld \n", prog_verbosity_level());
+            printf("\nVerbose level: %ld \n", gr_rctl_verbosity());
     } else if (!strcmp(next_tok, "raw-times"))
     {
         if ((next_tok = strtok(NULL, " \n")) != NULL)
@@ -1395,7 +1395,7 @@ void getCmd()
     else if (!strcmp(next_tok, "sched-cycle"))
         printf("\nSchedule cycle length: %d (microseconds) \n", rconfig.schedcycle);
     else if (!strcmp(next_tok, "verbose"))
-        printf("\nVerbose level: %ld \n", prog_verbosity_level());
+        printf("\nVerbose level: %ld \n", gr_rctl_verbosity());
     else if (!strcmp(next_tok, "raw-times"))
         printf("\nRaw time mode: %d  \n", getTimeMode());
     else if (!strcmp(next_tok, "update-delay"))

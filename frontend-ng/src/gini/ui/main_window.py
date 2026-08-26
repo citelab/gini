@@ -134,6 +134,13 @@ class MainWindow(QMainWindow):
         self._project_dir: str | None = None       # active project folder (Projects)
         self._experiment: str | None = None        # the experiment (topology) open within it
         self._router_programs: dict = {}        # device id -> RouterProgram (Router Lab)
+        # Proof of activity: records the student's work into a hash chain once they enter their
+        # assignment code. Inert until armed, and every handler is guarded, so it can never take a
+        # session down. Built before the docks, because the dashboard strip displays its state.
+        from ..services.proof_recorder import ProofRecorder
+        self.proof_recorder = ProofRecorder(self.ctx)
+        self.proof_recorder.attach()
+        self.ctx.proof_recorder = self.proof_recorder   # so the assistant can reach it (hunk 5)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
         self.ctx.bus.device_activated.connect(self._on_device_activated)
@@ -1639,6 +1646,15 @@ class MainWindow(QMainWindow):
         # analytics strip — a short "cloud bill" dashboard stacked under the Console
         from .dashboard import Dashboard
         self.dashboard = Dashboard(self.theme)
+        # The proof-of-activity control goes on the RIGHT of the strip, after the cost breakdown
+        # and before the run-state text, so the strip reads money → work → status. Inserted from
+        # here rather than built into Dashboard, so the cost meter stays one self-contained thing.
+        # Positioned relative to the end (not a fixed index) because it must stay past the
+        # stretch that pushes the tail of the strip rightward, even if the meters change.
+        from .proof_strip import ProofStrip
+        self.proof_strip = ProofStrip(self.theme, self.proof_recorder)
+        _dash = self.dashboard.layout()
+        _dash.insertWidget(max(0, _dash.count() - 1), self.proof_strip)
         dash = QDockWidget("Dashboard", self)
         dash.setObjectName("dock_dashboard")
         dash.setWidget(self.dashboard)
@@ -1712,6 +1728,14 @@ class MainWindow(QMainWindow):
         reset_act.setMenuRole(QAction.MenuRole.NoRole)
         hwm.addSeparator()
         add(hwm, "&List Boards…", self._show_boards)
+
+        # Teacher: verifying a student's proof is an action a marker takes repeatedly, not a
+        # preference, so it gets a menu of its own rather than a corner of Settings.
+        tm = mb.addMenu("&Teacher")
+        issue_act = add(tm, "&Issue codes…", self._issue_codes)
+        issue_act.setMenuRole(QAction.MenuRole.NoRole)
+        verify_act = add(tm, "&Verify proof…", self._verify_proof)
+        verify_act.setMenuRole(QAction.MenuRole.NoRole)
 
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
@@ -1858,6 +1882,12 @@ class MainWindow(QMainWindow):
         scene._callouts = []
         scene._spotlit = []
         scene._highlit = []
+        # A topology that arrives whole is an IMPORT, not a construction — and the loops below
+        # replay device_added/link_added for every element in it. Tell the recorder BEFORE the
+        # swap, or an imported .gini writes a perfect fake build.
+        rec = getattr(self, "proof_recorder", None)
+        if rec is not None:
+            rec.note_load(getattr(topo, "name", "") or "an experiment", topo)
         self.ctx.topology = topo
         topo.prefix_overrides = dict(self.ctx.settings.name_prefixes)   # apply naming prefs
         self.ctx.selected_id = None
@@ -2087,6 +2117,11 @@ class MainWindow(QMainWindow):
         self._last_k8s = list(cfg.k8s)
         self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
         self._board_state = {}          # board_id -> live state, refreshed by the poller
+        # What each controller is ACTUALLY running, so a later property edit can tell an
+        # App change from any other edit. Without this seed, the first device_changed on
+        # a controller (a rename, say) would look like a new app and bounce it.
+        from ..services.compiler import _svc as _svc_name
+        self._live_ctrl_app = {_svc_name(c.name): c.app for c in cfg.controllers}
         self._workdir = tempfile.mkdtemp(prefix="gini-lab-")
         self.ctx.log(f"Launching {len(cfg.machines)} machines + {len(cfg.routers)} "
                      f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
@@ -2500,6 +2535,37 @@ class MainWindow(QMainWindow):
             self._k8s_live(d, scale=True)
         elif _role(d.type_key) == "hpa":                  # Target CPU slider -> patch HPA
             self._k8s_live(d, scale=False)
+        elif d.type_key == "controller":                  # App changed -> bounce just POX
+            self._controller_app_live(d)
+
+    def _controller_app_live(self, d) -> None:
+        """The App property changed on a running controller: restart THAT container.
+
+        POX has no hot-reload, so a new app needs a new process — but not a new topology.
+        Comparing against the last applied value matters because device_changed fires for
+        every property (renaming the controller must not bounce it).
+        """
+        import threading
+        from ..services.compiler import _svc
+        app = (d.properties.get("App") or "").strip()
+        if not app:
+            return
+        svc = _svc(d.name)
+        if getattr(self, "_live_ctrl_app", None) is None:
+            self._live_ctrl_app = {}
+        if self._live_ctrl_app.get(svc) == app:
+            return                                        # some other property changed
+        self._live_ctrl_app[svc] = app
+        self.ctx.log(f"{d.name}: switching controller app to '{app}' — restarting the "
+                     f"controller (switches will reconnect).", "info")
+
+        def work():
+            ok, msg = self._gloader.set_controller_app(svc, app)
+            self.ctx.log(f"{d.name}: now running '{app}'. Give discovery a few seconds "
+                         f"before testing." if ok
+                         else f"{d.name}: could not switch app ({msg}) — stop and Run "
+                              f"to apply it.", "ok" if ok else "info")
+        threading.Thread(target=work, daemon=True).start()
 
     def _k8s_live(self, d, *, scale: bool) -> None:
         import threading
@@ -2814,6 +2880,17 @@ class MainWindow(QMainWindow):
             tp.on_selection(device_id, self.ctx.topology)
         except Exception as e:                # noqa: BLE001 - a panel must never break selection
             self.ctx.bus.log.emit("error", f"Terminal: {e}")
+
+    def _issue_codes(self) -> None:
+        """Teacher mode: mint the codes handed out with an assignment. One per student, because
+        a proof is bound to its code and sharing one defeats the point."""
+        from .proof_issue_dialog import ProofIssueDialog
+        ProofIssueDialog(self.theme, self).exec()
+
+    def _verify_proof(self) -> None:
+        """Teacher mode: read a student's proof. Read-only — it verifies and renders, never grades."""
+        from .proof_verify_dialog import ProofVerifyDialog
+        ProofVerifyDialog(self.theme, self).exec()
 
     def _on_selection_source(self, device_id) -> None:
         """Selecting a router points GINI Source at ~/.gini/scripts, the module directory

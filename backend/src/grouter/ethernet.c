@@ -25,6 +25,22 @@ extern classlist_t *classifier;
 
 extern router_config rconfig;
 
+/*
+ * On-the-wire size of a packet. Prefers the true length the producer recorded in
+ * frame.pkt_len (see message.h); falls back to deriving it from the protocol.
+ *
+ * Use THIS, not findPacketSize(), on every send path: findPacketSize() cannot derive
+ * a length for anything but IP and ARP, and its sizeof(pkt_data_t) fallback pads such
+ * frames to 1518 bytes -- which silently broke LLDP and would break any VLAN-tagged
+ * or otherwise non-IP frame the same way.
+ */
+int gpacketSize(gpacket_t *pkt)
+{
+	if (pkt->frame.pkt_len > 0 && pkt->frame.pkt_len <= (int) sizeof(pkt_data_t))
+		return pkt->frame.pkt_len;
+	return findPacketSize(&(pkt->data));
+}
+
 int findPacketSize(pkt_data_t *pkt)
 {
 	ip_packet_t *ip_pkt;
@@ -61,7 +77,7 @@ void *toEthernetDev(void *arg)
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
 			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
 		}
-		pkt_size = findPacketSize(&(inpkt->data));
+		pkt_size = gpacketSize(inpkt);
 		verbose(2, "[toEthernetDev]:: vpl_sendto called for interface %d..%d bytes written ", iface->interface_id, pkt_size);
 		vpl_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
 		free(inpkt);          // finally destroy the memory allocated to the packet..
@@ -97,7 +113,12 @@ void* fromEthernetDev(void *arg)
 		}
 
 		bzero(in_pkt, sizeof(gpacket_t));
-		vpl_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+		{
+			/* record the TRUE received length so this frame is forwarded at its real
+			 * size rather than padded to sizeof(pkt_data_t) -- see frame.pkt_len. */
+			int _n = vpl_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+			in_pkt->frame.pkt_len = (_n > 0) ? _n : 0;
+		}
 		pthread_testcancel();
 		// check whether the incoming packet is a layer 2 broadcast or
 		// meant for this node... otherwise should be thrown..

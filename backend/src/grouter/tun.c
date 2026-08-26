@@ -7,6 +7,7 @@
 
 #include <slack/err.h>
 #include "sdn.h"        /* Z1: OpenFlow as ingress mode (seam) */
+#include "openflow.h"   /* OFP_DL_TYPE_ETH2_CUTOFF (ingress ethertype guard) */
 #include "tun.h"
 #include "packetcore.h"
 #include "classifier.h"
@@ -53,7 +54,7 @@ void *toTunDev(void *arg)
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
 			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
 		}
-		pkt_size = findPacketSize(&(inpkt->data));
+		pkt_size = gpacketSize(inpkt);
 		verbose(2, "[toTunDev]:: tun_sendto called for interface %d.. ", iface->interface_id);
 		tun_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
 		free(inpkt);          // finally destroy the memory allocated to the packet..
@@ -103,15 +104,33 @@ void* fromTunDev(void *arg)
             continue;
         }
 
-        // OpenFlow-switch safety: the legacy OpenFlow 1.0 flow-matcher only parses IPv4
-        // and ARP. Other ethertypes (IPv6 ND multicast 33:33:*, STP, LLDP, …) make it
-        // read past the header and SIGSEGV. A teaching L2/SDN lab only needs IPv4+ARP,
-        // so silently drop anything else before it reaches the flow table.
+        // OpenFlow-switch safety filter.
+        //
+        // This used to drop EVERY ethertype except IPv4 and ARP. That silently broke
+        // topology discovery: openflow.discovery probes links with LLDP (0x88CC), and
+        // dropping it here meant no LLDP ever reached the flow table, so no LinkEvent
+        // ever fired and any controller app needing a network-wide view
+        // (forwarding.l2_multi, openflow.spanning_tree) sat with an empty topology
+        // doing nothing. It would have blocked 802.1Q work for the same reason.
+        //
+        // The real hazard the original guard was reaching for is the 802.3/LLC branch
+        // of openflow_flowtable_match_packet(): for prot < OFP_DL_TYPE_ETH2_CUTOFF it
+        // indexes into data[] using the frame's OWN contents. Ethernet II types above
+        // the cutoff are safe -- the matcher's IP and ARP parsing is guarded by explicit
+        // prot checks, 802.1Q has its own handling, and anything else (LLDP included)
+        // simply falls through with dl_type set and the IP fields left at zero.
+        //
+        // So: pass the ethertypes the matcher demonstrably handles, and keep dropping
+        // the 802.3/LLC range that actually walks the payload.
         if (sdn_mode() == SDN_MODE_OPENFLOW)
         {
-            uint16_t ethertype = in_pkt->data.header.prot;
-            if (ethertype != htons(IP_PROTOCOL) && ethertype != htons(ARP_PROTOCOL))
+            uint16_t ethertype = ntohs(in_pkt->data.header.prot);
+            if (ethertype < OFP_DL_TYPE_ETH2_CUTOFF)
             {
+                /* 802.3/LLC: the matcher parses the payload to find a type. Not needed
+                 * by any GINI lab, and the one shape with real out-of-bounds risk. */
+                verbose(2, "[fromTunDev]:: Dropped 802.3/LLC frame (len/type 0x%04x)"
+                        " in OpenFlow mode.", ethertype);
                 free(in_pkt);
                 continue;
             }
