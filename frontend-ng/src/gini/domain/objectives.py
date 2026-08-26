@@ -33,6 +33,13 @@ from .devices import REGISTRY
 MET = "met"
 UNMET = "unmet"
 PENDING = "pending"          # behavioral, awaiting a run (Phase 2)
+DEFECTIVE = "defective"      # the OBJECTIVE is broken, not the student's work — see below
+
+# `defective` exists because the alternative is a silent misattribution. A probe or predicate that
+# does not parse is an authoring bug, but reporting it as `unmet` puts it in the same column as
+# work the student failed to do — and with machine-generated Activity Observation Plans, a single
+# hallucinated probe string would quietly read as "they didn't do it". Never fold a broken
+# objective into a verdict about a person.
 
 
 @dataclass
@@ -91,9 +98,15 @@ _CMP = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Gt: operator.gt,
 # predicates are what missions should use, so an objective matches what the student built
 # regardless of the (auto-generated) device names.
 _PREDICATES = {"exists", "count", "linked", "connected", "contains", "property", "prop",
-               "link", "path", "contains_type", "through", "all_linked"}
+               "link", "path", "contains_type", "through", "all_linked", "property_type"}
 _TYPE_ARG_FUNCS = {"exists", "count", "link", "path", "contains_type", "through",
-                   "all_linked"}  # args are type_keys
+                   "all_linked", "property_type"}  # first arg is a type_key
+
+# How many LEADING arguments of a type-based predicate are type_keys. Every argument is one by
+# default; `property_type(type_key, key[, value])` is the exception — only its first arg names an
+# element, and the rest are a property key and value. Without this, validation would report
+# `property_type('router', 'delay')` as referring to an element type called "delay".
+_TYPE_ARITY = {"property_type": 1}
 
 
 class PredicateError(ValueError):
@@ -120,6 +133,7 @@ PLACEMENT, CONNECTION, CONTAINMENT, LIVE = 1, 2, 3, 4
 
 _PRED_LEVEL = {
     "exists": PLACEMENT, "count": PLACEMENT, "property": PLACEMENT, "prop": PLACEMENT,
+    "property_type": PLACEMENT,
     "link": CONNECTION, "path": CONNECTION, "through": CONNECTION, "all_linked": CONNECTION,
     "linked": CONNECTION, "connected": CONNECTION,
     "contains": CONTAINMENT, "contains_type": CONTAINMENT,
@@ -215,6 +229,9 @@ def _call(fn: str, args: list, world) -> object:
         return world.contains(str(args[0]), str(args[1]))
     if fn in ("property", "prop"):
         return world.prop(str(args[0]), str(args[1]))
+    if fn == "property_type":           # SOME device of this type carries the property
+        want = args[2] if len(args) > 2 else None
+        return world.prop_type(str(args[0]), str(args[1]), want)
     if fn == "link":                    # a link between ANY typeA device and ANY typeB device
         return world.link_types(str(args[0]), str(args[1]))
     if fn == "path":                    # a path between some typeA and some typeB device
@@ -262,21 +279,32 @@ def evaluate(obj: Objective, world, runner=None) -> ObjectiveResult:
 
     Structural objectives evaluate against the graph instantly. Behavioral objectives need a
     live `runner` (GINI's runtime, the oracle): with one available they resolve to met/unmet via
-    the probe; without one they stay `pending` (Phase 1 behavior, and whenever nothing is running)."""
+    the probe; without one they stay `pending` (Phase 1 behavior, and whenever nothing is running).
+
+    An objective that does not parse resolves to `defective`, never to `unmet`: the fault is the
+    author's and must not be shown in the same column as the student's work."""
+    def result(status):
+        return ObjectiveResult(obj.id, obj.say, obj.kind, status, level_of(obj))
+
     if obj.is_behavioral():
-        if runner is None or not getattr(runner, "available", lambda: False)():
-            return ObjectiveResult(obj.id, obj.say, obj.kind, PENDING, level_of(obj))
         from . import probes as _probes
+        if not _probes.probe_ok(obj.probe):
+            # Checked BEFORE availability: a probe that cannot parse is broken whether or not
+            # anything is running, and saying so straight away is what turns a machine-generated
+            # typo into an authoring failure instead of a student's missing tick.
+            return result(DEFECTIVE)
+        if runner is None or not getattr(runner, "available", lambda: False)():
+            return result(PENDING)
         try:
             met = _probes.evaluate(obj.probe, runner)
         except _probes.ProbeError:
-            met = False
-        return ObjectiveResult(obj.id, obj.say, obj.kind, MET if met else UNMET, level_of(obj))
+            return result(DEFECTIVE)
+        return result(MET if met else UNMET)
     try:
         met = evaluate_check(obj.check, world)
     except PredicateError:
-        met = False
-    return ObjectiveResult(obj.id, obj.say, obj.kind, MET if met else UNMET, level_of(obj))
+        return result(DEFECTIVE)
+    return result(MET if met else UNMET)
 
 
 def evaluate_all(objectives, world, runner=None) -> list[ObjectiveResult]:
@@ -365,11 +393,43 @@ class TopologyWorld:
         d = self._by_name(dev)
         if d is None:
             return None
+        return self._prop_of(d, key)
+
+    @staticmethod
+    def _prop_of(d, key: str):
         props = getattr(d, "properties", {}) or {}
         if key in props:
             return props[key]
         low = {k.lower(): v for k, v in props.items()}      # forgiving on case
         return low.get(key.lower())
+
+    def prop_type(self, type_key: str, key: str, want=None) -> bool:
+        """Does SOME device of this type carry `key` (equal to `want`, when given)?
+
+        The type-based counterpart to `prop`. A plan written before the student builds anything
+        cannot know that their router is called R2, so a *name*-based property check silently
+        matches nothing and reads as "they didn't configure it". This is the same
+        name-agnostic reasoning behind `link_types`/`path_types`, applied to configuration:
+        `property_type('router', 'delay')` asks whether any router has delay set at all, and
+        `property_type('switch', 'mode', 'hub')` pins the value.
+
+        Existential, like `exists` — "some router has delay" is what an activity means when it
+        says the student configured delay somewhere on the path. Use a `count`-style universal
+        only if a future activity genuinely needs every one of them.
+
+        Truthiness is deliberate: an unset property reads as absent, so `property_type(x, 'k')`
+        answers "is it configured", not "does the key appear in the dict".
+        """
+        for d in self.t.devices.values():
+            if not self._match(d, type_key):
+                continue
+            got = self._prop_of(d, key)
+            if want is None:
+                if got not in (None, "", False):
+                    return True
+            elif str(got) == str(want):
+                return True
+        return False
 
     # -- type-based (name-agnostic) predicates: match what the student built, not the names -- #
     def link_types(self, type_a: str, type_b: str) -> bool:
@@ -475,7 +535,8 @@ def element_types_in_check(expr: str) -> list[str]:
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id in _TYPE_ARG_FUNCS):
-            for a in node.args:                 # every arg of a type-based predicate is a type_key
+            n = _TYPE_ARITY.get(node.func.id, len(node.args))
+            for a in node.args[:n]:
                 if isinstance(a, ast.Name):
                     out.append(a.id)
                 elif isinstance(a, ast.Constant) and isinstance(a.value, str):
