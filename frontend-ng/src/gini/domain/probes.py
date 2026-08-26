@@ -140,6 +140,10 @@ class TypeRunner:
     def __init__(self, base: Runner, get_topology) -> None:
         self.base = base
         self._get_topology = get_topology
+        # The last full relation measured by `reach_all`, when the base runner could sweep. Carries
+        # the islands and the failed pairs, so a report can name which stations are cut off instead
+        # of reporting a bare False.
+        self.last_relation = None
 
     def available(self) -> bool:
         return bool(self.base) and self.base.available()
@@ -175,8 +179,30 @@ class TypeRunner:
     # the existential reading, one healthy pair would mask a broken third host. An empty pair set is
     # False, not vacuously True — "no hosts" must never look like "all hosts talk".
     def reach_all(self, src: str, dst: str, port: int | None = None) -> bool:
+        """EVERY src-type device reaches every dst-type device.
+
+        When the base runner can sweep (one exec per host, all destinations in parallel), use it:
+        the same n(n-1) ordered pairs get measured in n process spawns rather than n(n-1), which is
+        the difference between ~22 s and ~1 s on ten stations. Nothing is inferred either way — see
+        `domain.reach_strategy` for why transitivity was measured and rejected.
+
+        `last_relation` keeps the full result, so a report can say *which* stations are isolated
+        rather than only that some are. Falls back to per-pair probing for runners without a sweep
+        (FakeRunner, Xv6Runner), where the cost never mattered.
+        """
         pairs = list(self._pairs(src, dst))
-        return bool(pairs) and all(self.base.reach(s, d, port) for s, d in pairs)
+        if not pairs:
+            return False                       # "no devices" must never read as "all of them talk"
+        sweeper = getattr(self.base, "sweep_all", None)
+        if sweeper is not None and port is None and src == dst:
+            # The all-pairs-of-one-type case (`reach(host -> host, all)`) is exactly a full sweep
+            # over that set. Cross-type or port probes stay per-pair: their pair set is not the
+            # complete relation over a single group, so a sweep would measure more than was asked.
+            hosts = sorted({s for s, _ in pairs} | {d for _, d in pairs})
+            rel = sweeper(hosts)
+            self.last_relation = rel
+            return rel.all_reach()
+        return all(self.base.reach(s, d, port) for s, d in pairs)
 
     def http_all(self, src: str, dst: str, port: int) -> bool:
         pairs = list(self._pairs(src, dst))
