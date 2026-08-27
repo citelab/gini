@@ -56,3 +56,32 @@ def test_it_never_touches_the_containers_own_eth0(tmp_path, monkeypatch):
     monkeypatch.delenv("GINI_FABRIC_IPV6", raising=False)
     shuttle.quiet_ipv6("gini0")
     assert (eth0 / "disable_ipv6").read_text() == "0"
+
+
+def test_the_default_is_quieted_too_so_new_taps_inherit_it(tmp_path, monkeypatch):
+    """A tap is registered the moment TUNSETIFF returns, so the per-interface write leaves a
+    window in which the kernel could start autoconfiguring. `default` is inherited at device
+    creation, which closes the window instead of racing it."""
+    d = _fake_proc(tmp_path, "default")
+    monkeypatch.setattr(shuttle, "IPV6_CONF_ROOT", str(tmp_path))
+    monkeypatch.delenv("GINI_FABRIC_IPV6", raising=False)
+    shuttle.quiet_ipv6("default")
+    assert (d / "disable_ipv6").read_text() == "1"
+
+
+def test_main_quiets_default_before_creating_any_tap(monkeypatch):
+    """Ordering is the whole point: after the first tap exists it is already too late."""
+    order = []
+    monkeypatch.setattr(shuttle, "quiet_ipv6", lambda n: order.append(("quiet", n)))
+    monkeypatch.setattr(shuttle, "open_tap", lambda n: (order.append(("tap", n)), 0)[1])
+    monkeypatch.setattr(shuttle, "configure_iface", lambda *a: None)
+    monkeypatch.setattr(shuttle.Port, "from_cfg", staticmethod(lambda *a, **k: None))
+    monkeypatch.setenv("NODE_CONFIG", '{"name":"m1","ifaces":[{"ip":"10.0.1.10/24",'
+                                      '"mac":"02:00:00:01:02:01","tap":"gini0","port":{}}]}')
+    try:
+        shuttle.main()
+    except Exception:
+        pass                                   # main goes on to the select loop; we only
+                                               # care about what happened before the tap
+    assert order and order[0] == ("quiet", "default"), \
+        f"`default` must be quieted before any tap exists — got {order[:3]}"

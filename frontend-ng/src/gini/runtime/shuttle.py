@@ -337,6 +337,12 @@ def main() -> None:
         ifaces = [{"ip": cfg["ip"], "mac": cfg["mac"],
                    "tap": cfg.get("tap", "gini0"), "port": cfg["port"]}]
 
+    # Quiet IPv6 on interfaces that do not exist yet. A tap is already registered by the
+    # time TUNSETIFF returns, so configure_iface's per-interface write leaves a brief
+    # window in which the kernel could start autoconfiguring. `default` is inherited at
+    # device creation, so setting it here closes that window rather than racing it.
+    quiet_ipv6("default")
+
     sel = selectors.DefaultSelector()
     fd_port: dict[int, Port] = {}            # tap fd -> its uplink Port
     port_fd: dict[int, int] = {}             # port socket fileno -> tap fd
