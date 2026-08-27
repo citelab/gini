@@ -27,6 +27,7 @@ class EventBus(QObject):
     llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
     enrolment_changed = Signal(str, bool, int)  # (student, course-server online, missions due)
     boards_changed = Signal()         # a real GINI32 board came online or went quiet
+    board_status_ready = Signal(object)  # relay snapshot from the poll worker (None = no answer)
     theme_changed = Signal(str)       # theme name
     log = Signal(str, str)            # level, message
     assistant_message = Signal(str, str)  # role, text

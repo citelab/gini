@@ -194,15 +194,26 @@ class FlowHudController(QObject):
     def refresh(self) -> None:
         if self._busy:
             return
-        self._busy = True
         import threading
         import time
+
+        # Snapshot the machine list HERE, on the GUI thread. `_machines()` iterates
+        # ctx.topology.devices, and doing that from the worker races every mutation of the
+        # same dict -- a project load replaces ctx.topology outright, and the iteration then
+        # raises "dictionary changed size during iteration" INSIDE the worker, where the only
+        # handler is a `finally` that resets the flag. The poll is silently lost and nothing
+        # says why. The Network HUD hit this and guards against it; these two never did.
+        try:
+            names = list(self._machines())
+        except Exception:
+            return                              # topology in flux — skip this tick, not fatal
+        self._busy = True
 
         def work():
             try:
                 tnow = time.monotonic()
                 samples = []
-                for name in self._machines():
+                for name in names:
                     try:
                         samples.extend(parse_ss(self._query(name, "ss -tin"), host=name))
                     except Exception:

@@ -116,6 +116,12 @@ class MainWindow(QMainWindow):
         self._apply_env_settings()   # env vars override saved config
         from ..agent.tools import build_registry
         self.registry = build_registry(self.api)   # shared: in-app loop + present tools
+        # An LLM turn runs on a worker thread, and its tools mutate topology.devices /
+        # topology.links -- dicts the GUI thread iterates on every canvas paint. Route every
+        # handler through the GUI thread so a build cannot land mid-iteration.
+        from .gui_dispatch import GuiDispatcher
+        self._gui_dispatch = GuiDispatcher(self)
+        self.registry.dispatch = self._gui_dispatch
         # gLoader: compiles the drawn topology into a runtime plan and launches it
         from pathlib import Path
         from .. import runtime as _rt
@@ -143,6 +149,7 @@ class MainWindow(QMainWindow):
         self.ctx.proof_recorder = self.proof_recorder   # so the assistant can reach it (hunk 5)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
+        self.ctx.bus.board_status_ready.connect(self._on_board_status)
         self.ctx.bus.device_activated.connect(self._on_device_activated)
         from PySide6.QtCore import QTimer
         self._poll = QTimer(self)
@@ -1613,7 +1620,11 @@ class MainWindow(QMainWindow):
         self.inspector = Inspector(self.ctx, self.api, self.theme)
         self.inspector.query_fn = self.element_query
         # Boards report through the relay, not a container — see Inspector._board_live_text.
-        self.inspector.board_status_fn = self._gloader.orchestrator.board_status
+        # The CACHE, not the relay. This is called synchronously during _rebuild --
+        # twice for a gini32 element -- and board_status() is a blocking 2s HTTP GET.
+        # The poll worker keeps this at most one tick (3s) stale, which is fresher than
+        # the panel is redrawn anyway.
+        self.inspector.board_status_fn = lambda: getattr(self, "_board_status_raw", None)
         self.inspector.board_action_fn = self.board_action
         self.inspector.stats_fn = self._element_stats
         self.inspector.stats_all_fn = self._element_stats_all
@@ -1836,11 +1847,9 @@ class MainWindow(QMainWindow):
     def _show_boards(self) -> None:
         """What the relay currently knows about real boards."""
         from PySide6.QtWidgets import QMessageBox
-        st = None
-        try:
-            st = self._gloader.orchestrator.board_status()
-        except Exception:
-            st = None
+        # The poller's cache rather than a fresh blocking GET: at most one 3s tick stale,
+        # and a menu click should never freeze the window for two seconds.
+        st = getattr(self, "_board_status_raw", None)
         if st is None:
             QMessageBox.information(
                 self, "Boards",
@@ -2160,6 +2169,8 @@ class MainWindow(QMainWindow):
         self._last_k8s = list(cfg.k8s)
         self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
         self._board_state = {}          # board_id -> live state, refreshed by the poller
+        self._board_status_raw = None   # last raw relay snapshot (read by the Inspector)
+        self._boards_busy = False       # a board_status fetch is in flight
         # What each controller is ACTUALLY running, so a later property edit can tell an
         # App change from any other edit. Without this seed, the first device_changed on
         # a controller (a rename, say) would look like a new app and bounce it.
@@ -2288,6 +2299,7 @@ class MainWindow(QMainWindow):
                 # lab down we no longer know anything, so stop claiming we do.
                 self.canvas.clear_live_clients()
                 self._board_state = {}
+                self._board_status_raw = None
                 self._fabric_poll.stop()
                 self._k8s_poll.stop()
                 self.dashboard.set_fabric({})
@@ -2414,17 +2426,43 @@ class MainWindow(QMainWindow):
         return ".".join(parts[:3] + ["1"])
 
     def _poll_boards(self) -> None:
-        """Refresh real GINI32 board state, and the devices attached to their radios.
+        """Ask the relay for board state, OFF the GUI thread.
+
+        `board_status()` is an HTTP GET with a 2-SECOND timeout, and this runs from the
+        3-second status poll. Called inline it froze the whole app for two seconds out of
+        every three whenever the relay was slow to answer -- which is exactly when a
+        student is debugging a board and least wants a frozen window. The failure was
+        swallowed (`return None`), so it never looked like an error, only like jank.
+        """
+        if not getattr(self, "_last_gbridge", None):
+            return
+        if getattr(self, "_boards_busy", False):
+            return                              # last fetch still out; skip rather than pile up
+        self._boards_busy = True
+        import threading
+
+        def worker():
+            st = None
+            try:
+                st = self._gloader.orchestrator.board_status()
+            finally:
+                # Emit even on failure so the busy flag is always cleared on the GUI thread.
+                self.ctx.bus.board_status_ready.emit(st)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_board_status(self, st) -> None:
+        """Apply a relay snapshot. Runs on the GUI thread via a queued signal.
 
         Devices are OBSERVED, not drawn: a phone joining a board's hotspot is a fact
         about the physical world, so it appears as an ephemeral node and disappears
         when it leaves. It is never written into the saved topology.
         """
-        if not getattr(self, "_last_gbridge", None):
-            return
-        st = self._gloader.orchestrator.board_status()
+        self._boards_busy = False
         if st is None:
             return
+        # Cache the raw snapshot so the Inspector can render board panels without making
+        # its own blocking call -- it used to fire TWO per rebuild (see board_status_fn).
+        self._board_status_raw = st
         boards = {b["board_id"]: b for b in st.get("boards", [])}
         was_online = {k: bool(v.get("online"))
                       for k, v in (getattr(self, "_board_state", None) or {}).items()}
