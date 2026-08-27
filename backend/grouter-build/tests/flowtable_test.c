@@ -2,12 +2,14 @@
  * flowtable_test.c — standalone unit test for openflow_flowtable.c.
  *
  * Drives the REAL flow table through its PUBLIC API only (the table itself is file-static,
- * which is right, so nothing here reaches inside). Covers the two behaviours that were
+ * which is right, so nothing here reaches inside). Covers three behaviours that were
  * silently wrong and are easy to get wrong again:
  *
  *   1. LRU eviction — a full table accepts new rules by evicting the least recently
  *      matched entry, instead of refusing every further rule.
- *   2. Priority byte order — priorities survive a round trip, so a controller rule
+ *   2. Eviction NOTIFIES the controller, exactly as expiry does. A rule removed behind
+ *      the controller's back leaves it believing a path is installed that is not.
+ *   3. Priority byte order — priorities survive a round trip, so a controller rule
  *      outranks the boot-time wildcard default.
  *
  * Why these matter. The table holds OPENFLOW_MAX_FLOWTABLE_ENTRIES (100) and the POX
@@ -49,12 +51,18 @@ uint64_t htonll(uint64_t arg) { return ntohll(arg); }
 char *IP2Dot(char *buf, uchar *ip) { (void) ip; if (buf) buf[0] = 0; return buf; }
 char *MAC2Colon(char *buf, uchar *mac) { (void) mac; if (buf) buf[0] = 0; return buf; }
 uint16_t openflow_config_get_of_port_num(uint16_t n) { return n + 1; }
-void openflow_ctrl_iface_send_flow_removed(openflow_flowtable_entry_type *e, uint8_t r)
-{ (void) e; (void) r; }
 int gpacketSize(gpacket_t *pkt) { (void) pkt; return 64; }
 
+/* Counts OFPT_FLOW_REMOVED notifications so the test can assert the controller is told
+ * when a rule goes away -- including when it goes away because it was EVICTED. */
+static int removed_count = 0;
+static uint8_t removed_reason = 0xff;
+void openflow_ctrl_iface_send_flow_removed(openflow_flowtable_entry_type *e, uint8_t reason)
+{ (void) e; removed_count++; removed_reason = reason; }
+
 /* -- helpers -------------------------------------------------------------------------- */
-static ofp_flow_mod *mk(uint16_t priority, uint16_t sport, uint16_t out_port)
+static ofp_flow_mod *mk(uint16_t priority, uint16_t sport, uint16_t out_port,
+                        uint16_t flags)
 {
 	static char buf[sizeof(ofp_flow_mod) + sizeof(ofp_action_output)];
 	ofp_flow_mod *fm = (ofp_flow_mod *) buf;
@@ -67,6 +75,7 @@ static ofp_flow_mod *mk(uint16_t priority, uint16_t sport, uint16_t out_port)
 	fm->match.wildcards = htonl(0);
 	fm->match.tp_src = htons(sport);
 	fm->priority = htons(priority);
+	fm->flags = htons(flags);
 	ofp_action_output *a = (ofp_action_output *) &fm->actions[0];
 	a->type = htons(OFPAT_OUTPUT);
 	a->len = htons(sizeof(ofp_action_output));
@@ -77,7 +86,15 @@ static ofp_flow_mod *mk(uint16_t priority, uint16_t sport, uint16_t out_port)
 static int add_rule(uint16_t priority, uint16_t sport, uint16_t out_port)
 {
 	uint16_t error_type = 0, error_code = 0;
-	return openflow_flowtable_modify(mk(priority, sport, out_port),
+	return openflow_flowtable_modify(mk(priority, sport, out_port, 0),
+	                                 &error_type, &error_code);
+}
+
+/* same, but the controller asks to be told when this rule is removed */
+static int add_rule_notify(uint16_t priority, uint16_t sport, uint16_t out_port)
+{
+	uint16_t error_type = 0, error_code = 0;
+	return openflow_flowtable_modify(mk(priority, sport, out_port, OFPFF_SEND_FLOW_REM),
 	                                 &error_type, &error_code);
 }
 
@@ -102,6 +119,24 @@ int main(void)
 	       cap + 50, accepted, refused);
 	check("no rule is refused once the table is full",
 	      refused == 0 && accepted == (int) (cap + 50));
+
+	printf("\nevicting a rule tells the controller, like expiring one does\n");
+	openflow_flowtable_init();
+	removed_count = 0;
+	for (uint32_t i = 0; i < cap; i++)
+		add_rule_notify(32768, (uint16_t) (3000 + i), 2);
+	check("filling the table notifies nobody", removed_count == 0);
+	add_rule_notify(32768, 9999, 2);            /* forces one eviction */
+	check("evicting a rule sends OFPT_FLOW_REMOVED", removed_count == 1);
+	check("the reason is OFPRR_DELETE, not a timeout",
+	      removed_reason == OFPRR_DELETE);
+	/* a rule that did NOT ask for notification must not generate one */
+	removed_count = 0;
+	openflow_flowtable_init();
+	for (uint32_t i = 0; i < cap + 1; i++)
+		add_rule(32768, (uint16_t) (4000 + i), 2);
+	check("a rule without OFPFF_SEND_FLOW_REM is evicted silently",
+	      removed_count == 0);
 
 	printf("\npriority survives the round trip\n");
 	openflow_flowtable_init();

@@ -1487,8 +1487,17 @@ static int32_t openflow_flowtable_add(ofp_flow_mod* flow_mod,
 
 	verbose(2, "[openflow_flowtable_add]:: Flowtable full; evicting least recently"
 			" matched entry at index %" PRIu32 " to make room.", victim);
-	// active_count is unchanged: one entry leaves as one arrives.
-	memset(&flowtable->entries[victim], 0, sizeof(openflow_flowtable_entry_type));
+	// Delete it PROPERLY rather than overwriting it. A controller that set
+	// OFPFF_SEND_FLOW_REM is told when a rule goes away, and it must be told for eviction
+	// too -- otherwise it goes on believing a rule is installed that no longer exists, and
+	// silently stops refreshing a path the switch has already forgotten. OpenFlow 1.0 has
+	// no eviction reason (OFPRR_EVICTION arrives in 1.4), so OFPRR_DELETE is the honest
+	// one: the switch removed it, and not because it timed out.
+	openflow_flowtable_delete_entry_at_index(victim, OFPRR_DELETE);
+	// delete_entry_at_index decremented active_count; the replacement puts it straight
+	// back, so the count nets out unchanged -- one entry leaves as one arrives.
+	flowtable->stats.active_count = htonl(
+	        ntohl(flowtable->stats.active_count) + 1);
 	time(&flowtable->entries[victim].added);
 	return openflow_flowtable_modify_entry_at_index(flow_mod, victim, error_type,
 	        error_code, 1);
@@ -2439,7 +2448,10 @@ static void openflow_flowtable_timeout()
 				        flowtable->entries[i].last_modified);
 				if (flowtable->entries[i].hard_timeout != 0)
 				{
-					if (hard_diff > htons(flowtable->entries[i].hard_timeout))
+					// ntohs, not htons. Identical in effect (both byte-swap on a
+					// little-endian host) but this is a wire value being read, and
+					// the idle check above rightly uses ntohs.
+					if (hard_diff > ntohs(flowtable->entries[i].hard_timeout))
 					{
 						verbose(2, "[openflow_flowtable_timeout]:: Entry"
 								" %d hard timeout.", i);
