@@ -15,6 +15,7 @@ unit-tested without QEMU.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 from .xv6 import DemoScheduler, SchedTimeline, Snapshot
@@ -226,6 +227,17 @@ class MachineState:
     # may stay None when no xv6 is running — then Real mode shows an error, never demo data.
     _real: tuple | None = None
     _demo: tuple | None = None
+    # ONE reader at a time. Several threads converge on this object: the Lab's poll timer, the
+    # worker that re-reads after a launch/kill, the OS HUD, and the Ask GINI agent. Without this
+    # they can be inside refresh() together — and since the reads take different amounts of time,
+    # an OLDER snapshot could land after a newer one, sending `latest` backwards and putting the
+    # Gantt's timeline out of order. Symptom: the Lab goes strange right after you launch
+    # something, which is exactly when the launch worker and the poll overlap.
+    #
+    # The lock spans the provider read as well as the ingest, not just the ingest: guarding only
+    # the write would still let two reads finish out of order. Reentrant because step() and
+    # refresh() both go on to call _ingest().
+    _lock: object = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.vm is None:
@@ -337,14 +349,16 @@ class MachineState:
     def refresh(self) -> Snapshot | None:
         if self.provider is None:                 # Real mode with no running kernel -> no data
             return None
-        self._ingest(self.provider.snapshot())
-        return self.latest
+        with self._lock:                          # see _lock: readers must not overlap
+            self._ingest(self.provider.snapshot())
+            return self.latest
 
     def step(self) -> Snapshot | None:
         if self.provider is None:
             return None
-        self._ingest(self.provider.step())
-        return self.latest
+        with self._lock:
+            self._ingest(self.provider.step())
+            return self.latest
 
     def _ingest(self, snap: Snapshot | None) -> None:
         # An empty process list means the read FAILED (init+sh always exist), not that the

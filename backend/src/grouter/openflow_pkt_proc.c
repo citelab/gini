@@ -9,6 +9,7 @@
 #include <slack/std.h>
 #include <slack/err.h>
 
+#include "ethernet.h"   /* gpacketSize() -- real on-the-wire length */
 #include "grouter.h"
 #include "ip.h"
 #include "openflow.h"
@@ -164,7 +165,10 @@ static int32_t openflow_pkt_proc_forward_packet_to_port(gpacket_t *packet,
 
 	ofp_port_stats *stats = openflow_config_get_port_stats(of_port);
 	stats->tx_packets = htonll(ntohll(stats->tx_packets) + 1);
-	stats->tx_bytes = htonll(ntohll(stats->tx_bytes) + sizeof(pkt_data_t));
+	/* real length, not sizeof(pkt_data_t): the hardcoded struct size made every
+	 * port read exactly 1518 bytes/packet, which is actively misleading when
+	 * these counters are used to diagnose the packet path. */
+	stats->tx_bytes = htonll(ntohll(stats->tx_bytes) + gpacketSize(packet));
 	openflow_config_set_port_stats(of_port, stats);
 	free(stats);
 
@@ -197,7 +201,7 @@ int32_t openflow_pkt_proc_handle_packet(gpacket_t *packet)
 	        packet->frame.src_interface);
 	ofp_port_stats *stats = openflow_config_get_port_stats(of_port);
 	stats->rx_packets = htonll(ntohll(stats->rx_packets) + 1);
-	stats->rx_bytes = htonll(ntohll(stats->rx_bytes) + sizeof(pkt_data_t));
+	stats->rx_bytes = htonll(ntohll(stats->rx_bytes) + gpacketSize(packet));
 	openflow_config_set_port_stats(of_port, stats);
 	free(stats);
 

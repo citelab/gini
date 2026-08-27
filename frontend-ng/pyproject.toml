@@ -15,8 +15,13 @@ authors = [{ name = "GINI Toolkit" }]
 dependencies = [
     "PySide6-Essentials>=6.6",   # the Qt6 desktop GUI (gini.ui + the `gbuilder` entrypoint)
     "PySide6-Addons>=6.6",       # QtWebEngine — embeds headful Desktops / OS-Zoo screens (else the
-    #                              system browser). Bundled so one install pulls it in automatically.
+    #                              system browser); QtWebSockets — the Terminal's link to ttyd.
+    #                              Bundled so one install pulls it in automatically.
     "PyYAML>=6.0",               # reads authored Lesson packs (Missions / Teaching Center)
+    "pyte>=0.8",                 # terminal emulation for the Terminal pane. Pure Python: it turns
+    #                              the container's byte stream into a grid of cells, which
+    #                              ui/terminal_view.py paints. Replaced an embedded xterm.js page
+    #                              in QtWebEngine — a Chromium process per terminal.
 ]
 
 [project.optional-dependencies]

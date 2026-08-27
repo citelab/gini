@@ -20,6 +20,7 @@ from .theme import ThemeManager, icons
 
 
 class RouterLab(QDialog):
+    worker_done = Signal()      # one live-poll worker finished (queued to the GUI thread)
     flows_ready = Signal(list)  # parsed FlowEntry rows (from a worker thread)
     tablestats_ready = Signal(object)  # OpenFlow table-level stats dict
     routes_ready = Signal(list)  # parsed RouteEntry rows (from a worker thread)
@@ -132,6 +133,7 @@ class RouterLab(QDialog):
             root.addWidget(self._build_qos_panel())
             root.addWidget(foot_w)
 
+        self.worker_done.connect(self._round_worker_done)
         self._rebuild()
 
         # poll the live table (flows for an OVS, routes + queue stats otherwise) while open
@@ -357,10 +359,38 @@ class RouterLab(QDialog):
         lay.addWidget(tabs)
         return w
 
-    def _refresh_flows(self) -> None:
+    def _emit(self, signal, *args) -> bool:
+        """Emit from a worker thread, tolerating this dialog having been destroyed meanwhile.
+
+        A query can sit in `docker compose exec` for up to 12s. If the window is closed and
+        retired in that time, MainWindow._retire_lab deletes the C++ object and the worker's emit
+        lands on nothing:
+
+            RuntimeError: Signal source has been deleted
+
+        which killed the thread with an unhandled traceback on the console. There is no reliable
+        way to ask from another thread whether a QObject is still alive — checking and then
+        emitting is a race — so the emit itself is the check. Returns False if the dialog is gone,
+        which lets a worker stop early instead of running the rest of its queries for nobody.
+        """
+        try:
+            signal.emit(*args)
+            return True
+        except RuntimeError:
+            return False
+
+    def _refresh_flows(self, counted: bool = True) -> None:
+        """Read the live OpenFlow table. Driven only by the poll timer, so `counted` defaults True.
+
+        `counted` marks this call as part of a timed poll round. Ad-hoc refreshes (after
+        applying a policy, say) pass False so they do not decrement the round's worker
+        count and let the next tick start while the round's own workers are still out.
+        """
         if self.query_fn is None:
             self._set_flow_status("not running — press Run, then reopen to see live flows")
             return
+        if not self._round_begin(1):
+            return                              # previous round still out; skip this tick
         import threading
         self._set_flow_status("reading flow table…")
         qf = self.query_fn
@@ -374,8 +404,11 @@ class RouterLab(QDialog):
                 stats = parse_table_stats(qf("openflow stats table"))
             except Exception:
                 pass
-            self.flows_ready.emit(rows)
-            self.tablestats_ready.emit(stats)
+            if not self._emit(self.flows_ready, rows):
+                return
+            self._emit(self.tablestats_ready, stats)
+            if counted:
+                self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_flows(self, rows: list) -> None:
@@ -453,7 +486,13 @@ class RouterLab(QDialog):
         lay.addWidget(self.route_table)
         return w
 
-    def _refresh_routes(self) -> None:
+    def _refresh_routes(self, counted: bool = False) -> None:
+        """Read the live route table.
+
+        `counted` marks this call as part of a timed poll round. Ad-hoc refreshes (after
+        applying a policy, say) pass False so they do not decrement the round's worker
+        count and let the next tick start while the round's own workers are still out.
+        """
         if self.query_fn is None:
             self._set_route_status("not running — press Run to see the live route table")
             return
@@ -469,8 +508,11 @@ class RouterLab(QDialog):
                 chain = qf("gpipe list")     # the live deployed service chain
             except Exception:
                 pass
-            self.routes_ready.emit(rows)
-            self.chain_ready.emit(chain)
+            if not self._emit(self.routes_ready, rows):
+                return
+            self._emit(self.chain_ready, chain)
+            if counted:
+                self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_routes(self, rows: list) -> None:
@@ -487,10 +529,75 @@ class RouterLab(QDialog):
             self.route_status.setText(text)
 
     # Traffic & QoS (classifier + weighted queues + scheduler) --------------
+    # -- live polling ------------------------------------------------------- #
+    # Every tick of the 2.5s timer fires SEVERAL `docker compose exec` calls — routes, the gpipe
+    # chain and queue stats for a router; three openflow queries for an OVS. Each one is a whole
+    # docker CLI invocation plus a round trip to the gRouter's control socket.
+    #
+    # On a fast machine a round finishes well inside the interval. On a slow one it does not, and
+    # without a guard the timer starts another round on top of the last: threads pile up
+    # unboundedly, every round re-sets the status to "reading…", and the spinner never clears —
+    # the Lab looks hung while the router is perfectly healthy. Worse, the pile-up is
+    # self-sustaining, because the extra execs are themselves what make each round slow.
+    #
+    # So: one round at a time, and if a round overruns the interval, back the interval off to fit.
+    MIN_POLL_MS = 2500
+    MAX_POLL_MS = 20000
+
+    def _round_begin(self, n: int) -> bool:
+        """Claim the poll for `n` workers. False if a round is still running."""
+        import time
+        if getattr(self, "_inflight", 0) > 0:
+            return False
+        self._inflight = n
+        self._round_started = time.monotonic()
+        return True
+
+    def _round_worker_done(self) -> None:
+        """One worker finished (queued to the GUI thread, so this is not a race)."""
+        import time
+        self._inflight = max(0, getattr(self, "_inflight", 0) - 1)
+        if self._inflight or not getattr(self, "_live_timer", None):
+            return
+        took_ms = (time.monotonic() - getattr(self, "_round_started", 0)) * 1000
+        # Leave the machine half the wall clock to itself rather than polling flat out.
+        want = int(min(self.MAX_POLL_MS, max(self.MIN_POLL_MS, took_ms * 2)))
+        if want != self._live_timer.interval():
+            self._live_timer.setInterval(want)
+
+    # -- the poll must not outlive the window ------------------------------- #
+    # This dialog is parented to MainWindow, so Qt keeps it alive after it is closed and after
+    # main_window rebinds self._router_lab to a newer one. Nothing stopped the timer, so every
+    # Router Lab ever opened left a PERMANENT background poller behind, each firing three
+    # `docker compose exec` calls every 2.5s at a router nobody was looking at.
+    #
+    # That is what the py-spy dump showed: four live query threads for what should be one round,
+    # and two still running after the window was closed. The main thread was idle throughout —
+    # the app was not stalled, the machine was saturated. On Linux the window manager then paints
+    # a busy cursor because the app misses its _NET_WM_PING deadlines, which is the "spinner" that
+    # kept appearing while the route table filled in perfectly well. It got worse the longer a
+    # session ran, and a slow box crossed the threshold first.
+    def hideEvent(self, e):                  # noqa: N802 - Qt naming
+        """Stop polling whenever the window stops being visible.
+
+        hideEvent alone, deliberately — closing a dialog hides it, so a closeEvent override that
+        also stopped the timer was dead code: removing it changed no test. Hiding is the broader
+        condition anyway, and it covers being hidden without a close.
+        """
+        self._live_timer.stop()
+        super().hideEvent(e)
+
+    def showEvent(self, e):                  # noqa: N802 - Qt naming
+        if self.query_fn is not None and not self._live_timer.isActive():
+            self._live_timer.start(max(self.MIN_POLL_MS, self._live_timer.interval()))
+        super().showEvent(e)
+
     def _refresh_router_live(self) -> None:
         """Live poll for the router/firewall face: routes and per-queue stats."""
-        self._refresh_routes()
-        self._refresh_qstats()
+        if not self._round_begin(2):
+            return                              # previous round still out; skip this tick
+        self._refresh_routes(counted=True)
+        self._refresh_qstats(counted=True)
 
     def _build_qos_panel(self) -> QWidget:
         t = self.theme.theme
@@ -580,7 +687,13 @@ class RouterLab(QDialog):
             self._set_qos_status("could not add class/queue")
         self._refresh_qstats()
 
-    def _refresh_qstats(self) -> None:
+    def _refresh_qstats(self, counted: bool = False) -> None:
+        """Read live per-queue stats.
+
+        `counted` marks this call as part of a timed poll round. Ad-hoc refreshes (after
+        applying a policy, say) pass False so they do not decrement the round's worker
+        count and let the next tick start while the round's own workers are still out.
+        """
         if self.query_fn is None:
             self._set_qos_status("not running — press Run to see live queue stats")
             return
@@ -594,7 +707,9 @@ class RouterLab(QDialog):
                 payload = parse_queue_stats(qf("queue stats"))
             except Exception:
                 pass
-            self.qstats_ready.emit(payload)
+            self._emit(self.qstats_ready, payload)
+            if counted:
+                self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_qstats(self, payload) -> None:
@@ -684,7 +799,7 @@ class RouterLab(QDialog):
                 listing = qf("gpipe list") if qf is not None else cf("list")
             except Exception as e:
                 listing = f"(deploy failed: {e})"
-            self.chain_ready.emit(listing)
+            self._emit(self.chain_ready, listing)
         threading.Thread(target=work, daemon=True).start()
 
     def _set_fw_status(self, text: str) -> None:
@@ -793,7 +908,7 @@ class RouterLab(QDialog):
                 out = qf("delay show")
             except Exception as e:
                 out = f"(apply failed: {e})"
-            self.delay_ready.emit(out.strip() or "applied")
+            self._emit(self.delay_ready, out.strip() or "applied")
         threading.Thread(target=work, daemon=True).start()
 
     def _clear_delay(self) -> None:
@@ -814,8 +929,8 @@ class RouterLab(QDialog):
             try:
                 qf("delay clear")
             except Exception as e:
-                self.delay_ready.emit(f"(clear failed: {e})"); return
-            self.delay_ready.emit("cleared")
+                self._emit(self.delay_ready, f"(clear failed: {e})"); return
+            self._emit(self.delay_ready, "cleared")
         threading.Thread(target=work, daemon=True).start()
 
     def _set_delay_status(self, text: str) -> None:
@@ -874,7 +989,7 @@ class RouterLab(QDialog):
                 listing = qf("gpipe list") if qf is not None else cf("list")
             except Exception as e:
                 listing = f"(deploy failed: {e})"
-            self.chain_ready.emit(listing)
+            self._emit(self.chain_ready, listing)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_chain(self, text: str) -> None:

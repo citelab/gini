@@ -86,6 +86,39 @@ def grouter_cmd(conf: str, confdir: str, name: str, openflow_port: int | None = 
     return argv
 
 
+def clear_stale_pidfile(confdir: str, name: str) -> None:
+    """Remove <confdir>/<name>.pid before starting.
+
+    The gRouter refuses to start when that file names a live process — sound on a workstation,
+    WRONG inside a container. A restarted container begins its PID namespace at 1 again, so the
+    number in a leftover pid file is near-certain to belong to some new process (ttyd, this
+    script, the router itself), `kill(pid, 0)` succeeds, and the router aborts:
+
+        r1: fatal: [makePIDFile]:: Another router is still running under: /run/r1.pid
+        [r1] gRouter exited (1); stopping container.
+
+    which then loops: the container restarts, finds the same file, and dies again. One crash
+    became a router that could never come back.
+
+    Deleting it here is safe precisely because of where "here" is: this script IS the container's
+    entrypoint, so reaching this line means the container has just started and no previous router
+    of ours survived. The C-side liveness check stays as it is — it is still right for someone
+    running two routers on one host outside a container.
+    """
+    path = os.path.join(confdir, f"{name}.pid")
+    try:
+        with open(path) as f:
+            stale = f.read().strip()
+    except OSError:
+        return                                     # no pid file: the ordinary case
+    try:
+        os.remove(path)
+        print(f"[{name}] removed stale pid file {path} (held pid {stale}); the container "
+              f"restarted, so that pid belongs to something else now.", file=sys.stderr)
+    except OSError as e:
+        print(f"[{name}] WARNING: could not remove {path}: {e}", file=sys.stderr)
+
+
 def main() -> int:
     raw = os.environ.get("ROUTER_CONFIG")
     if not raw:
@@ -100,6 +133,8 @@ def main() -> int:
     with open(conf, "w") as f:
         f.write(build_config(cfg))
     print(f"[{name}] config:\n{open(conf).read()}", file=sys.stderr)
+
+    clear_stale_pidfile(confdir, name)
 
     # launch the real gRouter, sourcing the generated config (OVS mode -> --openflow)
     of = cfg.get("openflow")

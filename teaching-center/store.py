@@ -77,6 +77,56 @@ CREATE TABLE IF NOT EXISTS review (
 CREATE TABLE IF NOT EXISTS kv (
   k TEXT PRIMARY KEY, v TEXT
 );
+
+-- Activities: free-form assessed work observed against a frozen Activity Observation Plan.
+--
+-- NOTE THE ABSENCE OF A `student` COLUMN in all three tables. That absence IS the privacy
+-- property: an activity submission is keyed by the code that scoped it, and who did the work is
+-- never recorded here. The teacher maps a receipt to a name in their own gradebook, where the
+-- mapping is actually needed. A later migration adding an identifying column would silently
+-- revoke a guarantee students were given.
+CREATE TABLE IF NOT EXISTS activity (
+  id              TEXT PRIMARY KEY,          -- "<course>/<lab>"
+  course          TEXT NOT NULL,
+  lab             TEXT NOT NULL,
+  title           TEXT DEFAULT '',
+  intent          TEXT DEFAULT '',           -- the teacher's own words
+  selection       TEXT DEFAULT '',           -- the model's choice, for audit + regeneration
+  plan            TEXT DEFAULT '',           -- the frozen AOP, canonical JSON
+  plan_hash       TEXT DEFAULT '',
+  status          TEXT DEFAULT 'draft',      -- draft | released
+  vend_until      REAL DEFAULT 0,
+  session_minutes INTEGER DEFAULT 60,
+  created         REAL DEFAULT 0,
+  released        REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_activity_course ON activity(course, lab);
+
+CREATE TABLE IF NOT EXISTS activity_code (
+  code        TEXT PRIMARY KEY,
+  activity    TEXT NOT NULL,
+  plan_hash   TEXT NOT NULL,   -- the instrument this code was minted against
+  issued      REAL DEFAULT 0,
+  valid_until REAL DEFAULT 0,  -- absolute; vend_until + session_minutes, so hoarding gains nothing
+  used        INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_activity_code_act ON activity_code(activity);
+
+CREATE TABLE IF NOT EXISTS activity_submission (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  code          TEXT NOT NULL UNIQUE,   -- one code, one submission
+  receipt       TEXT NOT NULL UNIQUE,   -- the same proof cannot be handed in twice
+  activity      TEXT NOT NULL,
+  plan_hash     TEXT NOT NULL,
+  artifact_hash TEXT DEFAULT '',        -- indexed; collisions FLAG for review, never reject
+  ts            REAL DEFAULT 0,
+  started       REAL DEFAULT 0,         -- from the chain, for the session-window check
+  finished      REAL DEFAULT 0,
+  verdict       TEXT DEFAULT '',        -- integrity of the proof, NOT quality of the work
+  data          TEXT DEFAULT ''         -- proof + artifact + report
+);
+CREATE INDEX IF NOT EXISTS ix_activity_sub_act ON activity_submission(activity);
+CREATE INDEX IF NOT EXISTS ix_activity_sub_artifact ON activity_submission(artifact_hash);
 """
 
 
@@ -310,3 +360,77 @@ class Store:
 
     def kv_delete(self, k: str) -> None:
         self._run("DELETE FROM kv WHERE k=?", (k,))
+
+    # -- activities ------------------------------------------------------- #
+    # Storage-shaped only, like everything else here: the RULES (deadlines, hoarding, duplicate
+    # detection) live in `activities.py` so they are testable without a database.
+    def activity_put(self, rec: dict) -> None:
+        cols = ("id", "course", "lab", "title", "intent", "selection", "plan", "plan_hash",
+                "status", "vend_until", "session_minutes", "created", "released")
+        self._run(f"INSERT OR REPLACE INTO activity({','.join(cols)}) "
+                  f"VALUES({','.join('?' * len(cols))})",
+                  tuple(rec.get(c, "") for c in cols))
+
+    def activity(self, activity_id: str) -> dict | None:
+        return self._one("SELECT * FROM activity WHERE id=?", (activity_id,))
+
+    def activities(self, course: str = "") -> list[dict]:
+        if course:
+            return self._all("SELECT * FROM activity WHERE course=? ORDER BY lab", (course,))
+        return self._all("SELECT * FROM activity ORDER BY course, lab")
+
+    def activity_delete(self, activity_id: str) -> None:
+        self._run("DELETE FROM activity WHERE id=?", (activity_id,))
+
+    def code_put(self, rec: dict) -> None:
+        self._run("INSERT OR REPLACE INTO activity_code"
+                  "(code,activity,plan_hash,issued,valid_until,used) VALUES(?,?,?,?,?,?)",
+                  (rec["code"], rec["activity"], rec["plan_hash"],
+                   rec.get("issued", 0.0), rec.get("valid_until", 0.0), int(rec.get("used", 0))))
+
+    def code(self, code: str) -> dict | None:
+        return self._one("SELECT * FROM activity_code WHERE code=?", (code,))
+
+    def code_mark_used(self, code: str) -> None:
+        self._run("UPDATE activity_code SET used=1 WHERE code=?", (code,))
+
+    def codes_for(self, activity_id: str) -> list[dict]:
+        return self._all("SELECT * FROM activity_code WHERE activity=? ORDER BY issued",
+                         (activity_id,))
+
+    def submission_put(self, rec: dict) -> bool:
+        """Insert a submission. Returns False when the code or receipt is already present.
+
+        The uniqueness is enforced by the SCHEMA, not by a prior read: two students submitting at
+        the same instant would both pass a check-then-insert, and the loser must be rejected rather
+        than silently overwriting the winner.
+        """
+        cols = ("code", "receipt", "activity", "plan_hash", "artifact_hash",
+                "ts", "started", "finished", "verdict", "data")
+        try:
+            self._run(f"INSERT INTO activity_submission({','.join(cols)}) "
+                      f"VALUES({','.join('?' * len(cols))})",
+                      tuple(rec.get(c, "") for c in cols))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def submission_by_receipt(self, receipt: str) -> dict | None:
+        return self._one("SELECT * FROM activity_submission WHERE receipt=?", (receipt,))
+
+    def submission_by_code(self, code: str) -> dict | None:
+        return self._one("SELECT * FROM activity_submission WHERE code=?", (code,))
+
+    def activity_submissions(self, activity_id: str) -> list[dict]:
+        return self._all("SELECT * FROM activity_submission WHERE activity=? ORDER BY ts",
+                         (activity_id,))
+
+    def artifact_twins(self, artifact_hash: str, exclude_code: str = "") -> list[dict]:
+        """Other submissions built from the same topology — the collusion signal a receipt cannot
+        see, because two students doing identical work under their own codes produce different
+        receipts. Flags for review; never rejects, since a shared starter topology is legitimate."""
+        if not artifact_hash:
+            return []
+        return self._all(
+            "SELECT code,receipt,ts FROM activity_submission "
+            "WHERE artifact_hash=? AND code<>? ORDER BY ts", (artifact_hash, exclude_code))

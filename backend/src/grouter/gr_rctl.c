@@ -29,6 +29,34 @@
 static pthread_mutex_t rctl_lock = PTHREAD_MUTEX_INITIALIZER;
 static char rctl_path[256];
 
+/*
+ * Verbosity while a console command is running.
+ *
+ * gr_rctl_exec() drops the level to 0 around each command so packet-path logging
+ * doesn't bleed into the captured output, then restores it. That broke `set verbose`
+ * from the console in BOTH directions: a read reported the temporary 0 instead of the
+ * real level, and a write was silently undone by the restore a moment later.
+ *
+ * So the effective level lives here while a command is in flight. >= 0 means "inside a
+ * hushed command, and this is the level the router should be at"; -1 means no command
+ * is running and prog_verbosity_level() is authoritative. cli.c reads and writes
+ * verbosity through the two accessors below rather than touching libslack directly.
+ */
+static long rctl_effective_v = -1;
+
+long gr_rctl_verbosity(void)
+{
+    return (rctl_effective_v >= 0) ? rctl_effective_v : prog_verbosity_level();
+}
+
+void gr_rctl_set_verbosity(long v)
+{
+    if (rctl_effective_v >= 0)
+        rctl_effective_v = v;           /* applied by the restore in gr_rctl_exec() */
+    else
+        prog_set_verbosity_level(v);    /* interactive CLI: take effect immediately */
+}
+
 int gr_rctl_exec(const char *line, char *out, size_t outlen)
 {
     int saved_fd, n = 0;
@@ -45,6 +73,7 @@ int gr_rctl_exec(const char *line, char *out, size_t outlen)
     pthread_mutex_lock(&rctl_lock);
 
     saved_v = prog_verbosity_level();
+    rctl_effective_v = saved_v;         /* what a `set verbose` read/write sees */
     prog_set_verbosity_level(0);        /* hush packet-path logging during capture */
 
     fflush(stdout);
@@ -67,7 +96,11 @@ int gr_rctl_exec(const char *line, char *out, size_t outlen)
     }
     if (saved_fd >= 0) close(saved_fd);
 
-    prog_set_verbosity_level(saved_v);
+    /* Restore the level the command asked for, which may differ from what we saved
+     * if it was itself a `set verbose N`. Restoring saved_v unconditionally is what
+     * made that command a no-op from the console. */
+    prog_set_verbosity_level(rctl_effective_v);
+    rctl_effective_v = -1;
     pthread_mutex_unlock(&rctl_lock);
 
     free(cmd);

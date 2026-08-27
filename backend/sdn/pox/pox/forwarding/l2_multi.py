@@ -320,6 +320,21 @@ class Switch (EventMixin):
       # OFPP_FLOOD is optional; some switches may need OFPP_ALL
       msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
       msg.buffer_id = event.ofp.buffer_id
+      # GINI PATCH: send the packet data when the switch did NOT buffer it.
+      #
+      # This referenced buffer_id alone, which assumes the switch is holding the
+      # packet for us. A switch that does no buffering is legal OpenFlow -- it sends
+      # the whole frame up in the packet_in with buffer_id = NO_BUFFER -- and GINI's
+      # gRouter is exactly that switch. With no buffer to reference and no data
+      # attached, the flood went out EMPTY: the switch performed the OUTPUT action on
+      # a zero-length packet, so ARP requests never reached their destination, no
+      # host ever replied, and no path was ever installed. Discovery worked, floods
+      # "happened", and nothing was forwarded.
+      #
+      # (This is why gini.samples.switch always worked here -- it does
+      # of.ofp_packet_out(data=event.ofp), which carries the data.)
+      if msg.buffer_id is None or msg.buffer_id == 0xffffffff:
+        msg.data = event.ofp.data
       msg.in_port = event.port
       self.connection.send(msg)
 

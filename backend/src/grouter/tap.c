@@ -56,7 +56,7 @@ void *toTapDev(void *arg)
 			COPY_MAC(apkt->src_hw_addr, iface->mac_addr);
 			COPY_IP(apkt->src_ip_addr, gHtonl(tmpbuf, iface->ip_addr));
 		}
-		pkt_size = findPacketSize(&(inpkt->data));
+		pkt_size = gpacketSize(inpkt);
 
 		verbose(2, "[toTapDev]:: tap_sendto called for interface %d.. ", iface->interface_id);
 		tap_sendto(iface->vpl_data, &(inpkt->data), pkt_size);

@@ -63,6 +63,18 @@ typedef struct _pkt_frame_t
 	int arp_valid;
 	int arp_bcast;
 	int openflow;
+	// True on-the-wire byte count of `data`, when the producer knows it (frames read
+	// off an interface, and frames injected by an OpenFlow controller via PACKET_OUT).
+	// 0 = unknown, in which case the send path falls back to findPacketSize().
+	//
+	// This exists because findPacketSize() can only derive a length for IP and ARP and
+	// returns sizeof(pkt_data_t) — 1518 bytes — for anything else. That made every
+	// non-IP frame go out padded to the full struct, which both put ~1450 bytes of
+	// uninitialized heap on the wire and broke LLDP: the oversized datagrams never
+	// arrived, so openflow.discovery found no links and every network-wide controller
+	// app (forwarding.l2_multi, openflow.spanning_tree) silently did nothing.
+	// Never transmitted — only `data` goes on the wire.
+	int pkt_len;
 } pkt_frame_t;
 
 

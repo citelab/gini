@@ -149,18 +149,132 @@ MACHINE_LEAN, MACHINE_FULL, MACHINE_SECURITY = "lean", "full", "security"
 MACHINE_GUI = "gui"                       # a HEADFUL machine: lean tools + a light X desktop
 MACHINE_TOOLKIT_DEFAULT = MACHINE_LEAN
 
+# --------------------------------------------------------------------------------------------- #
+# ttyd — the in-container terminal server the gBuilder Terminal tab connects to.
+#
+# IN the container rather than on the host, deliberately: the container is always Linux, so this
+# behaves identically on macOS, Linux and Windows. A host-side ttyd would need a Windows build.
+#
+# Fetched in a throwaway Alpine stage and COPYed in, so no base image needs curl or ca-certificates
+# and every image gets a byte-identical binary. It is a single static executable (~1 MB, musl,
+# no runtime deps), which is why it works unchanged on both Alpine and Debian bases.
+#
+# `ttyd.$(uname -m)` is exactly how the project names its release assets — uname reports x86_64 and
+# aarch64, matching ttyd.x86_64 and ttyd.aarch64. Both were verified to exist before this landed.
+TTYD_PORT = 7681
+_TTYD_VER = "1.7.7"
+
+# Host ports for the per-element terminals. Deliberately a long way from the other fixed ports
+# (GBRIDGE 39098, CLOUDFABRIC 39099) and bound to 127.0.0.1 in compose — ttyd runs writable with
+# no password, so it must never be reachable off the machine.
+TTYD_HOST_BASE = 37600
+
+# Where the element -> host-port map is written, so the Terminal panel can find a container's
+# terminal without re-deriving compose's numbering. Fabric elements are emitted as raw compose
+# lines rather than ServiceSpecs, so there is no `ports` list for the UI to read; this file is
+# that list.
+TERMINALS_FILE = "gini-terminals.json"
+
+# One tmux session per container, so re-opening an element's Terminal re-attaches to the work
+# already in flight rather than starting a fresh shell. The name is fixed because each container
+# runs its own tmux server — there is nothing to collide with.
+TMUX_SESSION = "gini"
+
+# element name -> {"port", "cmd"}, refreshed by every _compose(). Module level because _compose
+# returns a string and has nowhere else to put it, while write_project needs it immediately
+# afterwards; one write per Run, on one thread, so there is no sharing hazard.
+#
+# Without this the map is built inside _compose and thrown away, TERMINALS_FILE is never written,
+# and the Terminal panel reports "nothing is running" forever — with the containers up and their
+# ttyd ports published. Nothing else notices, which is exactly why it needs a test.
+_LAST_TERMINALS: dict = {}
+
+_TTYD_STAGE = f"""FROM alpine:3.20 AS ttyd
+RUN apk add --no-cache curl \\
+ && curl -fsSL -o /ttyd "https://github.com/tsl0922/ttyd/releases/download/{_TTYD_VER}/ttyd.$(uname -m)" \\
+ && chmod +x /ttyd
+"""
+
+def _ttyd_layers() -> str:
+    """The COPY + launcher-script layers.
+
+    Written with printf and \\n escapes so the whole thing is ONE Dockerfile instruction — a
+    literal newline inside the string would end the RUN and leave the rest as garbage.
+
+    `${TTYD_CMD:-exec /bin/sh}` survives to runtime because it sits inside single quotes: the
+    build shell leaves it alone, and the launcher expands it when a student opens a terminal. That
+    is what lets routers and OVS switches share the gRouter image and still front different
+    things — the value comes from compose, per element, not from the image.
+    """
+    # The double quotes around the expansion are PLAIN, not backslash-escaped. `\"` is not a
+    # portable printf escape: GNU coreutils printf quietly turns it into `"`, but the printf a
+    # Dockerfile RUN actually uses is the shell's BUILTIN (busybox ash on Alpine, dash on Debian)
+    # and that one emits the backslash literally. The launcher then read
+    #     ttyd ... /bin/sh -c \"${TTYD_CMD:-exec /bin/sh}\"
+    # so ttyd received `"exec` and `/bin/sh"` as separate words and every terminal died with
+    #     "/bin/sh": line 0: syntax error: unterminated quoted string
+    # Plain quotes are safe here because the whole format string is already inside the RUN's
+    # single quotes, which is also what the hand-written grouter/sdn Dockerfiles do.
+    script = (r"#!/bin/sh\n"
+              r"exec /usr/local/bin/ttyd -W -p %d -i 0.0.0.0 "
+              r'/bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n') % TTYD_PORT
+    # tmux is what makes a session OUTLIVE its browser tab: leave a ping running on M1, look at
+    # M2, come back, and the ping is still there with its scrollback. Without it the view is torn
+    # down on every switch, the WebSocket closes, and ttyd's child dies with it.
+    #
+    # Status bar off: students are here to look at a shell, not to learn tmux, and a green bar
+    # across the bottom reads as part of GINI rather than part of the terminal. The prefix is left
+    # at the default — nothing in the labs asks them to use it.
+    conf = r"set -g status off\nset -g history-limit 10000\nset -g mouse on\n"
+    return ("COPY --from=ttyd /ttyd /usr/local/bin/ttyd\n"
+            f"RUN printf '{conf}' > /etc/tmux.conf "
+            f"&& printf '{script}' > /usr/local/bin/gini-term "
+            "&& chmod +x /usr/local/bin/gini-term\n")
+
+
+def _persist(cmd: str = "") -> str:
+    """A TTYD_CMD that re-attaches instead of starting over.
+
+    `new -A` is attach-or-create: the first connection starts the session, every later one joins
+    the SAME one. Plain `new` would silently start a second session per reconnect, which looks
+    identical on screen and loses the work — hence the test pinning `-A`.
+
+    Deliberately not `exec tmux`: if exec cannot find the binary the shell exits outright, so an
+    image built before tmux landed would serve a dead terminal. Written this way, an old image
+    prints tmux's "not found" and drops the student into a working shell — degraded, not broken.
+    Same reason the trailing shell is there: quitting tmux leaves you in the container rather than
+    killing the session under you.
+    """
+    inner = f' "{cmd}; exec /bin/sh"' if cmd else ""
+    # TERM must be set or tmux refuses to start — "TERM environment variable not set." — and the
+    # student silently gets the fallback shell with no persistence instead. ttyd does set TERM for
+    # its PTY child, but the launcher runs `/bin/sh -c "$TTYD_CMD"` and not every sh passes it
+    # through the way tmux needs; setting it here costs nothing and removes the doubt. `${TERM:-…}`
+    # keeps whatever ttyd did provide.
+    return (f'TERM="${{TERM:-xterm-256color}}" tmux new -A -s {TMUX_SESSION}{inner}'
+            f"; exec /bin/sh")
+
+
+def _with_ttyd(cmd: str) -> str:
+    """Wrap an image's CMD so the terminal server runs beside the real workload.
+
+    The workload keeps PID 1 semantics via `exec`, so container stop/restart behave exactly as
+    before; ttyd is a background child that dies with it.
+    """
+    return f'CMD ["sh", "-c", "gini-term & exec {cmd}"]\n'
+
 # Alpine package names (musl). Deliberately NOT: bind9, postfix, ettercap, haproxy, dsniff, lynx,
 # telnetd — those are what made the old image huge, and they belong to the `full` toolkit.
 _MACHINE_TOOLS_LEAN = (
     "python3 iproute2 iputils busybox-extras tcpdump curl wget bind-tools "
-    "netcat-openbsd socat iperf3 nmap ethtool traceroute mtr bridge-utils iptables"
+    "netcat-openbsd socat iperf3 nmap ethtool traceroute mtr bridge-utils iptables tmux"
 )
 
-_DOCKERFILE_MACHINE_LEAN = f"""FROM alpine:3.20
+_DOCKERFILE_MACHINE_LEAN = f"""{_TTYD_STAGE}FROM alpine:3.20
 RUN apk add --no-cache {_MACHINE_TOOLS_LEAN}
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["python3", "-m", "dataplane.shuttle"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & exec python3 -m dataplane.shuttle"]
 """
 
 # The FULL image ships "batteries included" — the heavy services the GINI book experiments stand
@@ -169,7 +283,7 @@ MACHINE_BASE = "Debian (python:3.12-slim)"
 _MACHINE_TOOLS = (
     "iproute2 net-tools iputils-ping iputils-tracepath iputils-arping traceroute "
     "mtr-tiny dnsutils netcat-openbsd socat curl wget nmap tcpdump tshark iperf3 "
-    "ethtool bridge-utils telnet telnetd hping3 iptables procps nano less ca-certificates "
+    "ethtool bridge-utils telnet telnetd hping3 iptables procps nano less ca-certificates tmux "
     # services + tools the GINI book experiments stand up, so a topology runs them offline
     # (no in-container apt). DNS: bind9 (named). Mail: postfix + mailutils (the `mail` MUA).
     # Web caching: squid (forward proxy). Load balancing: haproxy. Security: dsniff
@@ -216,7 +330,7 @@ def machine_tools(toolkit: str) -> str:
     return MACHINE_TOOLS_HUMAN if toolkit == MACHINE_FULL else MACHINE_TOOLS_LEAN_HUMAN
 
 
-_DOCKERFILE_MACHINE = f"""FROM python:3.12-slim
+_DOCKERFILE_MACHINE = f"""{_TTYD_STAGE}FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
         | debconf-set-selections \\
@@ -225,10 +339,10 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["python", "-m", "dataplane.shuttle"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & exec python -m dataplane.shuttle"]
 """
 
-_DOCKERFILE_MACHINE_SECURITY = f"""FROM python:3.12-slim
+_DOCKERFILE_MACHINE_SECURITY = f"""{_TTYD_STAGE}FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
         | debconf-set-selections \\
@@ -237,7 +351,7 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean true" \\
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["python", "-m", "dataplane.shuttle"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & exec python -m dataplane.shuttle"]
 """
 
 # The HEADFUL machine: lean Alpine host + a light X desktop, served over noVNC on :6080. The
@@ -250,7 +364,7 @@ _GUI_START = (
     "websockify --web=/usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 & "
     "exec python3 -m dataplane.shuttle"
 )
-_DOCKERFILE_MACHINE_GUI = f"""FROM alpine:3.20
+_DOCKERFILE_MACHINE_GUI = f"""{_TTYD_STAGE}FROM alpine:3.20
 RUN apk add --no-cache {_MACHINE_TOOLS_LEAN} \\
         xvfb x11vnc fluxbox xterm pcmanfm dillo novnc websockify font-dejavu
 # Ready-made desktop shortcuts so students see a Terminal and Dillo on the desktop at startup
@@ -262,7 +376,7 @@ RUN mkdir -p /root/Desktop \\
 ENV DISPLAY=:0 HOME=/root
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
-CMD ["sh", "-c", "{_GUI_START}"]
+{_ttyd_layers()}CMD ["sh", "-c", "gini-term & {_GUI_START}"]
 """
 
 # toolkit -> (compose image name, dockerfile path). Explicit image names so N hosts of one tier
@@ -586,15 +700,20 @@ while True:
 
 def _seed_examples(scripts: Path, shared: Path) -> None:
     """Copy the examples GINI ships (packaged under gini/data/examples) into the user's
-    ~/.gini dirs, so the book's instructions work out of the box: mcast_tree.lua appears
-    in ~/.gini/scripts (loadable as /scripts/mcast_tree.lua on every router), and the
-    Multicast File Distribution starter kit in ~/.gini/shared/multicast_fs (visible at
-    /shared/multicast_fs on every station). Never overwrites a file the user edited."""
+    ~/.gini dirs, so the book's instructions work out of the box: the reference Lua
+    control-plane modules appear in ~/.gini/scripts (loadable as /scripts/<name>.lua on
+    every router), and the Multicast File Distribution starter kit in
+    ~/.gini/shared/multicast_fs (visible at /shared/multicast_fs on every station).
+
+    Note the reference modules are deliberately NOT named after the files the book asks a
+    student to write (the routing experiment writes rip.lua), so seeding never lands the
+    finished answer on top of an exercise. Never overwrites a file the user edited."""
     ex = Path(__file__).resolve().parents[1] / "data" / "examples"
     try:
-        src = ex / "mcast_tree.lua"
-        if src.exists() and not (scripts / src.name).exists():
-            shutil.copy(src, scripts / src.name)
+        for name in ("mcast_tree.lua", "rip_reference.lua"):
+            src = ex / name
+            if src.exists() and not (scripts / name).exists():
+                shutil.copy(src, scripts / name)
         kit = ex / "multicast_fs"
         if kit.is_dir():
             dst = shared / "multicast_fs"
@@ -652,6 +771,10 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
         (work / "k8s" / k.svc).mkdir(parents=True, exist_ok=True)
         _put(work / "k8s" / k.svc / "manifests.yaml", k.manifests or "")
     _put(work / "docker-compose.yml", _compose(config, auto_internet, laptop_id))
+    # The element -> terminal-port map, written AFTER _compose has populated it. Fabric elements
+    # are emitted as raw compose lines rather than ServiceSpecs, so the UI has no `ports` list to
+    # read back; this file is that list.
+    _put(work / TERMINALS_FILE, json.dumps(_LAST_TERMINALS, indent=2, sort_keys=True))
     return work
 
 
@@ -697,6 +820,30 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             net.append("    internal: true")
         if vnet.get("cidr"):
             net += ["    ipam:", "      config:", f"        - subnet: {vnet['cidr']}"]
+    # One terminal per element. The port is allocated in emission order and recorded so the
+    # Terminal panel can look it up by element name; `TTYD_CMD` decides what the terminal
+    # FRONTS, which differs per element even when the image is shared (a gRouter and an OVS
+    # switch are both the gRouter image, but a student wants the router CLI on one).
+    _term: dict = {}
+
+    def _term_port(name: str, cmd: str = "") -> str:
+        """Publish this element's terminal and remember the port. Returns the ENTRY only.
+
+        Deliberately NOT the `ports:` header: a service can publish more than one thing — a GUI
+        host also publishes noVNC — and emitting a header here produced a second `ports:` key,
+        which compose rejects outright ("mapping key \\"ports\\" already defined"). Call sites
+        gather every entry and emit ONE block. Same reasoning as `_term_env`: never emit a
+        top-level service key that somebody else might also emit.
+        """
+        port = TTYD_HOST_BASE + len(_term)
+        _term[name] = {"port": port, "cmd": cmd}
+        return f'      - "127.0.0.1:{port}:{TTYD_PORT}"'
+
+    def _term_env(name: str) -> list:
+        cmd = _term.get(name, {}).get("cmd", "")
+        return [f"      TTYD_CMD: '{cmd}'"] if cmd else []
+
+
     lines = ["name: gini-lab", "networks:", *net, "services:"]
 
     # fabric = the L2 switch substrate only (skip entirely if there are no switches)
@@ -736,6 +883,15 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
     # each router = its own real C gRouter container (prebuilt image). The gRouter's
     # `tun` links are pure userspace UDP, so no NET_ADMIN / /dev/net/tun needed.
     for r in rt["routers"]:
+        # A router's terminal fronts the gRouter CLI, not a shell — that is what a student came
+        # for. grconsole is a CLIENT of the running daemon and needs the control socket path:
+        # <confdir>/<name>.ctl, and the image sets GINI_HOME=/run. Without the argument it prints
+        # its usage to stderr and exits 2, so the tab showed "usage: grconsole.py <socket>" and
+        # then ttyd's "Press Enter to Reconnect". Same form the external-terminal button uses.
+        # No `exec`: when the student quits the CLI they land in a shell in the router's own
+        # container rather than having the session die under them.
+        term = _term_port(r["name"], _persist(
+            f"python3 /build/grouter-build/grconsole.py /run/{r['name']}.ctl"))
         lines += [
             f"  {r['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -744,20 +900,25 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    volumes:",
             f'      - "{cap_host}:/captures"',   # tap VNF .pcap files land on the host here
             f'      - "{scr_host}:/scripts:ro"', # student Lua modules: `gpipe add lua /scripts/x.lua`
+            "    ports:", term,
             "    environment:",
             f"      ROUTER_CONFIG: '{json.dumps(r)}'",
+            *_term_env(r["name"]),
         ]
 
     # SDN controllers = POX (Python 3) containers, one per controller
     for c in rt["controllers"]:
+        term = _term_port(c["name"], _persist())   # a shell: POX itself owns the foreground
         lines += [
             f"  {c['name']}:",
             f"    image: {POX_IMAGE}",
             "    pull_policy: never",
             "    networks: [gini]",
+            "    ports:", term,
             "    environment:",
             f"      POX_APP: '{c['app']}'",
             f"      POX_PORT: '{c['port']}'",
+            *_term_env(c["name"]),
         ]
 
     # SDN switches = the real gRouter in OpenFlow mode (own container), pointed at
@@ -770,6 +931,10 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if o.get("controller"):
             env.append(f"      GINI_OF_CONTROLLER: '{o['controller']}:{o['controller_port']}'")
         depends = ([f"    depends_on: [{o['controller']}]"] if o.get("controller") else [])
+        # Same image as a router, but a SHELL: on a switch the student wants ovs-style
+        # inspection and the gRouter's `openflow …` CLI, not to be dropped straight into one.
+        term = _term_port(o["name"], _persist())
+        env += _term_env(o["name"])       # AFTER _term_port: that call is what registers it
         lines += [
             f"  {o['name']}:",
             f"    image: {GROUTER_IMAGE}",
@@ -778,6 +943,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    volumes:",
             f'      - "{cap_host}:/captures"',   # tap VNF .pcap files land on the host here
             f'      - "{scr_host}:/scripts:ro"', # student Lua modules: `gpipe add lua /scripts/x.lua`
+            "    ports:", term,
             *depends,
             *env,
         ]
@@ -894,6 +1060,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         # tags a separate <project>-<service> image per host and walks the build for each.
         tk = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT)
         image, dockerfile = _MACHINE_IMAGE.get(tk, _MACHINE_IMAGE[MACHINE_LEAN])
+        term = _term_port(m["name"], _persist())   # a plain shell — it is a host
         lines += [
             f"  {m['name']}:",
             f"    hostname: {m.get('hostname', m['name'])}",   # `hostname` = the canvas label
@@ -904,6 +1071,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             f"    networks: {nets}",
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
+            *_term_env(m["name"]),
         ]
         from ..app.paths import captures_dir, shared_dir
         # every station mounts ~/.gini/shared at /shared: students edit sources on the
@@ -913,9 +1081,15 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
             vols.append(f'      - "{_hostpath(captures_dir())}:/captures"')
         lines += ['    volumes:'] + vols
+        # ONE ports block per service: the terminal, plus noVNC on a headful host. Two
+        # separate blocks is a duplicate YAML key and compose refuses to start the lab.
+        pubs = [term]
         if tk == MACHINE_GUI and m.get("novnc_port"):   # headful host: publish its noVNC console
-            lines += ['    ports:', f'      - "{m["novnc_port"]}:6080"']
+            pubs.append(f'      - "{m["novnc_port"]}:6080"')
+        lines += ["    ports:", *pubs]
         lines += _cpu_limit_lines(m.get("cpus"))
+    _LAST_TERMINALS.clear()                  # hand the port map to write_project
+    _LAST_TERMINALS.update(_term)
     return "\n".join(_cap_service_logs(lines)) + "\n"
 
 
@@ -1175,6 +1349,49 @@ class Orchestrator:
             if svc:
                 states[svc] = "running" if "running" in raw or "up" in raw else raw
         return states
+
+    def set_controller_app(self, service: str, app: str,
+                           workdir: str | Path | None = None) -> tuple[bool, str]:
+        """Point a RUNNING controller at a different POX app, restarting only it.
+
+        POX loads its components once at process start (`pox.py openflow.of_01 <modules>`)
+        and has no hot-reload, so a new App means a new controller process. What it does
+        NOT need is a full topology restart: the switches reconnect on their own, which
+        makes trying a different controller app a few seconds' work instead of a
+        stop/start cycle.
+
+        The app is baked into the compose file as POX_APP, and `docker compose restart`
+        re-runs a container with its EXISTING config — so the value has to be rewritten
+        first and the container recreated. Only that one service's environment line is
+        touched (not a full project regeneration), so nothing else in a running lab can
+        shift underneath the containers already up.
+        """
+        wd = workdir or self.workdir
+        if not wd:
+            return False, "not running"
+        compose = Path(wd) / "docker-compose.yml"
+        if not compose.exists():
+            return False, "no docker-compose.yml in the project directory"
+
+        # Rewrite POX_APP inside THIS service's block only. The file is generated with a
+        # fixed two-space service indent, so the block runs from "  <service>:" to the
+        # next line at that indent.
+        out, in_block, replaced = [], False, False
+        for line in compose.read_text().splitlines():
+            if line.startswith("  ") and line.rstrip().endswith(":") and not line.startswith("   "):
+                in_block = (line.strip().rstrip(":") == service)
+            if in_block and line.strip().startswith("POX_APP:"):
+                out.append(f"      POX_APP: '{app}'")
+                replaced = True
+                continue
+            out.append(line)
+        if not replaced:
+            return False, f"no POX_APP entry found for service '{service}'"
+        compose.write_text("\n".join(out) + "\n")
+
+        # --no-deps so only the controller is touched; --force-recreate so the new
+        # environment is actually picked up rather than the old container restarted.
+        return self._compose("up", "-d", "--force-recreate", "--no-deps", service)
 
     def update_cpus(self, service: str, cpus: float,
                     workdir: str | Path | None = None) -> tuple[bool, str]:

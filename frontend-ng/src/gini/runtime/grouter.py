@@ -99,7 +99,7 @@ class Router:
             if sub == "stop":
                 self.cp_modules.clear()
                 return "control plane stopped (all modules removed)"
-            return "usage: cp add <name> [args] | cp list | cp stop  (modules: hello dhcp rip igmp)"
+            return "usage: cp add lua <script> | cp list | cp stop  (control plane = Lua)"
         if op == "mcast":                              # B3: multicast membership
             sub = parts[1] if len(parts) >= 2 else ""
             if sub in ("join", "leave") and len(parts) >= 4:

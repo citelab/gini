@@ -37,7 +37,20 @@ class LearningSwitch(object):
         # Known destination: install a flow so the datapath forwards the rest of
         # this conversation without bothering the controller, then send this one.
         msg = of.ofp_flow_mod()
-        msg.match = of.ofp_match.from_packet(packet, event.port)
+        # Match on the DESTINATION MAC only -- that is what a learning switch keys on.
+        #
+        # This was of.ofp_match.from_packet(...), an exact match on all twelve OF 1.0
+        # fields INCLUDING the L4 ports. One rule per 5-tuple then means traffic that
+        # varies a port per packet burns one throwaway rule per packet: traceroute sends
+        # every probe to a different UDP port (33434, 33435, ...), so 30 hops x 3 probes
+        # is ~90 single-use entries against a 100-entry table, each held for
+        # idle_timeout. traceroute therefore failed on an OVS while ping (one flow, since
+        # ICMP type/code sit in the port fields and do not vary) worked fine.
+        #
+        # Matching dl_dst is also the more honest lesson: the flow table then reads like
+        # the MAC table it is standing in for. A finer match is a deliberate choice an
+        # app makes when it needs one -- see gini.samples.l4_lb / redirect.
+        msg.match = of.ofp_match(dl_dst=packet.dst)
         msg.idle_timeout = 30
         msg.hard_timeout = 120
         msg.actions.append(of.ofp_action_output(port=out_port))

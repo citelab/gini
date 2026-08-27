@@ -75,7 +75,9 @@ static void openflow_flowtable_set_defaults(void)
 
 	flow_mod->command = OFPFC_ADD;
 	flow_mod->match.wildcards = htonl(OFPFW_ALL);
-	flow_mod->priority = htonl(1);
+	// priority is a uint16_t: htonl() would write a 32-bit value into it and
+	// truncate the default rule's priority to 0 on a little-endian host.
+	flow_mod->priority = htons(1);
 
 	flow_mod->actions[0].type = htons(OFPAT_OUTPUT);
 	flow_mod->actions[0].len = htons(sizeof(ofp_action_output));

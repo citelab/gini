@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from urllib.parse import quote
 
 from ..domain.xv6 import (
-    Snapshot, apply_proc_sched, parse_backtrace, parse_cpu_lines, parse_cpu_regs, parse_csr,
+    Snapshot, apply_proc_sched, apply_waits, parse_backtrace, parse_cpu_lines, parse_cpu_regs,
+    parse_csr,
     parse_modetime, parse_policies, parse_procdump, parse_registers, parse_regs_line, parse_sched,
     parse_shadow_manifest, running_pid,
 )
@@ -165,6 +167,7 @@ class Xv6Bridge:
         self._seq += 1
         txt = self.agent.get_text("/procs")
         procs = apply_proc_sched(parse_procdump(txt), txt)   # procs + priority/tickets/level/aging
+        apply_waits(procs, txt)                              # ...and what each blocked one waits for
         sched = parse_sched(txt)                     # the kernel's ACTUAL quantum + policy
         if sched:
             self.kernel_quantum = sched.get("quantum")
@@ -277,10 +280,22 @@ class Xv6Bridge:
     def programs(self) -> list:
         return self.agent.get_json("/programs").get("programs", [])
 
-    def run(self, prog: str) -> bool:
+    def run(self, prog: str, args: str = "") -> bool:
+        """Launch a program in the background. `args` is optional and is sanitised agent-side —
+        several programs are useless without it (sgrind's whole lesson is the number K).
+
+        A refusal is recorded in `last_run_error` rather than thrown away. The agent refuses a
+        program its image was built before (it carries its own allow-list), and with nothing on
+        screen that reads exactly as the program simply not launching."""
+        self.last_run_error = ""
         try:
-            return bool(json.loads(self.agent.post(f"/run?prog={prog}")).get("ok"))
-        except Exception:
+            q = f"/run?prog={quote(prog)}" + (f"&args={quote(args)}" if args else "")
+            r = json.loads(self.agent.post(q))
+            if not r.get("ok"):
+                self.last_run_error = r.get("error") or f"could not launch {prog}"
+            return bool(r.get("ok"))
+        except Exception as e:
+            self.last_run_error = f"could not reach the xv6 agent: {e}"
             return False
 
     def kill(self, pid: int) -> None:

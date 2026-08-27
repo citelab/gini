@@ -134,6 +134,13 @@ class MainWindow(QMainWindow):
         self._project_dir: str | None = None       # active project folder (Projects)
         self._experiment: str | None = None        # the experiment (topology) open within it
         self._router_programs: dict = {}        # device id -> RouterProgram (Router Lab)
+        # Proof of activity: records the student's work into a hash chain once they enter their
+        # assignment code. Inert until armed, and every handler is guarded, so it can never take a
+        # session down. Built before the docks, because the dashboard strip displays its state.
+        from ..services.proof_recorder import ProofRecorder
+        self.proof_recorder = ProofRecorder(self.ctx)
+        self.proof_recorder.attach()
+        self.ctx.proof_recorder = self.proof_recorder   # so the assistant can reach it (hunk 5)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
         self.ctx.bus.device_activated.connect(self._on_device_activated)
@@ -190,8 +197,12 @@ class MainWindow(QMainWindow):
         self._make_docks()
         from PySide6.QtWidgets import QApplication
         _app = QApplication.instance()
-        if _app is not None:                 # backstop so ⌘Q / app-menu Quit is blocked while running
-            _app.installEventFilter(self)
+        if _app is not None:
+            # Backstop so ⌘Q / app-menu Quit is blocked while running. A CALLBACK on the
+            # application, never an application-wide event filter: the filter form tapped every
+            # event for every QObject and segfaulted the moment the mouse crossed the OS Zoo /
+            # Desktop screen's embedded QWebEngineView. See ui/app.py for the crash report.
+            _app.quit_guard = self._quit_blocked
         self._make_statusbar()
         self._wire_llm()
 
@@ -222,6 +233,7 @@ class MainWindow(QMainWindow):
         self.ctx.xv6_rider_toggle = self._toggle_xv6_rider
         self.ctx.xv6_rider_running = lambda rid: rid in self._xv6_rider_sessions
         self.ctx.bus.selection_changed.connect(self._on_selection_explain)
+        self.ctx.bus.selection_changed.connect(self._on_selection_source)
         self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self.palette.element_selected.connect(self._on_palette_explain)
         self.assistant.status_changed.connect(self.mode_indicator.set_status)
@@ -1370,14 +1382,17 @@ class MainWindow(QMainWindow):
         drain()
         super().closeEvent(e)
 
-    def eventFilter(self, obj, event):       # noqa: N802
-        # Backstop for macOS ⌘Q / the app-menu Quit, which can bypass closeEvent: block the app-level
-        # Quit while a topology is running (the window close-button path is handled by closeEvent).
-        from PySide6.QtCore import QEvent
-        if event.type() == QEvent.Type.Quit and self._running:
+    def _quit_blocked(self) -> bool:
+        """Backstop for macOS ⌘Q / the app-menu Quit, which can bypass closeEvent: refuse the
+        application-level Quit while a topology is running. (The window close-button path is
+        handled by closeEvent.) True = consume the quit.
+
+        Called by GiniApplication.event(). Deliberately NOT an eventFilter — see ui/app.py.
+        """
+        if self._running:
             self.ctx.log("The topology is still running — press Stop before quitting.", "error")
-            return True                      # consume the quit
-        return super().eventFilter(obj, event)
+            return True
+        return False
 
     def _toggle_routing_hud(self, checked: bool) -> None:
         """Show/hide the Routing HUD — a model view of the whole network's authentic routing state
@@ -1595,6 +1610,28 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, srcd)
         self.tabifyDockWidget(asst, srcd)
         self._source_dock = srcd
+
+        # Terminal — a real shell (or the gRouter CLI) on whichever element is selected, served by
+        # ttyd from inside that element's own container. Follows the selection quietly; it never
+        # raises itself, so it cannot steal the pane from the Inspector mid-read. The view inside
+        # is built only when this tab is actually visible — see terminal_panel.py.
+        from .terminal_panel import TerminalPanel
+        self.terminal_panel = TerminalPanel(
+            self.theme,
+            workdir_fn=lambda: str(getattr(self, "_workdir", "") or ""),
+            running_fn=lambda: bool(getattr(self, "_running", False)),
+        )
+        termd = QDockWidget("Terminal", self)
+        termd.setObjectName("dock_terminal")
+        termd.setWidget(self.terminal_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, termd)
+        self.tabifyDockWidget(srcd, termd)
+        self._terminal_dock = termd
+        # selection_changed is Signal(object) — the device id ALONE. The panel needs the topology
+        # to resolve it, so it goes through an adapter rather than being connected directly.
+        # (TerminalPanel subscribes to theme.themeChanged itself, as SourceBrowser does.)
+        self.ctx.bus.selection_changed.connect(self._on_selection_terminal)
+
         insp.raise_()
 
         self.console = QPlainTextEdit()
@@ -1609,6 +1646,15 @@ class MainWindow(QMainWindow):
         # analytics strip — a short "cloud bill" dashboard stacked under the Console
         from .dashboard import Dashboard
         self.dashboard = Dashboard(self.theme)
+        # The proof-of-activity control goes on the RIGHT of the strip, after the cost breakdown
+        # and before the run-state text, so the strip reads money → work → status. Inserted from
+        # here rather than built into Dashboard, so the cost meter stays one self-contained thing.
+        # Positioned relative to the end (not a fixed index) because it must stay past the
+        # stretch that pushes the tail of the strip rightward, even if the meters change.
+        from .proof_strip import ProofStrip
+        self.proof_strip = ProofStrip(self.theme, self.proof_recorder)
+        _dash = self.dashboard.layout()
+        _dash.insertWidget(max(0, _dash.count() - 1), self.proof_strip)
         dash = QDockWidget("Dashboard", self)
         dash.setObjectName("dock_dashboard")
         dash.setWidget(self.dashboard)
@@ -1682,6 +1728,14 @@ class MainWindow(QMainWindow):
         reset_act.setMenuRole(QAction.MenuRole.NoRole)
         hwm.addSeparator()
         add(hwm, "&List Boards…", self._show_boards)
+
+        # Teacher: verifying a student's proof is an action a marker takes repeatedly, not a
+        # preference, so it gets a menu of its own rather than a corner of Settings.
+        tm = mb.addMenu("&Teacher")
+        issue_act = add(tm, "&Issue codes…", self._issue_codes)
+        issue_act.setMenuRole(QAction.MenuRole.NoRole)
+        verify_act = add(tm, "&Verify proof…", self._verify_proof)
+        verify_act.setMenuRole(QAction.MenuRole.NoRole)
 
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
@@ -1828,6 +1882,12 @@ class MainWindow(QMainWindow):
         scene._callouts = []
         scene._spotlit = []
         scene._highlit = []
+        # A topology that arrives whole is an IMPORT, not a construction — and the loops below
+        # replay device_added/link_added for every element in it. Tell the recorder BEFORE the
+        # swap, or an imported .gini writes a perfect fake build.
+        rec = getattr(self, "proof_recorder", None)
+        if rec is not None:
+            rec.note_load(getattr(topo, "name", "") or "an experiment", topo)
         self.ctx.topology = topo
         topo.prefix_overrides = dict(self.ctx.settings.name_prefixes)   # apply naming prefs
         self.ctx.selected_id = None
@@ -2057,6 +2117,11 @@ class MainWindow(QMainWindow):
         self._last_k8s = list(cfg.k8s)
         self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
         self._board_state = {}          # board_id -> live state, refreshed by the poller
+        # What each controller is ACTUALLY running, so a later property edit can tell an
+        # App change from any other edit. Without this seed, the first device_changed on
+        # a controller (a rename, say) would look like a new app and bounce it.
+        from ..services.compiler import _svc as _svc_name
+        self._live_ctrl_app = {_svc_name(c.name): c.app for c in cfg.controllers}
         self._workdir = tempfile.mkdtemp(prefix="gini-lab-")
         self.ctx.log(f"Launching {len(cfg.machines)} machines + {len(cfg.routers)} "
                      f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
@@ -2470,6 +2535,37 @@ class MainWindow(QMainWindow):
             self._k8s_live(d, scale=True)
         elif _role(d.type_key) == "hpa":                  # Target CPU slider -> patch HPA
             self._k8s_live(d, scale=False)
+        elif d.type_key == "controller":                  # App changed -> bounce just POX
+            self._controller_app_live(d)
+
+    def _controller_app_live(self, d) -> None:
+        """The App property changed on a running controller: restart THAT container.
+
+        POX has no hot-reload, so a new app needs a new process — but not a new topology.
+        Comparing against the last applied value matters because device_changed fires for
+        every property (renaming the controller must not bounce it).
+        """
+        import threading
+        from ..services.compiler import _svc
+        app = (d.properties.get("App") or "").strip()
+        if not app:
+            return
+        svc = _svc(d.name)
+        if getattr(self, "_live_ctrl_app", None) is None:
+            self._live_ctrl_app = {}
+        if self._live_ctrl_app.get(svc) == app:
+            return                                        # some other property changed
+        self._live_ctrl_app[svc] = app
+        self.ctx.log(f"{d.name}: switching controller app to '{app}' — restarting the "
+                     f"controller (switches will reconnect).", "info")
+
+        def work():
+            ok, msg = self._gloader.set_controller_app(svc, app)
+            self.ctx.log(f"{d.name}: now running '{app}'. Give discovery a few seconds "
+                         f"before testing." if ok
+                         else f"{d.name}: could not switch app ({msg}) — stop and Run "
+                              f"to apply it.", "ok" if ok else "info")
+        threading.Thread(target=work, daemon=True).start()
 
     def _k8s_live(self, d, *, scale: bool) -> None:
         import threading
@@ -2771,6 +2867,56 @@ class MainWindow(QMainWindow):
             if dev:                                           # exit via the Explain toggle)
                 a.explain_selected(dev.name)
 
+    def _on_selection_terminal(self, device_id) -> None:
+        """Point the Terminal tab at the selected element. Fills quietly — never raises the tab,
+        so it cannot steal the pane from the Inspector while a student is reading it.
+
+        Exists because bus.selection_changed is Signal(object) and carries the id alone; the panel
+        needs the topology to turn that into a service name."""
+        tp = getattr(self, "terminal_panel", None)
+        if tp is None:
+            return
+        try:
+            tp.on_selection(device_id, self.ctx.topology)
+        except Exception as e:                # noqa: BLE001 - a panel must never break selection
+            self.ctx.bus.log.emit("error", f"Terminal: {e}")
+
+    def _issue_codes(self) -> None:
+        """Teacher mode: mint the codes handed out with an assignment. One per student, because
+        a proof is bound to its code and sharing one defeats the point."""
+        from .proof_issue_dialog import ProofIssueDialog
+        ProofIssueDialog(self.theme, self).exec()
+
+    def _verify_proof(self) -> None:
+        """Teacher mode: read a student's proof. Read-only — it verifies and renders, never grades."""
+        from .proof_verify_dialog import ProofVerifyDialog
+        ProofVerifyDialog(self.theme, self).exec()
+
+    def _on_selection_source(self, device_id) -> None:
+        """Selecting a router points GINI Source at ~/.gini/scripts, the module directory
+        every router shares. The tab is not raised: it fills quietly, so a student who wants
+        to read a module before loading it finds it already there."""
+        sb = getattr(self, "source_browser", None)
+        if sb is None or device_id is None:
+            return
+        dev = self.ctx.topology.devices.get(device_id)
+        if dev is None:
+            return
+        from ..services.compiler import _role
+        tk = getattr(dev, "type_key", "")
+        try:
+            if _role(tk) == "router":
+                sb.show_scripts(dev.name)
+            elif tk == "xv6":
+                pass          # its source is the kernel board's to open; leave that view alone
+            else:
+                # anything else has no source yet. Clear, so the pane never keeps showing the
+                # last router's module as though it belonged to what was just clicked.
+                label = getattr(getattr(dev, "type", None), "label", "") or tk or "this element"
+                sb.show_none(f"{dev.name} ({label})")
+        except Exception as e:                # noqa: BLE001 - a browser must never break selection
+            self.ctx.bus.log.emit("error", f"GINI Source: {e}")
+
     def _on_warning_explain(self, device_id: str) -> None:
         dev = self.ctx.topology.devices.get(device_id)
         if dev:
@@ -3026,6 +3172,26 @@ class MainWindow(QMainWindow):
         else:
             node.set_status("ready" if self._running else "idle")
 
+    def _retire_lab(self, attr: str) -> None:
+        """Close and destroy a previously opened lab window before opening another.
+
+        These dialogs are parented to MainWindow, so rebinding the attribute does NOT free them:
+        Qt keeps every one alive as a child, timers and all. The Router Lab polls `docker compose
+        exec` every 2.5s, so each abandoned window left a permanent background load on the machine
+        — invisible, cumulative over a session, and eventually enough to make a slow box look like
+        it had stalled.
+        """
+        old = getattr(self, attr, None)
+        if old is None:
+            return
+        setattr(self, attr, None)
+        try:
+            old.close()
+            old.setParent(None)
+            old.deleteLater()
+        except RuntimeError:
+            pass                              # already gone; nothing to retire
+
     def _open_router_lab(self, device_id: str) -> None:
         from ..domain.router_modules import RouterProgram
         from ..services.compiler import _role
@@ -3044,6 +3210,7 @@ class MainWindow(QMainWindow):
         # raw CLI query used by the live panels: `openflow …` for an OVS, `route`/`arp`
         # for a router. Same control socket as the console.
         qf = ((lambda c, n=dev.name: self.element_query(n, c)) if self._running else None)
+        self._retire_lab("_router_lab")
         self._router_lab = RouterLab(
             self, self.theme, dev, program,
             on_console=lambda: self._open_terminal(device_id),
@@ -3159,6 +3326,7 @@ class MainWindow(QMainWindow):
         dev = self.ctx.topology.devices[device_id]
         ms = self._machine_state_for(device_id)
         try:
+            self._retire_lab("_machine_lab")
             self._machine_lab = MachineLab(
                 self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
                 on_console=lambda: self._open_terminal(device_id),
@@ -3199,7 +3367,12 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"{dev.name}: no desktop console — is it running as a Desktop (gui) host?",
                          "info")
             return
-        url = f"http://localhost:{port}/vnc.html?autoconnect=1&resize=remote"
+        # resize=scale, not remote: `remote` asks the VNC server to change the framebuffer size to
+        # match the window, and x11vnc serves a fixed Xvfb screen, so it refuses every time —
+        # "Server did not accept the resize request: Resize is administratively prohibited" on the
+        # console, once per connect. `scale` fits the same framebuffer to the window client-side,
+        # which is what we actually wanted.
+        url = f"http://localhost:{port}/vnc.html?autoconnect=1&resize=scale"
         try:
             from .zoo_lab import ZooLab
         except Exception as e:                    # QtWebEngine missing -> browser fallback
@@ -3209,6 +3382,7 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
                          f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
             return
+        self._retire_lab("_desktop_lab")
         self._desktop_lab = ZooLab(self, self.theme, dev, url)
         self._desktop_lab.show()
         self._desktop_lab.raise_()
@@ -3247,6 +3421,7 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"Opening {dev.name} in your browser (embedded view needs "
                          f"PySide6-Addons for QtWebEngine: {e}): {url}", "info")
             return
+        self._retire_lab("_zoo_lab")
         self._zoo_lab = ZooLab(self, self.theme, dev, url)
         self._zoo_lab.show()
         self._zoo_lab.raise_()
@@ -3534,6 +3709,8 @@ class MainWindow(QMainWindow):
         # the pill widget paints its own font — nudge it to re-measure/repaint at the new text size
         if getattr(self, "mode_indicator", None) is not None:
             self.mode_indicator.updateGeometry(); self.mode_indicator.update()
+        # Widgets that style themselves from theme tokens subscribe to theme.themeChanged
+        # themselves (see SourceBrowser and Dashboard), so there is nothing to poke here.
         self._update_status()
 
     def _on_log(self, level: str, message: str) -> None:

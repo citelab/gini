@@ -272,9 +272,14 @@ class NodeItem(QGraphicsObject):
     def _resizable(self) -> bool:
         return pricing.resizable(self.inst.type_key)
 
-    # xv6 caps at L (2 vCPU): QEMU harts are capped at 2 for a legible 1-2 core scheduler demo, so
-    # the Size must never advertise more cores than the machine actually runs.
-    _XV6_MAX_LEVEL = 3        # L
+    # xv6 goes up to XL (4 vCPU). The Size must never advertise more cores than the machine
+    # actually runs, and everything below this already handles four: SIZE_TIERS maps XL to 4.0
+    # vCPU, `_xv6_harts` clamps to min(4, ...), and xv6's own NCPU is 8. This constant was the
+    # only thing holding it at L.
+    #
+    # Four is worth having: contention is impossible on one core and thin on two, so the Lock Lab
+    # and the scheduler's Gantt only get interesting as harts are added.
+    _XV6_MAX_LEVEL = 4        # XL
 
     def _size(self) -> int:
         if not self._resizable():
@@ -1189,7 +1194,45 @@ class CanvasScene(QGraphicsScene):
                 return e
         return None
 
+    def _prune_dead(self) -> None:
+        """Drop tracked items whose C++ object Qt has already deleted.
+
+        Python dict membership and Qt object lifetime are INDEPENDENT: an item can be destroyed
+        underneath us (a scene clear, a parent going away, deleteLater) while our wrapper is still
+        sitting in self.nodes, and the next attribute access on it raises
+
+            RuntimeError: Internal C++ object (NodeItem) already deleted.
+
+        That was reaching the user as a bare traceback out of a bus handler, which also stopped
+        every later slot on that signal from running — so an overlay stayed on screen with no
+        explanation. Pruning makes the state converge instead: whatever went wrong, the next clear
+        is clean.
+
+        The log line is deliberate and names the element. This is a GUARD, not a root-cause fix —
+        the path that orphans the item has not been reproduced, and that message is the evidence
+        needed to find it.
+        """
+        for name, book in (("node", self.nodes), ("edge", self.edges), ("group", self.groups)):
+            for key, item in list(book.items()):
+                try:
+                    item.opacity()                     # cheapest call that touches the C++ object
+                except RuntimeError:
+                    book.pop(key, None)
+                    self.ctx.bus.log.emit(
+                        "error", f"canvas: dropped a deleted {name} still tracked as {key} — "
+                                 f"please report this with what you had just done")
+        for attr in ("_spotlit", "_highlit", "_callouts"):
+            live = []
+            for item in getattr(self, attr, []):
+                try:
+                    item.opacity()
+                    live.append(item)
+                except RuntimeError:
+                    pass
+            setattr(self, attr, live)
+
     def _on_clear_stage(self) -> None:
+        self._prune_dead()                             # never raise out of a bus handler
         for n in self._spotlit:
             n.set_spotlight(False)
         for n in self._highlit:
@@ -1408,7 +1451,7 @@ class CanvasView(QGraphicsView):
         self._lp_start = None
         self._lp_timer = QTimer(self)
         self._lp_timer.setSingleShot(True)
-        self._lp_timer.timeout.connect(self._fire_xray)
+        self._lp_timer.timeout.connect(self._on_lp_timeout)
         self._xray_on = False
         self._xray_items: list = []             # ghost cards + connector lines on the scene
         self._ghosts: list = []                 # the clickable ghost cards
@@ -1517,6 +1560,28 @@ class CanvasView(QGraphicsView):
 
     # -- X-ray: long-press spawns ghost previews of the valid neighbours ----- #
     MAX_GHOSTS = 8                               # cap the ring so it stays readable
+
+    def _on_lp_timeout(self) -> None:
+        """The long-press timer expired. Decide whether it was REALLY a long press.
+
+        Stopping the timer on release is not enough on its own. If the GUI thread stalls between
+        the press and the release — which it does on a slow machine while something expensive is
+        being built — the queued timer expiry is delivered BEFORE the queued mouse release, and an
+        ordinary click opens the X-ray ring. Reported as "I click on the router and it is
+        immediately registered as a long press. I never long-pressed."
+
+        Qt's live button state is not queued, so it reports what the mouse is doing NOW rather
+        than what the event backlog has got round to. If the button is already up, this was a
+        click that the stall made look slow.
+
+        The gesture decision lives here and the ring lives in _fire_xray, so the two can be
+        tested apart: the X-ray's CONTENT does not depend on a physical button being held.
+        """
+        from PySide6.QtWidgets import QApplication
+        if not (QApplication.mouseButtons() & Qt.LeftButton):
+            self._lp_node = None
+            return
+        self._fire_xray()
 
     def _fire_xray(self) -> None:
         from ..domain import connection_rules as cr

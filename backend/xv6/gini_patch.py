@@ -1366,6 +1366,12 @@ gini_dump(void)
     // (via the Syscall Builder) that DRIVE them, and this line is the live proof it works.
     PRINTF("ALARM %d %d %d %p %d\\n", p->pid, p->gini_alarm_interval, p->gini_alarm_ticks,
            (void*)p->gini_alarm_handler, p->gini_alarm_on);
+    // What this process is waiting FOR. p->chan is set by sleep_prepare and CLEARED by wakeup,
+    // so a non-zero chan on a RUNNABLE process is not a bug — it is the moment between "armed to
+    // sleep" and actually sleeping, which is exactly the race sleep_prepare exists to close.
+    // Printed for every process rather than only sleepers so that moment is visible too.
+    if(p->chan)
+      PRINTF("WAIT %d %p %s\\n", p->pid, p->chan, gini_chan_name(p->chan));
   }
   PRINTF("SCHED policy %d quantum %d\\n", sched_policy, sched_quantum);
   // policy roster (id -> display name) so the UI's selector is DATA-DRIVEN: add a policy in the
@@ -1764,6 +1770,17 @@ extern uchar    gini_trail[];      // recent residency samples, newest at gini_t
 extern uint64   gini_trail_i;
 void            gini_obs_begin(void);
 void            gini_obs_end(void);
+// SLEEP CHANNELS. `state == SLEEPING` says a process is blocked; it does not say what will wake
+// it. xv6 sleeps on an ADDRESS — sleep(chan, lk) — and wakeup(chan) matches on that address, so
+// the answer to "who is going to wake you?" is sitting in p->chan and is invisible to a student.
+//
+// A raw pointer teaches nothing, so each subsystem registers the address (or range) it sleeps on
+// together with a name a human can read. Registration rather than a lookup table because the
+// interesting structs — bcache, log, cons — are STATIC to their own files and cannot be named
+// from anywhere else.
+#define GINI_NCHAN 12
+void            gini_chan_add(void *lo, void *hi, char *name);
+char*           gini_chan_name(void *chan);
 // THE TRACE. Aggregates say the block cache was asked 601 times; they cannot say the read went
 // syscall -> file -> inode -> bcache -> disk IN THAT ORDER. This ring records the real ordered
 // path, and only while armed: unarmed it costs one predictable branch, so the board stays
@@ -2008,6 +2025,39 @@ gini_doorrec(void)
   gini_sub[h] = GSUB_TRAP;
 }
 
+// ---- sleep-channel registry -----------------------------------------------------------------
+// Each entry claims an address or a half-open range [lo, hi). Ranges matter: the block cache and
+// the process table are arrays, and a process sleeping on buf 12 or waiting for child slot 7 is
+// sleeping on an address INSIDE them, never on the array itself.
+struct gini_chanreg { void *lo; void *hi; char *name; };
+static struct gini_chanreg gini_chans[GINI_NCHAN];
+static int gini_nchan;
+
+void
+gini_chan_add(void *lo, void *hi, char *name)
+{
+  if(gini_nchan >= GINI_NCHAN || lo == 0)
+    return;
+  gini_chans[gini_nchan].lo = lo;
+  gini_chans[gini_nchan].hi = hi ? hi : (void*)((char*)lo + 1);
+  gini_chans[gini_nchan].name = name;
+  gini_nchan++;
+}
+
+char*
+gini_chan_name(void *chan)
+{
+  if(chan == 0)
+    return "";
+  for(int i = 0; i < gini_nchan; i++)
+    if(chan >= gini_chans[i].lo && chan < gini_chans[i].hi)
+      return gini_chans[i].name;
+  // A process sleeping on its OWN proc struct is inside wait(), which is by far the most common
+  // sleep in a quiet system — worth naming even though proc[] is registered as a range, because
+  // "a child to exit" says far more than "the process table".
+  return "?";
+}
+
 void
 gini_boardreset(void)
 {
@@ -2064,6 +2114,48 @@ gini_boarddump(void)
   %(P)s("BUSER %%d %%d\\n", (int)(gini_uinstr / 1000), (int)gini_uentry);
 }
 """ % {"P": PRINT}, "GINI-xv6 KERNEL BOARD core")
+
+# 4h6) SLEEP CHANNELS — naming the thing a blocked process is waiting for.
+#
+# `state == SLEEPING` says a process is blocked. It does not say WHY, or who will wake it. In this
+# xv6 the answer is in `p->chan`: sleep_prepare(chan) records an address, sleep() blocks, and
+# wakeup(chan) matches on that same address and clears it. The whole mechanism is a pointer
+# comparison, and it is completely invisible from outside.
+#
+# Each subsystem registers the address (or array range) it sleeps on, at its own init, because the
+# interesting structs — bcache, itable, log, cons — are STATIC to their own files and cannot be
+# named from anywhere else. Ranges matter: a process blocked on buf 12 or waiting for child slot 7
+# is sleeping on an address INSIDE an array, never on the array itself.
+#
+# Not registered: pipes. They are allocated per pipe, so there is no fixed address to claim; a
+# pipe wait shows its raw channel instead, which is still better than "sleeping" with no object.
+_CHAN_REG = [
+    ("kernel/console.c", r"(consoleinit\(void\)\n\{\n)",
+     '  gini_chan_add(&cons.r, 0, "console input");   // a keystroke\n'),
+    ("kernel/log.c", r"(initlog\(int dev, struct superblock \*sb\)\n\{\n)",
+     '  gini_chan_add(&log, &log + 1, "the log");     // commit / space in a transaction\n'),
+    ("kernel/proc.c", r"(procinit\(void\)\n\{\n)",
+     '  gini_chan_add(proc, &proc[NPROC], "a child to exit");   // wait()\n'),
+    ("kernel/bio.c", r"(binit\(void\)\n\{\n)",
+     '  gini_chan_add(bcache.buf, &bcache.buf[NBUF], "a disk block");  // buf + its sleeplock\n'),
+    ("kernel/fs.c", r"(iinit\(\)\n\{\n)",
+     '  gini_chan_add(itable.inode, &itable.inode[NINODE], "an inode");  // inode sleeplock\n'),
+    ("kernel/uart.c", r"(uartinit\(void\)\n\{\n)",
+     '  gini_chan_add(&tx_chan, 0, "room in the UART buffer");\n'),
+    ("kernel/virtio_disk.c", r"(virtio_disk_init\(void\)\n\{\n)",
+     '  gini_chan_add(&disk.free[0], &disk.free[NUM], "a free disk descriptor");\n'),
+]
+for _rel, _anchor, _line in _CHAN_REG:
+    regex_once(_rel, _anchor, r"\1" + _line, "gini_chan_add")
+
+# `&ticks` is sys_sleep's channel and lives in trap.c, where the registry itself is — registered
+# from trapinit rather than from a subsystem, since ticks belongs to no subsystem.
+regex_once("kernel/trap.c",
+           r"(trapinit\(void\)\n\{\n)",
+           # NOT one raw string: `\"` inside an r"" stays a literal backslash-quote and lands in
+           # the C source as `\"the next timer tick\"`, which does not compile.
+           r"\1" + '  gini_chan_add(&ticks, &ticks + 1, "the next timer tick");  // sys_sleep\n',
+           "GINI-xv6: ticks chan")
 
 # 4h4) The probes themselves. One line at the top of each subsystem ENTRY POINT — the functions
 # other subsystems call — and nothing internal. That is what makes the counts mean "traffic this
@@ -2125,6 +2217,85 @@ regex_once("kernel/console.c",
            "// GINI: kernel board (0x1e/0x1f-bracketed)\n"
            r"  case C('Q'): gini_path_toggle(); break;  // GINI: arm/disarm the kernel-path trace" "\n",
            "GINI: board dump key")
+
+
+# 4i) EXECUTABLE heap — SBRK_EXEC, so a program can build instructions and run them.
+#
+# Why this is needed at all: growproc() calls uvmalloc(..., PTE_W), so heap pages come back
+# PTE_R|PTE_U|PTE_W with NO PTE_X. Jumping into sbrk memory therefore raises scause 12
+# (instruction page fault), and usertrap routes only 13 and 15 to vmfault() — 12 falls through
+# to "unexpected scause" and setkilled(). So without this the corridor walker does not walk, it
+# dies on its first instruction.
+#
+# This follows the existing SBRK_EAGER/SBRK_LAZY flag mechanism rather than inventing a new
+# syscall, and adds a SEPARATE growproc_exec() instead of giving growproc() a permission
+# parameter — every existing caller of growproc() then keeps its exact current behaviour.
+#
+# W and X together violate W^X, which a production kernel would not allow. That is deliberate
+# here and worth saying out loud to students: the corridor has to be written before it can be
+# run, and xv6 has no mprotect to drop the write permission afterwards.
+append_once("kernel/vm.h", """
+#define SBRK_EXEC  3   // GINI-xv6: eager, and mapped EXECUTABLE (see growproc_exec)
+""", "GINI-xv6: SBRK_EXEC")
+
+append_once("kernel/proc.c", """
+// GINI-xv6: grow user memory by n bytes, mapped WRITABLE **and EXECUTABLE**, so a process can
+// generate instructions into the new pages and then jump into them. Deliberately a separate
+// function from growproc() so that ordinary sbrk() keeps mapping non-executable pages.
+//
+// Shrinking is not supported here — pass a negative n to plain growproc(), which does not care
+// about permissions when unmapping.
+int
+growproc_exec(int n)
+{
+  uint64 sz;
+  struct proc *p = myproc();
+
+  if(n <= 0)
+    return growproc(n);
+  sz = p->sz;
+  if(sz + n > TRAPFRAME)
+    return -1;
+  if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W | PTE_X)) == 0)
+    return -1;
+  p->sz = sz;
+  return 0;
+}
+""", "GINI-xv6: growproc_exec")
+
+append_once("kernel/defs.h", """
+// GINI-xv6: executable heap growth (SBRK_EXEC) — see proc.c
+int             growproc_exec(int);
+""", "GINI-xv6: growproc_exec decl")
+
+# sys_sbrk's existing shape is `if (t == SBRK_EAGER || n < 0) { growproc } else { lazy }`, so the
+# SBRK_EXEC arm has to be tested BEFORE that or a request for executable memory silently falls
+# into the lazy branch and comes back non-executable.
+regex_once("kernel/sysproc.c",
+           r"  (if \(t == SBRK_EAGER \|\| n < 0\) \{)",
+           "  if (t == SBRK_EXEC && n > 0) {          // GINI-xv6: eager AND executable\n"
+           "    if (growproc_exec(n) < 0) {\n"
+           "      return -1;\n"
+           "    }\n"
+           "  } else " r"\1",
+           "GINI-xv6: SBRK_EXEC arm")
+
+# Note: sysproc.c and user/ulib.c both already `#include "vm.h"` (that is where SBRK_EAGER and
+# SBRK_LAZY live and both files use them), so SBRK_EXEC resolves in both with no include added.
+
+append_once("user/user.h", """
+char *sbrkexec(int);   // GINI-xv6: grow the heap with EXECUTABLE pages
+""", "GINI-xv6: sbrkexec decl")
+
+append_once("user/ulib.c", """
+// GINI-xv6: like sbrk(), but the new pages are mapped executable so generated instructions in
+// them can be jumped into. Used by `walker` to build a corridor of NOPs for the PC to walk.
+char *
+sbrkexec(int n)
+{
+  return sys_sbrk(n, SBRK_EXEC);
+}
+""", "GINI-xv6: sbrkexec")
 
 
 # 5) launchable long-running user programs, so the Machine Lab can spawn real work to watch
@@ -2207,6 +2378,414 @@ main(int argc, char *argv[])
       close(fd);
     }
     unlink("giniwr");
+    pause(1);
+  }
+  return 0;
+}
+""",
+
+    # walker — the SECOND pass is the lesson.
+    #
+    # Pass one faults every page in; pass two touches exactly the same pages and faults ZERO
+    # times. Same work, same addresses, no kernel involvement at all. Students reliably believe a
+    # memory access costs something every time, and one run of this fixes that.
+    #
+    # NOTE, and worth telling students: xv6 has NO SWAP. A faulted-in page stays for the life of
+    # the process, so a walker cannot thrash physical memory however large the walk — it just runs
+    # out and sbrklazy fails. Thrashing lives in the BUFFER CACHE instead (see sgrind), because
+    # NBUF is 30. Memory faults are a one-time cost; cache misses are a recurring one.
+    "walker": """#include "kernel/types.h"
+#include "user/user.h"
+// Make the PROGRAM COUNTER walk a long straight corridor of memory, slowly enough to watch.
+//
+//   walker                64 pages (256 KB), ~1 tick per page
+//   walker 128            128 pages (512 KB)
+//   walker 64 2           64 pages, ~2 ticks dwell on each
+//
+// Every other program in the launcher moves a DATA pointer while the PC stays parked in a tiny
+// loop. This one is the opposite: it builds a corridor of NOP instructions and jumps into the
+// start of it, so the PC itself slides from low addresses to high ones. In the Machine Lab the
+// PC readout climbs a staircase across a quarter of a megabyte instead of sitting on one value.
+//
+// HOW THE CORRIDOR IS BUILT. Each 4 KB page holds:
+//
+//     +0    a 12-byte DELAY BLOCK   (lui t0, N / addi t0,t0,-1 / bne t0,zero,-4)
+//     +12   1021 NOPs, to the end of the page
+//     ...   the very last page ends in `ret` instead of a NOP
+//
+// Execution enters at the first byte, spends nearly all of its time in that page's delay block,
+// then crosses the remaining NOPs in a few microseconds and lands in the next page's block. So
+// the PC steps page by page, dwelling at one address per page.
+//
+// WHY THE DELAY IS COPIED IN RATHER THAN CALLED. The obvious design is `nop; call slowdown;
+// nop; call slowdown; ...` with one shared delay routine. It does not work, for two reasons.
+// The PC would sit at the SHARED routine's address while it burns time, so sampling would find
+// it there essentially every time and the corridor would look like a single hot address -- the
+// exact picture `spin` already gives. And `call` writes the return address into ra, which is
+// the register holding the corridor's OWN return address, so the closing `ret` would jump back
+// into the middle of the corridor instead of returning here.
+//
+// WHY THE ITERATION COUNT IS MEASURED, NOT ASSUMED. How many loop iterations fill one tick
+// depends on the host, on QEMU's translator, and on how many other processes are running. So
+// walker times the real block, in the real corridor, before deciding how long to make it.
+#define PGSZ    4096
+#define MAXP    512
+#define NWORD   (PGSZ / 4)                 // 1024 instruction slots per page
+
+#define NOP     0x00000013u                // addi zero,zero,0
+#define RET     0x00008067u                // jalr zero,0(ra)
+#define ADDI_M1 0xFFF28293u                // addi t0,t0,-1
+#define BNE_BK  0xFE029EE3u                // bne  t0,zero,-4   (back to the addi)
+
+// lui SIGN-EXTENDS bit 31 into the upper half of the 64-bit register. An imm20 of 0x80000 or
+// more therefore loads a NEGATIVE count, and `addi -1` then walks it further from zero -- the
+// loop would run for about 2^64 iterations, which is indistinguishable from a hung machine. So
+// the usable range stops one step short of that.
+#define IMM20_MAX 0x7FFFFu                 // -> at most 0x7FFFF000 iterations, still positive
+
+// lui t0, imm20  ->  t0 = imm20 << 12, so the loop runs (imm20 << 12) times. The count lives
+// entirely in the top 20 bits of this one word, which is why the dwell can be retuned by
+// rewriting a single instruction instead of rebuilding the corridor.
+static uint32
+lui_t0(uint32 imm20)
+{
+  if(imm20 > IMM20_MAX)
+    imm20 = IMM20_MAX;
+  if(imm20 == 0)
+    imm20 = 1;                             // a zero count means "loop 2^64 times", not "skip"
+  return (imm20 << 12) | (5 << 7) | 0x37;
+}
+
+#define MAXC   ((uint64)IMM20_MAX << 12)   // most iterations one block can be asked for
+#define MAXBLK 256                         // 3 words each: 3072 of a page's 4096 bytes
+
+// Fill one page: enough back-to-back delay blocks to burn `total` iterations, then NOPs to the
+// end. Several blocks rather than one because a single lui tops out at ~2.1 billion iterations,
+// which on a fast host is only a few ticks -- asking for a longer dwell used to clamp silently
+// and the page went by quicker than requested.
+//
+// Consecutive blocks also make the dwell itself visible: the PC steps from one block to the next
+// WITHIN the page, so a long dwell reads as a slow climb rather than a frozen address.
+static void
+fill_page(uint32 *w, int nwords, uint64 total)
+{
+  int nblk = (int)((total + MAXC - 1) / MAXC);
+  uint32 each;
+
+  if(nblk < 1)      nblk = 1;
+  if(nblk > MAXBLK) nblk = MAXBLK;
+  each = (uint32)(total / (uint64)nblk);
+
+  for(int b = 0; b < nblk; b++){
+    w[3*b + 0] = lui_t0(each >> 12);       // granularity is 4096 iterations; that is plenty
+    w[3*b + 1] = ADDI_M1;
+    w[3*b + 2] = BNE_BK;
+  }
+  for(int i = 3*nblk; i < nwords; i++)
+    w[i] = NOP;
+}
+
+// How many delay blocks a page needs for `total` iterations — and so whether the request fits.
+static int
+blocks_for(uint64 total)
+{
+  int n = (int)((total + MAXC - 1) / MAXC);
+  return n < 1 ? 1 : n;
+}
+
+// Instructions written as data are not necessarily visible to instruction fetch until the
+// pipeline's stale copies are discarded. Cheap here, and the one line that makes this program a
+// correct example of generating code rather than a lucky one.
+static void
+sync_icache(void)
+{
+  asm volatile ("fence.i" ::: "memory");
+}
+
+static void
+run(uint32 *code)
+{
+  ((void (*)(void))code)();
+}
+
+// Time the REAL block in the REAL corridor: build a one-block-then-return stub at `w`, run it
+// until the tick counter has advanced `nticks`, and report how many iterations that took.
+// Returns iterations per tick.
+static uint64
+calibrate(uint32 *w, int nticks)
+{
+  uint64 probe = 1ul << 20;                // 1,048,576 iterations per run
+  uint64 reps = 0;
+  int t0;
+
+  w[0] = lui_t0((uint32)(probe >> 12));
+  w[1] = ADDI_M1;
+  w[2] = BNE_BK;
+  w[3] = RET;
+  sync_icache();
+
+  t0 = uptime();
+  while(uptime() == t0)                    // start on a tick boundary, so the first partial
+    ;                                      // tick is not counted as a whole one
+  t0 = uptime();
+  while(uptime() - t0 < nticks){
+    run(w);
+    reps++;
+  }
+  if(reps < 1)
+    reps = 1;                              // one run already outlasted the window
+  return (reps * probe) / (uint64)nticks;  // 64-bit: reps*probe overflows 32 bits on a fast host
+}
+
+int
+main(int argc, char *argv[])
+{
+  int pages  = (argc > 1) ? atoi(argv[1]) : 64;
+  int dwell  = (argc > 2) ? atoi(argv[2]) : 1;     // ticks to sit on each page
+  int laps   = (argc > 3) ? atoi(argv[3]) : 0;     // 0 = keep walking until killed
+  uint32 *code;
+  char *raw;
+
+  if(pages < 2)    pages = 2;
+  if(pages > MAXP) pages = MAXP;
+  if(dwell < 1)    dwell = 1;
+
+  // Ordinary sbrk() memory is mapped read/write but NOT executable, so jumping into it raises an
+  // instruction page fault and the kernel kills the process. sbrkexec() asks for the same pages
+  // with PTE_X set as well. (Writable AND executable at once is exactly what a hardened kernel
+  // refuses; xv6 has no mprotect to drop the write permission after the corridor is built.)
+  //
+  // One page more than the corridor needs, because sbrk returns the process's OLD size, which is
+  // only page-aligned by luck -- and uvmalloc starts mapping at PGROUNDUP of it. An unaligned
+  // return would put the first bytes of the corridor in the PREVIOUS page, which was mapped
+  // without PTE_X and would fault on the first instruction.
+  raw = sbrkexec((pages + 1) * PGSZ);
+  if(raw == SBRK_ERROR){
+    printf("walker: cannot get %d executable pages\\n", pages + 1);
+    exit(1);
+  }
+  code = (uint32 *)(((uint64)raw + PGSZ - 1) & ~((uint64)PGSZ - 1));
+
+  uint64 per_tick = calibrate(code, 4);
+  uint64 want = per_tick * (uint64)dwell;
+  if(want < 4096)
+    want = 4096;                           // below one lui step the dwell is unmeasurable
+
+  // Say so if the dwell cannot be honoured, rather than quietly walking faster than asked.
+  if(blocks_for(want) > MAXBLK){
+    want = MAXC * MAXBLK;
+    printf("walker: dwell too long for one page, using ~%d ticks instead\\n",
+           (int)(want / per_tick));
+  }
+
+  for(int p = 0; p < pages; p++)
+    fill_page(code + (uint64)p * NWORD, NWORD, want);
+  code[(uint64)pages * NWORD - 1] = RET;   // the way back out of the corridor
+  sync_icache();
+
+  printf("walker: corridor %d pages (%d KB), %d delay block%s per page (~%d tick%s)\\n",
+         pages, pages * 4, blocks_for(want), blocks_for(want) == 1 ? "" : "s",
+         dwell, dwell == 1 ? "" : "s");
+  printf("walker: PC walks 0x%lx .. 0x%lx\\n",
+         (uint64)code, (uint64)code + (uint64)pages * PGSZ);
+
+  // Timing its own walk turns the prediction into something the student can check: pages x dwell
+  // is what it should be, and a number that disagrees means the machine was busy elsewhere.
+  // Walk it again and again. One pass is over in pages x dwell ticks -- about half a minute at
+  // the defaults -- which is shorter than it takes to set up an observation, so by default this
+  // keeps lapping until the student kills it, exactly as spin does. Each lap retraces the same
+  // addresses, so the PC reads as a repeating ramp rather than one climb: whoever missed the
+  // start can wait for the next one. A third argument caps the number of laps.
+  for(int lap = 1; laps == 0 || lap <= laps; lap++){
+    int t0 = uptime();
+    run(code);                             // the walk itself
+    int elapsed = uptime() - t0;
+
+    // One short line per lap, and a lap is tens of seconds. Deliberately infrequent: this is the
+    // same serial channel GINI's state dumps use, and a chatty program corrupts them.
+    printf("walker: lap %d walked in %d ticks (expected ~%d)\\n", lap, elapsed, pages * dwell);
+  }
+  exit(0);
+}
+""",
+    "toucher": """#include "kernel/types.h"
+#include "user/user.h"
+// TOUCH N pages twice. Pass 1 faults them in; pass 2 finds them mapped and faults zero times.
+// This moves a DATA pointer across a large span -- the PC stays in the small loop below.
+// (For the PROGRAM COUNTER walking a large span, see walker.)
+//   toucher             48 pages, sequential
+//   toucher 64           64 pages, sequential
+//   toucher 64 rand      shuffled order  — same count of faults, scattered addresses
+//   toucher 64 stride    every 7th page, wrapping
+#define MAXP 512
+static int order[MAXP];
+static unsigned long seed = 12345;
+
+static int
+nextrand(void)
+{
+  seed = seed * 1103515245u + 12345u;
+  return (seed >> 16) & 0x7fff;
+}
+
+static int
+gcd(int a, int b)
+{
+  while(b){ int t = a % b; a = b; b = t; }
+  return a;
+}
+
+// A stride only visits every page when it is COPRIME with the page count. A fixed stride of 7
+// silently visits one seventh of them whenever n is a multiple of 7 — which would make pass 1
+// fault far fewer times than the student predicted, and pass 2 fault for the pages pass 1 never
+// reached. Both halves of the lesson would be wrong, quietly. So pick the first stride that
+// actually covers.
+static int
+coprime_stride(int n)
+{
+  for(int s = 7; s < n; s++)
+    if(gcd(s, n) == 1)
+      return s;
+  return 1;                                        // n < 8, or prime-poor: plain sequential
+}
+
+int
+main(int argc, char *argv[])
+{
+  int n = (argc > 1) ? atoi(argv[1]) : 48;
+  char *mode = (argc > 2) ? argv[2] : "seq";
+  if(n < 1) n = 1;
+  if(n > MAXP) n = MAXP;
+
+  // Grow the address space by n pages and allocate NOTHING. Every page below is still a promise.
+  char *base = sbrklazy(n * 4096);
+  if(base == SBRK_ERROR){
+    printf("toucher: cannot grow by %d pages\\n", n);
+    exit(1);
+  }
+
+  for(int i = 0; i < n; i++)
+    order[i] = i;
+  if(mode[0] == 's' && mode[1] == 't'){            // stride
+    int s = coprime_stride(n);
+    for(int i = 0; i < n; i++)
+      order[i] = (i * s) % n;
+  } else if(mode[0] == 'r'){                       // rand: Fisher-Yates
+    for(int i = n - 1; i > 0; i--){
+      int j = nextrand() % (i + 1);
+      int t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+  }
+
+  // PASS 1 — every touch is a first touch, so every touch is a page fault.
+  for(int i = 0; i < n; i++){
+    base[order[i] * 4096] = 1;
+    if((i % 8) == 7) pause(1);                    // paced so the fault-in is watchable
+  }
+
+  pause(4);                                        // a clear gap between the two passes
+
+  // PASS 2 — identical addresses, identical order. Watch the fault counter NOT move.
+  for(int i = 0; i < n; i++){
+    base[order[i] * 4096] += 1;
+    if((i % 8) == 7) pause(1);                    // same pacing, so only the faults differ
+  }
+
+  printf("toucher: %d pages, %s, two passes done\\n", n, mode);
+  exit(0);
+}
+""",
+
+    # sgrind — buffer-cache pressure, with the cliff as a dial.
+    #
+    # NBUF is 30. Touch fewer than that many distinct blocks and they all stay cached; touch more
+    # and every pass evicts what the next pass needs. The hit rate does not decline gently, it
+    # falls off a cliff, and the student can compute where the cliff is BEFORE running it.
+    "sgrind": """#include "kernel/types.h"
+#include "kernel/fcntl.h"
+#include "user/user.h"
+// Read K distinct files round and round. The block cache holds NBUF = 30 buffers.
+//   sgrind         K = 20  — fits in the cache, hit rate stays high
+//   sgrind 60      K = 60  — every pass evicts what the next pass wants
+static char buf[512];
+
+static void
+nameof(char *dst, int i)                            // "sg0" … "sg511"; no sprintf in xv6
+{
+  int k = 0;
+  dst[k++] = 's'; dst[k++] = 'g';
+  if(i >= 100) dst[k++] = '0' + (i / 100) % 10;
+  if(i >= 10)  dst[k++] = '0' + (i / 10) % 10;
+  dst[k++] = '0' + i % 10;
+  dst[k] = 0;
+}
+
+int
+main(int argc, char *argv[])
+{
+  int k = (argc > 1) ? atoi(argv[1]) : 20;
+  char name[8];
+  if(k < 1) k = 1;
+  if(k > 400) k = 400;                              // FSSIZE is 2000 blocks; stay well inside
+
+  for(int i = 0; i < 512; i++)
+    buf[i] = 'x';
+  for(int i = 0; i < k; i++){                       // create the working set once
+    nameof(name, i);
+    int fd = open(name, O_CREATE | O_WRONLY);
+    if(fd < 0){ k = i; break; }                     // out of inodes: shrink to what we made
+    write(fd, buf, sizeof(buf));
+    close(fd);
+  }
+  printf("sgrind: working set %d blocks (cache holds 30)\\n", k);
+
+  for(;;){                                          // now read them round and round
+    for(int i = 0; i < k; i++){
+      nameof(name, i);
+      int fd = open(name, O_RDONLY);
+      if(fd >= 0){
+        read(fd, buf, sizeof(buf));
+        close(fd);
+      }
+    }
+    pause(1);
+  }
+  return 0;
+}
+""",
+
+    # mgrind — allocator, page-table and fork pressure, with nothing else moving.
+    #
+    # `grind` exercises everything at once, which makes it useless for attribution: when a lock
+    # heats up you cannot say why. mgrind and sgrind each lean on ONE subsystem, so the lock
+    # profile becomes a diagnosis — run one, read which lock heats, and the answer is the program
+    # you ran.
+    "mgrind": """#include "kernel/types.h"
+#include "user/user.h"
+// Hammer the physical page allocator, the page-table walk, and fork's address-space copy.
+//   mgrind         16 pages a cycle
+//   mgrind 64      more per cycle, harder on kalloc
+int
+main(int argc, char *argv[])
+{
+  int pages = (argc > 1) ? atoi(argv[1]) : 16;
+  if(pages < 1) pages = 1;
+  if(pages > 256) pages = 256;
+
+  for(;;){
+    char *p = sbrk(pages * 4096);                   // eager: real pages, right now
+    if(p != SBRK_ERROR){
+      for(int i = 0; i < pages; i++)                // walk the page table installing mappings
+        p[i * 4096] = 1;
+      int pid = fork();                             // copies the whole address space
+      if(pid == 0){
+        p[0] = 2;                                   // a write to a shared page
+        exit(0);
+      }
+      if(pid > 0)
+        wait(0);
+      sbrk(-pages * 4096);                          // hand every page back to the allocator
+    }
     pause(1);
   }
   return 0;
