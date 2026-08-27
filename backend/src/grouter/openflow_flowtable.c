@@ -1424,6 +1424,13 @@ static int32_t openflow_flowtable_add(ofp_flow_mod* flow_mod,
 				" index %" PRIu32 ".", i);
 		memset(&flowtable->entries[i], 0,
 		        sizeof(openflow_flowtable_entry_type));
+		// Set `added`, as the free-slot path below does. The memset above zeroes it and
+		// this path never restored it, so update_entry_stats computed
+		// difftime(now, 0) -- i.e. the whole Unix epoch -- and every REPLACED rule
+		// reported an age of ~1.79 billion seconds. The forwarding apps reinstall the
+		// same path constantly, so in practice most rules took this path and no reported
+		// age could be trusted.
+		time(&flowtable->entries[i].added);
 		return openflow_flowtable_modify_entry_at_index(flow_mod, i, error_type,
 		        error_code, 0);
 	}

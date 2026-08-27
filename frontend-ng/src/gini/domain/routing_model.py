@@ -560,15 +560,25 @@ def collect_network_data(routers, switches, query, delay_prop, links=None,
             entries = query(name, "openflow entry all")
         except Exception:                         # a query callable that raises, defensively
             entries = ""
-        if rid not in ports:
+        peers = ports.get(rid)
+        if peers is None:
             try:
                 verbose = query(name, "ifconfig show verbose")
             except Exception:
                 verbose = ""
-            if not query_failed(verbose):         # only cache a mapping we could verify
-                ports[rid] = ovs_port_peers(
-                    list(neighbours_of(rid)) if neighbours_of else [], verbose)
-        peers = ports.get(rid, {})
+            peers = {}
+            if not query_failed(verbose):
+                want = list(neighbours_of(rid)) if neighbours_of else []
+                peers = ovs_port_peers(want, verbose)
+                # Cache only a COMPLETE map. A switch takes a couple of seconds to bring
+                # its interfaces up, so a poll landing mid-boot sees only some of them and
+                # ovs_port_peers rightly drops the rest -- but caching that partial answer
+                # FROZE it for the whole run, and every rule egressing an unmapped port
+                # became permanently "unverified". That is why a HUD left open across Run
+                # never lit, while one opened afterwards did. An incomplete map is still
+                # used for this poll; it is simply re-read on the next one.
+                if len(peers) == len(want):
+                    ports[rid] = peers
         if query_failed(entries):
             # CARRY THE LAST KNOWN FLOWS FORWARD. Showing the switch as suddenly empty was
             # the flicker: the lit path went dark and the changed projection wrote a phantom

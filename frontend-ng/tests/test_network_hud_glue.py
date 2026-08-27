@@ -278,3 +278,55 @@ def test_activity_and_forwarding_are_kept_apart():
     assert hasattr(h, "activity") and hasattr(h, "snaps")
     h.clear()
     assert h.activity == [] and h.snaps == []
+
+
+# --- a switch caught mid-boot must not freeze a partial port map ------------------------------ #
+def test_a_partial_port_map_is_not_cached_for_the_whole_run():
+    """Reported live: a HUD left open across Run never lit, while one opened afterwards did.
+
+    Switch containers take ~2s to bring their interfaces up. A poll landing mid-boot sees
+    only some, ovs_port_peers rightly drops the unverifiable ones -- and caching that
+    partial answer froze it for the entire run, so every rule egressing an unmapped port
+    was permanently 'unverified'."""
+    booting = ("Int. State/Mode Device IP MAC MTU Sock TID\n"
+               "1 UC tun1 169.254.2.1 02:00:fe:02:00:01 1500 tun1 -1\n")   # only tun1 up
+    ready = booting + "2 UC tun2 169.254.2.2 02:00:fe:02:00:02 1500 tun2 -2\n"
+    replies = [booting, booting, ready]
+
+    def query(name, cmd):
+        if "verbose" in cmd:
+            return replies.pop(0) if replies else ready
+        return ENTRIES if name == "OVS1" else ROUTES
+
+    cache = {}
+    seen = []
+    for _ in range(4):
+        m = collect_network_data(
+            routers=[], switches=[("ovs1", "OVS1", None)], query=query,
+            delay_prop=lambda rid, k: "", links=[],
+            neighbours_of=lambda rid: ["m1", "ovs2"],       # this switch has TWO links
+            run_cache=cache)
+        seen.append(len(m.ovs["ovs1"].port_peer))
+
+    assert seen[0] == 1, "mid-boot: only the interface that exists is mapped"
+    assert seen[-1] == 2, "once the switch is up, both ports map"
+    assert cache["ports"]["ovs1"] == {2: "m1", 3: "ovs2"}, "the COMPLETE map is what sticks"
+
+
+def test_a_complete_map_is_still_read_only_once():
+    """The retry must not undo the caching that keeps the poll cheap."""
+    calls = []
+    ready = ("Int. State/Mode Device IP MAC MTU Sock TID\n"
+             "1 UC tun1 169.254.2.1 02:00:fe:02:00:01 1500 tun1 -1\n"
+             "2 UC tun2 169.254.2.2 02:00:fe:02:00:02 1500 tun2 -2\n")
+
+    def query(name, cmd):
+        calls.append(cmd)
+        return ready if "verbose" in cmd else ENTRIES
+
+    cache = {}
+    for _ in range(5):
+        collect_network_data(routers=[], switches=[("ovs1", "OVS1", None)], query=query,
+                             delay_prop=lambda rid, k: "", links=[],
+                             neighbours_of=lambda rid: ["m1", "ovs2"], run_cache=cache)
+    assert len([c for c in calls if "verbose" in c]) == 1

@@ -11,6 +11,8 @@
  *      the controller's back leaves it believing a path is installed that is not.
  *   3. Priority byte order — priorities survive a round trip, so a controller rule
  *      outranks the boot-time wildcard default.
+ *   4. A REPLACED rule reports a sane age. The replace path zeroed `added` and never
+ *      restored it, so duration came out as difftime(now, 0) — the whole Unix epoch.
  *
  * Why these matter. The table holds OPENFLOW_MAX_FLOWTABLE_ENTRIES (100) and the POX
  * forwarding apps match with ofp_match.from_packet(), i.e. ONE ENTRY PER MICROFLOW. A
@@ -34,6 +36,7 @@
 #include <string.h>
 #include <time.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 
 #include "openflow_flowtable.h"
 
@@ -137,6 +140,36 @@ int main(void)
 		add_rule(32768, (uint16_t) (4000 + i), 2);
 	check("a rule without OFPFF_SEND_FLOW_REM is evicted silently",
 	      removed_count == 0);
+
+	printf("\na replaced rule reports a sane age\n");
+	openflow_flowtable_init();
+	add_rule(32768, 700, 2);
+	add_rule(32768, 700, 3);          /* identical match -> takes the REPLACE path */
+	{
+		/* duration is reported through the stats dump; capture it rather than trusting
+		 * the code path by eye. Before the fix this printed ~1787842226. */
+		fflush(stdout);
+		char tmpl[] = "/tmp/ftageXXXXXX";
+		int fd = mkstemp(tmpl);
+		int saved = dup(1);
+		dup2(fd, 1);
+		openflow_flowtable_print_entry_stats();
+		fflush(stdout);
+		dup2(saved, 1);
+		close(saved);
+		FILE *f = fopen(tmpl, "r");
+		char line[512];
+		long worst = 0;
+		while (f && fgets(line, sizeof line, f))
+		{
+			char *p = strstr(line, "Duration (seconds):");
+			if (p) { long v = atol(p + 19); if (v > worst) worst = v; }
+		}
+		if (f) fclose(f);
+		remove(tmpl);
+		printf("    largest reported duration: %ld s\n", worst);
+		check("a replaced rule's age is seconds, not the Unix epoch", worst < 60);
+	}
 
 	printf("\npriority survives the round trip\n");
 	openflow_flowtable_init();
