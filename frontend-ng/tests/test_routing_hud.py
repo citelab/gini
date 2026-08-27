@@ -24,12 +24,18 @@ def _theme(app):
 def _model():
     R1 = RouterNode("R1", "R1", {"10.0.1.1"}, [
         RouteEntry(0, "10.0.1.0", "255.255.255.0", "0.0.0.0", "tun0"),
-        RouteEntry(1, "10.0.2.0", "255.255.255.0", "10.0.1.2", "tun0")])
+        RouteEntry(1, "10.0.2.0", "255.255.255.0", "10.0.1.2", "tun0"),
+        RouteEntry(2, "10.0.3.0", "255.255.255.0", "10.0.1.2", "tun0")])
     R2 = RouterNode("R2", "R2", {"10.0.1.2", "10.0.2.1"}, [
         RouteEntry(0, "10.0.1.0", "255.255.255.0", "0.0.0.0", "tun0"),
-        RouteEntry(1, "10.0.2.0", "255.255.255.0", "0.0.0.0", "tun1")])
-    R3 = RouterNode("R3", "R3", {"10.0.2.2"}, [
-        RouteEntry(0, "10.0.2.0", "255.255.255.0", "0.0.0.0", "tun0")])
+        RouteEntry(1, "10.0.2.0", "255.255.255.0", "0.0.0.0", "tun1"),
+        RouteEntry(2, "10.0.3.0", "255.255.255.0", "10.0.2.2", "tun1")])
+    # R3 serves a subnet of its own -- which is what a leaf router is FOR. Destinations are
+    # subnets, so a router owning none is not separately traced: from upstream it is just
+    # another address on a segment already covered.
+    R3 = RouterNode("R3", "R3", {"10.0.2.2", "10.0.3.1"}, [
+        RouteEntry(0, "10.0.2.0", "255.255.255.0", "0.0.0.0", "tun0"),
+        RouteEntry(1, "10.0.3.0", "255.255.255.0", "0.0.0.0", "tun1")])
     return RoutingModel([R1, R2, R3], [Edge("R1", "R2", 5), Edge("R2", "R3", 10)])
 
 

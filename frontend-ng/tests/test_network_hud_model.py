@@ -34,6 +34,9 @@ R1_IFACE = "eth0 10.0.1.1/24\n"
 R2_IFACE = "eth0 10.0.1.2/24\neth1 10.0.2.1/24\n"
 
 R2_MAC = "02:00:00:01:01:02"
+# The one subnet only R2 delivers; destinations are subnets, not routers.
+R2_NET = "10.0.2.0/24"          # only R2 delivers this one
+SHARED_NET = "10.0.1.0/24"      # the transit segment both routers sit on
 
 
 def _flow(mac=None, action="output:3", prio=100, packets=0):
@@ -57,8 +60,8 @@ def test_ovs_splits_the_hop_instead_of_being_a_next_hop():
     m = _build([_flow(R2_MAC)])
     # The L3 trace still reaches R2 -- the switch does not become a routing decision.
     tr = forwarding_tree(m, "r1")
-    assert tr.per_dest["r2"].status == "ok"
-    assert tr.per_dest["r2"].path == ["r1", "r2"], "L3 path must stay router-to-router"
+    assert tr.per_dest[R2_NET].status == "ok"
+    assert tr.per_dest[R2_NET].path == ["r1", "r2"], "L3 path must stay router-to-router"
     # ...but the LIT edges go through the switch, so the HUD draws it as a transit node.
     assert ("r1", "ovs1") in tr.edges_used
     assert ("ovs1", "r2") in tr.edges_used
@@ -78,7 +81,7 @@ def test_router_only_model_is_unchanged():
     m = assemble_model([("r1", "R1", R1_ROUTES, R1_IFACE),
                         ("r2", "R2", R2_ROUTES, R2_IFACE)])
     tr = forwarding_tree(m, "r1")
-    assert tr.per_dest["r2"].status == "ok"
+    assert tr.per_dest[R2_NET].status == "ok"
     assert ("r1", "r2") in tr.edges_used
     assert m.ovs == {}
     assert m.nodes.keys() == m.routers.keys()
@@ -157,10 +160,13 @@ def test_nodes_carry_their_kind_for_the_renderer():
     assert m.ovs["ovs1"].controller == "ofc1", "OFC association drives the dashed overlay"
 
 
-def test_forwarding_tree_never_targets_a_switch():
-    """A switch is never a destination -- forwarding_tree iterates routers only."""
+def test_a_switch_is_never_a_destination():
+    """Destinations are SUBNETS. A switch owns no subnet, so it can never be one -- it is
+    transit, and the only question asked of it is whether it carries the hop."""
     m = _build([_flow(R2_MAC)])
-    assert set(forwarding_tree(m, "r1").per_dest) == {"r2"}
+    dests = set(forwarding_tree(m, "r1").per_dest)
+    assert dests == {SHARED_NET, R2_NET}, "both subnets, and only subnets"
+    assert "ovs1" not in dests and "r2" not in dests
 
 
 # --- L2 mode: a pure-SDN fabric ------------------------------------------------------------ #
@@ -276,7 +282,7 @@ def test_l2_ignores_wildcard_and_flood_rules_like_l3_does():
 # --- mode selection and edge colour --------------------------------------------------------- #
 def test_the_mode_follows_the_root():
     m = _build([_flow(R2_MAC)])
-    assert trace(m, "r1").per_dest.keys() == {"r2"}          # router root -> L3
+    assert set(trace(m, "r1").per_dest) == {SHARED_NET, R2_NET}   # router root -> L3
     assert set(trace(m, "ovs1").per_dest) == {R2_MAC}        # switch root -> L2 (by MAC)
 
 

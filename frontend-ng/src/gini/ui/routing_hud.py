@@ -262,11 +262,23 @@ class RoutingHud(QWidget):
             p.drawText(12, self.height() - _TL_H - 22, self.width() - 24, 14, Qt.AlignLeft,
                        "click a node here to trace its forwarding  ·  hold for its table")
         elif self._trace is not None and not self._trace.edges_used:
-            why = "no rules programmed for any destination yet"
+            node = self._model.nodes[self._root]
+            # Order matters: the FIRST true reason wins, and "delivers locally" has to be
+            # checked before "no rules", because a switch every one of whose rules egresses
+            # off the fabric lights no edges while being perfectly well programmed. Blaming
+            # it for having no rules was simply false -- an SDN island in a hybrid topology
+            # is the normal case, not a fault.
             if self._model.ovs and not any(n.reachable for n in self._model.ovs.values()):
                 why = "switches are not answering"
-            elif any(not n.port_peer for n in self._model.ovs.values()):
+            elif getattr(node, "kind", None) == KIND_OVS and not node.port_peer:
                 why = "no verified port map — cannot follow any rule"
+            elif self._trace.per_dest and not (self._trace.deadends or self._trace.loops):
+                why = (f"every destination is delivered locally "
+                       f"({len(self._trace.per_dest)} known)")
+            elif self._trace.per_dest:
+                why = "nothing reachable from here"
+            else:
+                why = "no rules programmed for any destination yet"
             p.setPen(QColor(t.faint))
             p.setFont(QFont(self.font().family(), 8))
             p.drawText(12, self.height() - _TL_H - 22, self.width() - 24, 14, Qt.AlignLeft,
@@ -506,7 +518,8 @@ class RoutingHudController(QObject):
     model_ready = Signal(object, object, object)      # (RoutingModel, positions, controllers)
 
     def __init__(self, parent, theme, router_devices, query, delay_prop, positions_of,
-                 switch_devices=None, neighbours_of=None, mac_of=None, topo_links=None,
+                 switch_devices=None, neighbours_of=None, mac_of=None, ip_of=None,
+                 topo_links=None,
                  passthrough_of=None, controllers_of=None, log=None,
                  interval_ms: int = 2500) -> None:
         super().__init__(parent)
@@ -519,6 +532,7 @@ class RoutingHudController(QObject):
         self._switch_devices = switch_devices
         self._neighbours_of = neighbours_of
         self._mac_of = mac_of
+        self._ip_of = ip_of
         self._topo_links = topo_links
         self._passthrough_of = passthrough_of
         self._controllers_of = controllers_of
@@ -609,6 +623,7 @@ class RoutingHudController(QObject):
                 self._router_devices(), switches, self._query, self._delay_prop,
                 neighbours_of=self._neighbours_of,
                 mac_of=self._mac_of() if self._mac_of else None,
+                ip_of=self._ip_of() if self._ip_of else None,
                 topo_links=self._topo_links() if self._topo_links else None,
                 passthrough=self._passthrough_of() if self._passthrough_of else None,
                 run_cache=self._run_cache)

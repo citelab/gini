@@ -330,3 +330,45 @@ def test_a_complete_map_is_still_read_only_once():
                              delay_prop=lambda rid, k: "", links=[],
                              neighbours_of=lambda rid: ["m1", "ovs2"], run_cache=cache)
     assert len([c for c in calls if "verbose" in c]) == 1
+
+
+# --- the last hop: which switch actually delivers a subnet ------------------------------------ #
+def test_the_delivery_switch_is_identified_by_subnet_membership():
+    """R1 faces BOTH OVS1 and OVS2, so "an OVS next to the router" cannot pick the right one.
+    The switch that carries a subnet is the one wired to that router AND to something
+    addressed inside it -- which is what makes a working M6->M7 ping finally light OVS2."""
+    from gini.domain.routing_model import assemble_model
+
+    m = assemble_model(
+        [], links=[("r1", "ovs1"), ("r1", "ovs2")],
+        ovs_infos=[("ovs1", "OVS1", "", {2: "r1", 3: "m3"}, None),
+                   ("ovs2", "OVS2", "", {2: "r1", 3: "m7"}, None)],
+        ip_of={"m3": "10.0.1.11", "m7": "10.0.4.10"})
+    assert m.delivery_via("r1", "10.0.4.0", "255.255.255.0") == "ovs2"
+    assert m.delivery_via("r1", "10.0.1.0", "255.255.255.0") == "ovs1"
+    assert m.delivery_via("r1", "10.0.9.0", "255.255.255.0") is None, "no switch serves it"
+
+
+def test_a_representative_target_is_never_a_routers_own_address():
+    """Aiming at a router's interface ends the walk one step early, so the delivery segment
+    into the subnet is never considered."""
+    from gini.domain.routetable import RouteEntry
+    from gini.domain.routing_model import Edge, RouterNode, RoutingModel
+
+    r = RouterNode("r1", "R1", {"10.0.4.1", "10.0.4.2"},
+                   [RouteEntry(0, "10.0.4.0", "255.255.255.0", "0.0.0.0", "tun1")])
+    m = RoutingModel([r], [Edge("r1", "r1")])
+    target = m.target_in("10.0.4.0", "255.255.255.0")
+    assert target not in ("10.0.4.1", "10.0.4.2")
+    assert target == "10.0.4.3"
+
+
+def test_subnets_come_from_connected_routes_only():
+    from gini.domain.routetable import RouteEntry
+    from gini.domain.routing_model import RouterNode, RoutingModel
+
+    r = RouterNode("r1", "R1", {"10.0.1.1"}, [
+        RouteEntry(0, "10.0.1.0", "255.255.255.0", "0.0.0.0", "tun1"),   # connected
+        RouteEntry(1, "10.0.9.0", "255.255.255.0", "10.0.1.2", "tun1"),  # via a next hop
+    ])
+    assert RoutingModel([r], []).subnets() == [("10.0.1.0", "255.255.255.0")]

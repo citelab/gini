@@ -1437,6 +1437,7 @@ class MainWindow(QMainWindow):
                             if d.type_key == "ovs"],
                         neighbours_of=self._ovs_link_peers,
                         mac_of=self._hud_mac_of,
+                        ip_of=self._hud_ip_of,
                         topo_links=lambda: [(l.source_id, l.target_id)
                                             for l in self.ctx.topology.links.values()],
                         # only self-learning L2 devices may be walked THROUGH; a machine is an
@@ -2636,6 +2637,31 @@ class MainWindow(QMainWindow):
             macs = [i.get("mac") for i in (info.get("interfaces") or []) if i.get("mac")]
             if macs:
                 out[did] = macs
+        return out
+
+    def _hud_ip_of(self) -> dict:
+        """{device_id: [ip, ...]} for EVERY device, machines included.
+
+        Hosts are not nodes on the HUD, but the model has to know which subnet one sits in:
+        the switch that delivers a subnet is identified as the one wired both to the
+        delivering router and to something addressed inside that subnet. Without this the
+        last hop of a host-to-host path -- the OVS the traffic actually crosses -- cannot
+        be worked out at all.
+        """
+        addr = getattr(self.ctx, "addressing", None) or {}
+        by_name = {d.name: d.id for d in self.ctx.topology.devices.values()}
+        out: dict = {}
+        for name, info in addr.items():
+            did = by_name.get(name)
+            if did is None:
+                continue
+            ips = []
+            for i in (info.get("interfaces") or []):
+                cidr = i.get("ip")
+                if cidr:
+                    ips.append(str(cidr).split("/")[0])
+            if ips:
+                out[did] = ips
         return out
 
     def _controller_app_live(self, d) -> None:

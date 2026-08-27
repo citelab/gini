@@ -59,7 +59,14 @@ Reply with ONLY a JSON object, no prose around it:
 {{"patterns": [{{"key": "...", "params": {{...}}}}],
   "questions": ["..."],
   "note": "one or two plain sentences for the teacher explaining what will be observed and what \
-will not"}}
+will not",
+  "coverage": {{"addressed": ["<ids of the points below your choice covers>"],
+               "omitted": [{{"id": "<id>", "why": "<one line>"}}]}}}}
+
+POINTS THAT MATTER for this activity are listed below when there are any. Every one must appear in
+`addressed` or `omitted` — leaving something out is fine WITH a reason, but leaving it out
+SILENTLY is not, because the teacher cannot approve a gap they were never shown.
+{concerns}
 """
 
 _REPAIR = """\
@@ -78,6 +85,14 @@ class Draft:
     note: str = ""
     questions: list = field(default_factory=list)
     error: str = ""
+    #: Twin objections about the assembled plan — things the enumeration says matter that the
+    #: model did not account for. Questions for the teacher, never blocks: a plan that ignores half
+    #: of what was said can be a legitimate teaching choice, and these make sure it was a choice.
+    objections: list = field(default_factory=list)
+    #: True when the model returned no coverage report at all (no schema support, or it ignored the
+    #: instruction). The Twin then objects only about the urgent tier rather than guessing what the
+    #: prose covered.
+    coverage_silent: bool = False
 
     @property
     def ok(self) -> bool:
@@ -108,8 +123,18 @@ def _first_json(text: str):
     return None
 
 
-def _prompt(catalogue_keys=None) -> str:
-    return _SYSTEM.format(catalogue=_patterns.catalogue_brief(catalogue_keys), maxq=MAX_QUESTIONS)
+def _prompt(catalogue_keys=None, concerns=None) -> str:
+    """The system prompt. `concerns` is empty on the FIRST turn by necessity: the Twin enumerates
+    against an assembled plan, and there is no plan until the model has chosen. They arrive on the
+    revision turn, which is the Twin's designed shape — draft, audit, re-ask with the enumeration
+    in hand."""
+    block = ""
+    if concerns:
+        from .twin.dialectic import concern_context
+        block = concern_context(list(concerns)) + "\nPoint ids to report on:\n" + "\n".join(
+            f"  {c.id}: {c.statement}" for c in concerns)
+    return _SYSTEM.format(catalogue=_patterns.catalogue_brief(catalogue_keys),
+                          maxq=MAX_QUESTIONS, concerns=block)
 
 
 def _to_selection(obj: dict, intent: str, params: dict, answers, deadline_s) -> Selection:
@@ -126,7 +151,7 @@ def _to_selection(obj: dict, intent: str, params: dict, answers, deadline_s) -> 
 
 
 def draft(intent: str, llm, *, params=None, answers=(), deadline_s=None,
-          catalogue_keys=None) -> Draft:
+          catalogue_keys=None, twin=None) -> Draft:
     """Draft a plan from a teacher's description.
 
     `llm` is any callable taking a prompt and returning text — matching the other agent modules,
@@ -135,6 +160,10 @@ def draft(intent: str, llm, *, params=None, answers=(), deadline_s=None,
     `answers` carries the teacher's replies to earlier questions; passing them back in is what
     makes the loop converge rather than re-asking. An empty `answers` must still yield a plan
     (design §3.3): a teacher in a hurry gets a defaulted draft to push back on.
+
+    `twin` controls the Reasoning Twin audit: None builds one, a `Twin` instance reuses it across a
+    conversation (so its history of covered concerns accumulates), and False disables it entirely —
+    with it off, this function behaves exactly as it did before the Twin existed.
     """
     if llm is None:
         raise SelectorUnavailable(
@@ -190,7 +219,92 @@ def draft(intent: str, llm, *, params=None, answers=(), deadline_s=None,
     if defects:
         return Draft(error="The drafted plan did not pass validation: "
                            + "; ".join(str(d) for d in defects[:3]), note=note)
-    return Draft(selection=selection, note=note, questions=questions)
+
+    result = Draft(selection=selection, note=note, questions=questions)
+    if twin is False:
+        return result
+
+    engine = twin if hasattr(twin, "audit") else None
+    concerns, objections = _audit(result, intent, obj, engine)
+    if not objections:
+        return result
+
+    # One revision round, now that there IS a plan to enumerate against. The model gets the
+    # concerns and is asked to account for each — the same enumeration that just audited it. A
+    # concern it can justify is defeated; one it ignores again survives to the teacher.
+    try:
+        revised = llm(_prompt(catalogue_keys, concerns)
+                      + f"\n\nTEACHER'S ACTIVITY:\n{intent.strip()}\n"
+                      + "\nYour previous choice left these unanswered:\n"
+                      + "\n".join(f"- {o.question}" for o in objections))
+        obj2 = _first_json(revised)
+    except Exception:                                 # noqa: BLE001
+        obj2 = None
+    if isinstance(obj2, dict):
+        candidate = _to_selection(obj2, intent, params or {}, answers, deadline_s)
+        if candidate.patterns and not dry_run(candidate):
+            result.selection = candidate
+            result.note = str(obj2.get("note") or result.note).strip()
+        _concerns2, objections = _audit(result, intent, obj2, engine)
+    result.objections = list(objections)
+    return result
+
+
+def _audit(result: "Draft", intent: str, reply: dict, twin=None) -> tuple:
+    """Run the Reasoning Twin over the assembled plan, in place.
+
+    The Twin is a **challenger, never a judge**: it enumerates deterministically what matters,
+    diffs the model's own coverage report against that enumeration, and turns silent misses into
+    questions for the teacher. It cannot change the selection, and switched off (`twin=False`) the
+    draft is byte-for-byte what it was before.
+
+    Failures are swallowed on purpose. An audit that could take the draft down with it would make
+    the safety feature the least safe part of the pipeline.
+    """
+    try:
+        from ..domain import aop_assemble as _asm
+        from .twin import Twin, aop_concerns, parse_coverage
+        from .twin.contracts import Coverage
+        from .twin.dialectic import TwinContext
+
+        plan = _asm.assemble(result.selection, validate_plan=False)
+        concerns = aop_concerns(intent, plan, result.selection)
+        if not concerns:
+            return (), ()
+        coverage = parse_coverage(reply.get("coverage"))
+        result.coverage_silent = coverage is None
+        if coverage is None:
+            # Coverage-silence normally means a DEGRADED model — one that cannot follow the schema
+            # — so the Twin softens to objecting only about the urgent tier rather than nagging.
+            # That posture does not fit this surface, on either pass. On the first, no concerns
+            # exist yet (there is no plan to enumerate against), so the model was never asked. On
+            # the revision, it was handed the concern ids explicitly and still said nothing — a
+            # non-answer, not a capability gap. Treating either as "degraded" made the Twin fall
+            # silent on every draft: it never engaged at all, and an ignored objection vanished
+            # instead of reaching the teacher.
+            coverage = Coverage()
+        engine = twin if isinstance(twin, Twin) else Twin()
+        objections = engine.audit(concerns, coverage, TwinContext(
+            move_kind="author", utterance=result.note, history=set()))
+        result.objections = list(objections)
+        return concerns, objections
+    except Exception:                                 # noqa: BLE001
+        result.objections = []
+        return (), ()
+
+
+def concerns_for(intent: str, selection) -> list:
+    """The Twin's enumeration for a selection — what the ratify surface shows as *considered*.
+
+    Separate from the objections so a teacher sees what was weighed as well as what went
+    unanswered: the difference between a conversation and a checklist.
+    """
+    try:
+        from ..domain import aop_assemble as _asm
+        from .twin import aop_concerns
+        return aop_concerns(intent, _asm.assemble(selection, validate_plan=False), selection)
+    except Exception:                                 # noqa: BLE001
+        return []
 
 
 _BACKTRANSLATE = """\

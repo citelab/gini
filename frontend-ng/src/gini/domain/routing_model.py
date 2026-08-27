@@ -178,7 +178,8 @@ def ovs_egress_port(flows, dest_mac: str):
 class RoutingModel:
     """A snapshot of the whole network's routing state."""
 
-    def __init__(self, routers, edges, dest_ip=None, ovs=None, mac_of=None) -> None:
+    def __init__(self, routers, edges, dest_ip=None, ovs=None, mac_of=None,
+                 ip_of=None) -> None:
         self.routers: dict = {r.rid: r for r in routers}
         # OVS transit nodes, keyed like routers but held separately: forwarding_tree()
         # iterates `routers` to pick TARGETS, and a switch is never a target.
@@ -187,6 +188,9 @@ class RoutingModel:
         # rid -> MAC to aim at when an L2 hop has to be resolved. Supplied by the glue from
         # the compiler's address map, which already carries both ip and mac per interface.
         self.mac_of: dict = dict(mac_of or {})
+        # rid -> IP(s), for HOSTS as well as routers. Hosts are not nodes, but the model has
+        # to be able to tell which subnet one sits in to identify the delivery switch.
+        self.ip_of: dict = dict(ip_of or {})
         self.edges: list = list(edges)
         self.ip_owner: dict = {ip: r.rid for r in routers for ip in r.ips}
         self._lat: dict = {frozenset((e.a, e.b)): e.latency_ms for e in self.edges}
@@ -239,6 +243,81 @@ class RoutingModel:
         # interface pointing the other way, so any match counts.
         return any(ovs_egress_port(self.ovs[mid].flows, mac) is not None
                    for mac in self.macs_of(b))
+
+    def subnets(self) -> list:
+        """Every subnet the routers say exists, as (network, netmask), from CONNECTED routes.
+
+        These are the trace's destinations. Tracing router-to-router answered "how do the
+        routers reach each other", which is not the question a student asks: they ask
+        whether M6 reaches M7. Those two hosts are ordinary members of 10.0.3.0/24 and
+        10.0.4.0/24, and neither subnet is a router, so a router-keyed trace could never
+        mention them. Aiming at the SUBNET keeps hosts off the map -- they are targets, not
+        nodes -- while making the tree span the whole addressed network.
+        """
+        out, seen = [], set()
+        for r in self.routers.values():
+            for e in r.table:
+                if not e.direct:
+                    continue
+                key = (e.network, e.netmask)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return sorted(out)
+
+    def target_in(self, network: str, netmask: str):
+        """A representative address inside a subnet that is NOT one of the routers' own.
+
+        Aiming at a router's interface would end the trace one step early -- the walk would
+        report "arrived" on reaching that router, and the final delivery segment into the
+        subnet would never be considered.
+        """
+        try:
+            net = ipaddress.IPv4Network(f"{network}/{netmask}", strict=False)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
+            return None
+        for host in net.hosts():
+            ip = str(host)
+            if ip not in self.ip_owner:
+                return ip
+        return None
+
+    def delivery_via(self, router_rid: str, network: str, netmask: str):
+        """The OVS carrying the LAST hop, from `router_rid` into the subnet it delivers to.
+
+        A router may face several switches -- R1 sits between OVS1 and OVS2 -- so "an OVS
+        next to the router" is not enough to pick the right one. The switch that carries a
+        subnet is the one wired both to that router AND to something whose address is IN the
+        subnet, which its port map already tells us.
+        """
+        try:
+            net = ipaddress.IPv4Network(f"{network}/{netmask}", strict=False)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
+            return None
+        for rid, node in self.ovs.items():
+            peers = set(node.port_peer.values())
+            if router_rid not in peers:
+                continue
+            for peer in peers:
+                if peer is None or peer == router_rid:
+                    continue
+                for ip in self.ips_of(peer):
+                    try:
+                        if ipaddress.IPv4Address(ip) in net:
+                            return rid
+                    except ipaddress.AddressValueError:
+                        continue
+        return None
+
+    def ips_of(self, rid: str) -> list:
+        """Every IP known for a node. `ip_of` is supplied by the glue for hosts, which the
+        model otherwise knows nothing about -- they are targets, not nodes."""
+        if rid in self.routers:
+            return sorted(self.routers[rid].ips)
+        v = self.ip_of.get(rid)
+        if not v:
+            return []
+        return [v] if isinstance(v, str) else list(v)
 
     def macs_of(self, rid: str) -> list:
         """Every MAC known for a node. `mac_of` accepts a bare string or a list per node."""
@@ -471,7 +550,7 @@ def contract_edges(drawn, links, passthrough) -> list:
 
 
 def assemble_model(router_infos, links=None, latency_of=None,
-                   ovs_infos=None, mac_of=None) -> RoutingModel:
+                   ovs_infos=None, mac_of=None, ip_of=None) -> RoutingModel:
     """Build a RoutingModel from per-router CLI text.
 
     router_infos: [(rid, name, route_show_text, ifconfig_show_text)]
@@ -482,6 +561,9 @@ def assemble_model(router_infos, links=None, latency_of=None,
                   draw as transit nodes. Requires `links` to route through them
                   (a--ovs, ovs--b), since a switch owns no IP for adjacency to be derived from.
     mac_of:       {rid: mac} used to ask an OVS whether a hop's destination is programmed.
+    ip_of:        {rid: ip} for HOSTS as well as routers -- hosts are not nodes, but the
+                  model must be able to tell which subnet one sits in to identify the
+                  switch that delivers that subnet (see delivery_via).
     """
     routers = [RouterNode(rid, name, parse_iface_ips(iface_text), parse_routes(route_text))
                for (rid, name, route_text, iface_text) in router_infos]
@@ -496,7 +578,7 @@ def assemble_model(router_infos, links=None, latency_of=None,
                            dict(port_peer or {}), controller, reachable=reachable))
     pairs = list(links) if links is not None else [(e.a, e.b) for e in derive_edges(routers)]
     edges = [Edge(a, b, latency_of(a, b) if latency_of else None) for (a, b) in pairs]
-    return RoutingModel(routers, edges, ovs=ovs, mac_of=mac_of)
+    return RoutingModel(routers, edges, ovs=ovs, mac_of=mac_of, ip_of=ip_of)
 
 
 def collect_router_data(routers, query, delay_prop, links=None):
@@ -521,7 +603,7 @@ def collect_router_data(routers, query, delay_prop, links=None):
 
 def collect_network_data(routers, switches, query, delay_prop, links=None,
                          neighbours_of=None, mac_of=None, topo_links=None,
-                         passthrough=None, run_cache=None):
+                         passthrough=None, run_cache=None, ip_of=None):
     """Live glue for the Network HUD: routers AND OpenFlow switches in one model.
 
     Everything beyond `collect_router_data` is about the switches:
@@ -531,6 +613,8 @@ def collect_network_data(routers, switches, query, delay_prop, links=None,
                    COMPILED, which is what fixes the OpenFlow port numbers (ovs_port_peers)
     mac_of:        {rid: mac} so an L3 hop can ask a switch whether its destination is
                    programmed; the compiler's address map already carries a mac per interface
+    ip_of:         {rid: ip} for HOSTS too -- needed to work out which switch delivers a
+                   given subnet, which is the last hop of any host-to-host path
     run_cache:     a dict the caller keeps for the lifetime of the RUN; holds the static
                    port map and the last good flow dump per switch (see below)
 
@@ -597,7 +681,7 @@ def collect_network_data(routers, switches, query, delay_prop, links=None,
         links = contract_edges(drawn, topo_links, set(passthrough or ()))
 
     return assemble_model(infos, links, latency_of=latency_of,
-                          ovs_infos=ovs_infos, mac_of=mac_of)
+                          ovs_infos=ovs_infos, mac_of=mac_of, ip_of=ip_of)
 
 
 # -- P4: convergence recording (pure; the HUD scrub renders straight off this) ------------------ #
@@ -817,7 +901,65 @@ def decision_kind(model: RoutingModel, src: str) -> str:
 
 
 def forwarding_tree(model: RoutingModel, root: str) -> TraceResult:
-    """The forwarding tree/DAG rooted at `root`, built purely from real next-hops.
+    """Reachability from `root` to every SUBNET, built purely from real next-hops.
+
+    What counts as "reachable" is the whole question this panel answers, so it is worth
+    being explicit: a destination is a SUBNET, not a router and not a host.
+
+    Routers are the wrong destination because nobody asks whether R2 reaches R1; they ask
+    whether M6 reaches M7, and those two are ordinary members of 10.0.3.0/24 and
+    10.0.4.0/24. A router-keyed trace can never mention either. Hosts are the wrong
+    destination too -- there may be hundreds, they are not decision-makers, and drawing
+    them would bury the structure that matters.
+
+    A subnet sits exactly in between. It is what a routing table actually holds, so the
+    trace stays a walk over real table entries, and every host is covered by the prefix it
+    lives in. Reaching a subnet means: some router on the path has it CONNECTED, and the
+    segment from that router into it is drawn -- including the switch that carries it.
+
+    Falls back to the older router-keyed trace when no subnet can be derived, which is the
+    case for a model assembled without connected routes.
+    """
+    if not model.subnets():
+        return _forwarding_tree_by_router(model, root)
+    res = TraceResult(root=root)
+    for network, netmask in model.subnets():
+        target = model.target_in(network, netmask)
+        if target is None:
+            continue
+        label = f"{network}/{_prefix_len(netmask)}"
+        edges, reaching, loop, deadend, ecmp = _trace_dest(model, root, target)
+        res.edges_used |= edges
+        if ecmp:
+            res.ecmp.add(label)
+        if reaching:
+            path, lat = min(reaching, key=lambda pl: (pl[1] if pl[1] is not None else 1e18,
+                                                      len(pl[0])))
+            # THE LAST HOP. Reaching the router that owns the subnet is not the same as
+            # reaching the subnet: M7 hangs off OVS2, one segment beyond R1. Without this
+            # the picture stops at the final router and the switch that actually delivers
+            # never appears -- which is precisely why a working M6->M7 ping showed nothing
+            # on the OVS carrying it.
+            via = model.delivery_via(path[-1], network, netmask)
+            if via is not None:
+                res.edges_used.add((path[-1], via))
+            res.per_dest[label] = PathResult(label, "ok", len(path) - 1, lat, path)
+            if loop:
+                res.loops.add(label)
+        elif loop:
+            res.loops.add(label)
+            res.per_dest[label] = PathResult(label, "loop", 0, None, [])
+        else:
+            res.deadends.add(label)
+            res.per_dest[label] = PathResult(label, "deadend", 0, None, [])
+    return res
+
+
+def _forwarding_tree_by_router(model: RoutingModel, root: str) -> TraceResult:
+    """Router-to-router reachability: the destination is each OTHER ROUTER.
+
+    Superseded by the subnet trace above and kept only for models with no connected routes
+    to derive subnets from.
 
     A router is multi-homed, so we trace toward EACH of a destination's interface IPs and
     keep the nearest (fewest-hop) reaching branch. Aiming only at one representative IP —
