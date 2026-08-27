@@ -220,6 +220,12 @@ class FlowHudController(QObject):
         self.refresh()
         self._poll.start(self._interval)
 
+    def reset(self) -> None:
+        """Forget every tracked flow. Called when the TOPOLOGY is swapped: the flows in the
+        tracker belong to the previous network's machines, and keeping them would chart a
+        network that is no longer on screen."""
+        self._tracker = FlowTracker()
+
     def close(self) -> None:
         self._poll.stop()
         self.hud.hide()

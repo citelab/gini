@@ -331,6 +331,10 @@ class RoutingHudController(QObject):
 
     def _on_model(self, model, positions) -> None:
         import time
+        if model is None:                           # rebuild failed — show nothing, not stale
+            if not self.hud.scrubbing:
+                self.hud.set_model(None, positions)
+            return                                  # and never record a non-state in history
         self.history.push(model, time.monotonic())
         self.hud.set_history(self.history)          # timeline live-edge / new change ticks
         if not self.hud.scrubbing:                  # don't yank a replay back to live
@@ -343,6 +347,18 @@ class RoutingHudController(QObject):
         return (collect_router_data(self._router_devices(), self._query, self._delay_prop),
                 self._positions_of())
 
+    def reset(self) -> None:
+        """Forget everything: model, convergence history, and any scrub position.
+
+        Must be called whenever the TOPOLOGY changes (open/new project, Run, Stop).
+        Without it the HUD keeps drawing the previous network's routers over the new
+        canvas -- confidently, and indistinguishably from live data.
+        """
+        self.history.clear()
+        self.hud._scrub_t = None
+        self.hud.set_history(self.history)
+        self.hud.set_model(None, {})
+
     def refresh(self) -> None:
         if self._busy:
             return
@@ -354,7 +370,11 @@ class RoutingHudController(QObject):
                 model, pos = self._build()
                 self.model_ready.emit(model, pos)
             except Exception:
-                pass
+                # A failed rebuild used to be swallowed here, which left the PREVIOUS
+                # model on screen looking live. For a HUD whose whole value is showing
+                # the network's real state, a confident stale picture is worse than an
+                # empty one -- so surface the failure by clearing instead.
+                self.model_ready.emit(None, self._positions_of())
             finally:
                 self._busy = False
         threading.Thread(target=work, daemon=True).start()

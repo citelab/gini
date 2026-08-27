@@ -20,12 +20,45 @@ from dataclasses import dataclass, field
 from .routetable import parse_routes
 
 
+# Node kinds. The HUD draws a circle for a router and a square for an OVS, and colours a
+# lit hop by HOW the decision was made -- "computed" (longest-prefix) vs "programmed" (an
+# installed flow rule). Classic switches are deliberately NOT nodes: they collapse into
+# the edge (see derive_edges), because their forwarding is self-learned and there is no
+# decision to inspect.
+KIND_ROUTER = "router"
+KIND_OVS = "ovs"
+
+
 @dataclass
 class RouterNode:
     rid: str
     name: str
     ips: set                      # every interface IP this router owns
     table: list                   # [RouteEntry] — the router's REAL table
+    kind: str = KIND_ROUTER
+
+
+@dataclass
+class OvsNode:
+    """An OpenFlow switch on the path.
+
+    An OVS is NOT an L3 decision-maker and is not traced like one. A router picks the next
+    hop and addresses the frame to that router's MAC; the switch in between only carries
+    it. So an OVS appears in the model as a TRANSIT node that splits an L3 hop
+    (R1--OVS1--R2 instead of R1--R2), and its flow table answers one narrower question:
+    can it carry this hop -- is there a rule programmed for that destination MAC?
+
+    `port_peer` maps an OpenFlow port number to the neighbour on that port. The model
+    cannot derive it (it is a fact about the drawn topology, not about any device's
+    state), so the live glue supplies it -- which also keeps this module pure and
+    testable with fake CLI text.
+    """
+    rid: str
+    name: str
+    flows: list                   # [FlowEntry] — the switch's REAL flow table
+    port_peer: dict = field(default_factory=dict)   # {of_port:int -> neighbour rid}
+    controller: str | None = None                   # rid of the OFC programming it, if any
+    kind: str = KIND_OVS
 
 
 @dataclass
@@ -83,11 +116,55 @@ def _best_entries(table, ip: str) -> list:
     return best
 
 
+def ovs_egress_port(flows, dest_mac: str):
+    """The port an OVS would send a frame for `dest_mac` out of, per its REAL flow table.
+
+    Only an EXPLICIT destination-MAC match counts. A wildcard rule (the boot-time
+    match-all -> NORMAL default, say) forwards the frame but says nothing about this
+    destination having been programmed, and reporting it as a definite next hop would
+    invent precision the switch does not have. Likewise an action of flood/controller/
+    normal is not a definite egress port.
+
+    Returns int port, or None for "no rule for this destination yet" -- which is NOT the
+    same as unreachable. A switch that has not learned a destination is mid-learning, and
+    the HUD must not render it with the router side's red dead-end ring.
+    """
+    if not dest_mac:
+        return None
+    want = dest_mac.strip().lower()
+    best_prio, best_port = None, None
+    for f in flows or []:
+        mac = (f.match or {}).get("Ethernet destination MAC address")
+        if not mac or mac.strip().lower() != want:
+            continue
+        port = None
+        for a in f.actions or []:
+            if str(a).startswith("output:"):
+                try:
+                    port = int(str(a).split(":", 1)[1])
+                except ValueError:
+                    port = None
+                break
+        if port is None:
+            continue
+        prio = f.priority if f.priority is not None else 0
+        if best_prio is None or prio > best_prio:
+            best_prio, best_port = prio, port
+    return best_port
+
+
 class RoutingModel:
     """A snapshot of the whole network's routing state."""
 
-    def __init__(self, routers, edges, dest_ip=None) -> None:
+    def __init__(self, routers, edges, dest_ip=None, ovs=None, mac_of=None) -> None:
         self.routers: dict = {r.rid: r for r in routers}
+        # OVS transit nodes, keyed like routers but held separately: forwarding_tree()
+        # iterates `routers` to pick TARGETS, and a switch is never a target.
+        self.ovs: dict = {n.rid: n for n in (ovs or [])}
+        self.nodes: dict = {**self.routers, **self.ovs}     # everything the HUD draws
+        # rid -> MAC to aim at when an L2 hop has to be resolved. Supplied by the glue from
+        # the compiler's address map, which already carries both ip and mac per interface.
+        self.mac_of: dict = dict(mac_of or {})
         self.edges: list = list(edges)
         self.ip_owner: dict = {ip: r.rid for r in routers for ip in r.ips}
         self._lat: dict = {frozenset((e.a, e.b)): e.latency_ms for e in self.edges}
@@ -104,6 +181,37 @@ class RoutingModel:
 
     def neighbors(self, rid: str) -> list:
         return [(e.b if e.a == rid else e.a) for e in self.edges if rid in (e.a, e.b)]
+
+    def via(self, a: str, b: str):
+        """The OVS sitting between routers `a` and `b`, if the hop crosses one.
+
+        When the segment joining two routers carries an OVS, the glue supplies links as
+        a--ovs and ovs--b rather than a--b, so the switch is the common OVS neighbour.
+        """
+        if not self.ovs:
+            return None
+        na = {n for n in self.neighbors(a) if n in self.ovs}
+        for n in self.neighbors(b):
+            if n in na:
+                return n
+        return None
+
+    def expand_hop(self, a: str, b: str) -> list:
+        """One L3 hop as the sub-edges the HUD should light: [(a,b)] normally, or
+        [(a,ovs),(ovs,b)] when it crosses an SDN segment."""
+        mid = self.via(a, b)
+        return [(a, b)] if mid is None else [(a, mid), (mid, b)]
+
+    def hop_carried(self, a: str, b: str):
+        """Whether the OVS on this hop has a rule PROGRAMMED for the destination.
+
+        Returns None when the hop crosses no OVS (nothing to say), True/False otherwise.
+        False means "not programmed yet", not "unreachable" -- see ovs_egress_port.
+        """
+        mid = self.via(a, b)
+        if mid is None:
+            return None
+        return ovs_egress_port(self.ovs[mid].flows, self.mac_of.get(b)) is not None
 
 
 # -- the authentic trace ----------------------------------------------------------------------- #
@@ -137,7 +245,10 @@ def _trace_dest(model: RoutingModel, root: str, target: str):
         if len(uniq) > 1:
             state["ecmp"] = True
         for owner in uniq:
-            edges.add((cur, owner))
+            # Light the hop as the sub-edges it is actually made of: a hop across an SDN
+            # segment becomes router--ovs--router, so the switch shows as a transit node
+            # rather than the hop pretending to be a direct link.
+            edges.update(model.expand_hop(cur, owner))
             if owner in path:                             # forwarding loop — record the closing hop
                 state["loop"] = True
                 continue
@@ -211,19 +322,29 @@ def derive_edges(routers) -> list:
     return out
 
 
-def assemble_model(router_infos, links=None, latency_of=None) -> RoutingModel:
+def assemble_model(router_infos, links=None, latency_of=None,
+                   ovs_infos=None, mac_of=None) -> RoutingModel:
     """Build a RoutingModel from per-router CLI text.
 
     router_infos: [(rid, name, route_show_text, ifconfig_show_text)]
     links:        [(a_rid, b_rid)] to draw; None → derive adjacency from connected routes (handles
                   switch-mediated segments)
     latency_of:   optional callable(a_rid, b_rid) -> float|None  (configured delay-VNF latency)
+    ovs_infos:    [(rid, name, openflow_entry_text, port_peer, controller_rid)] — SDN switches to
+                  draw as transit nodes. Requires `links` to route through them
+                  (a--ovs, ovs--b), since a switch owns no IP for adjacency to be derived from.
+    mac_of:       {rid: mac} used to ask an OVS whether a hop's destination is programmed.
     """
     routers = [RouterNode(rid, name, parse_iface_ips(iface_text), parse_routes(route_text))
                for (rid, name, route_text, iface_text) in router_infos]
+    ovs = []
+    for rid, name, entry_text, port_peer, controller in (ovs_infos or []):
+        from .flowtable import parse as parse_flows       # local: keeps import graph flat
+        ovs.append(OvsNode(rid, name, parse_flows(entry_text or ""),
+                           dict(port_peer or {}), controller))
     pairs = list(links) if links is not None else [(e.a, e.b) for e in derive_edges(routers)]
     edges = [Edge(a, b, latency_of(a, b) if latency_of else None) for (a, b) in pairs]
-    return RoutingModel(routers, edges)
+    return RoutingModel(routers, edges, ovs=ovs, mac_of=mac_of)
 
 
 def collect_router_data(routers, query, delay_prop, links=None):
@@ -248,14 +369,34 @@ def collect_router_data(routers, query, delay_prop, links=None):
 
 # -- P4: convergence recording (pure; the HUD scrub renders straight off this) ------------------ #
 def model_signature(model: RoutingModel) -> tuple:
-    """A hashable fingerprint of the network's routing state: every router's table rows
-    (plus its interface IPs). Two models with the same signature forward identically."""
+    """A hashable fingerprint of the network's forwarding state: every router's table rows
+    (plus its interface IPs), and every OVS's FORWARDING PROJECTION.
+
+    The projection matters. A flow table also carries packet counters, byte counts, ages
+    and timeouts, all of which change on every single poll. Hashing the raw table would
+    make every refresh look like a convergence event, so RouteHistory would record a
+    snapshot each time and the scrub timeline would fill with noise until it was useless.
+    Only (destination MAC -> egress port) is a forwarding fact; everything else is
+    telemetry. Two models with the same signature forward identically.
+    """
     sig = []
     for rid in sorted(model.routers):
         r = model.routers[rid]
         rows = tuple(sorted((e.network, e.netmask, e.nexthop, e.iface,
                              getattr(e, "origin", "")) for e in r.table))
         sig.append((rid, tuple(sorted(r.ips)), rows))
+    for rid in sorted(getattr(model, "ovs", {})):
+        n = model.ovs[rid]
+        proj = set()
+        for f in n.flows or []:
+            mac = (f.match or {}).get("Ethernet destination MAC address")
+            if not mac:
+                continue                      # wildcard rules say nothing per-destination
+            for a in f.actions or []:
+                if str(a).startswith("output:"):
+                    proj.add((mac.strip().lower(), str(a)))
+                    break
+        sig.append((rid, tuple(sorted(proj))))
     return tuple(sig)
 
 

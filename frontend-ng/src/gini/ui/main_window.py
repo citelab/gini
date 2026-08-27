@@ -1414,15 +1414,24 @@ class MainWindow(QMainWindow):
                     self._oshud_act.setChecked(False)
                 if getattr(self, "_rhud", None) is None:
                     from .routing_hud import RoutingHudController
-                    devs = self.ctx.topology.devices
+                    # Read the device dict THROUGH self.ctx on every call. Capturing
+                    # `devs = self.ctx.topology.devices` once bound the HUD to whatever
+                    # topology happened to be open when it was first toggled on: loading a
+                    # project REPLACES ctx.topology (main_window ~1891), so the closure kept
+                    # querying the previous network's routers and the HUD went on drawing
+                    # them, live-looking, over the new canvas.
                     self._rhud = RoutingHudController(
                         self.canvas, self.theme,
-                        router_devices=lambda: [(d.id, d.name) for d in devs.values()
-                                                if d.type_key in ("router", "firewall")],
+                        router_devices=lambda: [
+                            (d.id, d.name) for d in self.ctx.topology.devices.values()
+                            if d.type_key in ("router", "firewall")],
                         query=self.element_query,
-                        delay_prop=lambda rid, k: devs[rid].properties.get(k, "") if rid in devs
-                        else "",
-                        positions_of=lambda: {d.id: (d.x, d.y) for d in devs.values()})
+                        delay_prop=lambda rid, k: (
+                            self.ctx.topology.devices[rid].properties.get(k, "")
+                            if rid in self.ctx.topology.devices else ""),
+                        positions_of=lambda: {d.id: (d.x, d.y)
+                                              for d in self.ctx.topology.devices.values()})
+                self._rhud.reset()          # a fresh topology has no shared convergence history
                 self._rhud.show_topright()
             elif getattr(self, "_rhud", None) is not None:
                 self._rhud.close()
@@ -1450,10 +1459,12 @@ class MainWindow(QMainWindow):
                 if getattr(self, "_fhud", None) is None:
                     from .flow_hud import FlowHudController
                     from ..services.compiler import _role
-                    devs = self.ctx.topology.devices
+                    # Read through self.ctx every call: loading a project REPLACES
+                    # ctx.topology, so a captured devices dict pins this HUD to the
+                    # topology that was open when it was first toggled on.
                     self._fhud = FlowHudController(
                         self.canvas, self.theme,
-                        machines=lambda: [d.name for d in devs.values()
+                        machines=lambda: [d.name for d in self.ctx.topology.devices.values()
                                           if _role(d.type_key) == "machine"],
                         query=self._machine_shell,   # docker exec `ss -tin` in the station
                         window_getter=lambda: int(
@@ -1478,10 +1489,10 @@ class MainWindow(QMainWindow):
                         getattr(self, act_attr).setChecked(False)
                 if getattr(self, "_mhud", None) is None:
                     from .mcast_hud import McastHudController
-                    devs = self.ctx.topology.devices
+                    # Read through self.ctx every call — see the Routing HUD note above.
                     self._mhud = McastHudController(
                         self.canvas, self.theme,
-                        routers=lambda: [d.name for d in devs.values()
+                        routers=lambda: [d.name for d in self.ctx.topology.devices.values()
                                          if d.type_key in ("router", "firewall")],
                         query=self.element_query)
                 self._mhud.show_topright()
@@ -1889,6 +1900,18 @@ class MainWindow(QMainWindow):
         if rec is not None:
             rec.note_load(getattr(topo, "name", "") or "an experiment", topo)
         self.ctx.topology = topo
+        # A different network is a different history. Any HUD left open across the swap must
+        # forget what it recorded, or its convergence timeline mixes the previous topology's
+        # events with this one's and the scrub replays a network that is no longer on screen.
+        # (The live view corrects itself on the next poll now that the HUDs read the device
+        # dict through self.ctx, but recorded history has no such self-correction.)
+        for _h in ("_rhud", "_fhud", "_mhud", "_oshud"):
+            _hud = getattr(self, _h, None)
+            if _hud is not None and hasattr(_hud, "reset"):
+                try:
+                    _hud.reset()
+                except Exception:                       # a HUD reset must never block a load
+                    pass
         topo.prefix_overrides = dict(self.ctx.settings.name_prefixes)   # apply naming prefs
         self.ctx.selected_id = None
         if hasattr(self, "_manual_addr_act"):

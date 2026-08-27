@@ -216,6 +216,12 @@ class McastHudController(QObject):
         self.refresh()
         self._poll.start(self._interval)
 
+    def reset(self) -> None:
+        """Forget every tracked group. Called when the TOPOLOGY is swapped: the membership
+        belongs to the previous network's routers, and keeping it would show a tree for a
+        network that is no longer on screen."""
+        self._tracker = McastTracker()
+
     def close(self) -> None:
         self._poll.stop()
         self.hud.hide()
