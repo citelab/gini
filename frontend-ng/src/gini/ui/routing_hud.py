@@ -151,19 +151,31 @@ class RoutingHud(QWidget):
         bot = m + (_TL_H if (self._history is not None and len(self._history) > 0) else 0)
         w, h = self.width() - 2 * m, self.height() - m - bot
         pts = {r: self._positions[r] for r in rids if r in self._positions}
-        if len(pts) < len(rids) or not pts:          # missing positions → circle layout fallback
+        if not pts:                                  # nothing placed yet → ring them
             n = max(len(rids), 1)
             cx, cy, rad = self.width() / 2, self.height() / 2, min(w, h) / 2 - _NODE_R
             return {r: QPointF(cx + rad * math.cos(2 * math.pi * i / n),
                                cy + rad * math.sin(2 * math.pi * i / n))
                     for i, r in enumerate(rids)}
+        # Lay out only what we HAVE a position for.
+        #
+        # This used to fall back to the ring whenever a SINGLE node was missing one, so the
+        # whole diagram jumped from the topology's real shape to a circle and back --
+        # reported as "rendering is flaky", and worst right after Run. The cause is a race
+        # rather than missing data: _build() runs on a worker thread and reads ctx.topology
+        # through several separate callables, while Run REPLACES ctx.topology underneath
+        # them. For one poll the model can hold a node id from the outgoing topology while
+        # positions come from the incoming one.
+        #
+        # Dropping one unplaceable node for one poll is a far smaller lie than relocating
+        # every node that IS placed.
         xs = [p[0] for p in pts.values()]; ys = [p[1] for p in pts.values()]
         minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
         sx = (maxx - minx) or 1.0; sy = (maxy - miny) or 1.0
         scale = min(w / sx, h / sy)
         ox = m + (w - sx * scale) / 2; oy = m + (h - sy * scale) / 2
         return {r: QPointF(ox + (pts[r][0] - minx) * scale, oy + (pts[r][1] - miny) * scale)
-                for r in rids}
+                for r in pts}
 
     # -- paint ------------------------------------------------------------- #
     def paintEvent(self, _e) -> None:  # noqa: N802
@@ -523,6 +535,15 @@ class RoutingHudController(QObject):
 
     def _on_model(self, model, positions, controllers=None) -> None:
         import time
+        # A poll that straddled a topology swap is not a state observation. _build() runs on
+        # a worker thread and reads ctx.topology through several callables; Run REPLACES
+        # ctx.topology underneath them, so one poll can hold a node from the outgoing
+        # topology and positions from the incoming one. Rendering that means every node
+        # jumps as the layout rescales around whatever survived -- the "flaky rendering"
+        # seen when the HUD is open before Run. Keep the previous picture and wait: the next
+        # poll, 2.5 s later, is consistent.
+        if model is not None and positions and any(r not in positions for r in model.nodes):
+            return
         self.hud._controllers = dict(controllers or {})
         if model is None:                           # rebuild failed — show nothing, not stale
             if not self.hud.scrubbing:

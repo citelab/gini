@@ -294,3 +294,41 @@ def test_a_switch_going_quiet_is_reported_once_and_so_is_its_recovery(app):
         _poll(ctrl, state)
     assert len(logs) == 2, f"one line down, one line back up — got {logs}"
     assert "no answer" in logs[0] and "answering again" in logs[1]
+
+
+# --- "rendering is flaky", reported with the HUD open across Run --------------------------- #
+def test_one_unplaceable_node_does_not_relocate_every_other_node(app):
+    """The layout used to fall back to a RING whenever a single node lacked a position, so
+    the whole diagram jumped from the topology's real shape to a circle and back."""
+    h = _hud(app); h.resize(360, 300)
+    full = h._fit()
+    assert len(full) == 3
+
+    h._positions = {"R1": (0, 0), "R2": (100, 0)}      # R3's position went missing
+    partial = h._fit()
+    assert set(partial) == {"R1", "R2"}, "the unplaceable node is simply not drawn"
+    # and the survivors keep a sane left-to-right order rather than being rung around a circle
+    assert partial["R1"].x() < partial["R2"].x()
+    h.close()
+
+
+def test_a_poll_that_straddled_a_topology_swap_is_discarded(app):
+    """_build() reads ctx.topology through several callables on a worker thread while Run
+    REPLACES it, so one poll can carry a node from the outgoing topology and positions from
+    the incoming one. Rendering that rescales the layout around whatever survived."""
+    from gini.ui.routing_hud import RoutingHudController
+    ctrl = RoutingHudController(
+        None, _theme(app), router_devices=lambda: [], query=lambda n, c: "",
+        delay_prop=lambda rid, k: "", positions_of=lambda: {})
+    good_pos = {"R1": (0, 0), "R2": (100, 0), "R3": (200, 0)}
+    ctrl._on_model(_model(), good_pos, {})
+    assert ctrl.hud._model is not None
+    before = ctrl.hud._fit()
+
+    # positions for a DIFFERENT topology: none of the model's nodes are in it
+    ctrl._on_model(_model(), {"X1": (0, 0)}, {})
+    assert ctrl.hud._fit() == before, "the inconsistent poll must not move anything"
+
+    # ...and a consistent poll is accepted again
+    ctrl._on_model(_model(), good_pos, {})
+    assert ctrl.hud._fit() == before
