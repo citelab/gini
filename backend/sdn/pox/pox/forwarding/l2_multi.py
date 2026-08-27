@@ -65,20 +65,23 @@ FLOOD_HOLDDOWN = 5
 # nothing to say why. Raised so a path stays visible long enough to actually discuss, and
 # matched to gini.samples.switch (30 / 120), which had already settled on this order.
 #
-# WATCH THE TABLE. The gRouter's table holds OPENFLOW_MAX_FLOWTABLE_ENTRIES = 100
-# (openflow_defs.h:67), and _install_path below matches with `ofp_match.from_packet()` --
-# a full 12-field match, so this app installs ONE ENTRY PER MICROFLOW, not per
-# destination. Every second of hard timeout is another second each microflow occupies a
-# slot. traceroute is the case that bites: each probe carries a fresh UDP destination
-# port, so ~90 probes are ~90 distinct entries, and it exhausted this table once already.
+# These are SAFE TO BE GENEROUS now, which they were not before. The gRouter's table holds
+# OPENFLOW_MAX_FLOWTABLE_ENTRIES = 100 (openflow_defs.h:67) and _install_path below matches
+# with `ofp_match.from_packet()` -- a full 12-field match, so this app installs ONE ENTRY
+# PER MICROFLOW, not per destination. A full table used to REFUSE every further rule, so a
+# long hard timeout meant a traceroute (~90 probes, each a fresh UDP port) could jam the
+# switch until its entries aged out. Short timeouts were the workaround, and a poor one:
+# they evict rules that are still carrying traffic while doing nothing about a burst that
+# genuinely overflows.
 #
-# Hence the env overrides: a traceroute-heavy or long-running lab can put these back down
-# without editing vendored POX. Set GINI_FLOW_IDLE_TIMEOUT / GINI_FLOW_HARD_TIMEOUT on the
-# controller container (0 in OpenFlow means "never expire" -- do not use it here).
+# openflow_flowtable_add now evicts the least recently matched entry instead of refusing,
+# so capacity and staleness are handled separately -- eviction deals with pressure, these
+# timeouts deal with rules nobody is using. That gRouter change is what makes 60/120
+# reasonable; it needs a `gini-grouter` image rebuild to be in effect.
 #
-# The durable fix is to narrow the match to dl_dst, the way gini.samples.switch does, which
-# makes entries per-destination and removes the tension entirely. That changes this app's
-# forwarding semantics, so it is deliberately NOT done here.
+# The env overrides remain for labs that want stock POX behaviour or faster churn: set
+# GINI_FLOW_IDLE_TIMEOUT / GINI_FLOW_HARD_TIMEOUT on the controller container (0 in
+# OpenFlow means "never expire" -- do not use it here).
 import os as _os
 
 
