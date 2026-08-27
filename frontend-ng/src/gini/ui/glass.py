@@ -1,4 +1,4 @@
-"""Shared frosted-glass look for the on-canvas HUD overlays (Routing HUD, Flow HUD).
+"""Shared frosted-glass look for the on-canvas HUD overlays (Network HUD, Flow HUD).
 
 Two ingredients make a panel read as glass: the widget must be a genuinely translucent
 pane so the canvas shows through it (`apply_glass`), and the fill must be a soft vertical

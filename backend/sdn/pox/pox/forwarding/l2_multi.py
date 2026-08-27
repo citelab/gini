@@ -56,9 +56,42 @@ waiting_paths = {}
 # Time to not flood in seconds
 FLOOD_HOLDDOWN = 5
 
-# Flow timeouts
-FLOW_IDLE_TIMEOUT = 10
-FLOW_HARD_TIMEOUT = 30
+# Flow timeouts.
+#
+# GINI PATCH: stock POX uses 10 / 30, which means every rule this app installs is gone
+# within thirty seconds of the last packet no matter what. That is correct reactive-SDN
+# behaviour, but it makes the switches unobservable for teaching: run a ping, look at the
+# Network HUD or `openflow entry all` a moment later, and the flow table is empty with
+# nothing to say why. Raised so a path stays visible long enough to actually discuss, and
+# matched to gini.samples.switch (30 / 120), which had already settled on this order.
+#
+# WATCH THE TABLE. The gRouter's table holds OPENFLOW_MAX_FLOWTABLE_ENTRIES = 100
+# (openflow_defs.h:67), and _install_path below matches with `ofp_match.from_packet()` --
+# a full 12-field match, so this app installs ONE ENTRY PER MICROFLOW, not per
+# destination. Every second of hard timeout is another second each microflow occupies a
+# slot. traceroute is the case that bites: each probe carries a fresh UDP destination
+# port, so ~90 probes are ~90 distinct entries, and it exhausted this table once already.
+#
+# Hence the env overrides: a traceroute-heavy or long-running lab can put these back down
+# without editing vendored POX. Set GINI_FLOW_IDLE_TIMEOUT / GINI_FLOW_HARD_TIMEOUT on the
+# controller container (0 in OpenFlow means "never expire" -- do not use it here).
+#
+# The durable fix is to narrow the match to dl_dst, the way gini.samples.switch does, which
+# makes entries per-destination and removes the tension entirely. That changes this app's
+# forwarding semantics, so it is deliberately NOT done here.
+import os as _os
+
+
+def _timeout(name, default):
+    try:
+        v = int(_os.environ.get(name, default))
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+FLOW_IDLE_TIMEOUT = _timeout("GINI_FLOW_IDLE_TIMEOUT", 60)
+FLOW_HARD_TIMEOUT = _timeout("GINI_FLOW_HARD_TIMEOUT", 120)
 
 # How long is allowable to set up a path?
 PATH_SETUP_TIME = 4

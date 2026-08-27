@@ -448,7 +448,7 @@ class Inspector(QWidget):
         if (addr["role"] == "router"
                 and getattr(self.ctx.topology, "routing_mode", "static") == "dynamic"):
             lines.append("<i>dynamic routing — further routes come from the control-plane "
-                         "protocol at runtime (see the Routing HUD)</i>")
+                         "protocol at runtime (see the Network HUD)</i>")
         return "<br>".join(lines)
 
     def _neighbors(self, name: str) -> str:

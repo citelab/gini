@@ -830,8 +830,8 @@ class MainWindow(QMainWindow):
                                self._delete_selected)
         self._delete_act.setEnabled(False)
         self._rhud_act = act("rhud", "router",
-                             "Routing HUD — model view of the network's routing; long-press a "
-                             "router for its shortest-path tree", self._toggle_routing_hud,
+                             "Network HUD — model view of the network's real forwarding; click a "
+                             "router for its forwarding tree, or a switch for its L2 fabric", self._toggle_routing_hud,
                              checkable=True)
         self._oshud_act = act("oshud", "host",
                               "OS HUD — X-ray a running xv6 kernel: the causal story of a launch "
@@ -1395,8 +1395,8 @@ class MainWindow(QMainWindow):
         return False
 
     def _toggle_routing_hud(self, checked: bool) -> None:
-        """Show/hide the Routing HUD — a model view of the whole network's authentic routing state
-        (long-press a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
+        """Show/hide the Network HUD — a model view of the whole network's authentic forwarding
+        (click a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
         try:
             if checked:
                 # only one HUD at a time — turn the other HUDs off if they are on
@@ -1430,13 +1430,32 @@ class MainWindow(QMainWindow):
                             self.ctx.topology.devices[rid].properties.get(k, "")
                             if rid in self.ctx.topology.devices else ""),
                         positions_of=lambda: {d.id: (d.x, d.y)
-                                              for d in self.ctx.topology.devices.values()})
+                                              for d in self.ctx.topology.devices.values()},
+                        switch_devices=lambda: [
+                            (d.id, d.name, self._ovs_controller(d.id))
+                            for d in self.ctx.topology.devices.values()
+                            if d.type_key == "ovs"],
+                        neighbours_of=self._ovs_link_peers,
+                        mac_of=self._hud_mac_of,
+                        topo_links=lambda: [(l.source_id, l.target_id)
+                                            for l in self.ctx.topology.links.values()],
+                        # only self-learning L2 devices may be walked THROUGH; a machine is an
+                        # endpoint, and bridging one would invent a link that does not exist
+                        passthrough_of=lambda: {
+                            d.id for d in self.ctx.topology.devices.values()
+                            if d.type_key in ("switch", "hub")},
+                        controllers_of=lambda: {
+                            d.id: d.name for d in self.ctx.topology.devices.values()
+                            if d.type_key == "controller"},
+                        # Says why the HUD is dark, in the Console. A dark panel has several
+                        # causes that look identical on screen; this names the one in force.
+                        log=lambda m: self.ctx.bus.log.emit("info", m))
                 self._rhud.reset()          # a fresh topology has no shared convergence history
                 self._rhud.show_topright()
             elif getattr(self, "_rhud", None) is not None:
                 self._rhud.close()
         except Exception as e:
-            self.ctx.bus.log.emit("error", f"Routing HUD: {e}")
+            self.ctx.bus.log.emit("error", f"Network HUD: {e}")
 
     def _toggle_flow_hud(self, checked: bool) -> None:
         """Show/hide the Flow HUD — live TCP congestion windows read from `ss -tin` on the
@@ -1489,7 +1508,7 @@ class MainWindow(QMainWindow):
                         getattr(self, act_attr).setChecked(False)
                 if getattr(self, "_mhud", None) is None:
                     from .mcast_hud import McastHudController
-                    # Read through self.ctx every call — see the Routing HUD note above.
+                    # Read through self.ctx every call — see the Network HUD note above.
                     self._mhud = McastHudController(
                         self.canvas, self.theme,
                         routers=lambda: [d.name for d in self.ctx.topology.devices.values()
@@ -2006,7 +2025,7 @@ class MainWindow(QMainWindow):
         self.ctx.log(
             "Dynamic routing: on — routers boot with connected routes only; run a "
             "control-plane protocol (e.g. RIP) to build the rest. Watch it converge "
-            "in the Routing HUD."
+            "in the Network HUD."
             if on else
             "Dynamic routing: off — static routes are computed and pre-installed at boot.",
             "info")
@@ -2560,6 +2579,64 @@ class MainWindow(QMainWindow):
             self._k8s_live(d, scale=False)
         elif d.type_key == "controller":                  # App changed -> bounce just POX
             self._controller_app_live(d)
+
+    # -- Network HUD glue: the SDN facts the routing model cannot derive ------------------- #
+    def _ovs_controller(self, did: str):
+        """The controller device linked to this OVS, or None.
+
+        Mirrors the compiler's rule (compiler.py:732): only an OVS↔controller link is a real
+        association, and it drives the dashed control-plane overlay — never a forwarding edge.
+        """
+        # .values(): `links` is a dict, and its insertion order is the same order the
+        # compiler sees (compiler.py:709 iterates topo.links.values()) — which is what makes
+        # the port numbering below reproducible.
+        for l in self.ctx.topology.links.values():
+            for a, b in ((l.source_id, l.target_id), (l.target_id, l.source_id)):
+                if a == did:
+                    d = self.ctx.topology.devices.get(b)
+                    if d is not None and d.type_key == "controller":
+                        return b
+        return None
+
+    def _ovs_link_peers(self, did: str) -> list:
+        """This OVS's neighbours in the order its links were COMPILED — which is what fixes
+        the OpenFlow port numbers (see routing_model.ovs_port_peers).
+
+        Control links are excluded because the compiler drops them from `kept`
+        (compiler.py:726-733) before numbering ports; counting one here would shift every
+        port by one and point every L2 hop at the wrong neighbour. The mapping is checked
+        against each port's MAC afterwards, so a divergence drops the port instead of
+        drawing a false edge.
+        """
+        out = []
+        for l in self.ctx.topology.links.values():
+            if getattr(l, "kind", "link") == "attach":
+                continue
+            peer = (l.target_id if l.source_id == did
+                    else l.source_id if l.target_id == did else None)
+            if peer is None:
+                continue
+            d = self.ctx.topology.devices.get(peer)
+            if d is not None and d.type_key == "controller":
+                continue
+            out.append(peer)
+        return out
+
+    def _hud_mac_of(self) -> dict:
+        """{device_id: [mac, …]} from the compiled address map, so an L3 hop can ask a switch
+        whether its destination is programmed. A router is multi-homed, hence a LIST: the
+        frame is addressed to whichever of its MACs faces the shared segment."""
+        addr = getattr(self.ctx, "addressing", None) or {}
+        by_name = {d.name: d.id for d in self.ctx.topology.devices.values()}
+        out: dict = {}
+        for name, info in addr.items():
+            did = by_name.get(name)
+            if did is None:
+                continue
+            macs = [i.get("mac") for i in (info.get("interfaces") or []) if i.get("mac")]
+            if macs:
+                out[did] = macs
+        return out
 
     def _controller_app_live(self, d) -> None:
         """The App property changed on a running controller: restart THAT container.
