@@ -24,6 +24,7 @@ concurrency limit and an honest "you're 4th in line" beats a spinner that lies.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -31,8 +32,42 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-OLLAMA_URL = "http://localhost:11434"
-MODEL = "llama3.1"
+OLLAMA_URL = os.environ.get("AI_URL", "http://localhost:11434")
+MODEL = os.environ.get("AI_MODEL", "llama3.1")
+# TWO limits, because "slow" and "dead" are different failures and one number cannot express both.
+# IDLE is how long we tolerate silence — nothing arriving at all. TOTAL is the whole budget for a
+# request that IS producing. A reasoning model legitimately needs a big total and a small idle;
+# collapsing them forces the idle case to wait out the total, so a hung request takes minutes to
+# notice.
+TIMEOUT_S = float(os.environ.get("AI_TIMEOUT", "300"))
+IDLE_S = float(os.environ.get("AI_IDLE_TIMEOUT", "45"))
+
+
+class ModelUnavailable(RuntimeError):
+    """The model host answered, but not with a completion."""
+
+
+class ModelTooSlow(TimeoutError):
+    """It was producing tokens the whole time and still ran past the budget. Distinct from silence
+    on purpose: the fix for this is a different model or a bigger budget, whereas the fix for
+    silence is usually that nothing is listening."""
+
+
+def _strip_thinking(text: str) -> str:
+    """Drop a reasoning trace, keeping the answer. Delegates to gBuilder's implementation so the
+    two clients cannot disagree about what a `<think>` block looks like; falls back to a local
+    version if the GINI package is unavailable (a relay that cannot author still serves ProfAI)."""
+    try:
+        from gini.agent.llm.ollama import strip_thinking
+        return strip_thinking(text)
+    except Exception:                                    # noqa: BLE001
+        out = text or ""
+        for close in ("</think>", "<|/think|>", "<|end_think|>"):
+            if close in out:
+                out = out.rsplit(close, 1)[1]
+        return re.sub(r"<think>.*?</think>", "", out, flags=re.S).strip()
+
+
 MAX_CONCURRENT = 2                 # generations at once — a laptop is not a datacentre
 RATE_LIMIT_S = 8                   # per student, between AI requests
 
@@ -116,8 +151,10 @@ class Persona:
 
 # --- the model --------------------------------------------------------------- #
 class Ollama:
-    def __init__(self, url: str = OLLAMA_URL, model: str = MODEL, timeout: float = 90.0) -> None:
+    def __init__(self, url: str = OLLAMA_URL, model: str = MODEL,
+                 timeout: float = TIMEOUT_S, idle_s: float = IDLE_S) -> None:
         self.url, self.model, self.timeout = url.rstrip("/"), model, timeout
+        self.idle_s = idle_s
 
     def available(self) -> bool:
         try:
@@ -126,15 +163,96 @@ class Ollama:
         except Exception:                                # noqa: BLE001
             return False
 
-    def chat(self, system: str, user: str) -> str:
-        body = json.dumps({"model": self.model, "stream": False,
-                           "messages": [{"role": "system", "content": system},
-                                        {"role": "user", "content": user}]}).encode()
-        req = urllib.request.Request(self.url + "/api/chat", data=body, method="POST",
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            obj = json.loads(r.read().decode())
-        return (obj.get("message") or {}).get("content", "").strip()
+    def chat(self, system: str, user: str, *, json_mode: bool = False,
+             num_predict: int = 0, on_chunk=None) -> str:
+        """One completion. Returns the answer with any reasoning trace removed.
+
+        **Thinking models.** A reasoning model generates its whole chain of thought before the
+        answer, and this call is non-streaming — so the caller waits for reasoning *and* answer
+        before seeing a byte. On an 8B model that routinely blows a 90s timeout, which surfaces as
+        "the model is timing out" and looks like a network fault rather than the model being asked
+        to think out loud. Three things stop that:
+
+        * `format: json` (when `json_mode`) constrains the output to a JSON value, so the model
+          cannot emit a prose preamble at all. This is the big one — it cuts the generated tokens
+          to roughly what the answer needs.
+        * `think: false` asks models that support the flag not to reason. Older Ollama builds
+          reject unknown fields, so a 400 falls back to a plain request rather than failing.
+        * `num_predict` caps the output. Our replies are small objects; without a cap a model that
+          starts rambling can run for minutes.
+
+        `strip_thinking` still runs on the result, because a model can emit `<think>` blocks even
+        when asked not to, and a reasoning trace left in place would defeat the JSON parser.
+        """
+        base = {"model": self.model, "stream": True,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": user}]}
+        opts = {}
+        if num_predict:
+            opts["num_predict"] = int(num_predict)
+        rich = dict(base, think=False, **({"options": opts} if opts else {}),
+                    **({"format": "json"} if json_mode else {}))
+
+        for payload in (rich, base):            # graceful across Ollama versions
+            try:
+                return self._stream(payload, on_chunk)
+            except urllib.error.HTTPError as e:
+                if e.code != 400 or payload is base:
+                    raise
+        raise ModelUnavailable("the model returned nothing")        # unreachable; for the reader
+
+    def _stream(self, payload: dict, on_chunk=None) -> str:
+        """Read Ollama's NDJSON stream, enforcing an IDLE limit and a TOTAL budget.
+
+        Streaming is not about speed — it is about being able to tell **slow** from **dead**. With a
+        single wall-clock timeout those are the same event, so a reasoning model that is working
+        perfectly well looks identical to a hung one, and the only tuning available is to raise one
+        number until the worst case fits. That number then has to be large, which means a genuinely
+        stuck request also takes that long to notice.
+
+        Two limits, each meaning one thing:
+          * `idle_s` — nothing arrived for this long. The model is stuck; fail fast and say so.
+          * `timeout` — total budget. It IS producing, but has gone on too long.
+
+        The idle limit comes free: `urlopen`'s timeout applies to each socket read, so while chunks
+        keep arriving the clock keeps resetting.
+        """
+        req = urllib.request.Request(
+            self.url + "/api/chat", data=json.dumps(payload).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        started = time.monotonic()
+        parts: list[str] = []
+        thinking = False
+        with urllib.request.urlopen(req, timeout=self.idle_s) as r:
+            for raw in r:                       # one JSON object per line
+                if not raw.strip():
+                    continue
+                try:
+                    obj = json.loads(raw.decode("utf-8", "replace"))
+                except json.JSONDecodeError:
+                    continue                    # a partial line; the next read completes it
+                if obj.get("error"):
+                    raise ModelUnavailable(str(obj["error"]))
+                msg = obj.get("message") or {}
+                # Some builds put the reasoning in its own field rather than inline tags. Either
+                # way it is not the answer, and counting it as progress is the point: a model that
+                # is thinking is ALIVE, so the idle clock should keep resetting.
+                if msg.get("thinking"):
+                    thinking = True
+                chunk = msg.get("content") or ""
+                if chunk:
+                    parts.append(chunk)
+                    if on_chunk is not None:
+                        on_chunk(chunk)
+                if obj.get("done"):
+                    break
+                if time.monotonic() - started > self.timeout:
+                    raise ModelTooSlow(
+                        f"{self.model} was still producing after {self.timeout:.0f}s "
+                        f"({sum(len(p) for p in parts)} chars so far"
+                        f"{', much of it reasoning' if thinking else ''}). Raise AI_TIMEOUT, or "
+                        f"use a model that does not think out loud.")
+        return _strip_thinking("".join(parts)).strip()
 
 
 # --- capacity ---------------------------------------------------------------- #

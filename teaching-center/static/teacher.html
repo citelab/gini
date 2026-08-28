@@ -43,6 +43,12 @@
   .bar>i{display:block;height:100%;background:var(--warn)}
   .note{color:var(--muted);font-size:12px} .err{color:var(--warn);font-weight:600}
   .pill{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:2px 8px}
+  /* second-level nav inside a tab: quieter than the header's, so the hierarchy reads */
+  nav.sub{display:flex;gap:6px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  nav.sub button{font-size:13px;padding:6px 12px}
+  nav.sub button.on{background:#e7f2eb;color:var(--accent)}
+  pre{background:#fbfdfc;border:1px solid var(--line);border-radius:8px;padding:10px;
+      overflow-x:auto;font-size:12px;white-space:pre-wrap}
 </style>
 <!-- SIGN-IN GATE. The console serves the class's enrolment tokens; it is not a public page. -->
 <section id="gate" hidden style="max-width:420px;margin:12vh auto;padding:0 20px">
@@ -73,6 +79,7 @@
   <nav>
     <button data-t="author" class="on">Author</button>
     <button data-t="lessons">Lessons</button>
+    <button data-t="acts">Activities</button>
     <button data-t="roster">Roster</button>
     <button data-t="progress">Progress</button>
     <button data-t="insights">Insights</button>
@@ -133,6 +140,91 @@
   </section>
 
   <section id="lessons" hidden><div class="card"><table id="lessons-t"></table></div></section>
+
+  <!-- ACTIVITIES ---------------------------------------------------------
+       Free-form assessed work. Unlike a Lesson, the student is never shown the plan: they get a
+       code, work however they like, and the plan decides only what GINI watches. The teacher's job
+       is to agree on the INSTRUMENT, which is why Create is a conversation and not a form.
+  -->
+  <section id="acts" hidden>
+    <nav class="sub" style="margin-bottom:12px">
+      <button data-a="new" class="on" onclick="actView('new')">Create activity</button>
+      <button data-a="all" onclick="actView('all')">All activities</button>
+      <button data-a="sub" onclick="actView('sub')">Submissions</button>
+    </nav>
+
+    <!-- CREATE ---------------------------------------------------------- -->
+    <div id="act-new">
+      <div class="row">
+        <div class="col card">
+          <b>1 · Describe the activity</b>
+          <div class="note">In your own words, the way you would tell a colleague. The teaching AI
+            picks what to watch for; you argue with it below until it is right.</div>
+          <label>Course / lab</label>
+          <div class="row"><div class="col"><input id="a-course" placeholder="comp535"></div>
+            <div class="col"><input id="a-lab" placeholder="lab1"></div></div>
+          <label>Title</label><input id="a-title" placeholder="Multi-LAN">
+          <label>What should the students do?</label>
+          <textarea id="a-intent" rows="4"
+            placeholder="Build a few LANs joined by routers and convince me a machine on one LAN can talk to a machine on another."></textarea>
+          <div class="row">
+            <div class="col"><label>Codes stop being issued</label>
+              <input id="a-vend" type="datetime-local"></div>
+            <div class="col"><label>Minutes per attempt</label>
+              <input id="a-mins" type="number" value="60"></div>
+          </div>
+          <label><input type="checkbox" id="a-guide"> Tell students what will be observed
+            <span class="note">(the one-line summaries only — never the checks themselves)</span></label>
+          <div style="margin-top:10px">
+            <button onclick="draftAct(true)">Draft the plan</button>
+            <button onclick="saveAct()" id="a-save" disabled>Save as draft</button>
+            <button onclick="releaseAct()" id="a-rel" disabled>Release &amp; open vending</button>
+          </div>
+          <div id="a-err" class="err" style="margin-top:8px"></div>
+
+          <!-- the ratify conversation: the teacher never edits the plan, they talk about it -->
+          <div id="a-chat-wrap" hidden style="margin-top:16px;border-top:1px solid #e4e8ee;padding-top:12px">
+            <b>2 · Tell it what to change</b>
+            <div class="note">Plain sentences — "also watch what happens when a link fails",
+              "drop the delay part". The whole conversation is re-read each time, so a later
+              remark can undo an earlier one.</div>
+            <div id="a-chat"></div>
+            <textarea id="a-say" rows="2" placeholder="What should be different?"></textarea>
+            <button onclick="sayToAct()">Send</button>
+            <button onclick="resetAct()" class="ghost">Start over</button>
+          </div>
+        </div>
+
+        <div class="col card">
+          <b>3 · What it will watch</b>
+          <div id="a-note" class="note" style="margin-top:8px"></div>
+          <div id="a-ask"></div>
+          <div id="a-obj"></div>
+          <div id="a-plan" style="margin-top:10px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALL ACTIVITIES --------------------------------------------------- -->
+    <div id="act-all" hidden>
+      <div class="card"><b>Activities in this course</b><table id="a-list"></table></div>
+    </div>
+
+    <!-- SUBMISSIONS ------------------------------------------------------ -->
+    <div id="act-sub" hidden>
+      <div class="card">
+        <b>Open a submission</b>
+        <div class="note">A student hands you the receipt their gBuilder showed them. The work
+          itself was submitted automatically — this is how you read it.</div>
+        <div class="row" style="align-items:flex-end;margin-top:10px">
+          <div class="col"><label>Receipt</label><input id="a-rcpt" placeholder="K2ST-G01Q"></div>
+          <div class="col" style="flex:0 0 auto"><button onclick="lookupReceipt()">Open</button></div>
+        </div>
+        <div id="a-sub"></div>
+      </div>
+    </div>
+  </section>
+
   <section id="roster" hidden>
     <div class="card">
       <div class="row" style="align-items:flex-end">
@@ -264,10 +356,10 @@ let FRAGS = [], SEL = [];
 
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
-  ['author','lessons','roster','progress','insights','inbox','profai'].forEach(t =>
+  ['author','acts','lessons','roster','progress','insights','inbox','profai'].forEach(t =>
       $('#'+t).hidden = (t !== b.dataset.t));
-  ({lessons:loadLessons, roster:loadRoster, progress:loadProgress, insights:loadInsights,
-    inbox:loadInbox, profai:loadPersona}[b.dataset.t]||(()=>{}))();
+  ({lessons:loadLessons, acts:loadActs, roster:loadRoster, progress:loadProgress,
+    insights:loadInsights, inbox:loadInbox, profai:loadPersona}[b.dataset.t]||(()=>{}))();
 });
 
 function spec(){
@@ -620,6 +712,167 @@ async function savePersona(){
 }
 
 function boot(){ loadFrags().then(refreshPreview); loadInbox(); }
+
+// --- activities -------------------------------------------------------------
+// The teacher never edits the plan directly (design 3.2): they talk, the model re-selects, and a
+// deterministic assembler re-expands. So this panel holds the last DRAFT and only ever posts that.
+let ACT = null;          // {selection, plan, note, questions, objections, describe, prose}
+let ACT_ANSWERS = [];    // replies to the model's clarifying questions, fed back so it converges
+let ACT_SAID = [];       // the ratify conversation, oldest first — replayed whole on every turn
+
+// `esc` is already defined above — re-declaring it with const is a SyntaxError, and a SyntaxError
+// anywhere in this block aborts the WHOLE script, so the sign-in gate never renders either and the
+// console is a blank page. Reuse it.
+
+function actView(v){
+  document.querySelectorAll('#acts nav.sub button').forEach(b =>
+      b.classList.toggle('on', b.dataset.a === v));
+  ['new','all','sub'].forEach(x => $('#act-'+x).hidden = (x !== v));
+  if (v === 'all') loadActs();
+}
+
+// The ratify conversation. `fresh` starts a new one (the Describe box changed); otherwise the
+// accumulated feedback is replayed, so the model sees the whole discussion rather than a patch.
+async function draftAct(fresh){
+  if (fresh) { ACT_SAID = []; ACT_ANSWERS = []; }
+  const intent = $('#a-intent').value.trim();
+  $('#a-err').textContent = '';
+  if (!intent) { $('#a-err').textContent = 'Describe the activity first.'; return; }
+  $('#a-note').textContent = 'Thinking…';
+  $('#a-plan').innerHTML = $('#a-obj').innerHTML = $('#a-ask').innerHTML = '';
+  const r = await api('/api/activities/draft',
+                      {intent, guidance: $('#a-guide').checked,
+                       answers: ACT_ANSWERS, feedback: ACT_SAID});
+  if (!r.ok) {
+    ACT = null; $('#a-save').disabled = $('#a-rel').disabled = true;
+    $('#a-note').textContent = r.note || '';
+    $('#a-err').textContent = r.error || 'The model could not draft a plan.';
+    renderAsks(r.questions);
+    return;
+  }
+  ACT = r;
+  $('#a-save').disabled = false;
+  $('#a-rel').disabled = false;
+  $('#a-note').textContent = r.prose || r.note || '';
+  renderAsks(r.questions);
+  renderObjections(r.objections);
+  // Both renderings, side by side. The prose above is the model's; this is the literal plan, so a
+  // friendly summary can be CHECKED rather than trusted.
+  $('#a-plan').innerHTML = '<label>The plan, exactly</label><pre>' + esc(r.describe) + '</pre>';
+  renderChat();          // there is now something to argue with
+}
+
+function renderAsks(qs){
+  if (!qs || !qs.length) { $('#a-ask').innerHTML = ''; return; }
+  // Answering is optional on purpose: a teacher in a hurry gets a defaulted plan to push back on,
+  // not an interrogation.
+  $('#a-ask').innerHTML = '<div class="note" style="margin-top:10px">It would draft better if it '
+    + 'knew — answering is optional:</div>' + qs.map((q,i) =>
+      `<label>${esc(q)}</label><input class="a-ans" data-q="${esc(q)}" id="a-ans-${i}">`).join('')
+    + '<button style="margin-top:8px" onclick="answerAsks()">Answer and re-draft</button>';
+}
+
+async function answerAsks(){
+  ACT_ANSWERS = [...document.querySelectorAll('.a-ans')]
+      .filter(i => i.value.trim())
+      .map(i => ({q: i.dataset.q, a: i.value.trim()}));
+  await draftAct();
+}
+
+function renderObjections(objs){
+  if (!objs || !objs.length) { $('#a-obj').innerHTML = ''; return; }
+  // The Reasoning Twin's questions. Deliberately NOT styled as errors: the plan is usable, and a
+  // plan that ignores half of what was said can be a legitimate teaching choice. These exist so it
+  // is a choice rather than an accident.
+  $('#a-obj').innerHTML = '<div class="card" style="margin-top:10px;background:#fffdf3">'
+    + '<b>Worth a second look</b>'
+    + '<div class="note">Deterministic checks against what you asked for. Nothing here blocks '
+    + 'releasing — decide and move on.</div><ul>'
+    + objs.map(o => `<li>${esc(o.question || o.concern?.statement || o)}</li>`).join('')
+    + '</ul></div>';
+}
+
+async function sayToAct(){
+  const said = $('#a-say').value.trim();
+  if (!said) return;
+  ACT_SAID.push(said);
+  $('#a-say').value = '';
+  renderChat();
+  await draftAct(false);          // re-draft with the whole conversation, never a patch
+}
+
+function resetAct(){
+  ACT_SAID = []; ACT_ANSWERS = []; ACT = null;
+  $('#a-chat-wrap').hidden = true;
+  $('#a-note').textContent = $('#a-plan').innerHTML = '';
+  $('#a-obj').innerHTML = $('#a-ask').innerHTML = $('#a-chat').innerHTML = '';
+  $('#a-save').disabled = $('#a-rel').disabled = true;
+}
+
+function renderChat(){
+  $('#a-chat-wrap').hidden = false;
+  // Numbered because the model is told a later remark supersedes an earlier one — the teacher
+  // should be able to see the same ordering it is reading.
+  $('#a-chat').innerHTML = ACT_SAID.length
+    ? '<ol style="margin:6px 0 10px;padding-left:20px">'
+      + ACT_SAID.map(t => `<li>${esc(t)}</li>`).join('') + '</ol>'
+    : '<div class="note" style="margin:6px 0">Nothing said yet.</div>';
+}
+
+function actBody(){
+  const v = $('#a-vend').value;
+  return {lab: $('#a-lab').value.trim(), title: $('#a-title').value.trim(),
+          intent: $('#a-intent').value.trim(),
+          selection: ACT && ACT.selection, plan: ACT && ACT.plan,
+          vend_until: v ? new Date(v).getTime()/1000 : 0,
+          session_minutes: parseInt($('#a-mins').value || '60', 10)};
+}
+
+async function saveAct(){
+  const r = await api('/api/activities/save', actBody());
+  $('#a-err').textContent = r.ok ? '' : (r.error || 'Could not save.');
+  if (r.ok) { loadActs(); }
+}
+
+async function releaseAct(){
+  if (!$('#a-vend').value) {
+    $('#a-err').textContent = 'Set when codes stop being issued — that is what closes the activity.';
+    return;
+  }
+  const saved = await api('/api/activities/save', actBody());
+  if (!saved.ok) { $('#a-err').textContent = saved.error || 'Could not save.'; return; }
+  const r = await api('/api/activities/release', actBody());
+  $('#a-err').textContent = r.ok ? '' : (r.error || 'Could not release.');
+  if (r.ok) loadActs();
+}
+
+async function loadActs(){
+  const rows = await api('/api/activities');
+  const url = a => `${location.origin}/getcode?course=${encodeURIComponent(a.id.split('/')[0])}`
+                 + `&lab=${encodeURIComponent(a.lab)}`;
+  $('#a-list').innerHTML = '<tr><th>Lab<th>Title<th>Status<th>Codes out<th>Submitted<th>Student link'
+    + (rows||[]).map(a => `<tr><td>${esc(a.lab)}<td>${esc(a.title)}`
+        + `<td>${a.status === 'released' ? '<b>released</b>' : 'draft'}`
+        + `<td>${a.vended}<td>${a.submitted}`
+        + `<td>${a.status === 'released'
+              ? `<a href="${url(a)}" target="_blank">${esc(url(a))}</a>` : '—'}`).join('');
+}
+
+async function lookupReceipt(){
+  const rc = $('#a-rcpt').value.trim().toUpperCase();
+  if (!rc) return;
+  const r = await api('/api/activities/receipt?receipt=' + encodeURIComponent(rc));
+  if (r.error) { $('#a-sub').innerHTML = `<div class="err">${esc(r.error)}</div>`; return; }
+  const d = r.data || {};
+  const twins = (r.twins || []).length;
+  $('#a-sub').innerHTML = '<div class="card" style="margin-top:12px">'
+    + `<b>${esc(r.activity)}</b> <span class="pill">${esc(r.verdict)}</span>`
+    // Two students sharing an artifact is a flag, never a rejection: a shared starter topology is
+    // a legitimate reason for it, and the teacher is the one who can tell.
+    + (twins ? `<div class="err">Built from the same topology as ${twins} other submission(s) — `
+             + `worth a look.</div>` : '')
+    + `<pre>${esc(d.report || '(no report in this submission)')}</pre></div>`;
+}
 
 // A stored session might be stale (expired, or the server was wiped). Ask the server who we are
 // before showing the console — a UI that renders and THEN 401s on every panel is worse than a gate.

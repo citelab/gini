@@ -209,3 +209,51 @@ def test_concerns_for_exposes_what_was_weighed():
                       patterns=(S.PatternRef("single-lan"),),
                       params={"starting_point": A.BLANK})
     assert any(c.id.startswith("aop:") for c in SEL.concerns_for("add delay to a router", sel))
+
+
+# -- the ratify conversation -------------------------------------------------- #
+# The teacher never edits the plan; they talk about it. So the whole conversation is replayed on
+# every turn rather than the plan being patched — which is also what lets a later remark undo an
+# earlier one, the way people actually revise.
+def test_feedback_reaches_the_model():
+    llm = _llm(_reply(["multi-lan"]))
+    SEL.draft("build LANs", llm, feedback=["also watch what happens when a link fails"])
+    assert "THE TEACHER HAS SINCE SAID" in llm.prompts[0]
+    assert "link fails" in llm.prompts[0]
+
+
+def test_the_whole_conversation_is_replayed_not_just_the_last_remark():
+    llm = _llm(_reply(["multi-lan"]))
+    SEL.draft("build LANs", llm, feedback=["watch the delay", "and the multicast"])
+    assert "watch the delay" in llm.prompts[0] and "multicast" in llm.prompts[0]
+
+
+def test_the_conversation_is_numbered_oldest_first():
+    """The model is told a later remark wins; the ordering has to be visible for that to mean
+    anything, and the console shows the teacher the same order."""
+    llm = _llm(_reply(["multi-lan"]))
+    SEL.draft("build LANs", llm, feedback=["first thing", "second thing"])
+    p = llm.prompts[0]
+    assert p.index("1. first thing") < p.index("2. second thing")
+    assert "the later one wins" in p
+
+
+def test_blank_remarks_are_dropped():
+    llm = _llm(_reply(["multi-lan"]))
+    SEL.draft("build LANs", llm, feedback=["", "   ", "real one"])
+    assert "1. real one" in llm.prompts[0]
+
+
+def test_no_feedback_means_no_conversation_block():
+    """A first draft must look exactly as it did before the loop existed."""
+    llm = _llm(_reply(["multi-lan"]))
+    SEL.draft("build LANs", llm)
+    assert "THE TEACHER HAS SINCE SAID" not in llm.prompts[0]
+
+
+def test_feedback_and_answers_coexist():
+    """Clarifying answers and ratify remarks are different things and must both survive."""
+    llm = _llm(_reply(["multi-lan"]))
+    SEL.draft("build LANs", llm, answers=({"q": "how many?", "a": "three"},),
+              feedback=["also the delay"])
+    assert "how many?" in llm.prompts[0] and "also the delay" in llm.prompts[0]

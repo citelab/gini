@@ -445,10 +445,18 @@ class Handler(BaseHTTPRequestHandler):
                 import ai as _ai
                 from gini.agent import aop_selector as _sel
                 _llm = _stack()["prof"].llm if _stack().get("prof") else _ai.Ollama()
-                d = _sel.draft(b.get("intent", ""), lambda prompt: _llm.chat("", prompt),
+                # TWO adapters, because the two calls want different things from the model.
+                # Selecting patterns must come back as JSON: `format: json` stops a reasoning model
+                # emitting a chain of thought first, which is what makes an 8B model blow the
+                # timeout. The back-translation is prose for the teacher and must NOT be
+                # constrained, or it comes back as a quoted JSON string.
+                _json = lambda prompt: _llm.chat("", prompt, json_mode=True, num_predict=800)
+                _prose = lambda prompt: _llm.chat("", prompt, num_predict=400)
+                d = _sel.draft(b.get("intent", ""), _json,
                                params={"starting_point": "blank",
                                        "guidance": bool(b.get("guidance"))},
                                answers=tuple(b.get("answers") or ()),
+                               feedback=tuple(b.get("feedback") or ()),
                                deadline_s=b.get("deadline_s"))
                 if not d.ok:
                     self._send(200, {"ok": False, "error": d.error, "questions": d.questions,
@@ -460,8 +468,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "selection": d.selection.to_dict(),
                                      "plan": plan.to_dict(),
                                      "describe": _asm.describe(plan),
-                                     "prose": _sel.back_translate(
-                                         plan, lambda prompt: _llm.chat("", prompt))})
+                                     "prose": _sel.back_translate(plan, _prose)})
             elif p == "/api/activities/save":
                 self._send(200, C.save_activity(
                     b.get("lab", ""), title=b.get("title", ""), intent=b.get("intent", ""),

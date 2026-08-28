@@ -150,7 +150,7 @@ def _to_selection(obj: dict, intent: str, params: dict, answers, deadline_s) -> 
                      answers=tuple(answers or ()), deadline_s=deadline_s)
 
 
-def draft(intent: str, llm, *, params=None, answers=(), deadline_s=None,
+def draft(intent: str, llm, *, params=None, answers=(), feedback=(), deadline_s=None,
           catalogue_keys=None, twin=None) -> Draft:
     """Draft a plan from a teacher's description.
 
@@ -160,6 +160,13 @@ def draft(intent: str, llm, *, params=None, answers=(), deadline_s=None,
     `answers` carries the teacher's replies to earlier questions; passing them back in is what
     makes the loop converge rather than re-asking. An empty `answers` must still yield a plan
     (design §3.3): a teacher in a hurry gets a defaulted draft to push back on.
+
+    `feedback` is the RATIFY CONVERSATION — everything the teacher has said since the first draft,
+    oldest first: "also watch what happens when a link fails", "drop the delay part". It is what
+    makes this a dialogue rather than a form. The whole conversation is replayed on every turn
+    rather than the plan being patched, because the teacher never edits the plan directly (design
+    §3.2): they talk, the model re-selects, and the assembler re-expands. Replaying also means a
+    later remark can undo an earlier one, which is how people actually revise.
 
     `twin` controls the Reasoning Twin audit: None builds one, a `Twin` instance reuses it across a
     conversation (so its history of covered concerns accumulates), and False disables it entirely —
@@ -174,6 +181,15 @@ def draft(intent: str, llm, *, params=None, answers=(), deadline_s=None,
     if answers:
         convo += "\nTHE TEACHER HAS ALREADY ANSWERED:\n" + "\n".join(
             f"- {a.get('q', '')} -> {a.get('a', '')}" for a in answers) + "\n"
+    if feedback:
+        # Filter FIRST, then number. Numbering the raw list and dropping blanks afterwards leaves
+        # gaps — "3." as the only line — and since the model is told a later remark supersedes an
+        # earlier one, a skipped number reads as context it was never given.
+        said = [str(f).strip() for f in feedback if str(f).strip()]
+        if said:
+            convo += ("\nTHE TEACHER HAS SINCE SAID (oldest first — honour all of it, and where "
+                      "two remarks conflict the later one wins):\n"
+                      + "\n".join(f"{i}. {t}" for i, t in enumerate(said, 1)) + "\n")
 
     try:
         raw = llm(convo)
