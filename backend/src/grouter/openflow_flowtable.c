@@ -13,6 +13,7 @@
 #include <slack/err.h>
 
 #include "arp.h"
+#include "ethernet.h"           // gpacketSize(): the REAL frame length for byte counts
 #include "gnet.h"
 #include "grouter.h"
 #include "message.h"
@@ -466,7 +467,10 @@ openflow_flowtable_entry_type *openflow_flowtable_get_entry_for_packet(
 {
 	pthread_mutex_lock(&flowtable_mutex);
 
+	// Host order. Priorities are stored on the wire (network order), so comparing them
+	// as stored ranks entries by their byte-swapped values -- see openflow_defs.h.
 	uint32_t current_priority = 0;
+	uint8_t have_wildcard_match = 0;
 	openflow_flowtable_entry_type *current_entry = NULL;
 	uint32_t i;
 	for (i = 0; i < OPENFLOW_MAX_FLOWTABLE_ENTRIES; i++)
@@ -487,14 +491,22 @@ openflow_flowtable_entry_type *openflow_flowtable_get_entry_for_packet(
 				current_entry = entry;
 				break;
 			}
-			else if (entry->priority >= current_priority)
+			else
 			{
+				uint32_t priority = ntohs(entry->priority);
 				// Possible wildcard match, but wait to see if there
-				// are any other wildcard matches with higher priority
-				verbose(2, "[openflow_flowtable_get_entry_for_packet]::"
-						" Found possible match at index %" PRIu32 ".", i);
-				current_entry = entry;
-				current_priority = entry->priority;
+				// are any other wildcard matches with higher priority.
+				// Strictly greater, so that among equal priorities the FIRST
+				// match wins rather than the last; `>=` also made an untaken
+				// first entry lose to every later priority-0 entry.
+				if (!have_wildcard_match || priority > current_priority)
+				{
+					verbose(2, "[openflow_flowtable_get_entry_for_packet]::"
+							" Found possible match at index %" PRIu32 ".", i);
+					current_entry = entry;
+					current_priority = priority;
+					have_wildcard_match = 1;
+				}
 			}
 		}
 	}
@@ -516,8 +528,11 @@ openflow_flowtable_entry_type *openflow_flowtable_get_entry_for_packet(
 		        ntohll(flowtable->stats.matched_count) + 1);
 		current_entry->stats.packet_count = htonll(
 		        ntohll(current_entry->stats.packet_count) + 1);
+		// The REAL frame length, not the buffer size. sizeof(pkt_data_t) charged every
+		// match a fixed 1518 bytes, so per-entry byte counts were fiction -- and worse,
+		// they looked plausible enough to reason from while debugging.
 		current_entry->stats.byte_count = htonll(
-		        ntohll(current_entry->stats.byte_count) + sizeof(pkt_data_t));
+		        ntohll(current_entry->stats.byte_count) + gpacketSize(packet));
 		time(&current_entry->last_matched);
 
 		// Make copy of entry for use outside this function
@@ -1409,6 +1424,13 @@ static int32_t openflow_flowtable_add(ofp_flow_mod* flow_mod,
 				" index %" PRIu32 ".", i);
 		memset(&flowtable->entries[i], 0,
 		        sizeof(openflow_flowtable_entry_type));
+		// Set `added`, as the free-slot path below does. The memset above zeroes it and
+		// this path never restored it, so update_entry_stats computed
+		// difftime(now, 0) -- i.e. the whole Unix epoch -- and every REPLACED rule
+		// reported an age of ~1.79 billion seconds. The forwarding apps reinstall the
+		// same path constantly, so in practice most rules took this path and no reported
+		// age could be trusted.
+		time(&flowtable->entries[i].added);
 		return openflow_flowtable_modify_entry_at_index(flow_mod, i, error_type,
 		        error_code, 0);
 	}
@@ -1430,10 +1452,62 @@ static int32_t openflow_flowtable_add(ofp_flow_mod* flow_mod,
 		}
 	}
 
-	verbose(2, "[openflow_flowtable_add]:: No room in flowtable to add entry.");
-	*error_type = htons(OFPET_FLOW_MOD_FAILED);
-	*error_code = htons(OFPFMFC_ALL_TABLES_FULL);
-	return -1;
+	// The table is full. Evict the LEAST RECENTLY MATCHED entry rather than refusing.
+	//
+	// Refusing was a hard failure with no recovery: the controller's rule was dropped,
+	// the switch kept punting those packets to the controller forever, and the table
+	// stayed jammed with whatever happened to fill it first. traceroute hit this
+	// routinely -- every probe carries a fresh UDP destination port, and the forwarding
+	// apps match with ofp_match.from_packet(), so ~90 probes are ~90 distinct entries in
+	// a 100-entry table.
+	//
+	// Short idle timeouts were the previous workaround, and they are the wrong tool:
+	// they evict rules that are still carrying traffic while doing nothing about a burst
+	// that genuinely overflows. Eviction under pressure is what real hardware does with
+	// a full TCAM, and it lets timeouts be long enough to actually observe.
+	//
+	// `last_matched` is set when an entry is installed as well as when it matches
+	// (modify_entry_at_index), so a rule installed a moment ago and not yet used is NOT
+	// the oldest -- a burst cannot evict the very rules it is installing.
+	uint32_t victim = OPENFLOW_MAX_FLOWTABLE_ENTRIES;
+	time_t oldest = 0;
+	for (i = 0; i < OPENFLOW_MAX_FLOWTABLE_ENTRIES; i++)
+	{
+		if (!flowtable->entries[i].active) continue;
+		time_t seen = flowtable->entries[i].last_matched;
+		if (victim == OPENFLOW_MAX_FLOWTABLE_ENTRIES || seen < oldest)
+		{
+			victim = i;
+			oldest = seen;
+		}
+	}
+
+	if (victim == OPENFLOW_MAX_FLOWTABLE_ENTRIES)
+	{
+		// Nothing active to evict, so the table is not really full. Should be
+		// unreachable; report the OpenFlow error rather than silently doing nothing.
+		verbose(2, "[openflow_flowtable_add]:: No room in flowtable to add entry.");
+		*error_type = htons(OFPET_FLOW_MOD_FAILED);
+		*error_code = htons(OFPFMFC_ALL_TABLES_FULL);
+		return -1;
+	}
+
+	verbose(2, "[openflow_flowtable_add]:: Flowtable full; evicting least recently"
+			" matched entry at index %" PRIu32 " to make room.", victim);
+	// Delete it PROPERLY rather than overwriting it. A controller that set
+	// OFPFF_SEND_FLOW_REM is told when a rule goes away, and it must be told for eviction
+	// too -- otherwise it goes on believing a rule is installed that no longer exists, and
+	// silently stops refreshing a path the switch has already forgotten. OpenFlow 1.0 has
+	// no eviction reason (OFPRR_EVICTION arrives in 1.4), so OFPRR_DELETE is the honest
+	// one: the switch removed it, and not because it timed out.
+	openflow_flowtable_delete_entry_at_index(victim, OFPRR_DELETE);
+	// delete_entry_at_index decremented active_count; the replacement puts it straight
+	// back, so the count nets out unchanged -- one entry leaves as one arrives.
+	flowtable->stats.active_count = htonl(
+	        ntohl(flowtable->stats.active_count) + 1);
+	time(&flowtable->entries[victim].added);
+	return openflow_flowtable_modify_entry_at_index(flow_mod, victim, error_type,
+	        error_code, 1);
 }
 
 /**
@@ -2144,7 +2218,9 @@ static void openflow_flowtable_print_entry_no_lock(uint32_t index)
 		printf("Last modified timeout (seconds): %" PRIu16 "\n",
 		        ntohs(entry.hard_timeout));
 
-		printf("Priority: %" PRIu32 "\n", ntohs(entry.hard_timeout));
+		// entry.priority, not entry.hard_timeout -- the hard timeout was being printed
+		// under the Priority label, so every dumped priority was meaningless.
+		printf("Priority: %" PRIu16 "\n", ntohs(entry.priority));
 
 		printf("Entry flags: %" PRIu16 "\n", ntohs(entry.flags));
 		if (ntohs(entry.flags) & OFPFF_SEND_FLOW_REM)
@@ -2379,7 +2455,10 @@ static void openflow_flowtable_timeout()
 				        flowtable->entries[i].last_modified);
 				if (flowtable->entries[i].hard_timeout != 0)
 				{
-					if (hard_diff > htons(flowtable->entries[i].hard_timeout))
+					// ntohs, not htons. Identical in effect (both byte-swap on a
+					// little-endian host) but this is a wire value being read, and
+					// the idle check above rightly uses ntohs.
+					if (hard_diff > ntohs(flowtable->entries[i].hard_timeout))
 					{
 						verbose(2, "[openflow_flowtable_timeout]:: Entry"
 								" %d hard timeout.", i);

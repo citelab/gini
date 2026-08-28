@@ -31,8 +31,17 @@ class ToolSpec:
 
 
 class ToolRegistry:
+    """The tools the model may call.
+
+    `dispatch` decides WHERE a handler runs. It is None here on purpose: this package
+    stays free of Qt, and headless callers (tests, the MCP server) want the handler run
+    inline. The GUI injects a marshaller that hops to the GUI thread, because the tools
+    mutate the topology and the LLM turn runs on a worker -- see the note in `execute`.
+    """
+
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
+        self.dispatch = None            # callable(fn) -> fn's return value; None = inline
 
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
@@ -47,12 +56,26 @@ class ToolRegistry:
         return list(self._tools)
 
     def execute(self, name: str, args: dict | None = None) -> Any:
+        """Run one tool call and return its result.
+
+        Handlers run through `dispatch` when the host supplied one. In gBuilder that hops
+        to the GUI thread, and it matters: an LLM turn runs on a worker thread, and these
+        handlers insert into `topology.devices` / `topology.links`. The GUI thread iterates
+        those same dicts on every canvas paint, so a build that lands mid-paint raises
+        `RuntimeError: dictionary changed size during iteration` -- reachable just by moving
+        the mouse while GINI assembles a recipe. Reads are marshalled too: a read racing a
+        UI-thread edit is no safer than a write.
+
+        Errors are returned to the model rather than raised, so a bad call is something it
+        can see and correct instead of a dead turn.
+        """
         args = args or {}
         spec = self._tools.get(name)
         if spec is None:
             return {"error": f"unknown tool {name!r}"}
+        run = self.dispatch or (lambda fn: fn())
         try:
-            return spec.handler(**args)
+            return run(lambda: spec.handler(**args))
         except TypeError as e:
             return {"error": f"bad arguments for {name}: {e}"}
         except Exception as e:  # surface to the agent rather than crashing

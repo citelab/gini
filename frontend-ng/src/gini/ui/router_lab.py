@@ -21,9 +21,9 @@ from .theme import ThemeManager, icons
 
 class RouterLab(QDialog):
     worker_done = Signal()      # one live-poll worker finished (queued to the GUI thread)
-    flows_ready = Signal(list)  # parsed FlowEntry rows (from a worker thread)
+    flows_ready = Signal(object)  # parsed FlowEntry rows, or None for a FAILED poll
     tablestats_ready = Signal(object)  # OpenFlow table-level stats dict
-    routes_ready = Signal(list)  # parsed RouteEntry rows (from a worker thread)
+    routes_ready = Signal(object)  # parsed RouteEntry rows, or None for a FAILED poll
     chain_ready = Signal(str)    # live `gpipe list` output (the deployed service chain)
     delay_ready = Signal(str)    # live `delay show` output (link-delay status)
     qstats_ready = Signal(object)  # (policy, [QueueStat]) from `queue stats`
@@ -397,9 +397,21 @@ class RouterLab(QDialog):
 
         def work():
             from ..domain.flowtable import flows, parse_table_stats
+            from ..domain.routing_model import query_failed
+            # element_query NEVER raises: on a timeout it RETURNS "(query failed: …)". So the
+            # old `try/except` caught nothing, `flows("(query failed…)")` parsed to [], the
+            # table blanked, and the event log emitted a phantom "expired" for every rule
+            # that was in fact still installed. That is the "flows disappearing" students on
+            # slower machines reported (a timeout, not a real teardown). Detect it and carry
+            # the last table forward instead of blanking.
+            entry = qf("openflow entry all")
+            if query_failed(entry):
+                self._emit(self.flows_ready, None)      # FAILED poll — do not blank
+                if counted:
+                    self._emit(self.worker_done)
+                return
             rows, stats = [], {}
             try:
-                entry = qf("openflow entry all")
                 rows = flows(entry, qf("openflow stats entry all"))
                 stats = parse_table_stats(qf("openflow stats table"))
             except Exception:
@@ -411,7 +423,14 @@ class RouterLab(QDialog):
                 self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_flows(self, rows: list) -> None:
+    def _on_flows(self, rows) -> None:
+        if rows is None:
+            # The switch did not answer this poll (a timed-out query). Keep the last table
+            # on screen rather than blanking, and — crucially — do NOT fold an empty
+            # snapshot into the event log: that is what turned a slow poll into a screen
+            # full of "－ expired" for rules that never actually left the switch.
+            self._set_flow_status("switch didn't answer this poll — showing last table")
+            return
         self.flow_table.setRowCount(len(rows))
         for r, f in enumerate(rows):
             age = "" if f.duration is None else f"{f.duration}s"
@@ -502,9 +521,20 @@ class RouterLab(QDialog):
 
         def work():
             from ..domain.routetable import parse_routes
+            from ..domain.routing_model import query_failed
+            # Same trap as the flow table: a timed-out `route show` comes back as
+            # "(query failed: …)", which parse_routes reads as zero routes and the panel
+            # renders "no routes" — the "routes disappearing" report. Carry the last table
+            # forward on a failed read instead of blanking.
+            raw = qf("route show")
+            if query_failed(raw):
+                self._emit(self.routes_ready, None)     # FAILED poll — do not blank
+                if counted:
+                    self._emit(self.worker_done)
+                return
             rows, chain = [], ""
             try:
-                rows = parse_routes(qf("route show"))
+                rows = parse_routes(raw)
                 chain = qf("gpipe list")     # the live deployed service chain
             except Exception:
                 pass
@@ -515,7 +545,10 @@ class RouterLab(QDialog):
                 self._emit(self.worker_done)
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_routes(self, rows: list) -> None:
+    def _on_routes(self, rows) -> None:
+        if rows is None:
+            self._set_route_status("router didn't answer this poll — showing last table")
+            return
         self.route_table.setRowCount(len(rows))
         for r, e in enumerate(rows):
             cells = [e.network, e.netmask, e.nexthop_str(), e.iface]
@@ -702,9 +735,16 @@ class RouterLab(QDialog):
 
         def work():
             from ..domain.qos import parse_queue_stats
+            from ..domain.routing_model import query_failed
+            raw = qf("queue stats")
+            if query_failed(raw):
+                self._emit(self.qstats_ready, None)     # FAILED poll — keep the last table
+                if counted:
+                    self._emit(self.worker_done)
+                return
             payload = ("", [])
             try:
-                payload = parse_queue_stats(qf("queue stats"))
+                payload = parse_queue_stats(raw)
             except Exception:
                 pass
             self._emit(self.qstats_ready, payload)
@@ -713,6 +753,9 @@ class RouterLab(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_qstats(self, payload) -> None:
+        if payload is None:                             # a failed poll — carry the last table
+            self._set_qos_status("router didn't answer this poll — showing last stats")
+            return
         policy, rows = payload
         if policy and hasattr(self, "qos_policy"):
             self.qos_policy.blockSignals(True)

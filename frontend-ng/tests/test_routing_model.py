@@ -1,4 +1,11 @@
-"""Authentic routing trace — converged tree, loop, dead-end, ECMP, latency, protocol-agnostic."""
+"""Authentic routing trace — converged tree, loop, dead-end, ECMP, latency, protocol-agnostic.
+
+Destinations are SUBNETS, not routers: nobody asks whether R1 reaches R2, they ask whether a
+host on one network reaches a host on another. So the leaf routers here own a subnet of their
+own, which is also what a real leaf router is FOR -- it exists to serve the hosts behind it.
+A router owning no unique subnet is not a separate destination, because from upstream it is
+just another address on a segment already being traced.
+"""
 from gini.domain.routetable import RouteEntry
 from gini.domain.routing_model import (
     Edge, RouterNode, RoutingModel, assemble_model, collect_router_data, forwarding_tree,
@@ -11,18 +18,22 @@ def _r(index, net, mask, nh, iface="tun0"):
 
 
 # A 3-router line: R1 —(5ms)— R2 —(10ms)— R3
-#   segments: 10.0.1.0/24 (R1,R2), 10.0.2.0/24 (R2,R3)
-def _line_model(r1_table=None, r3_reachable=True):
+#   transit: 10.0.1.0/24 (R1,R2), 10.0.2.0/24 (R2,R3);  R3 serves 10.0.3.0/24
+FAR = "10.0.3.0/24"                      # the subnet only R3 can deliver
+def _line_model(r1_table=None):
     R1 = RouterNode("R1", "R1", {"10.0.1.1"}, r1_table or [
         _r(0, "10.0.1.0", "255.255.255.0", "0.0.0.0"),                 # direct
         _r(1, "10.0.2.0", "255.255.255.0", "10.0.1.2"),                # via R2
+        _r(2, "10.0.3.0", "255.255.255.0", "10.0.1.2"),                # via R2
     ])
     R2 = RouterNode("R2", "R2", {"10.0.1.2", "10.0.2.1"}, [
         _r(0, "10.0.1.0", "255.255.255.0", "0.0.0.0"),
         _r(1, "10.0.2.0", "255.255.255.0", "0.0.0.0"),
+        _r(2, "10.0.3.0", "255.255.255.0", "10.0.2.2"),                # via R3
     ])
-    R3 = RouterNode("R3", "R3", {"10.0.2.2"}, [
+    R3 = RouterNode("R3", "R3", {"10.0.2.2", "10.0.3.1"}, [
         _r(0, "10.0.2.0", "255.255.255.0", "0.0.0.0"),
+        _r(1, "10.0.3.0", "255.255.255.0", "0.0.0.0"),                 # R3's own hosts
     ])
     edges = [Edge("R1", "R2", 5), Edge("R2", "R3", 10)]
     return RoutingModel([R1, R2, R3], edges)
@@ -31,7 +42,7 @@ def _line_model(r1_table=None, r3_reachable=True):
 def test_converged_tree_and_latency():
     m = _line_model()
     t = forwarding_tree(m, "R1")
-    p = t.per_dest["R3"]
+    p = t.per_dest[FAR]
     assert p.status == "ok" and p.path == ["R1", "R2", "R3"] and p.hop_count == 2
     assert p.total_latency == 15                          # 5 + 10, configured delay-VNF values
     assert ("R1", "R2") in t.edges_used and ("R2", "R3") in t.edges_used
@@ -39,13 +50,14 @@ def test_converged_tree_and_latency():
 
 
 def test_deadend_when_no_route():
-    # R1 has no route toward R3's subnet (and no default) -> black hole
-    m = _line_model(r1_table=[_r(0, "10.0.1.0", "255.255.255.0", "0.0.0.0")])
+    # R1 can reach R2's segment but has no route to R3's subnet (and no default) -> black hole
+    m = _line_model(r1_table=[_r(0, "10.0.1.0", "255.255.255.0", "0.0.0.0"),
+                              _r(1, "10.0.2.0", "255.255.255.0", "10.0.1.2")])
     t = forwarding_tree(m, "R1")
-    assert t.per_dest["R3"].status == "deadend" and "R3" in t.deadends
-    assert t.per_dest["R3"].path == []                   # R1 drops it — no path
+    assert t.per_dest[FAR].status == "deadend" and FAR in t.deadends
+    assert t.per_dest[FAR].path == []                    # R1 drops it — no path
     assert ("R2", "R3") not in t.edges_used              # nothing forwarded toward R3
-    assert ("R1", "R2") in t.edges_used                  # R2 itself is still directly reachable
+    assert ("R1", "R2") in t.edges_used                  # R2's segment is still reachable
 
 
 def test_forwarding_loop_is_detected():
@@ -75,11 +87,12 @@ def test_ecmp_becomes_a_dag():
     R4 = RouterNode("R4", "R4", {"10.0.4.9"}, [])
     m = RoutingModel([R1, R2, R3, R4], [Edge("R1", "R2", 3), Edge("R1", "R3", 8)],
                      dest_ip={"R4": "10.0.4.9"})
-    t = forwarding_tree(m, "R4" if False else "R1")
-    assert "R4" in t.ecmp
+    t = forwarding_tree(m, "R1")
+    far = "10.0.4.0/24"                                 # the subnet both R2 and R3 can deliver
+    assert far in t.ecmp
     assert ("R1", "R2") in t.edges_used and ("R1", "R3") in t.edges_used   # both parallels highlighted
     # the representative path takes the lower-latency next-hop (R2, 3ms < 8ms)
-    assert t.per_dest["R4"].path[1] == "R2"
+    assert t.per_dest[far].path[1] == "R2"
 
 
 def test_parse_iface_ips_both_formats():
@@ -100,16 +113,19 @@ def test_parse_delay_base_and_hop_latency():
 def test_assemble_model_from_cli_text_and_trace():
     r1_routes = "[0] 10.0.1.0 255.255.255.0 0.0.0.0 tun0\n[1] 10.0.2.0 255.255.255.0 10.0.1.2 tun0"
     r2_routes = "[0] 10.0.1.0 255.255.255.0 0.0.0.0 tun0\n[1] 10.0.2.0 255.255.255.0 0.0.0.0 tun1"
-    r3_routes = "[0] 10.0.2.0 255.255.255.0 0.0.0.0 tun0"
+    r3_routes = "[0] 10.0.2.0 255.255.255.0 0.0.0.0 tun0\n[1] 10.0.3.0 255.255.255.0 0.0.0.0 tun1"
+    r1_routes += "\n[2] 10.0.3.0 255.255.255.0 10.0.1.2 tun0"
+    r2_routes += "\n[2] 10.0.3.0 255.255.255.0 10.0.2.2 tun1"
     infos = [("R1", "R1", r1_routes, "eth0 10.0.1.1/24 m"),
              ("R2", "R2", r2_routes, "eth0 10.0.1.2/24 m\neth1 10.0.2.1/24 m"),
-             ("R3", "R3", r3_routes, "eth0 10.0.2.2/24 m")]
+             ("R3", "R3", r3_routes, "eth0 10.0.2.2/24 m\neth1 10.0.3.1/24 m")]
     lat = {("R1", "R2"): 5, ("R2", "R3"): 10}
     m = assemble_model(infos, [("R1", "R2"), ("R2", "R3")],
                        latency_of=lambda a, b: lat.get((a, b)) or lat.get((b, a)))
     assert m.ip_owner["10.0.1.2"] == "R2" and m.ip_owner["10.0.2.2"] == "R3"
     t = forwarding_tree(m, "R1")
-    assert t.per_dest["R3"].path == ["R1", "R2", "R3"] and t.per_dest["R3"].total_latency == 15
+    assert t.per_dest["10.0.3.0/24"].path == ["R1", "R2", "R3"]
+    assert t.per_dest["10.0.3.0/24"].total_latency == 15
 
 
 def test_collect_router_data_via_injected_callbacks():
@@ -127,7 +143,7 @@ def test_collect_router_data_via_injected_callbacks():
                             lambda rid, k: props.get((rid, k), ""))
     assert m.ip_owner["10.0.1.2"] == "R2"
     assert m.edge_latency("R1", "R2") == 10             # egress 8 + ingress 2 (configured delay VNF)
-    assert forwarding_tree(m, "R1").per_dest["R2"].status == "ok"
+    assert forwarding_tree(m, "R1").per_dest["10.0.2.0/24"].status == "ok"
 
 
 def test_derive_edges_handles_switch_mediated_adjacency():
@@ -160,8 +176,9 @@ def test_trace_is_protocol_agnostic():
         R4 = RouterNode("R4", "R4", {"10.0.8.2", "10.0.9.2"},
                         [_r(0, "10.0.9.0", "255.255.255.0", "0.0.0.0")])
         edges = [Edge("R1", "R2", 50), Edge("R1", "R3", 1), Edge("R3", "R4", 1)]
-        return RoutingModel([R1, R2, R3, R4], edges, dest_ip={"R2": "10.0.9.1"})
+        return RoutingModel([R1, R2, R3, R4], edges)
+    far = "10.0.9.0/24"                                  # reachable via R2 OR via R3->R4
     rip = forwarding_tree(model(_r(2, "10.0.9.0", "255.255.255.0", "10.0.1.2")), "R1")   # via R2
     ospf = forwarding_tree(model(_r(2, "10.0.9.0", "255.255.255.0", "10.0.7.2")), "R1")  # via R3
-    assert rip.per_dest["R2"].path[1] == "R2"            # RIP: 1 hop, but 50ms
-    assert ospf.per_dest["R2"].path[1] == "R3"           # OSPF: more hops, but 1+1ms
+    assert rip.per_dest[far].path == ["R1", "R2"]        # RIP: 1 hop, but 50ms
+    assert ospf.per_dest[far].path == ["R1", "R3", "R4"]  # OSPF: more hops, but 1+1ms

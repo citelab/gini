@@ -12,6 +12,7 @@ from .contracts import Concern, Coverage, Objection, parse_coverage
 from .dialectic import (
     COVERAGE_SCHEMA, Twin, TwinContext, TwinResult, concern_context, coverage_instruction,
 )
+from .aop import aop_concerns
 from .authoring import authoring_concerns
 from .harness import GoldenTurn, HarnessReport, replay
 from .justify import Adjudication, adjudicate, classify, state_holds
@@ -23,6 +24,6 @@ from .salience import MAX_CONCERNS, MUST_ADDRESS, cap
 __all__ = ["Concern", "Coverage", "Objection", "parse_coverage", "Twin", "TwinContext",
            "TwinResult", "concern_context", "coverage_instruction", "COVERAGE_SCHEMA",
            "Adjudication", "adjudicate", "classify", "state_holds", "mission_concerns",
-           "coach_concerns", "focus_line", "fallback_text", "authoring_concerns",
+           "coach_concerns", "focus_line", "fallback_text", "authoring_concerns", "aop_concerns",
            "learner_concerns", "GoldenTurn", "HarnessReport", "replay",
            "MAX_CONCERNS", "MUST_ADDRESS", "cap"]

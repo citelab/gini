@@ -5,7 +5,7 @@ glass panel, a `_busy` flag, a poll timer, an off-GUI-thread worker, `show_topri
 a mutually-exclusive toolbar toggle. The OS HUD would be the fourth copy, so the skeleton lives
 here instead.
 
-`HudHistory` is the generalised form of the Routing HUD's `RouteHistory`: a ring of snapshots
+`HudHistory` is the generalised form of the Network HUD's `RouteHistory`: a ring of snapshots
 deduped by signature, so a state that has not changed costs nothing and every retained entry is a
 real change. It is what makes a HUD replayable, which matters far more for the OS than for the
 network — kernel events happen in microseconds, so "watch it live" is not an option and scrubbing

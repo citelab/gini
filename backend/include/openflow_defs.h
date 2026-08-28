@@ -106,8 +106,16 @@ typedef struct
 	// entry; stored in network byte format
 	uint16_t hard_timeout;
 	// Entry priority (only relevant for wildcards); stored in network byte
-	// format
-	uint32_t priority;
+	// format.
+	//
+	// uint16_t, matching the wire (ofp_flow_mod.priority) and the stats struct.
+	// This was uint32_t, and openflow_flowtable_modify_entry_at_index assigns the
+	// wire field straight in -- so a 16-bit NETWORK-order value was widened to 32
+	// bits and then compared numerically in get_entry_for_packet. On a
+	// little-endian host that inverts the ordering: priority 1 stored as 0x0100
+	// (256) and priority 32768 as 0x0080 (128), so the boot-time wildcard default
+	// rule outranked every rule the controller installed.
+	uint16_t priority;
 	// Entry flags (see ofp_flow_mod_flags); stored in network byte format
 	uint16_t flags;
 	// Entry actions

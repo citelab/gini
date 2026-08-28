@@ -51,3 +51,11 @@ token.txt
 
 token.txt
 *.token
+
+# Teaching Center runtime data: the course SQLite database (accounts, activities, and student
+# submissions), created by teaching-center/run.sh. Never source — and `commit.sh` does `git add -A`,
+# so without this line a test drive quietly commits a database with real people in it.
+tc-data/
+teaching-center/example/data/
+*.db-wal
+*.db-shm

@@ -30,6 +30,7 @@
  *     before and after the processor.
  */
 
+#include "ethernet.h"          /* gpacketSize(): the REAL frame length */
 #include "openflow_ctrl_iface.h"
 
 #include <arpa/inet.h>
@@ -887,17 +888,31 @@ int32_t openflow_ctrl_iface_send_packet_in(gpacket_t *packet, uint8_t reason)
 {
 	if (openflow_ctrl_iface_get_conn_state())
 	{
-		uint16_t msg_len = sizeof(ofp_packet_in) + sizeof(pkt_data_t)
+		// The REAL frame length, not the buffer size. This sent every packet-in padded
+		// to sizeof(pkt_data_t) = 1518 bytes, whatever the frame actually was -- so a
+		// 42-byte ARP request reached the controller as 1518 bytes of mostly zeroes.
+		//
+		// That is not merely wasteful. The gRouter does no buffering, so the controller
+		// echoes the whole frame back in a packet-out and the switch floods THAT: every
+		// broadcast crossing the fabric was ~36x its true size. On a looped topology,
+		// where broadcasts already multiply, this is the difference between a fabric
+		// that converges and one that drowns in its own ARP. It is also why a capture on
+		// a station shows `ARP, Request ... length 1504` instead of length 28.
+		//
+		// Same bug, same cause as the padding that silently broke LLDP (see gpacketSize
+		// in ethernet.c); this path was simply missed when the send paths were fixed.
+		uint16_t frame_len = (uint16_t) gpacketSize(packet);
+		uint16_t msg_len = sizeof(ofp_packet_in) + frame_len
 		        - (sizeof(ofp_packet_in) - offsetof(ofp_packet_in, data));
 		ofp_packet_in *msg = (ofp_packet_in *) openflow_ctrl_iface_create_msg(
 		        OFPT_PACKET_IN, msg_len);
 		msg->header.xid = htonl(openflow_ctrl_iface_get_xid());
 		msg->buffer_id = htonl(-1);
-		msg->total_len = htons(sizeof(pkt_data_t));
+		msg->total_len = htons(frame_len);
 		msg->in_port = htons(
 		        openflow_config_get_of_port_num(packet->frame.src_interface));
 		msg->reason = reason;
-		memcpy(msg->data, &packet->data, sizeof(pkt_data_t));
+		memcpy(msg->data, &packet->data, frame_len);
 
 		int32_t ret = openflow_ctrl_iface_send(msg, msg_len);
 		free(msg);

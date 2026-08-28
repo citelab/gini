@@ -116,6 +116,12 @@ class MainWindow(QMainWindow):
         self._apply_env_settings()   # env vars override saved config
         from ..agent.tools import build_registry
         self.registry = build_registry(self.api)   # shared: in-app loop + present tools
+        # An LLM turn runs on a worker thread, and its tools mutate topology.devices /
+        # topology.links -- dicts the GUI thread iterates on every canvas paint. Route every
+        # handler through the GUI thread so a build cannot land mid-iteration.
+        from .gui_dispatch import GuiDispatcher
+        self._gui_dispatch = GuiDispatcher(self)
+        self.registry.dispatch = self._gui_dispatch
         # gLoader: compiles the drawn topology into a runtime plan and launches it
         from pathlib import Path
         from .. import runtime as _rt
@@ -143,6 +149,7 @@ class MainWindow(QMainWindow):
         self.ctx.proof_recorder = self.proof_recorder   # so the assistant can reach it (hunk 5)
         self.ctx.bus.run_state.connect(self._on_run_state)
         self.ctx.bus.runtime_status.connect(self._on_runtime_status)
+        self.ctx.bus.board_status_ready.connect(self._on_board_status)
         self.ctx.bus.device_activated.connect(self._on_device_activated)
         from PySide6.QtCore import QTimer
         self._poll = QTimer(self)
@@ -830,8 +837,8 @@ class MainWindow(QMainWindow):
                                self._delete_selected)
         self._delete_act.setEnabled(False)
         self._rhud_act = act("rhud", "router",
-                             "Routing HUD — model view of the network's routing; long-press a "
-                             "router for its shortest-path tree", self._toggle_routing_hud,
+                             "Network HUD — model view of the network's real forwarding; click a "
+                             "router for its forwarding tree, or a switch for its L2 fabric", self._toggle_routing_hud,
                              checkable=True)
         self._oshud_act = act("oshud", "host",
                               "OS HUD — X-ray a running xv6 kernel: the causal story of a launch "
@@ -1395,8 +1402,8 @@ class MainWindow(QMainWindow):
         return False
 
     def _toggle_routing_hud(self, checked: bool) -> None:
-        """Show/hide the Routing HUD — a model view of the whole network's authentic routing state
-        (long-press a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
+        """Show/hide the Network HUD — a model view of the whole network's authentic forwarding
+        (click a router → its shortest-path/forwarding tree). Overlaid top-right of the canvas."""
         try:
             if checked:
                 # only one HUD at a time — turn the other HUDs off if they are on
@@ -1414,20 +1421,49 @@ class MainWindow(QMainWindow):
                     self._oshud_act.setChecked(False)
                 if getattr(self, "_rhud", None) is None:
                     from .routing_hud import RoutingHudController
-                    devs = self.ctx.topology.devices
+                    # Read the device dict THROUGH self.ctx on every call. Capturing
+                    # `devs = self.ctx.topology.devices` once bound the HUD to whatever
+                    # topology happened to be open when it was first toggled on: loading a
+                    # project REPLACES ctx.topology (main_window ~1891), so the closure kept
+                    # querying the previous network's routers and the HUD went on drawing
+                    # them, live-looking, over the new canvas.
                     self._rhud = RoutingHudController(
                         self.canvas, self.theme,
-                        router_devices=lambda: [(d.id, d.name) for d in devs.values()
-                                                if d.type_key in ("router", "firewall")],
+                        router_devices=lambda: [
+                            (d.id, d.name) for d in self.ctx.topology.devices.values()
+                            if d.type_key in ("router", "firewall")],
                         query=self.element_query,
-                        delay_prop=lambda rid, k: devs[rid].properties.get(k, "") if rid in devs
-                        else "",
-                        positions_of=lambda: {d.id: (d.x, d.y) for d in devs.values()})
+                        delay_prop=lambda rid, k: (
+                            self.ctx.topology.devices[rid].properties.get(k, "")
+                            if rid in self.ctx.topology.devices else ""),
+                        positions_of=lambda: {d.id: (d.x, d.y)
+                                              for d in self.ctx.topology.devices.values()},
+                        switch_devices=lambda: [
+                            (d.id, d.name, self._ovs_controller(d.id))
+                            for d in self.ctx.topology.devices.values()
+                            if d.type_key == "ovs"],
+                        neighbours_of=self._ovs_link_peers,
+                        mac_of=self._hud_mac_of,
+                        ip_of=self._hud_ip_of,
+                        topo_links=lambda: [(l.source_id, l.target_id)
+                                            for l in self.ctx.topology.links.values()],
+                        # only self-learning L2 devices may be walked THROUGH; a machine is an
+                        # endpoint, and bridging one would invent a link that does not exist
+                        passthrough_of=lambda: {
+                            d.id for d in self.ctx.topology.devices.values()
+                            if d.type_key in ("switch", "hub")},
+                        controllers_of=lambda: {
+                            d.id: d.name for d in self.ctx.topology.devices.values()
+                            if d.type_key == "controller"},
+                        # Says why the HUD is dark, in the Console. A dark panel has several
+                        # causes that look identical on screen; this names the one in force.
+                        log=lambda m: self.ctx.bus.log.emit("info", m))
+                self._rhud.reset()          # a fresh topology has no shared convergence history
                 self._rhud.show_topright()
             elif getattr(self, "_rhud", None) is not None:
                 self._rhud.close()
         except Exception as e:
-            self.ctx.bus.log.emit("error", f"Routing HUD: {e}")
+            self.ctx.bus.log.emit("error", f"Network HUD: {e}")
 
     def _toggle_flow_hud(self, checked: bool) -> None:
         """Show/hide the Flow HUD — live TCP congestion windows read from `ss -tin` on the
@@ -1450,10 +1486,12 @@ class MainWindow(QMainWindow):
                 if getattr(self, "_fhud", None) is None:
                     from .flow_hud import FlowHudController
                     from ..services.compiler import _role
-                    devs = self.ctx.topology.devices
+                    # Read through self.ctx every call: loading a project REPLACES
+                    # ctx.topology, so a captured devices dict pins this HUD to the
+                    # topology that was open when it was first toggled on.
                     self._fhud = FlowHudController(
                         self.canvas, self.theme,
-                        machines=lambda: [d.name for d in devs.values()
+                        machines=lambda: [d.name for d in self.ctx.topology.devices.values()
                                           if _role(d.type_key) == "machine"],
                         query=self._machine_shell,   # docker exec `ss -tin` in the station
                         window_getter=lambda: int(
@@ -1478,10 +1516,10 @@ class MainWindow(QMainWindow):
                         getattr(self, act_attr).setChecked(False)
                 if getattr(self, "_mhud", None) is None:
                     from .mcast_hud import McastHudController
-                    devs = self.ctx.topology.devices
+                    # Read through self.ctx every call — see the Network HUD note above.
                     self._mhud = McastHudController(
                         self.canvas, self.theme,
-                        routers=lambda: [d.name for d in devs.values()
+                        routers=lambda: [d.name for d in self.ctx.topology.devices.values()
                                          if d.type_key in ("router", "firewall")],
                         query=self.element_query)
                 self._mhud.show_topright()
@@ -1582,7 +1620,11 @@ class MainWindow(QMainWindow):
         self.inspector = Inspector(self.ctx, self.api, self.theme)
         self.inspector.query_fn = self.element_query
         # Boards report through the relay, not a container — see Inspector._board_live_text.
-        self.inspector.board_status_fn = self._gloader.orchestrator.board_status
+        # The CACHE, not the relay. This is called synchronously during _rebuild --
+        # twice for a gini32 element -- and board_status() is a blocking 2s HTTP GET.
+        # The poll worker keeps this at most one tick (3s) stale, which is fresher than
+        # the panel is redrawn anyway.
+        self.inspector.board_status_fn = lambda: getattr(self, "_board_status_raw", None)
         self.inspector.board_action_fn = self.board_action
         self.inspector.stats_fn = self._element_stats
         self.inspector.stats_all_fn = self._element_stats_all
@@ -1805,11 +1847,9 @@ class MainWindow(QMainWindow):
     def _show_boards(self) -> None:
         """What the relay currently knows about real boards."""
         from PySide6.QtWidgets import QMessageBox
-        st = None
-        try:
-            st = self._gloader.orchestrator.board_status()
-        except Exception:
-            st = None
+        # The poller's cache rather than a fresh blocking GET: at most one 3s tick stale,
+        # and a menu click should never freeze the window for two seconds.
+        st = getattr(self, "_board_status_raw", None)
         if st is None:
             QMessageBox.information(
                 self, "Boards",
@@ -1889,6 +1929,18 @@ class MainWindow(QMainWindow):
         if rec is not None:
             rec.note_load(getattr(topo, "name", "") or "an experiment", topo)
         self.ctx.topology = topo
+        # A different network is a different history. Any HUD left open across the swap must
+        # forget what it recorded, or its convergence timeline mixes the previous topology's
+        # events with this one's and the scrub replays a network that is no longer on screen.
+        # (The live view corrects itself on the next poll now that the HUDs read the device
+        # dict through self.ctx, but recorded history has no such self-correction.)
+        for _h in ("_rhud", "_fhud", "_mhud", "_oshud"):
+            _hud = getattr(self, _h, None)
+            if _hud is not None and hasattr(_hud, "reset"):
+                try:
+                    _hud.reset()
+                except Exception:                       # a HUD reset must never block a load
+                    pass
         topo.prefix_overrides = dict(self.ctx.settings.name_prefixes)   # apply naming prefs
         self.ctx.selected_id = None
         if hasattr(self, "_manual_addr_act"):
@@ -1983,7 +2035,7 @@ class MainWindow(QMainWindow):
         self.ctx.log(
             "Dynamic routing: on — routers boot with connected routes only; run a "
             "control-plane protocol (e.g. RIP) to build the rest. Watch it converge "
-            "in the Routing HUD."
+            "in the Network HUD."
             if on else
             "Dynamic routing: off — static routes are computed and pre-installed at boot.",
             "info")
@@ -2117,6 +2169,8 @@ class MainWindow(QMainWindow):
         self._last_k8s = list(cfg.k8s)
         self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
         self._board_state = {}          # board_id -> live state, refreshed by the poller
+        self._board_status_raw = None   # last raw relay snapshot (read by the Inspector)
+        self._boards_busy = False       # a board_status fetch is in flight
         # What each controller is ACTUALLY running, so a later property edit can tell an
         # App change from any other edit. Without this seed, the first device_changed on
         # a controller (a rename, say) would look like a new app and bounce it.
@@ -2245,6 +2299,7 @@ class MainWindow(QMainWindow):
                 # lab down we no longer know anything, so stop claiming we do.
                 self.canvas.clear_live_clients()
                 self._board_state = {}
+                self._board_status_raw = None
                 self._fabric_poll.stop()
                 self._k8s_poll.stop()
                 self.dashboard.set_fabric({})
@@ -2371,17 +2426,43 @@ class MainWindow(QMainWindow):
         return ".".join(parts[:3] + ["1"])
 
     def _poll_boards(self) -> None:
-        """Refresh real GINI32 board state, and the devices attached to their radios.
+        """Ask the relay for board state, OFF the GUI thread.
+
+        `board_status()` is an HTTP GET with a 2-SECOND timeout, and this runs from the
+        3-second status poll. Called inline it froze the whole app for two seconds out of
+        every three whenever the relay was slow to answer -- which is exactly when a
+        student is debugging a board and least wants a frozen window. The failure was
+        swallowed (`return None`), so it never looked like an error, only like jank.
+        """
+        if not getattr(self, "_last_gbridge", None):
+            return
+        if getattr(self, "_boards_busy", False):
+            return                              # last fetch still out; skip rather than pile up
+        self._boards_busy = True
+        import threading
+
+        def worker():
+            st = None
+            try:
+                st = self._gloader.orchestrator.board_status()
+            finally:
+                # Emit even on failure so the busy flag is always cleared on the GUI thread.
+                self.ctx.bus.board_status_ready.emit(st)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_board_status(self, st) -> None:
+        """Apply a relay snapshot. Runs on the GUI thread via a queued signal.
 
         Devices are OBSERVED, not drawn: a phone joining a board's hotspot is a fact
         about the physical world, so it appears as an ephemeral node and disappears
         when it leaves. It is never written into the saved topology.
         """
-        if not getattr(self, "_last_gbridge", None):
-            return
-        st = self._gloader.orchestrator.board_status()
+        self._boards_busy = False
         if st is None:
             return
+        # Cache the raw snapshot so the Inspector can render board panels without making
+        # its own blocking call -- it used to fire TWO per rebuild (see board_status_fn).
+        self._board_status_raw = st
         boards = {b["board_id"]: b for b in st.get("boards", [])}
         was_online = {k: bool(v.get("online"))
                       for k, v in (getattr(self, "_board_state", None) or {}).items()}
@@ -2537,6 +2618,89 @@ class MainWindow(QMainWindow):
             self._k8s_live(d, scale=False)
         elif d.type_key == "controller":                  # App changed -> bounce just POX
             self._controller_app_live(d)
+
+    # -- Network HUD glue: the SDN facts the routing model cannot derive ------------------- #
+    def _ovs_controller(self, did: str):
+        """The controller device linked to this OVS, or None.
+
+        Mirrors the compiler's rule (compiler.py:732): only an OVS↔controller link is a real
+        association, and it drives the dashed control-plane overlay — never a forwarding edge.
+        """
+        # .values(): `links` is a dict, and its insertion order is the same order the
+        # compiler sees (compiler.py:709 iterates topo.links.values()) — which is what makes
+        # the port numbering below reproducible.
+        for l in self.ctx.topology.links.values():
+            for a, b in ((l.source_id, l.target_id), (l.target_id, l.source_id)):
+                if a == did:
+                    d = self.ctx.topology.devices.get(b)
+                    if d is not None and d.type_key == "controller":
+                        return b
+        return None
+
+    def _ovs_link_peers(self, did: str) -> list:
+        """This OVS's neighbours in the order its links were COMPILED — which is what fixes
+        the OpenFlow port numbers (see routing_model.ovs_port_peers).
+
+        Control links are excluded because the compiler drops them from `kept`
+        (compiler.py:726-733) before numbering ports; counting one here would shift every
+        port by one and point every L2 hop at the wrong neighbour. The mapping is checked
+        against each port's MAC afterwards, so a divergence drops the port instead of
+        drawing a false edge.
+        """
+        out = []
+        for l in self.ctx.topology.links.values():
+            if getattr(l, "kind", "link") == "attach":
+                continue
+            peer = (l.target_id if l.source_id == did
+                    else l.source_id if l.target_id == did else None)
+            if peer is None:
+                continue
+            d = self.ctx.topology.devices.get(peer)
+            if d is not None and d.type_key == "controller":
+                continue
+            out.append(peer)
+        return out
+
+    def _hud_mac_of(self) -> dict:
+        """{device_id: [mac, …]} from the compiled address map, so an L3 hop can ask a switch
+        whether its destination is programmed. A router is multi-homed, hence a LIST: the
+        frame is addressed to whichever of its MACs faces the shared segment."""
+        addr = getattr(self.ctx, "addressing", None) or {}
+        by_name = {d.name: d.id for d in self.ctx.topology.devices.values()}
+        out: dict = {}
+        for name, info in addr.items():
+            did = by_name.get(name)
+            if did is None:
+                continue
+            macs = [i.get("mac") for i in (info.get("interfaces") or []) if i.get("mac")]
+            if macs:
+                out[did] = macs
+        return out
+
+    def _hud_ip_of(self) -> dict:
+        """{device_id: [ip, ...]} for EVERY device, machines included.
+
+        Hosts are not nodes on the HUD, but the model has to know which subnet one sits in:
+        the switch that delivers a subnet is identified as the one wired both to the
+        delivering router and to something addressed inside that subnet. Without this the
+        last hop of a host-to-host path -- the OVS the traffic actually crosses -- cannot
+        be worked out at all.
+        """
+        addr = getattr(self.ctx, "addressing", None) or {}
+        by_name = {d.name: d.id for d in self.ctx.topology.devices.values()}
+        out: dict = {}
+        for name, info in addr.items():
+            did = by_name.get(name)
+            if did is None:
+                continue
+            ips = []
+            for i in (info.get("interfaces") or []):
+                cidr = i.get("ip")
+                if cidr:
+                    ips.append(str(cidr).split("/")[0])
+            if ips:
+                out[did] = ips
+        return out
 
     def _controller_app_live(self, d) -> None:
         """The App property changed on a running controller: restart THAT container.

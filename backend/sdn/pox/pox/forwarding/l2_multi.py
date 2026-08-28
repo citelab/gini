@@ -56,9 +56,45 @@ waiting_paths = {}
 # Time to not flood in seconds
 FLOOD_HOLDDOWN = 5
 
-# Flow timeouts
-FLOW_IDLE_TIMEOUT = 10
-FLOW_HARD_TIMEOUT = 30
+# Flow timeouts.
+#
+# GINI PATCH: stock POX uses 10 / 30, which means every rule this app installs is gone
+# within thirty seconds of the last packet no matter what. That is correct reactive-SDN
+# behaviour, but it makes the switches unobservable for teaching: run a ping, look at the
+# Network HUD or `openflow entry all` a moment later, and the flow table is empty with
+# nothing to say why. Raised so a path stays visible long enough to actually discuss, and
+# matched to gini.samples.switch (30 / 120), which had already settled on this order.
+#
+# These are SAFE TO BE GENEROUS now, which they were not before. The gRouter's table holds
+# OPENFLOW_MAX_FLOWTABLE_ENTRIES = 100 (openflow_defs.h:67) and _install_path below matches
+# with `ofp_match.from_packet()` -- a full 12-field match, so this app installs ONE ENTRY
+# PER MICROFLOW, not per destination. A full table used to REFUSE every further rule, so a
+# long hard timeout meant a traceroute (~90 probes, each a fresh UDP port) could jam the
+# switch until its entries aged out. Short timeouts were the workaround, and a poor one:
+# they evict rules that are still carrying traffic while doing nothing about a burst that
+# genuinely overflows.
+#
+# openflow_flowtable_add now evicts the least recently matched entry instead of refusing,
+# so capacity and staleness are handled separately -- eviction deals with pressure, these
+# timeouts deal with rules nobody is using. That gRouter change is what makes 60/120
+# reasonable; it needs a `gini-grouter` image rebuild to be in effect.
+#
+# The env overrides remain for labs that want stock POX behaviour or faster churn: set
+# GINI_FLOW_IDLE_TIMEOUT / GINI_FLOW_HARD_TIMEOUT on the controller container (0 in
+# OpenFlow means "never expire" -- do not use it here).
+import os as _os
+
+
+def _timeout(name, default):
+    try:
+        v = int(_os.environ.get(name, default))
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+FLOW_IDLE_TIMEOUT = _timeout("GINI_FLOW_IDLE_TIMEOUT", 60)
+FLOW_HARD_TIMEOUT = _timeout("GINI_FLOW_HARD_TIMEOUT", 120)
 
 # How long is allowable to set up a path?
 PATH_SETUP_TIME = 4

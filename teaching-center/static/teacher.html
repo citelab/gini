@@ -13,6 +13,8 @@
         padding:8px 12px;border-radius:8px;cursor:pointer}
   nav button.on{background:#e7f2eb;color:var(--accent)}
   main{padding:22px;max-width:1180px;margin:0 auto}
+  /* the three-column Create view needs the room */
+  body.wide main{max-width:1560px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;
         margin-bottom:16px}
   .row{display:flex;gap:16px;align-items:flex-start} .col{flex:1;min-width:0}
@@ -43,6 +45,52 @@
   .bar>i{display:block;height:100%;background:var(--warn)}
   .note{color:var(--muted);font-size:12px} .err{color:var(--warn);font-weight:600}
   .pill{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:2px 8px}
+  /* second-level nav inside a tab: quieter than the header's, so the hierarchy reads */
+  nav.sub{display:flex;gap:6px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  nav.sub button{font-size:13px;padding:6px 12px}
+  nav.sub button.on{background:#e7f2eb;color:var(--accent)}
+  pre{background:#fbfdfc;border:1px solid var(--line);border-radius:8px;padding:10px;
+      overflow-x:auto;font-size:12px;white-space:pre-wrap}
+
+  /* Activities · Create — three columns: what the lab IS, the conversation that shapes it, and
+     the instrument that conversation produced. The left is narrow because it holds settings a
+     teacher sets once; the middle and right carry the work. */
+  .act3{display:grid;grid-template-columns:280px minmax(0,1fr) minmax(0,1.15fr);gap:16px;
+        align-items:start}
+  .act3 > *{margin-bottom:0}
+  /* Both working columns share one height so the conversation and the plan scroll independently
+     rather than the page growing to fit whichever is longer. */
+  .act3 .chat, .act3 .plan{display:flex;flex-direction:column;height:min(72vh,720px)}
+  .fixed{padding:8px 10px;border:1px dashed var(--line);border-radius:8px;background:#f7faf8;
+         color:var(--muted);font-weight:600}
+  .sep{height:1px;background:var(--line);margin:16px 0}
+
+  .chatlog{flex:1;overflow-y:auto;margin:12px 0;padding-right:4px;min-height:0}
+  .turn{margin-bottom:12px;font-size:13px;line-height:1.5}
+  .turn .who{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+              color:var(--muted);margin-bottom:2px}
+  .turn.me .bubble{background:#e7f2eb;border-radius:10px;padding:8px 11px}
+  .turn.ai .bubble{background:#fbfdfc;border:1px solid var(--line);border-radius:10px;padding:8px 11px}
+  .turn.ai.asking .bubble{border-color:var(--gold);background:#fffdf3}
+  .chatbox{border-top:1px solid var(--line);padding-top:12px}
+  .chatbox textarea{min-height:64px}
+
+  .planbody{flex:1;overflow-y:auto;margin-top:10px;min-height:0}
+  .signoff{border-top:1px solid var(--line);padding-top:12px;display:flex;gap:8px;
+           justify-content:flex-end}
+  .exp{padding:8px 0;border-bottom:1px solid var(--line)}
+  .exp:last-child{border-bottom:none}
+  .exp .say{font-weight:600}
+  .exp .meta{font-size:11px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .layer{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;
+         background:#eef2f0;color:var(--muted);margin-right:6px}
+  /* The liveness indicator. The pulse advances per TOKEN, not on a timer, so it stalls exactly
+     when the model stalls — a frozen indicator is information, where a spinner would lie. */
+  .live{display:inline-block;width:1ch;color:var(--accent);font-weight:700}
+  .saying{margin-top:6px;padding-top:6px;border-top:1px dashed var(--line);color:var(--ink);
+          font-size:12px;max-height:7.5em;overflow:hidden}
+  @media (max-width:1100px){ .act3{grid-template-columns:1fr}
+                             .act3 .chat, .act3 .plan{height:auto} }
 </style>
 <!-- SIGN-IN GATE. The console serves the class's enrolment tokens; it is not a public page. -->
 <section id="gate" hidden style="max-width:420px;margin:12vh auto;padding:0 20px">
@@ -73,6 +121,7 @@
   <nav>
     <button data-t="author" class="on">Author</button>
     <button data-t="lessons">Lessons</button>
+    <button data-t="acts">Activities</button>
     <button data-t="roster">Roster</button>
     <button data-t="progress">Progress</button>
     <button data-t="insights">Insights</button>
@@ -133,6 +182,109 @@
   </section>
 
   <section id="lessons" hidden><div class="card"><table id="lessons-t"></table></div></section>
+
+  <!-- ACTIVITIES ---------------------------------------------------------
+       Free-form assessed work. Unlike a Lesson, the student is never shown the plan: they get a
+       code, work however they like, and the plan decides only what GINI watches. The teacher's job
+       is to agree on the INSTRUMENT, which is why Create is a conversation and not a form.
+  -->
+  <section id="acts" hidden>
+    <nav class="sub" style="margin-bottom:12px">
+      <button data-a="new" class="on" onclick="actView('new')">Create activity</button>
+      <button data-a="all" onclick="actView('all')">All activities</button>
+      <button data-a="sub" onclick="actView('sub')">Submissions</button>
+    </nav>
+
+    <!-- CREATE -------------------------------------------------------------
+         Three columns, left to right: what this lab IS, the conversation that shapes it, and the
+         instrument that conversation produced. The teacher never edits the plan — they talk about
+         it — so the middle column is the only place they type, and the right column is read-only
+         until they sign off.
+    -->
+    <div id="act-new" class="act3">
+      <!-- LEFT: what this lab is ------------------------------------------ -->
+      <aside class="card">
+        <b>The lab</b>
+        <label>Course</label>
+        <!-- Not an input. A Teaching Center serves one course; that is deployment configuration,
+             and offering a box here would invite mixing courses in a store with no notion of it. -->
+        <div class="fixed" id="a-course">—</div>
+        <label>Lab</label><input id="a-lab" placeholder="lab1">
+        <label>Title</label><input id="a-title" placeholder="Multi-LAN">
+
+        <div class="sep"></div>
+        <label>Codes stop being issued</label>
+        <input id="a-vend" type="datetime-local">
+        <div class="note">The hard stop. After this no student can start.</div>
+        <label>Minutes per attempt</label><input id="a-mins" type="number" value="60">
+        <div class="note">From when they enter the code, not from now.</div>
+
+        <div class="sep"></div>
+        <label style="display:flex;gap:8px;align-items:flex-start;font-weight:600">
+          <input type="checkbox" id="a-guide" style="width:auto;margin-top:2px">
+          <span>Tell students what will be observed
+            <span class="note" style="display:block;font-weight:400">The one-line summaries only —
+              never the checks themselves.</span></span>
+        </label>
+
+        <div class="sep"></div>
+        <button class="ghost" style="width:100%" onclick="resetAct()">Start a new activity</button>
+        <div id="a-err" class="err" style="margin-top:8px"></div>
+      </aside>
+
+      <!-- MIDDLE: the conversation ---------------------------------------- -->
+      <section class="card chat">
+        <b>Work it out with the teaching AI</b>
+        <div class="note">Describe the activity in your own words. Then keep talking until the plan
+          on the right is what you meant.</div>
+        <div id="a-chat" class="chatlog"></div>
+        <div class="chatbox">
+          <textarea id="a-say" rows="3" placeholder="Build a few LANs joined by routers and convince me a machine on one LAN can talk to a machine on another."
+                    onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey))sayToAct()"></textarea>
+          <div class="row" style="align-items:center;margin-top:8px">
+            <button onclick="sayToAct()" id="a-send">Send</button>
+            <span class="note" style="margin-left:10px">⌘/Ctrl + Enter</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT: the instrument ------------------------------------------- -->
+      <section class="card plan">
+        <b>Activity Observation Plan</b>
+        <div class="note">What GINI will watch while they work. Students never see this.</div>
+        <div id="a-obj"></div>
+        <div id="a-plan" class="planbody">
+          <div class="note" style="padding:24px 0;text-align:center">
+            Nothing yet — say what the students should do.
+          </div>
+        </div>
+        <div class="signoff">
+          <button class="ghost" onclick="saveAct()" id="a-save" disabled>Save as draft</button>
+          <button class="act" onclick="releaseAct()" id="a-rel" disabled>Sign off &amp; open vending</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- ALL ACTIVITIES --------------------------------------------------- -->
+    <div id="act-all" hidden>
+      <div class="card"><b>Activities in this course</b><table id="a-list"></table></div>
+    </div>
+
+    <!-- SUBMISSIONS ------------------------------------------------------ -->
+    <div id="act-sub" hidden>
+      <div class="card">
+        <b>Open a submission</b>
+        <div class="note">A student hands you the receipt their gBuilder showed them. The work
+          itself was submitted automatically — this is how you read it.</div>
+        <div class="row" style="align-items:flex-end;margin-top:10px">
+          <div class="col"><label>Receipt</label><input id="a-rcpt" placeholder="K2ST-G01Q"></div>
+          <div class="col" style="flex:0 0 auto"><button onclick="lookupReceipt()">Open</button></div>
+        </div>
+        <div id="a-sub"></div>
+      </div>
+    </div>
+  </section>
+
   <section id="roster" hidden>
     <div class="card">
       <div class="row" style="align-items:flex-end">
@@ -257,17 +409,17 @@ async function signIn(){
   if (!r.ok) { $('#g-err').textContent = r.error || 'Sign-in failed.'; return; }
   TOKEN = r.session;
   localStorage.setItem('gini_teacher_session', TOKEN);
-  gate(false); boot();
+  gate(false); boot(r);
 }
 
 let FRAGS = [], SEL = [];
 
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
-  ['author','lessons','roster','progress','insights','inbox','profai'].forEach(t =>
+  ['author','acts','lessons','roster','progress','insights','inbox','profai'].forEach(t =>
       $('#'+t).hidden = (t !== b.dataset.t));
-  ({lessons:loadLessons, roster:loadRoster, progress:loadProgress, insights:loadInsights,
-    inbox:loadInbox, profai:loadPersona}[b.dataset.t]||(()=>{}))();
+  ({lessons:loadLessons, acts:loadActs, roster:loadRoster, progress:loadProgress,
+    insights:loadInsights, inbox:loadInbox, profai:loadPersona}[b.dataset.t]||(()=>{}))();
 });
 
 function spec(){
@@ -619,7 +771,254 @@ async function savePersona(){
   $('#pa-ver').textContent = 'saved — version ' + p.version;
 }
 
-function boot(){ loadFrags().then(refreshPreview); loadInbox(); }
+function boot(me){
+  loadFrags().then(refreshPreview);
+  loadInbox();
+  // The course is deployment configuration, not a choice — show it, never ask for it.
+  const c = (me && me.course) || '';
+  $('#course').textContent = c;
+  $('#a-course').textContent = c || '—';
+  resetAct();
+}
+
+// --- activities -------------------------------------------------------------
+// The teacher never edits the plan (design 3.2): they talk, the model re-selects, and a
+// deterministic assembler re-expands. So the chat is the ONLY place they type about content, and
+// the plan on the right is read-only until they sign off.
+//
+// The conversation IS the input. Turn 1 is the activity description; every turn after it is a
+// refinement. That is exactly the shape the selector takes — intent + feedback — so nothing has to
+// be reconstructed, and replaying the whole conversation each time lets a later remark undo an
+// earlier one.
+let ACT = null;          // the last draft: {selection, plan, note, questions, objections, describe}
+let ACT_TURNS = [];      // what the teacher has said, oldest first. [0] is the intent.
+let ACT_REPLIES = [];    // the AI's side, interleaved for display
+let ACT_BUSY = false;
+
+// `esc` is already defined above — re-declaring it with const is a SyntaxError, and a SyntaxError
+// anywhere in this block aborts the WHOLE script, so the sign-in gate never renders either and the
+// console is a blank page. Reuse it.
+
+function actView(v){
+  document.querySelectorAll('#acts nav.sub button').forEach(b =>
+      b.classList.toggle('on', b.dataset.a === v));
+  ['new','all','sub'].forEach(x => $('#act-'+x).hidden = (x !== v));
+  document.body.classList.toggle('wide', v === 'new');
+  if (v === 'all') loadActs();
+}
+
+async function sayToAct(){
+  const said = $('#a-say').value.trim();
+  if (!said || ACT_BUSY) return;
+  ACT_TURNS.push(said);
+  ACT_REPLIES.push(null);              // placeholder until the model answers
+  $('#a-say').value = '';
+  renderChat();
+  await draftAct();
+}
+
+// Progress is driven by REAL tokens arriving from the model, never by a timer. A CSS spinner
+// keeps spinning on a dead model, which is confidently wrong; this freezes when the model freezes,
+// and a frozen indicator is information.
+const LIVE = {phase:'', chars:0, say:'', since:0, beat:0};
+
+function renderLive(){
+  const el = $('#a-live');
+  if (!el) return;
+  const secs = LIVE.since ? Math.round((Date.now() - LIVE.since)/1000) : 0;
+  // The pulse advances per token, so it stalls exactly when generation stalls.
+  const pulse = '·•●•'[LIVE.beat % 4];
+  el.innerHTML = `<div class="turn ai"><div class="who">Teaching AI</div><div class="bubble">
+      <span class="live">${pulse}</span> ${esc(LIVE.phase || 'Thinking')}
+      <span class="note">· ${secs}s${LIVE.chars ? ' · ' + LIVE.chars + ' chars' : ''}</span>
+      ${LIVE.say ? `<div class="saying">${esc(LIVE.say)}</div>` : ''}
+    </div></div>`;
+  $('#a-chat').scrollTop = $('#a-chat').scrollHeight;
+}
+
+async function draftAct(){
+  ACT_BUSY = true;
+  $('#a-send').disabled = true;
+  $('#a-err').textContent = '';
+  Object.assign(LIVE, {phase:'Sending it over', chars:0, say:'', since:Date.now(), beat:0});
+  renderChat();
+  const tick = setInterval(renderLive, 250);      // repaints the seconds; the PULSE needs tokens
+  let r = {};
+  try {
+    r = await draftStream({intent: ACT_TURNS[0] || '', feedback: ACT_TURNS.slice(1),
+                           guidance: $('#a-guide').checked});
+  } catch (e) {
+    r = {ok:false, error: 'Lost the connection to the course server.'};
+  } finally {
+    clearInterval(tick);
+  }
+  ACT_BUSY = false;
+  $('#a-send').disabled = false;
+
+  if (!r.ok) {
+    // Questions without a plan are a legitimate turn, not a failure — the model needs to know
+    // something before it can choose. Anything else is an error worth showing.
+    ACT_REPLIES[ACT_REPLIES.length - 1] = {questions: r.questions || [], note: r.note || '',
+                                           error: r.error || ''};
+    if (r.error && !(r.questions || []).length) $('#a-err').textContent = r.error;
+    renderChat();
+    return;
+  }
+  ACT = r;
+  ACT_REPLIES[ACT_REPLIES.length - 1] = {note: r.prose || r.note || '',
+                                         questions: r.questions || [],
+                                         objections: r.objections || []};
+  $('#a-save').disabled = false;
+  $('#a-rel').disabled = false;
+  renderChat();
+  renderPlan(r);
+}
+
+// Read the NDJSON progress stream. `fetch` is used rather than EventSource because this is a POST
+// and EventSource cannot send a body; the framing is ours on both ends anyway.
+async function draftStream(body){
+  const res = await fetch('/api/activities/draft', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body: JSON.stringify({...body, stream:true})});
+  if (res.status === 401) { signOut(); throw new Error('signed out'); }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', out = {ok:false, error:'The server closed without answering.'};
+  for (;;) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream:true});
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      if (m.t === 'phase')      { LIVE.phase = m.label; LIVE.chars = 0; LIVE.say = ''; }
+      else if (m.t === 'tick')  { LIVE.chars += m.chars; LIVE.beat++; }
+      else if (m.t === 'say')   { LIVE.say += m.text; LIVE.beat++; }
+      else if (m.t === 'done')  { out = m.result; }
+      renderLive();
+    }
+  }
+  return out;
+}
+
+function renderChat(state){
+  const log = $('#a-chat');
+  const rows = [];
+  ACT_TURNS.forEach((t, i) => {
+    rows.push(`<div class="turn me"><div class="who">You</div>
+                 <div class="bubble">${esc(t)}</div></div>`);
+    const rep = ACT_REPLIES[i];
+    if (rep === null && i === ACT_TURNS.length - 1 && ACT_BUSY) {
+      rows.push('<div id="a-live"></div>');      // filled by renderLive from the token stream
+    } else if (rep) {
+      const asking = (rep.questions || []).length > 0;
+      const bits = [];
+      if (rep.note) bits.push(esc(rep.note));
+      if (rep.error) bits.push(`<span class="err">${esc(rep.error)}</span>`);
+      if (asking) bits.push('<b>It would draft better if it knew:</b><ul style="margin:4px 0 0;'
+        + 'padding-left:18px">' + rep.questions.map(q => `<li>${esc(q)}</li>`).join('') + '</ul>');
+      rows.push(`<div class="turn ai ${asking ? 'asking' : ''}"><div class="who">Teaching AI</div>
+                   <div class="bubble">${bits.join('<br>') || '<span class="note">(no comment)</span>'}
+                   </div></div>`);
+    }
+  });
+  log.innerHTML = rows.join('') || '<div class="note">Nothing said yet.</div>';
+  if (ACT_BUSY) renderLive();
+  log.scrollTop = log.scrollHeight;          // always show the newest turn
+}
+
+function renderPlan(r){
+  const exps = ((r.plan || {}).expectations) || [];
+  // The Twin's questions sit ABOVE the plan, because they are about whether this plan is the right
+  // one — reading them after the fact is reading them too late.
+  $('#a-obj').innerHTML = (r.objections || []).length
+    ? '<div class="card" style="margin:10px 0 0;background:#fffdf3;border-color:#e8dcae;padding:12px">'
+      + '<b>Worth a second look</b><div class="note">Deterministic checks against what you asked '
+      + 'for. Nothing here blocks signing off.</div><ul style="margin:6px 0 0;padding-left:18px">'
+      + r.objections.map(o => `<li>${esc(o.question || o.concern?.statement || o)}</li>`).join('')
+      + '</ul></div>'
+    : '';
+  $('#a-plan').innerHTML =
+      `<div class="note" style="margin-bottom:8px">${exps.length} expectations · plan `
+    + `${esc((r.plan.plan_hash || '').slice(0,12))}…</div>`
+    + ((r.plan.header || {}).guidance || []).map(g =>
+        `<div class="note" style="margin-bottom:6px">Students are told: ${esc(g)}</div>`).join('')
+    + exps.map(e => `<div class="exp">
+         <div class="say"><span class="layer">${esc(e.layer)}</span>${esc(e.say)}</div>
+         <div class="meta">${esc(e.probe || e.check)}${
+            (e.requires||[]).length ? ' · after ' + esc(e.requires.join(', ')) : ''}</div>
+       </div>`).join('');
+}
+
+function resetAct(){
+  ACT = null; ACT_TURNS = []; ACT_REPLIES = [];
+  $('#a-say').value = ''; $('#a-err').textContent = '';
+  $('#a-save').disabled = $('#a-rel').disabled = true;
+  $('#a-obj').innerHTML = '';
+  $('#a-plan').innerHTML = '<div class="note" style="padding:24px 0;text-align:center">'
+    + 'Nothing yet — say what the students should do.</div>';
+  renderChat();
+}
+
+function actBody(){
+  const v = $('#a-vend').value;
+  return {lab: $('#a-lab').value.trim(), title: $('#a-title').value.trim(),
+          intent: ACT_TURNS[0] || '',
+          selection: ACT && ACT.selection, plan: ACT && ACT.plan,
+          vend_until: v ? new Date(v).getTime()/1000 : 0,
+          session_minutes: parseInt($('#a-mins').value || '60', 10)};
+}
+
+async function saveAct(){
+  if (!$('#a-lab').value.trim()) { $('#a-err').textContent = 'Give the lab a name first.'; return; }
+  const r = await api('/api/activities/save', actBody());
+  $('#a-err').textContent = r.ok ? '' : (r.error || 'Could not save.');
+}
+
+async function releaseAct(){
+  if (!$('#a-lab').value.trim()) { $('#a-err').textContent = 'Give the lab a name first.'; return; }
+  if (!$('#a-vend').value) {
+    $('#a-err').textContent = 'Set when codes stop being issued — that is what closes the activity.';
+    return;
+  }
+  const saved = await api('/api/activities/save', actBody());
+  if (!saved.ok) { $('#a-err').textContent = saved.error || 'Could not save.'; return; }
+  const r = await api('/api/activities/release', actBody());
+  if (!r.ok) { $('#a-err').textContent = r.error || 'Could not release.'; return; }
+  $('#a-err').textContent = '';
+  actView('all');
+}
+
+async function loadActs(){
+  const rows = await api('/api/activities');
+  const url = a => `${location.origin}/getcode?course=${encodeURIComponent(a.id.split('/')[0])}`
+                 + `&lab=${encodeURIComponent(a.lab)}`;
+  $('#a-list').innerHTML = '<tr><th>Lab<th>Title<th>Status<th>Codes out<th>Submitted<th>Student link'
+    + (rows||[]).map(a => `<tr><td>${esc(a.lab)}<td>${esc(a.title)}`
+        + `<td>${a.status === 'released' ? '<b>released</b>' : 'draft'}`
+        + `<td>${a.vended}<td>${a.submitted}`
+        + `<td>${a.status === 'released'
+              ? `<a href="${url(a)}" target="_blank">${esc(url(a))}</a>` : '—'}`).join('');
+}
+
+async function lookupReceipt(){
+  const rc = $('#a-rcpt').value.trim().toUpperCase();
+  if (!rc) return;
+  const r = await api('/api/activities/receipt?receipt=' + encodeURIComponent(rc));
+  if (r.error) { $('#a-sub').innerHTML = `<div class="err">${esc(r.error)}</div>`; return; }
+  const d = r.data || {};
+  const twins = (r.twins || []).length;
+  $('#a-sub').innerHTML = '<div class="card" style="margin-top:12px">'
+    + `<b>${esc(r.activity)}</b> <span class="pill">${esc(r.verdict)}</span>`
+    // Two students sharing an artifact is a flag, never a rejection: a shared starter topology is
+    // a legitimate reason for it, and the teacher is the one who can tell.
+    + (twins ? `<div class="err">Built from the same topology as ${twins} other submission(s) — `
+             + `worth a look.</div>` : '')
+    + `<pre>${esc(d.report || '(no report in this submission)')}</pre></div>`;
+}
 
 // A stored session might be stale (expired, or the server was wiped). Ask the server who we are
 // before showing the console — a UI that renders and THEN 401s on every panel is worse than a gate.
@@ -629,7 +1028,7 @@ function boot(){ loadFrags().then(refreshPreview); loadInbox(); }
   const me = r.ok ? await r.json() : null;
   if (!me || me.role !== 'teacher') { signOut(); return; }
   gate(false);
-  boot();
+  boot(me);
 })();
 </script>
 </div>

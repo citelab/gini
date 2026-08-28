@@ -189,14 +189,23 @@ class McastHudController(QObject):
     def refresh(self) -> None:
         if self._busy:
             return
-        self._busy = True
         import threading
+
+        # Snapshot the router list HERE, on the GUI thread -- see the same note in
+        # flow_hud.refresh(). `_routers()` iterates ctx.topology.devices, which a project
+        # load replaces outright; iterating it from the worker raises inside a thread whose
+        # only handler is a `finally`, so the poll vanishes with no explanation.
+        try:
+            names = list(self._routers())
+        except Exception:
+            return                              # topology in flux — skip this tick, not fatal
+        self._busy = True
 
         def work():
             try:
                 tnow = time.monotonic()
                 rows, polled = [], []
-                for name in self._routers():
+                for name in names:
                     try:
                         rows.extend(parse_cp_status(
                             self._query(name, "gpipe cp status"), router=name))
@@ -215,6 +224,12 @@ class McastHudController(QObject):
         self.hud.show(); self.hud.raise_()
         self.refresh()
         self._poll.start(self._interval)
+
+    def reset(self) -> None:
+        """Forget every tracked group. Called when the TOPOLOGY is swapped: the membership
+        belongs to the previous network's routers, and keeping it would show a tree for a
+        network that is no longer on screen."""
+        self._tracker = McastTracker()
 
     def close(self) -> None:
         self._poll.stop()

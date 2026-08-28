@@ -178,8 +178,57 @@ def open_tap(name: str) -> int:
     return fd
 
 
+# Overridable so the behaviour can be tested without a live container.
+IPV6_CONF_ROOT = "/proc/sys/net/ipv6/conf"
+
+
+def quiet_ipv6(name: str) -> None:
+    """Stop the kernel putting IPv6 autoconfiguration traffic on the fabric.
+
+    A stock Linux interface starts talking the moment it comes up: a link-local address,
+    duplicate-address detection, MLD reports, and router solicitations retried several
+    times. None of it is asked for, and on a student's drawn network it is pure noise --
+    a capture of eleven stations showed 988 packets in a few seconds, nearly all of them
+    `ICMP6, router solicitation` to ff02::2, with the ARP the student was actually looking
+    for buried inside.
+
+    And on a GINI fabric it is not just unused, it is UNANSWERABLE: the gRouter has no IPv6.
+    Nothing on the drawn network can ever reply to a router solicitation, so every one of
+    them is waste by construction -- retried, never satisfied, forever.
+
+    Worse on an SDN fabric specifically. Those are MULTICAST, so a reactive controller
+    floods them; in a topology with a cycle and no spanning tree they circulate, and the
+    same solicitation is delivered over and over. The chatter becomes a load source in its
+    own right, and it fills the switches' flow tables with rules for traffic nobody wants.
+
+    Set BEFORE the link comes up: bringing it up is what triggers the link-local address
+    and its DAD, so disabling afterwards still leaks the first burst.
+
+    GINI_FABRIC_IPV6=1 keeps IPv6 on. There is no IPv6 routing to be had either way, but a
+    purely L2 path (station to station across switches) does carry IPv6 frames, so the
+    escape hatch stays for anyone deliberately experimenting there.
+
+    Writes /proc directly rather than shelling out to `sysctl`: the lean station image is
+    Alpine and carries no procps, so `sysctl` would simply not be there. Only the fabric
+    interface is touched, never `all`, so the container's own eth0 -- which carries the UDP
+    transport underneath the fabric -- is left exactly as Docker set it up.
+    """
+    if os.environ.get("GINI_FABRIC_IPV6", "").strip().lower() in ("1", "true", "yes"):
+        return
+    for knob, value in (("disable_ipv6", "1"), ("accept_ra", "0"), ("autoconf", "0")):
+        path = f"{IPV6_CONF_ROOT}/{name}/{knob}"
+        try:
+            with open(path, "w") as fh:
+                fh.write(value)
+        except OSError:
+            # Kernel built without IPv6, or /proc/sys not writable. Not fatal: the cost is
+            # noise, not a broken station, and failing to start over it would be worse.
+            pass
+
+
 def configure_iface(name: str, mac: str, cidr: str) -> None:
     subprocess.run(["ip", "link", "set", name, "address", mac], check=True)
+    quiet_ipv6(name)                                                        # before `up`
     subprocess.run(["ip", "addr", "add", cidr, "dev", name], check=True)
     subprocess.run(["ip", "link", "set", name, "up"], check=True)
     subprocess.run(["ip", "link", "set", name, "mtu", "1400"], check=True)   # absorb UDP encap
@@ -287,6 +336,12 @@ def main() -> None:
     if ifaces is None:                       # back-compat with the old single-iface shape
         ifaces = [{"ip": cfg["ip"], "mac": cfg["mac"],
                    "tap": cfg.get("tap", "gini0"), "port": cfg["port"]}]
+
+    # Quiet IPv6 on interfaces that do not exist yet. A tap is already registered by the
+    # time TUNSETIFF returns, so configure_iface's per-interface write leaves a brief
+    # window in which the kernel could start autoconfiguring. `default` is inherited at
+    # device creation, so setting it here closes that window rather than racing it.
+    quiet_ipv6("default")
 
     sel = selectors.DefaultSelector()
     fd_port: dict[int, Port] = {}            # tap fd -> its uplink Port

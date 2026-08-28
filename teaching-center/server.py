@@ -187,7 +187,11 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if self.command == "GET" and p == "/auth/whoami":
             me = self._who()
-            return self._send(200, me) if me else self._send(401)
+            # The course travels with identity because a Teaching Center serves exactly ONE course
+            # — it is deployment configuration, not something a teacher picks per activity. The
+            # console shows it as a label; making it an input would invite mixing courses in a
+            # store that has no notion of doing so.
+            return self._send(200, {**me, "course": COURSE}) if me else self._send(401)
         self._send(404)
         return True
 
@@ -354,6 +358,102 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._send(405, {"error": "method not allowed here"}) or True
 
+    # -- drafting an observation plan (the one model-touching route) ---------- #
+    def _draft_activity(self, b: dict) -> None:
+        """Draft a plan, streaming progress as newline-delimited JSON.
+
+        The model streams into the SERVER, so without this the browser posts once and waits in
+        silence — and a model producing beautifully looks exactly like a hung one. Progress is
+        therefore driven by REAL tokens: if generation stalls, the indicator stalls. A CSS spinner
+        would keep spinning, which is worse than no indicator because it is confidently wrong.
+
+        NDJSON rather than SSE: both ends are ours, `event:` framing buys nothing, and the Ollama
+        reader upstream already speaks NDJSON, so the whole path uses one shape.
+
+        Line kinds:
+          {"t":"phase","n":1,"label":…}  a new model call started
+          {"t":"tick","chars":N}         tokens arrived — the liveness signal
+          {"t":"say","text":…}           human-readable prose, streamed as it is written
+          {"t":"done","result":{…}}      the payload the non-streaming route would have returned
+        """
+        import ai as _ai
+        from gini.agent import aop_selector as _sel
+
+        streaming = bool(b.get("stream"))
+        if streaming:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+
+        def emit(**line) -> None:
+            if not streaming:
+                return
+            try:
+                self.wfile.write((json.dumps(line) + "\n").encode())
+                self.wfile.flush()          # or the browser sees nothing until the end
+            except (BrokenPipeError, ConnectionResetError):
+                raise                        # the teacher navigated away; stop working
+
+        _llm = _stack()["prof"].llm if _stack().get("prof") else _ai.Ollama()
+
+        # Phase labels by call index. The selector may call the model up to three times — draft,
+        # repair an invalid selection, reconsider after the Twin objects — and "reconsidering its
+        # choice" is far more reassuring to watch than an unlabelled spinner.
+        LABELS = {1: "Reading that and choosing what to watch",
+                  2: "Reconsidering — something did not add up",
+                  3: "One more pass"}
+        calls = {"n": 0}
+
+        def _json_call(prompt: str) -> str:
+            calls["n"] += 1
+            emit(t="phase", n=calls["n"],
+                 label=LABELS.get(calls["n"], "Still working on the plan"))
+            return _llm.chat("", prompt, json_mode=True, num_predict=800,
+                             on_chunk=lambda c: emit(t="tick", chars=len(c)))
+
+        def _prose_call(prompt: str) -> str:
+            emit(t="phase", n=0, label="Writing you a plain-English summary")
+            # The ONLY call whose output is meant for a human, so it is the only one worth showing
+            # verbatim. Streaming raw JSON tokens from the selection call would be noise.
+            return _llm.chat("", prompt, num_predict=400,
+                             on_chunk=lambda c: emit(t="say", text=c))
+
+        try:
+            d = _sel.draft(b.get("intent", ""), _json_call,
+                           params={"starting_point": "blank",
+                                   "guidance": bool(b.get("guidance"))},
+                           answers=tuple(b.get("answers") or ()),
+                           feedback=tuple(b.get("feedback") or ()),
+                           deadline_s=b.get("deadline_s"))
+            if not d.ok:
+                result = {"ok": False, "error": d.error, "questions": d.questions, "note": d.note}
+            else:
+                from gini.domain import aop_assemble as _asm
+                plan = _asm.assemble(d.selection, gini_version="tc")
+                result = {"ok": True, "note": d.note, "questions": d.questions,
+                          "objections": [{"question": o.question,
+                                          "concern": {"statement": o.concern.statement,
+                                                      "evidence": o.concern.evidence}}
+                                         for o in d.objections],
+                          "coverage_silent": d.coverage_silent,
+                          "selection": d.selection.to_dict(), "plan": plan.to_dict(),
+                          "describe": _asm.describe(plan),
+                          "prose": _sel.back_translate(plan, _prose_call)}
+        except _ai.ModelTooSlow as e:
+            result = {"ok": False, "error": str(e)}
+        except TimeoutError:
+            result = {"ok": False, "error": ("The model went silent. Nothing arrived at all — "
+                                             "check that Ollama is running and the model is "
+                                             "pulled.")}
+        except Exception as e:                       # noqa: BLE001 — never 500 at a teacher
+            result = {"ok": False, "error": f"The model could not be reached: {e}"}
+
+        if streaming:
+            emit(t="done", result=result)
+        else:
+            self._send(200, result)
+
     # -- teacher console (UI + API) — TEACHER SESSION REQUIRED ---------------- #
     def _teacher_routes(self) -> bool:
         p = self.path.split("?")[0]
@@ -437,31 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                                               due=b.get("due", ""), attempts=b.get("attempts", 3),
                                               release_now=bool(b.get("release_now", False))))
             elif p == "/api/activities/draft":
-                # The ONLY model-touching route. `ai.Ollama.chat(system, user)` takes two args and
-                # the selector calls llm(prompt) with one — it owns its own system prompt — so the
-                # adapter is required. Passing chat directly raises TypeError, which draft()
-                # reports to the teacher as "the model could not be reached": a signature bug
-                # wearing a network fault's clothes.
-                import ai as _ai
-                from gini.agent import aop_selector as _sel
-                _llm = _stack()["prof"].llm if _stack().get("prof") else _ai.Ollama()
-                d = _sel.draft(b.get("intent", ""), lambda prompt: _llm.chat("", prompt),
-                               params={"starting_point": "blank",
-                                       "guidance": bool(b.get("guidance"))},
-                               answers=tuple(b.get("answers") or ()),
-                               deadline_s=b.get("deadline_s"))
-                if not d.ok:
-                    self._send(200, {"ok": False, "error": d.error, "questions": d.questions,
-                                     "note": d.note})
-                else:
-                    from gini.domain import aop_assemble as _asm
-                    plan = _asm.assemble(d.selection, gini_version="tc")
-                    self._send(200, {"ok": True, "note": d.note, "questions": d.questions,
-                                     "selection": d.selection.to_dict(),
-                                     "plan": plan.to_dict(),
-                                     "describe": _asm.describe(plan),
-                                     "prose": _sel.back_translate(
-                                         plan, lambda prompt: _llm.chat("", prompt))})
+                self._draft_activity(b)
             elif p == "/api/activities/save":
                 self._send(200, C.save_activity(
                     b.get("lab", ""), title=b.get("title", ""), intent=b.get("intent", ""),

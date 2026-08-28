@@ -32,6 +32,17 @@ log = core.getLogger()
 # Can be overriden on commandline.
 _flood_delay = 0
 
+# GINI PATCH: same values as forwarding/l2_multi.py, so both stock forwarding apps age
+# their rules alike. See the long note there for why these were raised off POX's 10 / 30
+# and what flow-table pressure it trades against. Deliberately duplicated rather than
+# imported from l2_multi: that module pulls in openflow.discovery at import time, and
+# loading a shortest-path app as a side effect of loading the learning switch is a far
+# worse coupling than three repeated lines.
+import os as _os
+
+FLOW_IDLE_TIMEOUT = int(_os.environ.get("GINI_FLOW_IDLE_TIMEOUT") or 60)
+FLOW_HARD_TIMEOUT = int(_os.environ.get("GINI_FLOW_HARD_TIMEOUT") or 120)
+
 class LearningSwitch (object):
   """
   The learning switch "brain" associated with a single OpenFlow switch.
@@ -167,8 +178,12 @@ class LearningSwitch (object):
                   (packet.src, event.port, packet.dst, port))
         msg = of.ofp_flow_mod()
         msg.match = of.ofp_match.from_packet(packet, event.port)
-        msg.idle_timeout = 10
-        msg.hard_timeout = 30
+        # GINI PATCH: see the note on FLOW_IDLE_TIMEOUT in forwarding/l2_multi.py. Stock
+        # 10 / 30 empties the flow table within thirty seconds of the last packet, which
+        # leaves nothing to observe in the Network HUD or `openflow entry all`. Same
+        # per-microflow caveat applies here -- this is also a from_packet match.
+        msg.idle_timeout = FLOW_IDLE_TIMEOUT
+        msg.hard_timeout = FLOW_HARD_TIMEOUT
         msg.actions.append(of.ofp_action_output(port = port))
         msg.data = event.ofp # 6a
         self.connection.send(msg)
