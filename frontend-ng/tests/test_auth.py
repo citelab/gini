@@ -17,12 +17,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
 sys.path.insert(0, str(_TC))
 
-import accounts as A                                     # noqa: E402
-from store import Store                                  # noqa: E402
+from gini_teaching_center import accounts as A           # noqa: E402
+from gini_teaching_center.store import Store             # noqa: E402
 
 GOOD = "a-good-password"
 

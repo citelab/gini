@@ -1,0 +1,36 @@
+# systemd alternative to pm2. Use this one if the VM is managed by the school's sysadmins:
+# it starts at boot without a per-user `pm2 startup`, and it survives the account being logged out.
+#
+#   sudo cp deploy/gini-tc.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gini-tc
+#   journalctl -u gini-tc -f
+[Unit]
+Description=GINI Teaching Center
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gini-tc
+Group=gini-tc
+WorkingDirectory=/opt/gini-tc
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/gini-tc/env
+ExecStart=/opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8080 --host 127.0.0.1
+Restart=always
+RestartSec=2
+
+# The database holds staff password hashes and every student's submitted work, on a VM the whole
+# school can log into. These are the lines that keep it out of everyone else's reach.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gini-tc/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

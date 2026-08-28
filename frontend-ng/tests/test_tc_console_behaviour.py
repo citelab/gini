@@ -24,15 +24,15 @@ from pathlib import Path
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
-_CONSOLE = _TC / "static" / "console.html"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
+_CONSOLE = _TC / "gini_teaching_center" / "static" / "console.html"
 
 pytestmark = pytest.mark.skipif(not _CONSOLE.exists(), reason="teaching-center not checked out")
 
 
 def _jsdom_root() -> str | None:
     """jsdom is optional. Look where a developer would plausibly have installed it."""
-    for base in (_TC.parent / "node_modules", Path("/tmp/jsdom-dyc/node_modules")):
+    for base in (_TC.parent.parent / "node_modules", Path("/tmp/jsdom-dyc/node_modules")):
         if (base / "jsdom").exists():
             return str(base)
     return None

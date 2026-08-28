@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gini-core"
+dynamic = ["version"]
+description = "GINI core domain model — topology, devices, and the proof-of-activity format"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "GINI Toolkit" }]
+# Pure Python and deliberately tiny: this is the code the desktop app and the Teaching Center must
+# agree on — the proof chain, the ticket codes, the narration — so it has to install anywhere,
+# including a headless server VM with no Qt and no compiler.
+#
+# PyYAML is here because `gini.domain.fragment_yaml` and `gini.domain.lesson` genuinely need it.
+# Declaring zero dependencies looked cleaner and was a lie: `pip install gini-core` would have
+# given you a package whose own modules raise ImportError. It is a universal wheel and about a
+# thousandth of what Qt would have cost.
+dependencies = ["PyYAML>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/citelab/gini"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gini.domain*"]
+
+[tool.setuptools.package-data]
+"gini.domain" = ["missions/**/*.yaml"]
+
+[tool.setuptools_scm]
+root = ".."
+version_file = "src/gini/_version.py"
+local_scheme = "no-local-version"

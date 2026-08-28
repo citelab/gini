@@ -511,6 +511,68 @@ class Store:
     def material_delete(self, mid: str) -> None:
         self._run("DELETE FROM material WHERE id=?", (mid,))
 
+    # -- the site as a whole ---------------------------------------------- #
+    def site_stats(self) -> dict:
+        """What a reset would destroy. Shown BEFORE anything is touched.
+
+        Named counts, because "3 submissions" is the difference between clearing test data and
+        finding out afterwards that it was the live term.
+        """
+        def one(sql: str) -> int:
+            return int(self.db.execute(sql).fetchone()[0])
+
+        with self.lock:
+            return {
+                "courses": one("SELECT COUNT(*) FROM course"),
+                "activities": one("SELECT COUNT(*) FROM activity"),
+                "codes": one("SELECT COUNT(*) FROM activity_code"),
+                "submissions": one("SELECT COUNT(*) FROM activity_submission"),
+                "claimed": one("SELECT COUNT(*) FROM activity_submission "
+                               "WHERE student_id<>'' AND student_id IS NOT NULL"),
+                "materials": one("SELECT COUNT(*) FROM material"),
+                "staff": one("SELECT COUNT(*) FROM account"),
+            }
+
+    def site_snapshot(self) -> dict:
+        """Everything a reset is about to remove, as plain data, for the backup file."""
+        tables = ["course", "course_staff", "activity", "activity_code", "activity_submission",
+                  "material", "claim_attempt", "account"]
+        return {t: self._all(f"SELECT * FROM {t}") for t in tables}
+
+    def site_reset(self, *, courses: bool = True, staff: bool = False,
+                   keep_account: str = "") -> dict:
+        """Clear the site. Returns what was removed.
+
+        `courses` and `staff` are optional because the common case after a testing phase is "same
+        people, same courses — throw away the labs and the fake submissions".
+
+        `keep_account` is never deleted whatever the flags say: it is the admin running this, and a
+        reset that locks the operator out of their own portal is a bug, not a feature.
+        """
+        removed = self.site_stats()
+        with self.lock:
+            # Always: the activity layer. That IS what "reset" means here.
+            for t in ("activity_submission", "claim_attempt", "activity_code", "activity"):
+                self.db.execute(f"DELETE FROM {t}")
+            if courses:
+                for t in ("material", "course_staff", "course"):
+                    self.db.execute(f"DELETE FROM {t}")
+            else:
+                removed["courses"] = removed["materials"] = 0
+            if staff:
+                self.db.execute("DELETE FROM account WHERE username<>?", (keep_account,))
+                self.db.execute("DELETE FROM session WHERE who<>?", (keep_account,))
+                removed["staff"] = max(0, removed["staff"] - 1)
+                # A claim token for an account that no longer exists is a spare key to a name
+                # somebody could re-add later.
+                for row in self.db.execute("SELECT k FROM kv WHERE k LIKE 'claim:%'").fetchall():
+                    if row["k"] != f"claim:{keep_account}":
+                        self.db.execute("DELETE FROM kv WHERE k=?", (row["k"],))
+            else:
+                removed["staff"] = 0
+            self.db.commit()
+        return removed
+
     # -- kv --------------------------------------------------------------- #
     def kv_get(self, k: str) -> dict | None:
         r = self._one("SELECT v FROM kv WHERE k=?", (k,))

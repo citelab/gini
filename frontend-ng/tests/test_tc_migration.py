@@ -19,12 +19,12 @@ from pathlib import Path
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
 if str(_TC) not in sys.path:
     sys.path.insert(0, str(_TC))
 
-from store import Store                                       # noqa: E402
+from gini_teaching_center.store import Store                                       # noqa: E402
 
 # The v0 shape, as it actually shipped: activity carried the plan, had no course/lab/brief columns,
 # and there were tables for lessons and a student roster.
@@ -129,7 +129,7 @@ def test_existing_submissions_survive_and_stay_findable(v0_root):
 
 
 def test_staff_accounts_still_sign_in_after_the_migration(v0_root):
-    import accounts as A
+    from gini_teaching_center import accounts as A
     acc = A.Accounts(str(v0_root))
     assert acc.store.account("mahesh")["role"] == "teacher"
 
@@ -165,7 +165,7 @@ def test_a_fresh_database_is_unaffected(tmp_path):
 def test_vending_a_code_works_though_v0_demanded_a_plan_hash(v0_root):
     """v0 declared `activity_code.plan_hash NOT NULL`. v1 has no plan to name, so every vend failed
     on a constraint — and adding columns cannot fix a constraint."""
-    import activities as ACT
+    from gini_teaching_center import activities as ACT
     store = Store(str(v0_root))
     act = store.activity("comp535/lab1")
     store.code_put(ACT.mint_code(act))          # raised IntegrityError before the rebuild

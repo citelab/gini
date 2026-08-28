@@ -49,9 +49,11 @@ _MAX_COMPLAINTS = 3
 
 
 def gini_version() -> str:
+    # From gini.version, not `gini.__init__`: `gini` is a namespace package shared with gini-core,
+    # so it has no __init__ to hold a version any more.
     try:
-        from .. import __version__
-        return str(__version__)
+        from ..version import gini_version as _v
+        return _v()
     except Exception:                       # noqa: BLE001 — a version is a nicety, never a blocker
         return ""
 
@@ -428,7 +430,11 @@ class ProofRecorder:
             return {"ok": False, "message": "Enter your assignment code first — nothing is being "
                                             "recorded, so there is nothing to prove."}
         try:
-            artifact = _proof.artifact_summary(self._topology_dict())
+            # Captured ONCE and returned, not re-read by the caller. A second `_topology_dict()`
+            # after the student nudges a node would hash differently from the one the chain
+            # committed to, and the server would rightly refuse the upload as not matching.
+            topology = self._topology_dict()
+            artifact = _proof.artifact_summary(topology)
             rows = objectives if objectives is not None else self._objectives
             self._record(ev.submit(artifact, rows))
             proof = _proof.build_proof(self._chain, gini_version())
@@ -436,6 +442,6 @@ class ProofRecorder:
         except Exception as e:                              # noqa: BLE001
             self._complain(e)
             return {"ok": False, "message": f"Could not write the proof: {e}"}
-        return {"ok": True, "path": str(path), "proof": proof,
+        return {"ok": True, "path": str(path), "proof": proof, "topology": topology,
                 "receipt": _proof.receipt_code(proof),
                 "message": f"Proof written to {path}"}

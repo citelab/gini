@@ -1,0 +1,51 @@
+# Publishes gini-teaching-center to PyPI.
+#
+# Depends on gini-core being published first (see core.yml). This workflow does not enforce that —
+# it cannot — so on a first release, tag and let core.yml finish before this one uploads, or the
+# package will exist on PyPI with a dependency nobody can resolve.
+name: publish gini-teaching-center
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade build
+      - run: python -m build --sdist --wheel --outdir dist/ teaching-center/
+
+      # The console and the student page are served straight off disk. Left out of the wheel, the
+      # server installs happily and then 500s on its own front page — so this is checked here
+      # rather than discovered on the VM.
+      - name: the wheel carries the HTML it serves
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          w = glob.glob("dist/gini_teaching_center-*.whl")[0]
+          names = zipfile.ZipFile(w).namelist()
+          for page in ("console.html", "getcode.html"):
+              assert f"gini_teaching_center/static/{page}" in names, f"{page} missing from the wheel"
+          # Only the Requires-Dist LINES. Scanning the whole METADATA also reads the README,
+          # which mentions PySide6 in prose to explain why it is absent — a check that fails on
+          # its own documentation is a check nobody keeps.
+          meta = zipfile.ZipFile(w).read(
+              [n for n in names if n.endswith("METADATA")][0]).decode()
+          reqs = [l for l in meta.splitlines() if l.startswith("Requires-Dist:")]
+          assert any("gini-core" in r for r in reqs), f"lost the gini-core dependency: {reqs}"
+          assert not any("PySide6" in r or "gini-toolkit" in r for r in reqs), \
+              f"Qt leaked into the SERVER package: {reqs}"
+          print(w, "ok")
+          PY
+      - uses: pypa/gh-action-pypi-publish@release/v1

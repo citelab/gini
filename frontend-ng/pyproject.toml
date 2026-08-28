@@ -13,6 +13,9 @@ authors = [{ name = "GINI Toolkit" }]
 # `pip install gini-toolkit` gives a runnable desktop app: engine + the PySide6/Qt GUI. The
 # container runtime (Docker/Colima) and images are brought in separately by the `gini-setup` command.
 dependencies = [
+    "gini-core",                 # the shared domain model + proof format. Split out so a headless
+    #                              Teaching Center can install it without dragging in Qt, and so
+    #                              there is exactly ONE copy of the format both sides must agree on.
     "PySide6-Essentials>=6.6",   # the Qt6 desktop GUI (gini.ui + the `gbuilder` entrypoint)
     "PySide6-Addons>=6.6",       # QtWebEngine — embeds headful Desktops / OS-Zoo screens (else the
     #                              system browser); QtWebSockets — the Terminal's link to ttyd.
@@ -45,10 +48,12 @@ gini-setup = "gini.setup.cli:main"       # one-time: bring in the container runt
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# `gini` is an implicit NAMESPACE package shared with gini-core, which owns gini.domain. Neither
+# distribution may ship gini/__init__.py, or one would shadow the other's half of the tree.
+exclude = ["gini.domain*"]
 
 [tool.setuptools.package-data]
 "gini.ui" = ["assets/*.png", "assets/*.ico", "assets/*.icns"]
-"gini.domain" = ["missions/**/*.yaml"]
 
 # Version comes from git tags (e.g. `git tag v6.1.0` -> 6.1.0). The repo root is one level up from
 # this pyproject, hence root = "..". A generated _version.py is written into the package at build

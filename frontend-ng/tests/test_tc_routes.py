@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
 if str(_TC) not in sys.path:
     sys.path.insert(0, str(_TC))
@@ -38,16 +38,16 @@ def tc(tmp_path, monkeypatch):
     monkeypatch.setenv("COURSE_ROOT", str(tmp_path))
     monkeypatch.setenv("ADMIN_ID", "boss")
     monkeypatch.setenv("ADMIN_PASSWORD", "correct-horse")
-    for mod in ("server", "accounts", "activities", "store"):
+    for mod in [m for m in list(sys.modules) if m.startswith("gini_teaching_center")]:
         sys.modules.pop(mod, None)
-    from store import Store
+    from gini_teaching_center.store import Store
     Store._instances.clear()
 
-    import server                                                   # noqa: PLC0415
+    from gini_teaching_center import server                         # noqa: PLC0415
     server.ROOT = tmp_path
     server.MATERIALS = tmp_path / "materials"
     server.MATERIALS.mkdir(parents=True, exist_ok=True)
-    import accounts as A                                            # noqa: PLC0415
+    from gini_teaching_center import accounts as A                  # noqa: PLC0415
     server._ACCTS = A.Accounts(tmp_path)
     server._STORE = Store(tmp_path)
     server._ACCTS.ensure_admin()
@@ -249,7 +249,7 @@ def _chain(code, *, t0, devices=None):
     plainly built something.
     """
     from gini.domain import proof as P
-    import activities as ACT
+    from gini_teaching_center import activities as ACT
     devices = devices or [{"id": "1", "name": "R1", "type": "Router"}]
     topo = {"devices": devices, "links": []}
     chain = P.Chain.start(ACT.normalize(code), assignment="comp535/lab1", gini_version="test", t=t0)
@@ -280,7 +280,7 @@ def test_someone_elses_proof_file_is_refused(tc):
     the same *work* redone under another code is a different chain with a different receipt —
     that case is caught by the artifact-hash twin, not here.
     """
-    import activities as ACT
+    from gini_teaching_center import activities as ACT
     tc.signin("boss", "correct-horse")
     _released_lab(tc)
     _, david = tc.call("/api/activity?course=comp535&lab=lab1", token="")
@@ -469,7 +469,7 @@ def test_an_unhandled_error_comes_back_as_a_readable_reason(tc, monkeypatch):
     """Not a dropped connection. When a handler raises, `BaseHTTPRequestHandler` closes the socket,
     so the browser gets a network failure with no status and no body — and the console can only say
     "something went wrong", which helps neither the teacher nor whoever has to fix it."""
-    import server
+    from gini_teaching_center import server
     monkeypatch.setattr(server.Handler, "_save_activity",
                         lambda self, c, b: (_ for _ in ()).throw(RuntimeError("the disk is gone")))
     tc.signin("boss", "correct-horse")
@@ -775,3 +775,161 @@ def test_deleting_one_lab_leaves_the_others_alone(tc):
     _released_lab(tc, "comp535", "lab2")
     tc.call("/api/activities/delete", {"course": "comp535", "lab": "lab1", "confirm": "lab1"})
     assert [a["lab"] for a in tc.call("/api/activities?course=comp535")[1]] == ["lab2"]
+
+
+# -- resetting the site -------------------------------------------------------- #
+def _a_full_site(tc):
+    """Two courses, labs, a vended code, a submission, a claim, a teacher, a material."""
+    import base64
+    _released_lab(tc, "comp535", "lab1")
+    _released_lab(tc, "comp557", "lab1")
+    _, v = tc.call("/api/activity?course=comp535&lab=lab1", token="")
+    _, sub = _submit(tc, v["code"])
+    tc.call("/api/submissions/claim",
+            {"course": "comp535", "receipt": sub["receipt"], "student_id": "260123456"})
+    tc.call("/api/materials", {"course": "comp535", "title": "Handout", "filename": "h.txt",
+                               "data": base64.b64encode(b"read me").decode()})
+    _, added = tc.call("/api/staff", {"username": "ada"})
+    tc.call("/auth/claim", {"id": "ada", "claim_token": added["claim_token"],
+                            "password": "a-good-password"})
+    return sub["receipt"]
+
+
+def test_the_site_preview_counts_what_a_reset_would_destroy(tc):
+    """Shown before anything is touched. "3 submissions" is the difference between clearing test
+    data and finding out afterwards it was the live term."""
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    st = tc.call("/api/site")[1]
+    assert st["courses"] == 2 and st["activities"] == 2
+    assert st["submissions"] == 1 and st["claimed"] == 1
+    assert st["materials"] == 1 and st["staff"] == 2
+
+
+def test_the_preview_changes_nothing(tc):
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    tc.call("/api/site")
+    assert tc.call("/api/site")[1]["submissions"] == 1
+
+
+def test_a_reset_needs_the_typed_word(tc):
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    for confirm in ("", "reset please", "yes", "Reset"):
+        _, r = tc.call("/api/site/reset", {"confirm": confirm, "password": "correct-horse"})
+        assert not r["ok"], confirm
+    assert tc.call("/api/site")[1]["activities"] == 2
+
+
+def test_a_reset_needs_the_password_again(tc):
+    """A signed-in console left open on a shared desk is the exact scenario. Re-authenticating is
+    the only gate a passer-by cannot walk through."""
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    _, r = tc.call("/api/site/reset", {"confirm": "RESET", "password": "wrong"})
+    assert not r["ok"] and "password" in r["error"]
+    assert tc.call("/api/site")[1]["activities"] == 2
+
+
+def test_a_teacher_cannot_reset_the_site(tc):
+    tc.signin("boss", "correct-horse")
+    _, added = tc.call("/api/staff", {"username": "ada"})
+    _, ada = tc.call("/auth/claim", {"id": "ada", "claim_token": added["claim_token"],
+                                     "password": "a-good-password"})
+    assert tc.call("/api/site/reset",
+                   {"confirm": "RESET", "password": "a-good-password"},
+                   token=ada["session"])[0] == 403
+    assert tc.call("/api/site", token=ada["session"])[0] == 403
+
+
+def test_a_reset_clears_the_activity_layer(tc):
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    _, r = tc.call("/api/site/reset", {"confirm": "RESET", "password": "correct-horse"})
+    assert r["ok"], r
+    st = tc.call("/api/site")[1]
+    assert st["activities"] == 0 and st["codes"] == 0 and st["submissions"] == 0
+
+
+def test_courses_and_staff_survive_by_default(tc):
+    """The common case after testing: same people, same courses, throw away the fake labs."""
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    tc.call("/api/site/reset", {"confirm": "RESET", "password": "correct-horse"})
+    st = tc.call("/api/site")[1]
+    assert st["courses"] == 2 and st["staff"] == 2
+
+
+def test_courses_go_when_asked(tc):
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    tc.call("/api/site/reset",
+            {"confirm": "RESET", "password": "correct-horse", "courses": True})
+    st = tc.call("/api/site")[1]
+    assert st["courses"] == 0 and st["materials"] == 0
+    assert st["staff"] == 2                       # untouched by the courses flag
+
+
+def test_staff_go_when_asked_but_never_the_admin_doing_it(tc):
+    """A reset that locks the operator out of their own portal is a bug, not a feature."""
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    _, r = tc.call("/api/site/reset",
+                   {"confirm": "RESET", "password": "correct-horse", "staff": True})
+    assert r["ok"]
+    assert tc.call("/api/site")[1]["staff"] == 1
+    assert [s["username"] for s in tc.call("/api/staff")[1]] == ["boss"]
+    assert tc.call("/auth/login", {"id": "boss", "password": "correct-horse"})[1]["ok"]
+
+
+def test_a_removed_teachers_pending_claim_token_goes_with_them(tc):
+    """A claim token for an account that no longer exists is a spare key to a name someone could
+    re-add later."""
+    tc.signin("boss", "correct-horse")
+    tc.call("/api/courses", {"id": "comp535", "title": "Networks"})
+    tc.call("/api/staff", {"username": "neverclaimed"})          # left unclaimed on purpose
+    tc.call("/api/site/reset",
+            {"confirm": "RESET", "password": "correct-horse", "staff": True})
+    assert tc.server._STORE.kv_get("claim:neverclaimed") is None
+
+
+def test_a_backup_is_written_before_anything_is_deleted(tc):
+    """This is meant for test data, but the person running it is one wrong browser tab away from
+    a live term."""
+    import json as _json
+    from pathlib import Path as _Path
+    tc.signin("boss", "correct-horse")
+    receipt = _a_full_site(tc)
+    _, r = tc.call("/api/site/reset", {"confirm": "RESET", "password": "correct-horse",
+                                       "courses": True, "staff": True})
+    backup = _Path(r["backup"])
+    assert backup.exists()
+    data = _json.loads(backup.read_text())
+    assert [s["receipt"] for s in data["activity_submission"]] == [receipt]
+    assert data["activity_submission"][0]["student_id"] == "260123456"   # the claim too
+    assert {c["id"] for c in data["course"]} == {"comp535", "comp557"}
+    assert data["activity_submission"][0]["data"]                        # the whole proof
+
+
+def test_the_reset_reports_what_it_removed(tc):
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    _, r = tc.call("/api/site/reset", {"confirm": "RESET", "password": "correct-horse",
+                                       "courses": True})
+    assert r["removed"]["submissions"] == 1
+    assert r["removed"]["courses"] == 2
+    assert r["removed"]["staff"] == 0             # not asked for, so not counted
+
+
+def test_the_site_works_normally_after_a_reset(tc):
+    """The real acceptance test: can you start a new term?"""
+    tc.signin("boss", "correct-horse")
+    _a_full_site(tc)
+    tc.call("/api/site/reset", {"confirm": "RESET", "password": "correct-horse",
+                                "courses": True, "staff": True})
+    _released_lab(tc, "comp999", "lab1")
+    _, v = tc.call("/api/activity?course=comp999&lab=lab1", token="")
+    assert v["ok"]
+    _, sub = _submit(tc, v["code"])
+    assert sub["ok"]

@@ -28,7 +28,7 @@ import os
 import secrets
 import time
 
-from store import Store
+from .store import Store
 
 SESSION_TTL = 12 * 3600          # a working day, not forever
 _N, _R, _P = 2 ** 14, 8, 1       # scrypt cost — interactive-login tier

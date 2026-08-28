@@ -154,10 +154,13 @@ class Rejected(Exception):
 
 
 BAD_PROOF = "bad_proof"
+WRONG_TOPOLOGY = "wrong_topology"
 DUPLICATE = "duplicate"
 
 _MESSAGES.update({
     BAD_PROOF: "That proof does not verify. It may have been edited after it was produced.",
+    WRONG_TOPOLOGY: "The work sent does not match the proof recorded for it. Submit from the "
+                    "gBuilder that recorded the work.",
     DUPLICATE: "A submission already exists for that code or that proof.",
 })
 
@@ -173,6 +176,21 @@ def session_seconds(proof: dict) -> tuple[float, float]:
     if not entries:
         return 0.0, 0.0
     return float(entries[0].get("t") or 0), float(entries[-1].get("t") or 0)
+
+
+def topology_matches(topology: dict, proof: dict) -> bool:
+    """Does this topology hash to the fingerprint the chain committed to?
+
+    THE anti-theft check, and the reason a stolen file is worthless. The chain is bound to the code
+    (verified with `expect_ticket`), and the chain's submit entry carries `sha256` of the topology
+    it was generated from. So a student who obtains a classmate's project file cannot submit it
+    under their own code: their chain would commit to a different digest, and swapping the file in
+    afterwards changes the digest and fails here.
+
+    Hashed with the SAME function the recorder used, so the two can never disagree about
+    canonicalisation — key order, whitespace, float formatting.
+    """
+    return bool(topology) and _proof.artifact_summary(topology).get("sha256") == artifact_hash(proof)
 
 
 def artifact_hash(proof: dict) -> str:
@@ -207,6 +225,13 @@ def prepare(payload: dict, code_row: dict, activity: dict,
     verdict = _proof.verify_proof(proof, expect_ticket=code_row["code"])
     if not verdict.ok:
         raise Rejected(BAD_PROOF, verdict.reason or "the chain does not verify")
+
+    # The runnable package. Optional only so an older gBuilder still submits something rather than
+    # nothing; when it IS sent it must match, or the submission is refused outright.
+    topology = payload.get("topology")
+    if topology is not None and not topology_matches(topology, proof):
+        raise Rejected(WRONG_TOPOLOGY,
+                       "the submitted topology is not the one this proof was generated from")
 
     started, finished = session_seconds(proof)
     return {"code": code_row["code"],
@@ -273,6 +298,9 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None)
         "narration": narrate(proof),
         "entries": len(proof.get("entries") or []),
         "artifact": payload.get("artifact"),
+        # Whether the teacher can actually OPEN this, or only read about it. An older gBuilder
+        # sends a proof and no package; saying so beats a download button that yields nothing.
+        "runnable": bool(payload.get("topology")),
         # Same topology under another code. FLAGGED, never rejected: a shared starter topology is a
         # legitimate reason for two submissions to match, and only the teacher can tell.
         "twins": twins,

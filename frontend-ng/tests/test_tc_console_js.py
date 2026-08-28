@@ -20,14 +20,14 @@ from pathlib import Path
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
 
 PAGES = ("console.html", "getcode.html")
 
 
 def scripts(name: str) -> str:
-    html = (_TC / "static" / name).read_text(encoding="utf-8")
+    html = (_TC / "gini_teaching_center" / "static" / name).read_text(encoding="utf-8")
     return "\n".join(re.findall(r"<script>(.*?)</script>", html, re.S))
 
 

@@ -40,14 +40,23 @@ MATERIALS = ROOT / "materials"
 # course-scoped rather than in the server operator's home.
 os.environ.setdefault("GINI_HOME_DIR", str(ROOT))
 
-import accounts as _accounts                                       # noqa: E402
-import activities as _act                                          # noqa: E402
-from store import Store                                            # noqa: E402
+from . import accounts as _accounts                                       # noqa: E402
+from . import activities as _act                                          # noqa: E402
+from .store import Store                                            # noqa: E402
 
 _ACCTS = _accounts.Accounts(ROOT)
 _STORE = Store(ROOT)
 
 _MAX_UPLOAD = 25 * 1024 * 1024        # a handout, not a video library
+
+# A receipt the server has never seen is USUALLY not a mistake: gBuilder computes it locally from
+# the proof, so a student holds a correct receipt from the moment they finish, even if the upload
+# has not landed yet. "No such receipt" reads as "your student is lying", which is the wrong
+# first thought and the wrong conversation to start.
+_NOT_HERE_YET = ("No submission has arrived under that receipt yet. The receipt is generated "
+                 "locally when the student finishes, so it is valid even before their work "
+                 "reaches this server — gBuilder retries on its own each time it starts. Ask them "
+                 "to reopen gBuilder on the network, or check the receipt for a typo.")
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -111,7 +120,7 @@ class Handler(BaseHTTPRequestHandler):
         return (q.get(key) or [""])[0]
 
     def _page(self, name: str) -> None:
-        p = Path(__file__).parent / "static" / name
+        p = Path(__file__).parent / "static" / name          # ships in the wheel; see pyproject
         self._send(200, text=p.read_text(encoding="utf-8"), ctype="text/html; charset=utf-8")
 
     # ===================================================================== #
@@ -250,6 +259,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "Admins only."})
             return self._send(200, _ACCTS.staff())
 
+        if p == "/api/site":
+            if not self._is_admin():
+                return self._send(403, {"error": "Admins only."})
+            return self._send(200, _STORE.site_stats())
+
         if p == "/api/courses":
             rows = _STORE.courses(me["who"], me["role"])
             return self._send(200, [{**c, "staff": _STORE.course_staff(c["id"]),
@@ -275,10 +289,12 @@ class Handler(BaseHTTPRequestHandler):
                                       "student_id", "claimed_at")}
                                     for s in _STORE.course_submissions(course)])
 
+        if p == "/api/submissions/topology":
+            return self._download_topology()
         if p == "/api/receipt":
             row = _STORE.submission_by_receipt(self._q("receipt").strip().upper())
             if not row:
-                return self._send(404, {"error": "No submission with that receipt."})
+                return self._send(404, {"error": _NOT_HERE_YET})
             act = _STORE.activity(row["activity"]) or {}
             if not self._may(act.get("course", "")):
                 return self._send(403, {"error": "That is not your course."})
@@ -289,6 +305,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": f"No endpoint at {p} for {self.command}."})
 
     def _console_post(self, p: str, me: dict, b: dict) -> None:
+        # --- the site as a whole (admin only). Its own branch, NOT under the /api/staff prefix:
+        # nesting it there made it unreachable, and an endpoint that silently 404s is worse than
+        # one that refuses.
+        if p == "/api/site/reset":
+            if not self._is_admin():
+                return self._send(403, {"error": "Admins only."})
+            return self._send(200, self._site_reset(me, b))
+
         # --- staff (admin only) ---
         if p.startswith("/api/staff"):
             if not self._is_admin():
@@ -433,6 +457,79 @@ class Handler(BaseHTTPRequestHandler):
         codes = _STORE.codes_delete_for(aid)
         _STORE.activity_delete(aid)
         return {"ok": True, "lab": lab, "codes": codes}
+
+    def _download_topology(self) -> None:
+        """Hand the teacher a project file they can open and RUN.
+
+        Written in gBuilder's own project format (`persistence.save_project`), so it opens with no
+        conversion step — a report you cannot run is half a report.
+        """
+        receipt = self._q("receipt").strip().upper()
+        row = _STORE.submission_by_receipt(receipt)
+        if not row:
+            return self._send(404, {"error": _NOT_HERE_YET})
+        act = _STORE.activity(row.get("activity", "")) or {}
+        if not self._may(act.get("course", "")):
+            return self._send(403, {"error": "That is not your course."})
+        payload = json.loads(row.get("data") or "{}")
+        topo = payload.get("topology")
+        if not topo:
+            return self._send(404, {"error": "This submission carried no runnable copy — it came "
+                                             "from a gBuilder that only sent the proof."})
+        # Constants from the module that DEFINES the format, never restated here: a project file
+        # written to a slightly wrong shape would open nowhere and blame the teacher.
+        from gini.services.persistence import FORMAT, PROJECT_EXT, VERSION
+        body = json.dumps({"format": FORMAT, "version": VERSION, "topology": topo}, indent=2)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Disposition",
+                         f'attachment; filename="{receipt}-{act.get("lab", "lab")}{PROJECT_EXT}"')
+        self.send_header("Content-Length", str(len(body.encode())))
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    # -- resetting the site -------------------------------------------------- #
+    def _site_reset(self, me: dict, b: dict) -> dict:
+        """Clear the site after a testing phase. The most destructive thing here, so: three gates.
+
+        1. **Admin only** — enforced by the caller.
+        2. **The password again.** Not paranoia: a signed-in console left open on a shared desk is
+           the exact scenario, and re-authenticating is the only gate a passer-by cannot pass.
+        3. **A typed phrase.** Deliberately not the site name or the admin's username, both of
+           which are on screen; it has to be typed from the instruction, not copied from the page.
+
+        And before anything is deleted, a snapshot goes to disk. This is meant for test data, but
+        the person running it is one wrong browser tab away from a live term.
+        """
+        if str(b.get("confirm", "")).strip() != "RESET":
+            return {"ok": False, "error": 'Type RESET to confirm.'}
+        who = me["who"]
+        if not _ACCTS.login(who, str(b.get("password", ""))).get("ok"):
+            return {"ok": False, "error": "That is not your password."}
+
+        stats = _STORE.site_stats()
+        try:
+            snap = ROOT / "backups"
+            snap.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            path = snap / f"before-reset-{stamp}.json"
+            path.write_text(json.dumps(_STORE.site_snapshot(), indent=2))
+        except Exception as e:                                        # noqa: BLE001
+            # Refuse rather than proceed. A reset whose safety net failed is exactly the reset
+            # that should not happen.
+            return {"ok": False, "error": f"Could not write the backup, so nothing was "
+                                          f"changed: {e}"}
+
+        drop_courses = bool(b.get("courses"))
+        drop_staff = bool(b.get("staff"))
+        removed = _STORE.site_reset(courses=drop_courses, staff=drop_staff, keep_account=who)
+        if drop_courses:
+            # The material FILES, not just their rows.
+            import shutil
+            for d in (MATERIALS.iterdir() if MATERIALS.exists() else []):
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+        return {"ok": True, "removed": removed, "before": stats, "backup": str(path)}
 
     # -- claiming ---------------------------------------------------------- #
     def _claim(self, course: str, b: dict) -> dict:

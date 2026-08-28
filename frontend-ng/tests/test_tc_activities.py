@@ -20,12 +20,12 @@ from pathlib import Path
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 if str(_TC) not in sys.path:
     sys.path.insert(0, str(_TC))
 
-import activities as ACT                                       # noqa: E402
-from store import Store                                        # noqa: E402
+from gini_teaching_center import activities as ACT                                       # noqa: E402
+from gini_teaching_center.store import Store                                        # noqa: E402
 
 from gini.domain import proof as P                             # noqa: E402
 from gini.domain import ticket as T                            # noqa: E402

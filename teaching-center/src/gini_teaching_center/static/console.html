@@ -213,6 +213,34 @@
       </div>
       <div class="card"><table id="s-list"></table></div>
     </div>
+
+    <!-- Deliberately at the BOTTOM, in its own red-edged card, well away from the everyday
+         controls. This is the one action here that destroys student work. -->
+    <div class="card" id="reset-card" style="border-color:#eccdc9">
+      <h2 style="font-size:21px;color:var(--red)">Reset the site</h2>
+      <div class="note">For clearing up after a testing phase. Labs, codes and submissions are
+        always removed. A backup is written to disk first.</div>
+      <div id="site-stats" class="rowb"></div>
+
+      <div class="rowb" style="gap:22px">
+        <label style="display:flex;align-items:center;gap:9px;margin:0;text-transform:none;
+                      letter-spacing:0;font-size:16px;color:var(--ink)">
+          <input type="checkbox" id="rs-courses" style="width:auto">Also delete the courses
+        </label>
+        <label style="display:flex;align-items:center;gap:9px;margin:0;text-transform:none;
+                      letter-spacing:0;font-size:16px;color:var(--ink)">
+          <input type="checkbox" id="rs-staff" style="width:auto">Also delete the other staff
+        </label>
+      </div>
+
+      <label>Your password</label>
+      <input id="rs-pw" type="password" autocomplete="current-password" style="max-width:340px">
+      <label>Type RESET to confirm</label>
+      <input id="rs-confirm" placeholder="RESET" style="max-width:340px"
+             onkeydown="if(event.key==='Enter')siteReset()">
+      <div class="rowb"><button class="danger" onclick="siteReset()">Reset the site</button></div>
+      <div id="rs-err" class="err"></div>
+    </div>
   </section>
 </main>
 </div>
@@ -547,8 +575,32 @@ async function openReceipt(receipt){
       ${twins ? `<div class="note">Built from the same topology as
          ${r.twins.map(t=>'<span class="mono">'+esc(t.receipt)+'</span>').join(', ')}.
          A shared starter topology is a legitimate reason for this — worth a look, not a verdict.</div>` : ''}
+      <div class="rowb">
+        ${r.runnable
+          ? `<button class="go" onclick="getTopology('${esc(r.receipt)}')">Download the topology</button>
+             <span class="note" style="margin:0">Opens in gBuilder — this is what they built.</span>`
+          : `<span class="note" style="margin:0">No runnable copy came with this submission; it was
+             sent by a gBuilder that only uploaded the proof.</span>`}
+      </div>
       <pre>${esc(r.narration)}</pre>
     </div>`;
+}
+
+async function getTopology(receipt){
+  // A plain navigation, not fetch(): the response is a file download, and routing it through
+  // api() would only turn a project file into a string in memory. The session token has to ride
+  // along in the URL for the same reason — this is the one staff read that cannot set a header.
+  const r = await api('/api/receipt?receipt=' + encodeURIComponent(receipt));
+  if (!r || r.error) return;
+  const res = await fetch('/api/submissions/topology?receipt=' + encodeURIComponent(receipt),
+                          {headers: {'Authorization': 'Bearer ' + TOKEN}});
+  if (!res.ok) { say('Could not download that topology.'); return; }
+  const blob = await res.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = receipt + '.gini';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
 }
 
 // ---- content ----------------------------------------------------------------
@@ -584,6 +636,7 @@ async function delMaterial(id){ await api('/api/materials/delete', {course:COURS
 
 // ---- staff ------------------------------------------------------------------
 async function loadStaff(){
+  loadSite();
   const rows = await api('/api/staff');
   $('#s-list').innerHTML = '<tr><th>Username<th>Role<th>Status<th>' +
     rows.map(s => `<tr><td class="mono">${esc(s.username)}
@@ -596,6 +649,41 @@ async function loadStaff(){
              s.role === 'admin' ? 'teacher' : 'admin'}</button>
           <button class="danger" style="margin-left:10px"
                   onclick="delStaff('${esc(s.username)}')">Remove</button>`).join('');
+}
+
+async function loadSite(){
+  const st = await api('/api/site');
+  if (!st || st.error) return;
+  // Named counts, not a vague warning. "3 submissions" is the difference between clearing test
+  // data and discovering afterwards that it was the live term.
+  const bits = [['courses', st.courses], ['labs', st.activities], ['codes vended', st.codes],
+                ['submissions', st.submissions], ['claimed', st.claimed],
+                ['materials', st.materials], ['staff', st.staff]];
+  $('#site-stats').innerHTML = bits.map(([k, n]) =>
+    `<span class="tag ${(k === 'submissions' || k === 'claimed') && n ? 'warn' : 'draft'}">${
+      n} ${esc(k)}</span>`).join('');
+}
+
+async function siteReset(){
+  const submissions = Number(($('#site-stats').textContent.match(/(\d+) submissions/) || [])[1] || 0);
+  if (submissions && !confirm(
+        `This deletes ${submissions} submission${submissions === 1 ? '' : 's'} — student work `
+        + `that cannot be recovered except from the backup file.\n\nContinue?`)) return;
+  const r = await api('/api/site/reset', {
+    password: $('#rs-pw').value,
+    confirm: $('#rs-confirm').value,
+    courses: $('#rs-courses').checked,
+    staff: $('#rs-staff').checked});
+  $('#rs-err').textContent = r.ok ? '' : r.error;
+  if (!r.ok) return;
+  const g = r.removed;
+  say(`Site reset — removed ${g.activities} lab(s), ${g.codes} code(s), ${g.submissions} `
+      + `submission(s)${g.courses ? `, ${g.courses} course(s)` : ''}${
+        g.staff ? `, ${g.staff} staff account(s)` : ''}. Backup: ${r.backup}`, true);
+  ['rs-pw', 'rs-confirm'].forEach(i => $('#' + i).value = '');
+  $('#rs-courses').checked = $('#rs-staff').checked = false;
+  COURSE = ''; localStorage.removeItem('gini_tc_course');
+  loadStaff(); loadSite();
 }
 
 async function setRole(u, role){
