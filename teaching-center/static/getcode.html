@@ -8,50 +8,64 @@
   The public page. No login, nothing writable, no field that could carry a name — the privacy
   property is visible here, not just in the schema.
 
-  Every load vends a NEW code. Unused codes are expected and harmless: a student may look, practise
-  first, and come back for a code when they are ready. What matters is that a code is a scope, not
-  an identity, so handing one to a friend gives them nothing — a proof is a *chain* recorded under
-  it, and only doing the work produces one.
+  Every load vends a NEW code. Unused codes are expected and harmless: a student may practise
+  first and come back for a code when they are ready. A code is a scope, not an identity, so
+  handing one to a friend gives them nothing — a proof is a *chain* recorded under it, and only
+  doing the work produces one.
+
+  The page has to teach the flow, not just hand over ten characters, because the step a student can
+  get wrong is not handing the receipt to their instructor — work nobody records is work nobody can
+  mark.
+
+  It describes only what the system does TODAY. The intended design seals the submitted package so
+  the Teaching Center cannot read it until the receipt unlocks it; that is not built yet, and a page
+  that told students their work was sealed would be telling them something false about their own
+  data.
 -->
 <style>
-  :root {
-    --ink:#16202b; --muted:#5b6b7c; --line:#dde5ec; --bg:#f6f8fa; --card:#fff;
-    --accent:#1a6fd4; --warn:#8a5300; --warnbg:#fff6e5;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --ink:#e7edf3; --muted:#9fb0c0; --line:#2b3947; --bg:#0f1620; --card:#161f2a;
-            --accent:#6ba7f0; --warn:#e9c07a; --warnbg:#2c2415; }
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; padding:2rem 1rem; background:var(--bg); color:var(--ink);
-         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-  main { max-width:34rem; margin:0 auto; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
-          padding:1.5rem 1.6rem; }
-  h1 { font-size:1.05rem; margin:0 0 .2rem; letter-spacing:.02em; color:var(--muted);
-       text-transform:uppercase; font-weight:600; }
-  h2 { font-size:1.5rem; margin:0 0 1.2rem; font-weight:650; }
-  .code { font:700 clamp(1.6rem,7vw,2.4rem)/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;
-          letter-spacing:.06em; margin:.2rem 0 .1rem; word-break:break-all; }
-  .label { font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
-  dl { display:grid; grid-template-columns:auto 1fr; gap:.45rem 1.1rem; margin:1.4rem 0 0;
-       font-size:.94rem; }
-  dt { color:var(--muted); }
-  dd { margin:0; }
-  .note { margin-top:1.4rem; padding-top:1.1rem; border-top:1px solid var(--line);
-          font-size:.88rem; color:var(--muted); }
-  .closed { background:var(--warnbg); color:var(--warn); border-radius:10px;
-            padding:1rem 1.1rem; font-size:.95rem; }
-  button { font:inherit; margin-top:1.2rem; padding:.55rem 1rem; border-radius:9px;
-           border:1px solid var(--line); background:transparent; color:var(--accent);
-           cursor:pointer; }
-  button:hover { border-color:var(--accent); }
+  :root{--ink:#0d1b16;--dim:#4a6659;--line:#cfe0d7;--bg:#eef4f0;--card:#fff;
+        --green:#0a7f4f;--green-2:#065f3a;--amber:#b46b00;--warnbg:#fff3dd;--chip:#dff0e6}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;
+       font:600 18px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{background:var(--ink);color:#fff;padding:22px 32px;display:flex;align-items:baseline;gap:18px}
+  .brand{font-size:22px;font-weight:800;letter-spacing:-.02em}
+  .where{color:#9fc4b3;font-size:17px;font-weight:700}
+  main{flex:1;padding:40px 32px;width:100%}
+  h2{font-size:clamp(30px,4.5vw,46px);font-weight:800;letter-spacing:-.025em;margin:0 0 10px}
+  .brief{font-size:19px;font-weight:600;color:var(--dim);max-width:70ch;margin-bottom:30px}
+  .code{font:800 clamp(40px,10vw,84px)/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;
+        letter-spacing:.08em;background:var(--chip);border:3px solid var(--green);color:var(--green);
+        border-radius:20px;padding:24px 34px;display:inline-block;word-break:break-all}
+  .label{font-size:15px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;
+         color:var(--dim);margin-bottom:10px}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:14px 34px;margin:34px 0 0;font-size:19px;
+     max-width:640px}
+  dt{color:var(--dim);font-weight:700}
+  dd{margin:0;font-weight:700}
+  .note{margin-top:34px;padding-top:22px;border-top:3px solid var(--line);font-size:17px;
+        font-weight:600;color:var(--dim);max-width:74ch}
+  .note p{margin:0 0 14px}
+  .note b{color:var(--ink)}
+  .closed{background:var(--warnbg);color:var(--amber);border:3px solid #e8c88c;border-radius:16px;
+          padding:26px 30px;font-size:22px;font-weight:800;max-width:70ch}
+  .rowb{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:30px}
+  button,.btn{font:800 18px/1 inherit;padding:16px 26px;border-radius:12px;border:none;
+              background:var(--green);color:#fff;cursor:pointer;text-decoration:none;
+              display:inline-block}
+  button:hover,.btn:hover{background:var(--green-2)}
+  button.big{font-size:24px;padding:24px 44px;border-radius:16px}
+  .flow{margin:38px 0 0;max-width:1000px}
+  .flow svg{width:100%;height:auto;display:block}
+  .flowcap{font-size:16px;font-weight:700;color:var(--dim);margin-top:14px;max-width:74ch}
 </style>
 </head>
 <body>
-<main class="card">
-  <h1 id="course">GINI activity</h1>
+<header><span class="brand">GINI</span><span class="where" id="course"></span></header>
+<main>
   <h2 id="title">…</h2>
+  <div class="brief" id="brief"></div>
   <div id="out">Fetching a code…</div>
 </main>
 
@@ -59,14 +73,73 @@
 const qs = new URLSearchParams(location.search);
 const course = qs.get("course") || "", lab = qs.get("lab") || "";
 const when = t => t ? new Date(t * 1000).toLocaleString() : "—";
-const esc = s => String(s).replace(/[<>&]/g, c => ({ "<":"&lt;", ">":"&gt;", "&":"&amp;" }[c]));
+const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({ "<":"&lt;", ">":"&gt;", "&":"&amp;" }[c]));
 
-document.getElementById("course").textContent = course ? `${course} · ${lab}` : "GINI activity";
+// The whole lifecycle in one picture. The point it has to land is that the work goes to the
+// Teaching Center WITHOUT a name, and the receipt is the separate, deliberate step that attaches
+// one. Students otherwise assume submitting is the end of it, and never hand the receipt over.
+const FLOW = `
+<div class="flow">
+<svg viewBox="0 0 1000 300" role="img"
+     aria-label="Take a code, build the lab in gBuilder while it records what you do, then gBuilder pushes your work to the Teaching Center and shows you a receipt. Give that receipt to your instructor, who records it as yours.">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+            orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a6659"/>
+    </marker>
+  </defs>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif" font-weight="800">
+    <rect x="6" y="10" width="470" height="140" rx="16" fill="none" stroke="#cfe0d7"
+          stroke-width="3" stroke-dasharray="10 7"/>
+    <text x="26" y="40" font-size="15" fill="#4a6659" letter-spacing="1.5">ON YOUR MACHINE</text>
+
+    <rect x="30" y="60" width="164" height="72" rx="12" fill="#dff0e6" stroke="#0a7f4f" stroke-width="3"/>
+    <text x="112" y="90" font-size="18" fill="#065f3a" text-anchor="middle">Code</text>
+    <text x="112" y="113" font-size="14" fill="#4a6659" text-anchor="middle">from this page</text>
+
+    <line x1="202" y1="96" x2="238" y2="96" stroke="#4a6659" stroke-width="3" marker-end="url(#ar)"/>
+
+    <rect x="246" y="60" width="212" height="72" rx="12" fill="#fff" stroke="#0d1b16" stroke-width="3"/>
+    <text x="352" y="90" font-size="18" fill="#0d1b16" text-anchor="middle">gBuilder</text>
+    <text x="352" y="113" font-size="14" fill="#4a6659" text-anchor="middle">you build, it records</text>
+
+    <line x1="478" y1="96" x2="530" y2="96" stroke="#0a7f4f" stroke-width="4" marker-end="url(#ar)"/>
+    <text x="504" y="82" font-size="14" fill="#0a7f4f" text-anchor="middle">your work</text>
+
+    <rect x="538" y="10" width="456" height="140" rx="16" fill="none" stroke="#cfe0d7"
+          stroke-width="3" stroke-dasharray="10 7"/>
+    <text x="558" y="40" font-size="15" fill="#4a6659" letter-spacing="1.5">TEACHING CENTER</text>
+    <rect x="558" y="60" width="200" height="72" rx="12" fill="#fff" stroke="#0d1b16" stroke-width="3"/>
+    <text x="658" y="90" font-size="18" fill="#0d1b16" text-anchor="middle">Stored</text>
+    <text x="658" y="113" font-size="14" fill="#4a6659" text-anchor="middle">with no name on it</text>
+
+    <line x1="766" y1="96" x2="802" y2="96" stroke="#4a6659" stroke-width="3" marker-end="url(#ar)"/>
+
+    <rect x="810" y="60" width="164" height="72" rx="12" fill="#dff0e6" stroke="#0a7f4f" stroke-width="3"/>
+    <text x="892" y="90" font-size="18" fill="#065f3a" text-anchor="middle">Receipt</text>
+    <text x="892" y="113" font-size="14" fill="#4a6659" text-anchor="middle">gBuilder shows you</text>
+
+    <path d="M892,140 L892,196 L360,196 L360,214" fill="none" stroke="#0a7f4f" stroke-width="4"
+          marker-end="url(#ar)"/>
+    <rect x="140" y="216" width="440" height="66" rx="12" fill="#dff0e6" stroke="#0a7f4f" stroke-width="3"/>
+    <text x="360" y="244" font-size="18" fill="#065f3a" text-anchor="middle">Give the receipt to your instructor</text>
+    <text x="360" y="267" font-size="14" fill="#4a6659" text-anchor="middle">they record the work as yours</text>
+
+    <text x="612" y="248" font-size="16" fill="#0a7f4f">✓ the receipt is all you hand in</text>
+    <text x="612" y="274" font-size="16" fill="#0a7f4f">✓ nothing records who took which code</text>
+  </g>
+</svg>
+<div class="flowcap">Your work reaches the Teaching Center with no name attached. It becomes yours
+when your instructor records your receipt against your student ID.</div>
+</div>`;
+
+document.getElementById("course").textContent = course ? `${course} · ${lab}` : "";
 
 fetch(`/api/activity?course=${encodeURIComponent(course)}&lab=${encodeURIComponent(lab)}`)
   .then(r => r.json())
   .then(d => {
     document.getElementById("title").textContent = d.title || lab || "Activity";
+    document.getElementById("brief").textContent = d.brief || "";
     const out = document.getElementById("out");
     if (!d.ok) {
       // Say what happened plainly. No retry button when vending has closed — offering one would
@@ -80,16 +153,30 @@ fetch(`/api/activity?course=${encodeURIComponent(course)}&lab=${encodeURICompone
       <dl>
         <dt>Enter it in</dt><dd>gBuilder, before you start</dd>
         <dt>You then have</dt><dd>${d.session_minutes} minutes to finish</dd>
-        <dt>Codes stop</dt><dd>${when(d.vend_until)}</dd>
+        <dt>Code vending stops</dt><dd>${when(d.vend_until)}</dd>
         <dt>This code expires</dt><dd>${when(d.valid_until)}</dd>
       </dl>
+
+      ${FLOW}
+
       <div class="note">
-        This code is yours for one attempt. You can practise as much as you like first and come
-        back for a fresh code when you are ready — every visit to this page issues a new one.
-        Your work is submitted automatically when you finish, and gBuilder will show you a short
-        receipt to give your instructor.
+        <p><b>Practise as much as you like.</b> gBuilder runs with or without a code, so you can try
+        the whole lab first and take a code only when you are ready to be marked.</p>
+
+        <p><b>Take a code any time until vending stops.</b> Every visit to this page issues a new
+        one, and nothing here records who took which code.</p>
+
+        <p><b>When you finish, gBuilder sends your work to the Teaching Center and shows you a
+        receipt.</b> It arrives with no name on it.</p>
+
+        <p><b>Give that receipt to your instructor.</b> Recording it against your student ID is what
+        makes the work yours — until then nobody knows whose it is. Do it as soon as you finish and
+        before the lab deadline: unrecorded work is deleted automatically as storage is needed.</p>
       </div>
-      <button onclick="location.reload()">Give me a different code</button>`;
+
+      <div class="rowb">
+        <button class="big" onclick="location.reload()">Give me another code</button>
+      </div>`;
   })
   .catch(() => {
     document.getElementById("out").innerHTML =

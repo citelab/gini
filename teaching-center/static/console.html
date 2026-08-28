@@ -1,0 +1,640 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GINI Teaching Center</title>
+<style>
+  /* Full-bleed and loud on purpose. This is used standing up, in a lab, often on a projector —
+     so type is large, weights are heavy, and colour carries meaning rather than decorating.
+     No max-width: the window IS the page. */
+  :root{
+    --ink:#0d1b16; --dim:#4a6659; --line:#cfe0d7; --bg:#eef4f0; --card:#fff;
+    --green:#0a7f4f; --green-2:#065f3a; --amber:#b46b00; --red:#c0261f; --blue:#0b5cab;
+    --chip:#dff0e6;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:600 17px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  button,input,textarea,select{font:inherit}
+
+  /* ---- shell ---- */
+  .top{display:flex;align-items:center;gap:28px;background:var(--ink);color:#fff;
+       padding:0 28px;height:76px;position:sticky;top:0;z-index:5}
+  .brand{font-size:22px;font-weight:800;letter-spacing:-.02em}
+  .top nav{display:flex;gap:6px;flex:1}
+  .top nav button{background:none;border:none;color:#9fc4b3;font-size:17px;font-weight:700;
+       padding:10px 18px;border-radius:10px;cursor:pointer}
+  .top nav button:hover{color:#fff}
+  .top nav button.on{background:var(--green);color:#fff}
+  .who{font-size:15px;color:#9fc4b3}
+  .role{background:var(--green);color:#fff;border-radius:999px;padding:3px 12px;font-size:13px;
+        font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin-left:8px}
+  .role.admin{background:var(--amber)}
+
+  main{padding:28px}
+  h2{font-size:28px;font-weight:800;letter-spacing:-.02em;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:16px;font-weight:600;margin-bottom:22px}
+  .card{background:var(--card);border:2px solid var(--line);border-radius:16px;padding:24px;
+        margin-bottom:20px}
+  .grid{display:grid;gap:20px}
+  .g2{grid-template-columns:minmax(0,380px) minmax(0,1fr)}
+  @media (max-width:980px){.g2{grid-template-columns:1fr}}
+
+  label{display:block;font-size:14px;font-weight:800;text-transform:uppercase;
+        letter-spacing:.05em;color:var(--dim);margin:16px 0 6px}
+  input,textarea,select{width:100%;padding:13px 15px;border:2px solid var(--line);
+        border-radius:11px;background:#fbfefc;font-weight:600}
+  input:focus,textarea:focus{outline:3px solid var(--green);outline-offset:1px;border-color:var(--green)}
+  textarea{min-height:96px;resize:vertical}
+
+  button.go{background:var(--green);color:#fff;border:none;border-radius:11px;
+        padding:14px 24px;font-size:17px;font-weight:800;cursor:pointer}
+  button.go:hover{background:var(--green-2)}
+  button.go[disabled]{background:#a9c4b6;cursor:default}
+  button.flat{background:#fff;border:2px solid var(--line);border-radius:11px;padding:11px 18px;
+        font-weight:700;cursor:pointer}
+  button.flat:hover{border-color:var(--green);color:var(--green)}
+  button.danger{background:#fff;border:2px solid #eccdc9;color:var(--red);border-radius:11px;
+        padding:9px 15px;font-weight:800;cursor:pointer}
+  .rowb{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:18px}
+
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;
+     color:var(--dim);padding:12px 14px;border-bottom:3px solid var(--line)}
+  td{padding:15px 14px;border-bottom:2px solid #edf4f0;font-weight:600;font-size:16px}
+  tr:last-child td{border-bottom:none}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700}
+
+  .tag{display:inline-block;padding:4px 12px;border-radius:999px;font-size:13px;font-weight:800;
+       text-transform:uppercase;letter-spacing:.05em}
+  .tag.live{background:var(--green);color:#fff}
+  .tag.draft{background:#e6ecea;color:var(--dim)}
+  .tag.warn{background:var(--amber);color:#fff}
+  .big{font-size:34px;font-weight:800;letter-spacing:-.02em}
+  .code{font-family:ui-monospace,Menlo,monospace;font-size:26px;font-weight:800;
+        letter-spacing:.08em;background:var(--chip);border-radius:12px;padding:10px 16px;
+        display:inline-block}
+  .err{color:var(--red);font-weight:800;margin-top:14px}
+  .ok{color:var(--green);font-weight:800;margin-top:14px}
+  .empty{color:var(--dim);font-weight:600;padding:34px 0;text-align:center;font-size:17px}
+  pre{background:#f6faf8;border:2px solid var(--line);border-radius:12px;padding:18px;
+      font-size:15px;font-weight:500;line-height:1.65;white-space:pre-wrap;overflow-x:auto}
+  .note{color:var(--dim);font-size:14px;font-weight:600;margin-top:6px}
+  a{color:var(--blue);font-weight:700}
+
+  .banner{position:sticky;top:76px;z-index:6;background:var(--red);color:#fff;font-size:19px;
+          font-weight:800;padding:18px 28px}
+  .banner.good{background:var(--green)}
+
+  /* ---- sign-in ---- */
+  #gate{max-width:520px;margin:10vh auto;padding:0 24px}
+  #gate h1{font-size:34px;font-weight:800;letter-spacing:-.02em;margin:0 0 6px}
+</style>
+
+<!-- SIGN-IN. The console vends codes and reads every submission; it is not a public page. -->
+<section id="gate" hidden>
+  <h1>GINI Teaching Center</h1>
+  <div class="sub">Staff sign-in.</div>
+  <div class="card">
+    <label>Username</label><input id="g-id" autocomplete="username">
+    <label>Password</label>
+    <input id="g-pw" type="password" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')signIn()">
+    <label>Claim token <span style="text-transform:none;letter-spacing:0">— first time only</span></label>
+    <input id="g-claim" placeholder="printed by the server on first run">
+    <div class="rowb"><button class="go" onclick="signIn()">Sign in</button></div>
+    <div id="g-err" class="err"></div>
+  </div>
+</section>
+
+<div id="app" hidden>
+<div id="banner" class="banner" hidden></div>
+<header class="top">
+  <div class="brand">GINI</div>
+  <nav>
+    <button data-t="courses" class="on">Courses</button>
+    <button data-t="acts">Activities</button>
+    <button data-t="content">Content</button>
+    <button data-t="staff" id="nav-staff">Staff</button>
+  </nav>
+  <span class="who" id="who"></span>
+  <button class="flat" onclick="signOut()">Sign out</button>
+</header>
+
+<main>
+  <!-- COURSES ---------------------------------------------------------- -->
+  <section id="courses">
+    <h2>Courses</h2>
+    <div class="sub">Everything hangs off a course. Pick one to work in.</div>
+    <div class="grid g2">
+      <div class="card" id="new-course-card">
+        <h2 style="font-size:21px">New course</h2>
+        <label>Id</label><input id="c-id" placeholder="comp535">
+        <label>Title</label><input id="c-title" placeholder="Computer Networks">
+        <div class="rowb"><button class="go" onclick="makeCourse()">Create</button></div>
+        <div id="c-err" class="err"></div>
+      </div>
+      <div class="card"><table id="c-list"></table></div>
+    </div>
+  </section>
+
+  <!-- ACTIVITIES ------------------------------------------------------- -->
+  <section id="acts" hidden>
+    <h2>Activities</h2>
+    <div class="sub" id="acts-sub"></div>
+    <div class="grid g2">
+      <div class="card">
+        <h2 style="font-size:21px" id="a-heading">New lab</h2>
+        <label>Lab id</label><input id="a-lab" placeholder="lab1">
+        <label>Title</label><input id="a-title" placeholder="Multi-LAN">
+        <label>What the students are told</label>
+        <textarea id="a-brief" placeholder="Build a few LANs joined by routers and show a machine on one LAN can talk to a machine on another."></textarea>
+        <label>Codes stop being issued</label><input id="a-vend" type="datetime-local">
+        <div class="note">The hard stop. After this no student can start.</div>
+        <label>Minutes per attempt</label><input id="a-mins" type="number" value="60">
+        <div class="note">From when they enter the code, not from now.</div>
+        <div class="rowb">
+          <button class="go" onclick="saveAct()">Save</button>
+          <button class="flat" onclick="clearAct()">Clear</button>
+        </div>
+        <div id="a-err" class="err"></div>
+      </div>
+      <div class="card"><table id="a-list"></table></div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:21px">Submissions</h2>
+      <div class="note">Work arrives on its own as students finish, with no name on it. Enter the
+        receipt a student gave you, plus their student ID, to open the work and record it as
+        theirs. Leave the ID blank just to look.</div>
+      <div class="rowb">
+        <input id="r-code" placeholder="Receipt — K2ST-G01Q" style="max-width:260px"
+               onkeydown="if(event.key==='Enter')document.getElementById('r-sid').focus()">
+        <input id="r-sid" placeholder="Student ID — optional" style="max-width:260px"
+               onkeydown="if(event.key==='Enter')openReceipt()">
+        <button class="go" onclick="openReceipt()">Open</button>
+      </div>
+      <div id="r-out"></div>
+      <table id="sub-list" style="margin-top:26px"></table>
+    </div>
+  </section>
+
+  <!-- CONTENT ---------------------------------------------------------- -->
+  <section id="content" hidden>
+    <h2>Content</h2>
+    <div class="sub" id="content-sub"></div>
+    <div class="grid g2">
+      <div class="card">
+        <h2 style="font-size:21px">Add material</h2>
+        <label>Title</label><input id="m-title" placeholder="Lab 1 handout">
+        <label>File</label><input id="m-file" type="file">
+        <label>…or a link</label><input id="m-url" placeholder="https://…">
+        <div class="rowb"><button class="go" onclick="addMaterial()">Add</button></div>
+        <div id="m-err" class="err"></div>
+      </div>
+      <div class="card"><table id="m-list"></table></div>
+    </div>
+  </section>
+
+  <!-- STAFF (admin) ---------------------------------------------------- -->
+  <section id="staff" hidden>
+    <h2>Staff</h2>
+    <div class="sub">Teachers you add get a one-time claim token. They choose their own password.</div>
+    <div class="grid g2">
+      <div class="card">
+        <h2 style="font-size:21px">Add a teacher</h2>
+        <label>Username</label><input id="s-user" placeholder="mahesh">
+        <label>Role</label>
+        <select id="s-role"><option value="teacher">teacher</option>
+                            <option value="admin">admin</option></select>
+        <div class="rowb"><button class="go" onclick="addStaff()">Add</button></div>
+        <div id="s-err" class="err"></div>
+        <div id="s-token"></div>
+      </div>
+      <div class="card"><table id="s-list"></table></div>
+    </div>
+  </section>
+</main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = t => String(t ?? '').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+const when = t => t ? new Date(t*1000).toLocaleString() : '—';
+
+let TOKEN = localStorage.getItem('gini_tc_session') || '';
+let ME = null;
+let COURSE = localStorage.getItem('gini_tc_course') || '';   // the course we are working in
+let MINE = [];                                               // courses this person actually runs
+
+// Never let a request fail silently. `return r.json()` looks harmless and is not: a 500 with an
+// empty body, or a dropped connection, rejects the promise, the caller's `await` never returns,
+// and the button the teacher pressed does *nothing at all* — no error, no change, nothing to
+// report. That is the worst failure a console can have, because it looks like the click missed.
+// Every path here resolves to an object, and anything unexpected is SHOWN.
+// Every failure resolves to `{ok:false, error:<a reason a human can act on>}`. The `error` field
+// is the contract: a caller that finds one must NOT replace it with a generic line of its own, or
+// the specific reason — the only useful part — is thrown away at the last moment. That is exactly
+// how "Could not save that lab" appeared with nothing behind it.
+//
+// The body is read as TEXT first and parsed second, so a response that isn't JSON can still be
+// quoted back instead of vanishing into a parse error.
+const api = async (p, body) => {
+  const opt = {headers:{'Authorization':'Bearer '+TOKEN}};
+  if (body) { opt.method='POST'; opt.headers['Content-Type']='application/json';
+              opt.body = JSON.stringify(body); }
+  const fail = msg => { say(msg); return {ok:false, error:msg}; };
+
+  let r;
+  try { r = await fetch(p, opt); }
+  catch (e) { return fail(`Could not reach the course server (${e.message}). Is it still running?`); }
+  if (r.status === 401) { signOut(); return {ok:false, error:'Your session ended. Sign in again.'}; }
+
+  const raw = await r.text().catch(() => '');
+  let out;
+  try { out = JSON.parse(raw); }
+  catch (e) {
+    // Quote what actually came back. "check its console" sends the teacher to a terminal they may
+    // not have; the first line of the body usually names the problem outright.
+    const snippet = raw.trim().split('\n')[0].slice(0, 200);
+    return fail(snippet ? `Server error ${r.status}: ${snippet}`
+                        : `Server error ${r.status} — the reply was empty. The server's own `
+                          + `console will have the traceback.`);
+  }
+  if (out && out.error) { say(out.error); return {ok:false, ...out}; }
+  if (!r.ok) return fail(`Server error ${r.status}: ${raw.slice(0, 200)}`);
+  return out;
+};
+
+// One banner, top of the page, impossible to miss. Small red text under a form is not enough when
+// the thing you are looking at is a table on the other side of the screen.
+let _sayT = null;
+function say(msg, good){
+  const b = $('#banner');
+  b.textContent = msg;
+  b.className = 'banner' + (good ? ' good' : '');
+  b.hidden = false;
+  clearTimeout(_sayT);
+  _sayT = setTimeout(() => { b.hidden = true; }, 6000);
+}
+
+function gate(show){ $('#gate').hidden = !show; $('#app').hidden = show; }
+
+function signOut(){
+  // Tell the SERVER, not just this browser. Forgetting the token locally leaves it valid for the
+  // rest of its 12-hour life — which on a shared lab machine is a live staff session someone else
+  // can pick up. Fire-and-forget: a failed logout must still clear the console.
+  const dead = TOKEN;
+  TOKEN=''; localStorage.removeItem('gini_tc_session'); ME=null; gate(true);
+  if (dead) fetch('/auth/logout', {method:'POST', headers:{'Authorization':'Bearer '+dead}})
+              .catch(()=>{});
+}
+
+async function signIn(){
+  const id = $('#g-id').value.trim(), pw = $('#g-pw').value, claim = $('#g-claim').value.trim();
+  const path = claim ? '/auth/claim' : '/auth/login';
+  const body = claim ? {id, claim_token:claim, password:pw} : {id, password:pw};
+  // Through api(), like everything else. Signing in against a stopped server used to reject the
+  // promise and leave the button looking broken — the one moment a person is least able to guess
+  // what went wrong, because they have no console to look at yet.
+  const r = await api(path, body);
+  if (!r.ok) { $('#g-err').textContent = r.error || 'Sign-in failed.'; return; }
+  TOKEN = r.session; localStorage.setItem('gini_tc_session', TOKEN);
+  ME = {who:r.who, role:r.role};
+  gate(false); boot();
+}
+
+// ---- navigation -------------------------------------------------------------
+const TABS = ['courses','acts','content','staff'];
+document.querySelectorAll('.top nav button').forEach(b => b.onclick = () => show(b.dataset.t));
+
+function show(t){
+  // Activities and Content are meaningless without a course; say so rather than showing an
+  // empty table that looks like "you have none".
+  if ((t === 'acts' || t === 'content') && !COURSE) { show('courses'); return; }
+  document.querySelectorAll('.top nav button').forEach(b => b.classList.toggle('on', b.dataset.t===t));
+  TABS.forEach(x => $('#'+x).hidden = (x !== t));
+  ({courses:loadCourses, acts:loadActs, content:loadMaterials, staff:loadStaff}[t]||(()=>{}))();
+}
+
+async function boot(){
+  $('#who').innerHTML = esc(ME.who) + `<span class="role ${ME.role==='admin'?'admin':''}">`
+                      + esc(ME.role) + '</span>';
+  const admin = ME.role === 'admin';
+  $('#nav-staff').style.display = admin ? '' : 'none';
+  $('#new-course-card').style.display = admin ? '' : 'none';
+
+  // The remembered course belongs to the BROWSER, not to the person. Sign in as someone else on
+  // the same machine and you would land in a course you do not run — every action then 403s, and
+  // the tab header still says "Labs in comp535", so it reads as the console being broken rather
+  // than as the wrong course. Re-check it against whoever is actually signed in.
+  MINE = await api('/api/courses');
+  if (!Array.isArray(MINE)) MINE = [];
+  if (COURSE && !MINE.some(c => c.id === COURSE)) {
+    COURSE = ''; localStorage.removeItem('gini_tc_course');
+  }
+  show('courses');
+}
+
+// ---- courses ----------------------------------------------------------------
+async function loadCourses(){
+  const rows = await api('/api/courses');
+  MINE = Array.isArray(rows) ? rows : [];
+  const admin = ME.role === 'admin';
+  $('#c-list').innerHTML = rows.length ? (
+      '<tr><th>Course<th>Title<th>Labs<th>Staff<th>' +
+      rows.map(c => `<tr>
+        <td class="mono">${esc(c.id)}${c.archived?' <span class="tag draft">archived</span>':''}
+        <td>${esc(c.title)}<td>${c.activities}
+        <td>${esc((c.staff||[]).join(', ')) || '<span class="tag draft">none</span>'}
+            ${admin ? `<div class="rowb" style="margin-top:10px">
+              <input id="st-${esc(c.id)}" placeholder="username" style="max-width:170px">
+              <button class="flat" onclick="staffCourse('${esc(c.id)}',1)">Add</button>
+              <button class="flat" onclick="staffCourse('${esc(c.id)}',0)">Remove</button>
+            </div>` : ''}
+        <td><button class="go" onclick="pick('${esc(c.id)}')">Work in this</button>
+            ${admin ? `<button class="flat" style="margin-left:10px"
+                onclick="archiveCourse('${esc(c.id)}')">${c.archived?'Restore':'Archive'}</button>`
+              : ''}`).join('')
+    ) : '<tr><td class="empty">No courses yet.</td></tr>';
+}
+
+async function staffCourse(cid, on){
+  const u = $('#st-' + cid).value.trim();
+  if (!u) return;
+  await api('/api/courses/' + (on ? 'staff' : 'unstaff'), {course: cid, username: u});
+  loadCourses();
+}
+
+async function archiveCourse(cid){
+  await api('/api/courses/archive', {course: cid});
+  loadCourses();
+}
+
+function pick(id){
+  COURSE = id; localStorage.setItem('gini_tc_course', id);
+  $('#acts-sub').textContent = 'Labs in ' + id;
+  $('#content-sub').textContent = 'Materials for ' + id;
+  show('acts');
+}
+
+async function makeCourse(){
+  const r = await api('/api/courses', {id:$('#c-id').value.trim(), title:$('#c-title').value.trim()});
+  $('#c-err').textContent = r.ok ? '' : r.error;
+  if (r.ok) { $('#c-id').value = $('#c-title').value = ''; loadCourses(); }
+}
+
+// ---- activities -------------------------------------------------------------
+async function loadActs(){
+  $('#acts-sub').textContent = 'Labs in ' + COURSE;
+  loadSubs();
+  const rows = await api('/api/activities?course=' + encodeURIComponent(COURSE));
+  const link = a => `${location.origin}/getcode?course=${encodeURIComponent(COURSE)}&lab=${encodeURIComponent(a.lab)}`;
+  $('#a-list').innerHTML = rows.length ? (
+      '<tr><th>Lab<th>Title<th>Status<th>Codes out<th>In<th>' +
+      rows.map(a => `<tr>
+        <td class="mono">${esc(a.lab)}<td>${esc(a.title)}
+        <td><span class="tag ${a.status==='released'?'live':'draft'}">${esc(a.status)}</span>
+        <td class="mono">${a.vended}<td class="mono">${a.submitted}
+        <td>${a.status==='released'
+              ? `<button class="flat" onclick="release('${esc(a.lab)}',false)">Close</button>
+                 <a href="${link(a)}" target="_blank" style="margin-left:10px">student link</a>`
+              : `<button class="go" onclick="release('${esc(a.lab)}',true)">Release</button>`}
+            <button class="flat" style="margin-left:10px" onclick='editAct(${JSON.stringify(a.lab)
+              },${JSON.stringify(a.title||'')},${JSON.stringify(a.brief||'')},${
+              Number(a.vend_until)||0},${Number(a.session_minutes)||60})'>Edit</button>
+            ${a.submitted
+              ? `<span class="note" style="margin-left:12px">${a.submitted} submitted — close it,
+                 it cannot be deleted</span>`
+              : `<button class="danger" style="margin-left:10px"
+                    onclick="askDelete('${esc(a.lab)}')">Delete</button>`}
+        <tr id="del-${esc(a.lab)}" hidden><td colspan="6" style="background:#fdf3f2">
+            <b style="color:var(--red)">Delete ${esc(a.lab)}?</b>
+            <span class="note" style="display:inline;margin-left:8px">${a.vended
+              ? `${a.vended} code${a.vended === 1 ? '' : 's'} already vended will stop working. `
+              : ''}This cannot be undone. Type the lab id to confirm.</span>
+            <div class="rowb">
+              <input id="delc-${esc(a.lab)}" placeholder="${esc(a.lab)}" style="max-width:220px"
+                     onkeydown="if(event.key==='Enter')doDelete('${esc(a.lab)}')">
+              <button class="danger" onclick="doDelete('${esc(a.lab)}')">Delete it</button>
+              <button class="flat" onclick="askDelete('${esc(a.lab)}', true)">Cancel</button>
+            </div></td>`).join('')
+    ) : '<tr><td class="empty">No labs yet.</td></tr>';
+}
+
+function actBody(){
+  // A BLANK field means "leave it alone", so it is sent as null. Sending 0 would read as a real
+  // value and wipe the saved deadline — and the deadline is the whole late-submission control, so
+  // losing it silently turns a closed lab back into an open one.
+  const v = $('#a-vend').value, m = $('#a-mins').value.trim();
+  const t = v ? new Date(v).getTime() : NaN;
+  return {course:COURSE, lab:$('#a-lab').value.trim(), title:$('#a-title').value.trim(),
+          brief:$('#a-brief').value.trim(),
+          vend_until: Number.isNaN(t) ? null : t/1000,
+          session_minutes: m === '' ? null : parseInt(m, 10)};
+}
+
+// Editing has to be deliberate. The form is otherwise blind: type a lab id that already exists,
+// press Save, and you have overwritten it without ever seeing what was there.
+function editAct(lab, title, brief, vend, mins){
+  $('#a-lab').value = lab; $('#a-title').value = title; $('#a-brief').value = brief;
+  $('#a-mins').value = mins;
+  // datetime-local wants exactly YYYY-MM-DDTHH:mm in LOCAL time, which toISOString would shift.
+  if (vend) {
+    const d = new Date(vend*1000 - new Date().getTimezoneOffset()*60000);
+    $('#a-vend').value = d.toISOString().slice(0,16);
+  } else $('#a-vend').value = '';
+  $('#a-heading').textContent = 'Editing ' + lab;
+  $('#a-lab').scrollIntoView({behavior:'smooth', block:'center'});
+}
+async function saveAct(){
+  if (!$('#a-lab').value.trim()) { say('Give the lab an id, like lab1.'); return; }
+  const r = await api('/api/activities/save', actBody());
+  $('#a-err').textContent = r.ok ? '' : r.error;
+  if (!r.ok) return;                       // api() already said WHY, in the banner. Leave it there.
+  say(`Saved ${r.activity}. It is a draft — press Release to start vending codes.`, true);
+  clearAct(); loadActs();
+}
+function clearAct(){
+  ['a-lab','a-title','a-brief','a-vend'].forEach(i=>$('#'+i).value='');
+  $('#a-mins').value = '60';
+  $('#a-heading').textContent = 'New lab';
+}
+
+// Two gates, for two different mistakes. This one catches the slip — the id has to be typed
+// again, so a delete is something the teacher decided rather than something their mouse did. The
+// server catches the graver one: a lab with submissions is refused outright, because student work
+// is the one thing here that cannot be recreated.
+function askDelete(lab, close){
+  const row = $('#del-' + CSS.escape(lab));
+  row.hidden = !!close || !row.hidden;
+  if (!row.hidden) $('#delc-' + CSS.escape(lab)).focus();
+}
+
+async function doDelete(lab){
+  const r = await api('/api/activities/delete',
+                      {course: COURSE, lab, confirm: $('#delc-' + CSS.escape(lab)).value});
+  if (!r.ok) return;                       // api() already said why, loudly
+  say(`${lab} deleted${r.codes ? `, along with ${r.codes} vended code${r.codes === 1 ? '' : 's'}`
+                               : ''}.`, true);
+  loadActs();
+}
+
+async function release(lab, on){
+  const r = await api('/api/activities/' + (on?'release':'unrelease'), {course:COURSE, lab});
+  $('#a-err').textContent = r.ok ? '' : r.error;
+  if (r.ok) say(on ? `${lab} is live — students can take codes now.` : `${lab} is closed.`, true);
+  loadActs();
+}
+
+async function loadSubs(){
+  const rows = await api('/api/submissions?course=' + encodeURIComponent(COURSE));
+  // Same-topology twins are worth SEEING in the list, not only inside one report — a teacher
+  // scanning what came in should notice a cluster without opening thirty receipts one by one.
+  const seen = {};
+  rows.forEach(r => { seen[r.artifact_hash] = (seen[r.artifact_hash]||0) + 1; });
+  $('#sub-list').innerHTML = rows.length ? (
+      '<tr><th>Receipt<th>Lab<th>Claimed by<th>Arrived<th>' +
+      rows.map(r => `<tr>
+        <td class="mono">${esc(r.receipt)}
+        <td class="mono">${esc((r.activity||'').split('/')[1] || r.activity)}
+        <td>${r.student_id ? '<span class="mono">'+esc(r.student_id)+'</span>'
+                           : '<span class="tag draft">unclaimed</span>'}
+        <td>${when(r.ts)}
+            ${seen[r.artifact_hash] > 1
+               ? `<span class="tag warn" style="margin-left:10px">shared topology</span>` : ''}
+        <td><button class="flat" onclick="openReceipt('${esc(r.receipt)}')">Open</button>`).join('')
+    ) : '<tr><td class="empty">Nothing submitted yet.</td></tr>';
+}
+
+// ---- the report -------------------------------------------------------------
+async function openReceipt(receipt){
+  const rc = (receipt || $('#r-code').value).trim().toUpperCase();
+  if (!rc) return;
+  $('#r-code').value = rc;
+
+  // Record the claim BEFORE opening, so the report below already shows the result of it. A
+  // contested receipt is reported, never overwritten: the first claim stands until a person
+  // decides otherwise, and the banner names who holds it so it can be taken up with both.
+  const sid = $('#r-sid').value.trim();
+  if (sid) {
+    const c = await api('/api/submissions/claim', {course: COURSE, receipt: rc, student_id: sid});
+    if (c.ok) { say(`${rc} recorded as ${sid}.`, true); $('#r-sid').value = ''; }
+    else if (c.held_by) say(c.error);      // api() already showed it; this keeps it on screen
+  }
+
+  const r = await api('/api/receipt?receipt=' + encodeURIComponent(rc));
+  if (r.error) { $('#r-out').innerHTML = `<div class="err">${esc(r.error)}</div>`; return; }
+  // Twins are FLAGGED, never rejected: a shared starter topology is a legitimate reason for two
+  // submissions to match, and only the teacher can tell which it is.
+  const twins = (r.twins||[]).length;
+  $('#r-out').innerHTML = `
+    <div style="margin-top:24px">
+      <div class="big">${esc(r.title || r.activity)}</div>
+      <div class="rowb">
+        <span class="tag ${r.student_id?'live':'draft'}">${
+          r.student_id ? 'claimed by '+esc(r.student_id) : 'unclaimed'}</span>
+        <span class="tag ${r.verdict==='pass'?'live':'warn'}">${esc(r.verdict||'?')}</span>
+        <span class="tag ${r.within_session?'live':'warn'}">
+          ${r.minutes} min${r.within_session?'':' · over the window'}</span>
+        <span class="tag draft">${r.entries} recorded actions</span>
+        ${twins ? `<span class="tag warn">same topology as ${twins} other</span>` : ''}
+      </div>
+      ${(r.contested_by||[]).length ? `<div class="note" style="color:var(--red)">
+         <b>Also claimed by ${r.contested_by.map(esc).join(', ')}</b> — refused at the time, so
+         that student was told only that the receipt was taken, never by whom. Both of them are
+         named here so you can take it up with them.</div>` : ''}
+      ${twins ? `<div class="note">Built from the same topology as
+         ${r.twins.map(t=>'<span class="mono">'+esc(t.receipt)+'</span>').join(', ')}.
+         A shared starter topology is a legitimate reason for this — worth a look, not a verdict.</div>` : ''}
+      <pre>${esc(r.narration)}</pre>
+    </div>`;
+}
+
+// ---- content ----------------------------------------------------------------
+async function loadMaterials(){
+  $('#content-sub').textContent = 'Materials for ' + COURSE;
+  const rows = await api('/api/materials?course=' + encodeURIComponent(COURSE));
+  $('#m-list').innerHTML = rows.length ? (
+      '<tr><th>Title<th>Kind<th>Added<th>' +
+      rows.map(m => `<tr><td>${esc(m.title)}<td><span class="tag draft">${esc(m.kind)}</span>
+        <td>${when(m.uploaded)}
+        <td><a href="${m.kind==='link'?esc(m.url):'/m/'+esc(m.id)}" target="_blank">open</a>
+            <button class="danger" style="margin-left:12px"
+                    onclick="delMaterial('${esc(m.id)}')">Remove</button>`).join('')
+    ) : '<tr><td class="empty">Nothing here yet.</td></tr>';
+}
+
+async function addMaterial(){
+  const title = $('#m-title').value.trim(), url = $('#m-url').value.trim();
+  const f = $('#m-file').files[0];
+  if (!f && !url) { $('#m-err').textContent = 'Pick a file or paste a link.'; return; }
+  let body = {course:COURSE, title};
+  if (url) body.url = url;
+  else {
+    const buf = await f.arrayBuffer();
+    let s=''; new Uint8Array(buf).forEach(b => s += String.fromCharCode(b));
+    body.filename = f.name; body.data = btoa(s);
+  }
+  const r = await api('/api/materials', body);
+  $('#m-err').textContent = r.ok ? '' : r.error;
+  if (r.ok) { $('#m-title').value=''; $('#m-url').value=''; $('#m-file').value=''; loadMaterials(); }
+}
+async function delMaterial(id){ await api('/api/materials/delete', {course:COURSE, id}); loadMaterials(); }
+
+// ---- staff ------------------------------------------------------------------
+async function loadStaff(){
+  const rows = await api('/api/staff');
+  $('#s-list').innerHTML = '<tr><th>Username<th>Role<th>Status<th>' +
+    rows.map(s => `<tr><td class="mono">${esc(s.username)}
+      <td><span class="tag ${s.role==='admin'?'warn':'draft'}">${esc(s.role)}</span>
+      <td>${s.claimed ? 'active'
+            : `<span class="tag draft">unclaimed</span>
+               <span class="mono" style="margin-left:8px">${esc(s.claim_token)}</span>`}
+      <td><button class="flat" onclick="setRole('${esc(s.username)}','${
+             s.role === 'admin' ? 'teacher' : 'admin'}')">Make ${
+             s.role === 'admin' ? 'teacher' : 'admin'}</button>
+          <button class="danger" style="margin-left:10px"
+                  onclick="delStaff('${esc(s.username)}')">Remove</button>`).join('');
+}
+
+async function setRole(u, role){
+  const r = await api('/api/staff/role', {username: u, role});
+  $('#s-err').textContent = r.ok ? '' : r.error;
+  loadStaff();
+}
+
+async function addStaff(){
+  const r = await api('/api/staff', {username:$('#s-user').value.trim(), role:$('#s-role').value});
+  $('#s-err').textContent = r.ok ? '' : r.error;
+  // The token is shown ONCE, here, because it is not stored in a recoverable form afterwards.
+  $('#s-token').innerHTML = r.ok
+    ? `<div class="ok">Give <b>${esc(r.username)}</b> this claim token:</div>
+       <div class="code" style="margin-top:10px">${esc(r.claim_token)}</div>` : '';
+  if (r.ok) { $('#s-user').value=''; loadStaff(); }
+}
+async function delStaff(u){
+  const r = await api('/api/staff/delete', {username:u});
+  $('#s-err').textContent = r.ok ? '' : r.error;
+  loadStaff();
+}
+
+// ---- start ------------------------------------------------------------------
+// A stored session may be stale. Ask who we are BEFORE rendering: a console that draws and then
+// 401s on every panel is worse than a sign-in gate.
+(async () => {
+  if (!TOKEN) { gate(true); return; }
+  let r;
+  try { r = await fetch('/auth/whoami', {headers:{'Authorization':'Bearer '+TOKEN}}); }
+  catch (e) {
+    // A stopped server is NOT a stale session. Signing the person out here would throw away a
+    // perfectly good token and send them to type a password at a server that cannot answer.
+    gate(true);
+    $('#g-err').textContent = 'Could not reach the course server. Is it running?';
+    return;
+  }
+  ME = r.ok ? await r.json().catch(() => null) : null;
+  if (!ME) { signOut(); return; }
+  gate(false); boot();
+})();
+</script>

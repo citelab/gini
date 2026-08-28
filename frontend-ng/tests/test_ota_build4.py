@@ -88,6 +88,15 @@ _FRAG = ("id: ota-lan\nlayer: core\nteaches: networking-basics\nsummary: a LAN\n
 
 @pytest.fixture()
 def live(tmp_path):
+    # TEACHING_CENTER_V1_SPEC.md §3.1, the open decision. v1 removed lessons, profiles and the
+    # roster from the server, which retires the OTA pull path this fixture drives — it needs an
+    # enrolled student, and v1 students have no accounts at all. The *receiving* version gate above
+    # is pure and still runs, so the part worth keeping is still covered.
+    #
+    # Skipped rather than deleted because the decision is not made: if Missions must keep syncing
+    # from the TC, lessons and profiles come back and these tests come back with them. Deleting
+    # would quietly answer a question that is still open.
+    pytest.skip("OTA pull retired by Teaching Center v1 — see spec §3.1 (decision pending)")
     root = tmp_path / "course"
     (root / "data").mkdir(parents=True)
     (root / "courses" / "c1").mkdir(parents=True)

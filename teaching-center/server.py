@@ -1,156 +1,98 @@
 #!/usr/bin/env python3
-"""GINI Teaching Center — reference server (skeleton).
+"""GINI Teaching Center — v1.
 
-The single service both teachers and students talk to: system of record for **Lessons** and
-student **Profiles**, and the collector for Mission **submissions**. This is a minimal stdlib
-reference implementation of the GINI Learning Protocol (GLP) so the client can be exercised
-end-to-end; a production deployment would add a real datastore, a roster, role-based auth, and
-(Phase 6) a Docker-capable re-grader for the hybrid grading authority.
+Four things and nothing else (TEACHING_CENTER_V1_SPEC.md):
 
-Layout it serves from (COURSE_ROOT):
-    courses/<course>/manifest.json          # released lessons
-    lessons/<lesson_id>/lesson.yaml         # a Lesson Pack (Phase 5 = yaml text)
-    data/profiles/<student>.json            # authoritative profiles (monotonic-merged on PUT)
-    data/submissions.jsonl                  # appended Mission results
+    staff        the admin adds and removes teachers
+    courses      several, in one portal; everything hangs off a course
+    activities   labs: vend codes, gBuilder records the work, submit, read the report
+    content      course materials a teacher uploads for students
 
-Run:  COURSE_ROOT=./example PORT=8080 python teaching-center/server.py
-Auth: a Bearer token is required but accepted as any non-empty string in this skeleton
-      (replace with a real enrollment roster).
+**No AI.** No model client is imported and no outbound model call is made. That removes an entire
+class of failure — "the model timed out", "the model chose badly" — from a system teachers depend
+on at deadline time. There is also no observation plan: gBuilder records what the student DID and
+the report narrates it, so the account is true by construction.
+
+**No student accounts.** A vended code is the whole interaction. The portal never learns who did
+the work; the teacher maps a receipt to a name in their own gradebook, which is the only place that
+mapping is needed.
+
+Run:  ./run.sh          (sets PYTHONPATH; gini.domain is a hard dependency)
 """
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
+import secrets
+import traceback
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(os.environ.get("COURSE_ROOT", "./example")).resolve()
+ROOT = Path(os.environ.get("COURSE_ROOT", "./tc-data")).resolve()
 PORT = int(os.environ.get("PORT", "8080"))
+MATERIALS = ROOT / "materials"
 
-# Uploaded (teacher-authored) fragments land in the course's own content layer, so the TC composes
-# from built-ins + these. Point GINI_HOME at the course root (before any gini.domain import) so the
-# content is COURSE-SCOPED, not in the server operator's ~/.gini.
+# Point GINI_HOME at the course root before any gini.domain import, so anything it writes is
+# course-scoped rather than in the server operator's home.
 os.environ.setdefault("GINI_HOME_DIR", str(ROOT))
 
-_MANIFEST = re.compile(r"^/courses/([\w-]+)/manifest$")
-_PACK = re.compile(r"^/lessons/([\w-]+)/pack$")
-_PROFILE = re.compile(r"^/students/([\w-]+)/profile$")
-_SUBMIT = re.compile(r"^/courses/([\w-]+)/submissions$")
-
-# --- auth (Phase A) --------------------------------------------------------- #
-# Until now a Bearer token was accepted as "any non-empty string", which meant anyone could read any
-# student's profile, submit as anyone, and — worst — GET /api/roster, which hands out the enrolment
-# tokens for the WHOLE CLASS. That isn't a mild oversight, it's a master key sitting on an open port.
-import accounts as _accounts                                        # noqa: E402
-from store import Store as _Store                                   # noqa: E402
+import accounts as _accounts                                       # noqa: E402
+import activities as _act                                          # noqa: E402
+from store import Store                                            # noqa: E402
 
 _ACCTS = _accounts.Accounts(ROOT)
-_STORE = _Store(ROOT)
-COURSE = os.environ.get("COURSE", "cs4480-fall26")
-TEACHER_ID = os.environ.get("TEACHER_ID", "teacher")
+_STORE = Store(ROOT)
 
-_SOCIAL_RE = {
-    "presence": re.compile(r"^/courses/([\w-]+)/presence$"),
-    "group": re.compile(r"^/courses/([\w-]+)/group$"),
-    "channels": re.compile(r"^/courses/([\w-]+)/channels$"),
-    "messages": re.compile(r"^/courses/([\w-]+)/messages$"),
-    "report": re.compile(r"^/courses/([\w-]+)/messages/report$"),
-    "delete": re.compile(r"^/courses/([\w-]+)/messages/delete$"),
-    "aipref": re.compile(r"^/courses/([\w-]+)/ai/pref$"),
-    "photo": re.compile(r"^/courses/([\w-]+)/photo$"),
-    "content": re.compile(r"^/courses/([\w-]+)/content$"),   # OTA: authored fragments to pull
-}
-
-_LAZY: dict = {}
-
-
-def _stack():
-    """course + social + ProfAI + StudentAI, built once. Imported lazily so the student endpoints
-    keep working even if the AI extras aren't importable."""
-    if not _LAZY:
-        import ai as _ai
-        import social as _social
-        import teacher as _teacher
-        c = _teacher.Course(ROOT, COURSE)
-        s = _social.Social(ROOT, c)
-        cap = _ai.Capacity()
-        llm = _ai.Ollama(os.environ.get("AI_URL", _ai.OLLAMA_URL),
-                         os.environ.get("AI_MODEL", _ai.MODEL))
-        _LAZY.update(course=c, social=s,
-                     prof=_ai.ProfAI(ROOT, c, s, llm=llm, capacity=cap),
-                     student_ai=_ai.StudentAI(ROOT, c, s, llm=llm, capacity=cap))
-    return _LAZY
+_MAX_UPLOAD = 25 * 1024 * 1024        # a handout, not a video library
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _bearer(handler) -> str:
     return handler.headers.get("Authorization", "").removeprefix("Bearer ").strip()
 
-_BAND_RANK = {"": 0, "incomplete": 1, "partial": 2, "pass": 3, "gold": 4}
 
+def _number(sent, previous, default, cast):
+    """Read a number a browser sent, falling back to what was already stored, then to a default.
 
-def _merge_profiles(a: dict, b: dict) -> dict:
-    """Monotonic union merge (same rule as the client's domain.profile.merge): best-band max,
-    attempts max, completed OR, best_time min. Conflict-free because the data is monotonic."""
-    out = {"student_id": a.get("student_id") or b.get("student_id"), "lessons": {}}
-    la, lb = a.get("lessons", {}), b.get("lessons", {})
-    for lid in set(la) | set(lb):
-        ra, rb = la.get(lid), lb.get(lid)
-        if not ra or not rb:
-            out["lessons"][lid] = ra or rb
+    `None` and `""` mean "not supplied" — JSON has no NaN, so a field a browser could not fill
+    arrives as null. Anything else must actually parse: raising here is deliberate, so the caller
+    can name the field instead of silently storing a zero the teacher never chose.
+    """
+    for v in (sent, previous):
+        if v is None or v == "":
             continue
-        times = [t for t in (ra.get("best_time_s"), rb.get("best_time_s")) if t is not None]
-        out["lessons"][lid] = {
-            "lesson_id": lid, "concept": ra.get("concept") or rb.get("concept"),
-            "best_band": max((ra.get("best_band", ""), rb.get("best_band", "")), key=lambda x: _BAND_RANK.get(x, 0)),
-            "attempts_used": max(ra.get("attempts_used", 0), rb.get("attempts_used", 0)),
-            "best_time_s": min(times) if times else None,
-            "completed": ra.get("completed", False) or rb.get("completed", False),
-            "last_played": max(ra.get("last_played", 0), rb.get("last_played", 0)),
-            "snapshot": ra.get("snapshot") if ra.get("last_played", 0) >= rb.get("last_played", 0) else rb.get("snapshot", ""),
-        }
-    return out
-
-
-def _ticket_pretty(code: str) -> str:
-    """A vended code in the grouped form a student reads off the screen."""
-    from gini.domain.ticket import Ticket
-    return Ticket(code).pretty
-
-
-def _course_api():
-    """The teacher console's API. Imported lazily so the student endpoints keep working even if the
-    GINI package isn't importable (e.g. a bare relay deployment)."""
-    import teacher
-    return teacher
+        return cast(v)
+    return cast(default)
 
 
 class Handler(BaseHTTPRequestHandler):
-    # -- identity ------------------------------------------------------------ #
+    server_version = "GINI-TC/1"
+
+    def log_message(self, *a):                 # quiet; the console is the interface
+        pass
+
+    # -- identity --------------------------------------------------------- #
     def _who(self) -> dict | None:
-        """Resolve the caller from their session token, or None."""
         return _ACCTS.whoami(_bearer(self))
 
-    def _authed(self) -> bool:
-        return self._who() is not None
-
-    def _is(self, who: str) -> bool:
-        """The caller IS this student (or is the teacher, who may act across the course). Without
-        this, a valid session for student A could read student B's profile — authentication without
-        authorization is just a nicer-looking hole."""
+    def _is_admin(self) -> bool:
         me = self._who()
-        if me is None:
-            return False
-        return me["role"] == "teacher" or me["who"] == who
+        return me is not None and me["role"] == _accounts.ADMIN
 
-    def _teacher(self) -> bool:
+    def _may(self, course: str) -> bool:
+        """This caller may act on this course. An admin may act on any."""
         me = self._who()
-        return me is not None and me["role"] == "teacher"
+        return me is not None and _STORE.staffs(course, me["who"], me["role"])
 
-    def _send(self, status: int, obj=None, *, text: str | None = None,
+    # -- plumbing --------------------------------------------------------- #
+    def _send(self, status: int, obj=None, *, text: str | None = None, raw: bytes | None = None,
               ctype: str = "application/json") -> None:
-        body = (text if text is not None else json.dumps(obj) if obj is not None else "").encode()
+        body = raw if raw is not None else (
+            (text if text is not None else json.dumps(obj) if obj is not None else "").encode())
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -164,522 +106,441 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
-    # -- auth (open by necessity: you can't authenticate before you have a session) ------------- #
-    def _auth_routes(self) -> bool:
+    def _q(self, key: str) -> str:
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        return (q.get(key) or [""])[0]
+
+    def _page(self, name: str) -> None:
+        p = Path(__file__).parent / "static" / name
+        self._send(200, text=p.read_text(encoding="utf-8"), ctype="text/html; charset=utf-8")
+
+    # ===================================================================== #
+    # public + code-authenticated. MUST be dispatched before the console API,
+    # which claims every /api/ path and 401s it without a session.
+    # ===================================================================== #
+    def _open_routes(self) -> bool:
         p = self.path.split("?")[0]
-        if not p.startswith("/auth/"):
-            return False
-        if self.command == "POST":
-            b = self._body()
-            if p == "/auth/claim":                  # first login: id + enrolment token + new password
-                self._send(200, _ACCTS.claim(b.get("id", ""), b.get("enrolment_token", ""),
-                                             b.get("password", "")))
-            elif p == "/auth/claim-teacher":
-                self._send(200, _ACCTS.claim_teacher(b.get("id", ""), b.get("setup_token", ""),
-                                                     b.get("password", "")))
-            elif p == "/auth/login":
-                self._send(200, _ACCTS.login(b.get("id", ""), b.get("password", "")))
-            elif p == "/auth/logout":
-                _ACCTS.logout(_bearer(self))
-                self._send(200, {"ok": True})
-            else:
-                self._send(404)
+
+        if p in ("/", "/console", "/console/"):
+            self._page("console.html")
             return True
-        if self.command == "GET" and p == "/auth/whoami":
+        if p == "/getcode":
+            self._page("getcode.html")
+            return True
+
+        # --- auth (open by necessity: you cannot authenticate before you have a session) ---
+        if p == "/auth/login" and self.command == "POST":
+            b = self._body()
+            self._send(200, _ACCTS.login(b.get("id", ""), b.get("password", "")))
+            return True
+        if p == "/auth/claim" and self.command == "POST":
+            b = self._body()
+            self._send(200, _ACCTS.claim(b.get("id", ""), b.get("claim_token", ""),
+                                         b.get("password", "")))
+            return True
+        if p == "/auth/whoami" and self.command == "GET":
             me = self._who()
-            # The course travels with identity because a Teaching Center serves exactly ONE course
-            # — it is deployment configuration, not something a teacher picks per activity. The
-            # console shows it as a label; making it an input would invite mixing courses in a
-            # store that has no notion of doing so.
-            return self._send(200, {**me, "course": COURSE}) if me else self._send(401)
-        self._send(404)
-        return True
-
-    # -- the social plane: presence, groups, chat (Phases B–E) ----------------- #
-    def _social_routes(self) -> bool:
-        p = self.path.split("?")[0]
-        if not any(rx.match(p) for rx in _SOCIAL_RE.values()):
-            return False
-        me = self._who()
-        if me is None:
-            self._send(401)
+            self._send(200, me) if me else self._send(401, {"error": "not signed in"})
             return True
-        S = _stack()
-        soc, course, prof, sai = S["social"], S["course"], S["prof"], S["student_ai"]
-        who, role = me["who"], me["role"]
-
-        if self.command == "GET":
-            if _SOCIAL_RE["group"].match(p):
-                self._send(200, soc.my_group(who))
-            elif _SOCIAL_RE["channels"].match(p):
-                self._send(200, soc.channels(who, role))
-            elif _SOCIAL_RE["messages"].match(p):
-                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-                since = float((q.get("since") or ["0"])[0] or 0)
-                self._send(200, soc.inbox(who, role, since=since))
-            elif _SOCIAL_RE["content"].match(p):        # OTA channel — authored fragments to pull
-                self._send(200, _course_api().authored_content())
-            else:
-                self._send(404)
+        if p == "/auth/logout" and self.command == "POST":
+            _ACCTS.logout(_bearer(self))
+            self._send(200, {"ok": True})
             return True
 
-        if self.command == "POST":
-            b = self._body()
-            if _SOCIAL_RE["presence"].match(p):
-                self._send(200, soc.heartbeat(who, b.get("progress")))
-            elif _SOCIAL_RE["report"].match(p):
-                self._send(200, soc.report(who, b.get("message_id", ""), b.get("note", "")))
-            elif _SOCIAL_RE["aipref"].match(p):
-                if not sai.granted(who):
-                    self._send(200, {"ok": False, "error": "Your instructor hasn't enabled a hosted "
-                                                           "AI for you."})
-                else:
-                    self._send(200, sai.set_pref(who, bool(b.get("on")), b.get("blurb", "")))
-            elif _SOCIAL_RE["delete"].match(p):
-                self._send(200, soc.set_deleted(who, role, b.get("message_id", ""),
-                                                bool(b.get("deleted", True))))
-            elif _SOCIAL_RE["photo"].match(p):
-                self._send(200, _ACCTS.set_photo(who, b.get("photo", "")))
-            elif _SOCIAL_RE["messages"].match(p):
-                self._send(200, self._post_message(soc, course, prof, sai, who, role, b))
-            else:
-                self._send(404)
+        # --- the student's two endpoints. Code-authenticated, never a session. ---
+        if p == "/api/activity" and self.command == "GET":
+            self._activity_for_code()
+            return True
+        if p == "/api/activity/submit" and self.command == "POST":
+            self._submit()
+            return True
+
+        # --- a course material, by link. Public so a student can open it. ---
+        if p.startswith("/m/"):
+            self._serve_material(p[3:])
             return True
         return False
 
-    def _post_message(self, soc, course, prof, sai, who, role, b) -> dict:
-        """Send a message — and run THE REPLY LADDER, which is the design:
-
-            1. the human is present and answers        (a present human is never pre-empted)
-            2. the human is away and allows a proxy    → ProfAI / StudentAI answers, LABELLED
-            3. away, no proxy                          → it queues, and says so honestly
-
-        The AI reply is generated inline here for simplicity; it is bounded by the capacity queue, so
-        a lab full of students degrades into a line rather than a meltdown."""
-        to, body = b.get("to", ""), b.get("body", "")
-        res = soc.send(who, to, body, kind="human")
-        if not res.get("ok"):
-            return res
-        if role == "teacher":
-            return res                                  # the teacher speaking IS the human reply
-
-        # --- to the instructor -------------------------------------------------
-        if to == "teacher":
-            if not prof.should_answer(TEACHER_ID):
-                return {**res, "ai": None, "note": "Your instructor will see this."}
-            reply = prof.answer(who, body)
-            posted = soc.reply_to_student(who, reply["body"], from_label="ProfAI", kind="ai",
-                                          persona_version=reply.get("persona_version", ""))
-            prof.log_answer(who, body, reply, posted["message"]["id"])   # guardrail 3: always logged
-            return {**res, "ai": posted["message"]}
-
-        # --- to a groupmate ----------------------------------------------------
-        if to not in ("group",) and sai.should_answer(to):
-            reply = sai.answer(to, who, body)
-            posted = soc.send(to, who, reply["body"], kind="ai", from_label=f"{to}AI")
-            return {**res, "ai": posted.get("message")}
-        return res
-
-    # -- activities: the public page + the two CODE-authenticated endpoints ---- #
-    def _activity_routes(self) -> bool:
-        """Everything about activities that is NOT behind a teacher session.
-
-        **This must be dispatched before `_teacher_routes`.** That method claims every path under
-        `/api/` and 401s it without a teacher session, so `/api/activity` — which authenticates by
-        the student's *code*, not a session — would never reach a handler otherwise.
-
-        These are the only unauthenticated write surfaces in the server, so both are deliberately
-        narrow: one reads a released plan for a code the TC itself issued, one accepts a submission
-        for that same code. Neither can name a student, and neither reveals whether some *other*
-        code would have worked.
-        """
-        p = self.path.split("?")[0]
-        if p not in ("/getcode", "/api/activity", "/api/activity/submit"):
-            return False
-
-        import activities as _act
-        course = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        one = lambda k: (course.get(k) or [""])[0]                        # noqa: E731
-
-        if p == "/getcode":
-            if self.command != "GET":
-                return self._send(405, {"error": "GET only"}) or True
-            html = (Path(__file__).parent / "static" / "getcode.html").read_text()
-            return self._send(200, text=html, ctype="text/html; charset=utf-8") or True
-
-        if p == "/api/activity" and self.command == "GET":
-            # Two shapes: without a code it describes the activity and vends one (what the public
-            # page calls); with a code it returns the PLAN (what gBuilder calls at arming).
-            code = _act.normalize(one("code"))
-            if code:
-                row = _STORE.code(code)
-                act = _STORE.activity(row["activity"]) if row else None
-                ok, why = _act.check_code(row, act)
-                if not ok:
-                    return self._send(403, {"ok": False, "reason": why,
-                                            "error": _act.message(why)}) or True
-                return self._send(200, {
-                    "ok": True, "activity": act["id"], "title": act["title"],
-                    "plan": json.loads(act["plan"]), "plan_hash": act["plan_hash"],
-                    "session_minutes": act["session_minutes"],
-                    "valid_until": row["valid_until"]}) or True
-
-            act = _STORE.activity(_act.activity_id(one("course"), one("lab")))
-            ok, why = _act.vending_open(act)
-            if not ok:
-                return self._send(200, {"ok": False, "reason": why,
-                                        "error": _act.message(why),
-                                        "title": (act or {}).get("title", "")}) or True
-            issued = _act.mint_code(act)
-            _STORE.code_put(issued)
-            return self._send(200, {
-                "ok": True, "activity": act["id"], "title": act["title"],
-                "code": _ticket_pretty(issued["code"]),
-                "vend_until": act["vend_until"], "valid_until": issued["valid_until"],
-                "session_minutes": act["session_minutes"]}) or True
-
-        if p == "/api/activity/submit" and self.command == "POST":
-            body = self._body()
-            code = _act.normalize(str(body.get("code") or ""))
+    def _activity_for_code(self) -> None:
+        """Two shapes: with a code, what gBuilder needs to arm; without, vend one."""
+        code = _act.normalize(self._q("code"))
+        if code:
             row = _STORE.code(code)
             act = _STORE.activity(row["activity"]) if row else None
-            try:
-                rec = _act.prepare(body, row, act)
-            except _act.Rejected as e:
-                return self._send(409, {"ok": False, "reason": e.reason, "error": str(e)}) or True
-            if not _STORE.submission_put(rec):
-                # Uniqueness is the schema's, not a prior read's: two submissions racing would both
-                # pass a check-then-insert, and the loser must be told rather than silently lost.
-                return self._send(409, {"ok": False, "reason": _act.DUPLICATE,
-                                        "error": _act.message(_act.DUPLICATE)}) or True
-            _STORE.code_mark_used(code)
-            return self._send(200, {"ok": True, "receipt": rec["receipt"],
-                                    "within_session": _act.within_session(rec, act)}) or True
-
-        return self._send(405, {"error": "method not allowed here"}) or True
-
-    # -- drafting an observation plan (the one model-touching route) ---------- #
-    def _draft_activity(self, b: dict) -> None:
-        """Draft a plan, streaming progress as newline-delimited JSON.
-
-        The model streams into the SERVER, so without this the browser posts once and waits in
-        silence — and a model producing beautifully looks exactly like a hung one. Progress is
-        therefore driven by REAL tokens: if generation stalls, the indicator stalls. A CSS spinner
-        would keep spinning, which is worse than no indicator because it is confidently wrong.
-
-        NDJSON rather than SSE: both ends are ours, `event:` framing buys nothing, and the Ollama
-        reader upstream already speaks NDJSON, so the whole path uses one shape.
-
-        Line kinds:
-          {"t":"phase","n":1,"label":…}  a new model call started
-          {"t":"tick","chars":N}         tokens arrived — the liveness signal
-          {"t":"say","text":…}           human-readable prose, streamed as it is written
-          {"t":"done","result":{…}}      the payload the non-streaming route would have returned
-        """
-        import ai as _ai
-        from gini.agent import aop_selector as _sel
-
-        streaming = bool(b.get("stream"))
-        if streaming:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-
-        def emit(**line) -> None:
-            if not streaming:
+            ok, why = _act.check_code(row, act)
+            if not ok:
+                # Deliberately nothing else: a refusal must not become an oracle for guessing
+                # valid codes.
+                self._send(403, {"ok": False, "reason": why, "error": _act.message(why)})
                 return
-            try:
-                self.wfile.write((json.dumps(line) + "\n").encode())
-                self.wfile.flush()          # or the browser sees nothing until the end
-            except (BrokenPipeError, ConnectionResetError):
-                raise                        # the teacher navigated away; stop working
+            self._send(200, {"ok": True, "activity": act["id"], "title": act["title"],
+                             "brief": act.get("brief", ""),
+                             "session_minutes": act["session_minutes"],
+                             "valid_until": row["valid_until"]})
+            return
 
-        _llm = _stack()["prof"].llm if _stack().get("prof") else _ai.Ollama()
+        act = _STORE.activity(_act.activity_id(self._q("course"), self._q("lab")))
+        ok, why = _act.vending_open(act)
+        if not ok:
+            self._send(200, {"ok": False, "reason": why, "error": _act.message(why),
+                             "title": (act or {}).get("title", "")})
+            return
+        issued = _act.mint_code(act)
+        _STORE.code_put(issued)
+        from gini.domain.ticket import Ticket
+        self._send(200, {"ok": True, "activity": act["id"], "title": act["title"],
+                         "brief": act.get("brief", ""),
+                         "code": Ticket(issued["code"]).pretty,
+                         "vend_until": act["vend_until"], "valid_until": issued["valid_until"],
+                         "session_minutes": act["session_minutes"]})
 
-        # Phase labels by call index. The selector may call the model up to three times — draft,
-        # repair an invalid selection, reconsider after the Twin objects — and "reconsidering its
-        # choice" is far more reassuring to watch than an unlabelled spinner.
-        LABELS = {1: "Reading that and choosing what to watch",
-                  2: "Reconsidering — something did not add up",
-                  3: "One more pass"}
-        calls = {"n": 0}
-
-        def _json_call(prompt: str) -> str:
-            calls["n"] += 1
-            emit(t="phase", n=calls["n"],
-                 label=LABELS.get(calls["n"], "Still working on the plan"))
-            return _llm.chat("", prompt, json_mode=True, num_predict=800,
-                             on_chunk=lambda c: emit(t="tick", chars=len(c)))
-
-        def _prose_call(prompt: str) -> str:
-            emit(t="phase", n=0, label="Writing you a plain-English summary")
-            # The ONLY call whose output is meant for a human, so it is the only one worth showing
-            # verbatim. Streaming raw JSON tokens from the selection call would be noise.
-            return _llm.chat("", prompt, num_predict=400,
-                             on_chunk=lambda c: emit(t="say", text=c))
-
+    def _submit(self) -> None:
+        b = self._body()
+        code = _act.normalize(str(b.get("code") or ""))
+        row = _STORE.code(code)
+        act = _STORE.activity(row["activity"]) if row else None
         try:
-            d = _sel.draft(b.get("intent", ""), _json_call,
-                           params={"starting_point": "blank",
-                                   "guidance": bool(b.get("guidance"))},
-                           answers=tuple(b.get("answers") or ()),
-                           feedback=tuple(b.get("feedback") or ()),
-                           deadline_s=b.get("deadline_s"))
-            if not d.ok:
-                result = {"ok": False, "error": d.error, "questions": d.questions, "note": d.note}
-            else:
-                from gini.domain import aop_assemble as _asm
-                plan = _asm.assemble(d.selection, gini_version="tc")
-                result = {"ok": True, "note": d.note, "questions": d.questions,
-                          "objections": [{"question": o.question,
-                                          "concern": {"statement": o.concern.statement,
-                                                      "evidence": o.concern.evidence}}
-                                         for o in d.objections],
-                          "coverage_silent": d.coverage_silent,
-                          "selection": d.selection.to_dict(), "plan": plan.to_dict(),
-                          "describe": _asm.describe(plan),
-                          "prose": _sel.back_translate(plan, _prose_call)}
-        except _ai.ModelTooSlow as e:
-            result = {"ok": False, "error": str(e)}
-        except TimeoutError:
-            result = {"ok": False, "error": ("The model went silent. Nothing arrived at all — "
-                                             "check that Ollama is running and the model is "
-                                             "pulled.")}
-        except Exception as e:                       # noqa: BLE001 — never 500 at a teacher
-            result = {"ok": False, "error": f"The model could not be reached: {e}"}
+            rec = _act.prepare(b, row, act)
+        except _act.Rejected as e:
+            self._send(409, {"ok": False, "reason": e.reason, "error": str(e)})
+            return
+        if not _STORE.submission_put(rec):
+            self._send(409, {"ok": False, "reason": _act.DUPLICATE,
+                             "error": _act.message(_act.DUPLICATE)})
+            return
+        _STORE.code_mark_used(code)
+        self._send(200, {"ok": True, "receipt": rec["receipt"],
+                         "within_session": _act.within_session(rec, act)})
 
-        if streaming:
-            emit(t="done", result=result)
-        else:
-            self._send(200, result)
+    def _serve_material(self, mid: str) -> None:
+        m = _STORE.material(mid)
+        if not m or m["kind"] != "file":
+            self._send(404, {"error": "no such material"})
+            return
+        f = MATERIALS / m["course"] / m["filename"]
+        if not f.exists():
+            self._send(404, {"error": "file is missing"})
+            return
+        ctype = mimetypes.guess_type(m["filename"])[0] or "application/octet-stream"
+        self._send(200, raw=f.read_bytes(), ctype=ctype)
 
-    # -- teacher console (UI + API) — TEACHER SESSION REQUIRED ---------------- #
-    def _teacher_routes(self) -> bool:
+    # ===================================================================== #
+    # the console API — a STAFF session is required for everything here
+    # ===================================================================== #
+    def _console_routes(self) -> bool:
         p = self.path.split("?")[0]
-        if p in ("/", "/teacher", "/teacher/"):
-            html = (Path(__file__).parent / "static" / "teacher.html").read_text()
-            self._send(200, text=html, ctype="text/html; charset=utf-8")
-            return True
         if not p.startswith("/api/"):
             return False
-        # The console's API is the master key (it serves the class's enrolment tokens). Nothing here
-        # is readable without a TEACHER session — not even a listing.
-        if not self._teacher():
-            self._send(401, {"error": "Teacher sign-in required."})
-            return True
-        t = _course_api()
-        course = os.environ.get("COURSE", "cs4480-fall26")
-        C = t.Course(ROOT, course)
-        if self.command == "GET":
-            if p == "/api/fragments":
-                self._send(200, t.fragment_library())
-            elif p == "/api/vocabulary":            # the discovery protocol (asset manifest)
-                self._send(200, t.vocabulary())
-            elif p == "/api/lessons":
-                self._send(200, C.lessons())
-            elif p == "/api/activities":
-                self._send(200, C.activities())
-            elif p == "/api/activities/receipt":
-                # The teacher's lookup: a student hands over a receipt, this returns everything
-                # recorded under it — plus any OTHER submission built from the same topology, which
-                # is the collusion signal a receipt alone cannot see.
-                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-                got = _STORE.submission_by_receipt((q.get("receipt") or [""])[0].strip().upper())
-                if not got:
-                    self._send(404, {"error": "No submission with that receipt."})
-                else:
-                    self._send(200, {**got, "data": json.loads(got.get("data") or "{}"),
-                                     "twins": _STORE.artifact_twins(got.get("artifact_hash", ""),
-                                                                    exclude_code=got["code"])})
-            elif p == "/api/roster":
-                # enrich each row with a live-status + photo so the console can show real faces and
-                # who's on right now. Read-only join over presence + accounts.
-                S = _stack()
-                rows = []
-                for r in C.roster():
-                    pr = S["social"].presence_of(r["id"])
-                    rows.append({**r, "online": pr["online"], "last_seen": pr["last_seen"],
-                                 "progress": pr["progress"], "photo": _ACCTS.photo(r["id"]),
-                                 "claimed": _ACCTS.store.account(r["id"]) is not None})
-                self._send(200, rows)
-            elif p == "/api/progress":
-                self._send(200, C.progress())
-            elif p == "/api/insights":
-                self._send(200, C.insights())
-            elif p == "/api/groups":
-                self._send(200, C.groups())
-            elif p == "/api/review":                    # guardrail 3: every ProfAI answer, reviewable
-                self._send(200, _stack()["prof"].review_queue())
-            elif p == "/api/persona":
-                self._send(200, _stack()["prof"].persona.get())
-            elif p == "/api/digest":                    # the situation report, not a transcript
-                self._send(200, _stack()["prof"].digest())
-            elif p == "/api/reports":                   # messages students CHOSE to show you
-                self._send(200, _stack()["social"].reports())
-            elif p == "/api/messages":                  # the Gmail-style mailbox (incl. trash)
-                self._send(200, _stack()["social"].inbox(TEACHER_ID, "teacher", include_deleted=True))
-            else:
-                self._send(404)
-            return True
-        if self.command == "POST":
-            b = self._body()
-            S = _stack()
-            if p == "/api/preview":
-                self._send(200, t.preview(b.get("spec") or {}))
-            elif p == "/api/fragments":             # author → TC upload (Build 3)
-                self._send(200, t.register_fragment(b.get("yaml", "")))
-            elif p == "/api/fragments/delete":      # remove an authored fragment from the library
-                self._send(200, t.delete_fragment(b.get("id", "")))
-            elif p == "/api/lessons":
-                # save as a DRAFT by default (the approval gate); release_now skips it
-                self._send(200, C.save_lesson(b.get("spec") or {}, release=b.get("release", ""),
-                                              due=b.get("due", ""), attempts=b.get("attempts", 3),
-                                              release_now=bool(b.get("release_now", False))))
-            elif p == "/api/activities/draft":
-                self._draft_activity(b)
-            elif p == "/api/activities/save":
-                self._send(200, C.save_activity(
-                    b.get("lab", ""), title=b.get("title", ""), intent=b.get("intent", ""),
-                    selection=b.get("selection"), plan=b.get("plan"),
-                    vend_until=float(b.get("vend_until") or 0),
-                    session_minutes=int(b.get("session_minutes") or 60)))
-            elif p == "/api/activities/release":
-                self._send(200, C.release_activity(
-                    b.get("lab", ""), vend_until=float(b.get("vend_until") or 0),
-                    session_minutes=int(b.get("session_minutes") or 0)))
-            elif p == "/api/activities/unrelease":
-                self._send(200, C.unrelease_activity(b.get("lab", "")))
-            elif p == "/api/lessons/playtest":       # teacher confirmed a canvas playtest
-                self._send(200, C.mark_playtested(b.get("id", "")))
-            elif p == "/api/lessons/approve":
-                self._send(200, C.approve_lesson(b.get("id", ""), release=b.get("release", ""),
-                                                 due=b.get("due", ""), attempts=b.get("attempts")))
-            elif p == "/api/lessons/unrelease":
-                self._send(200, C.unrelease_lesson(b.get("id", "")))
-            elif p == "/api/lessons/delete":
-                self._send(200, C.delete_lesson(b.get("id", "")))
-            elif p == "/api/roster":
-                self._send(200, C.enrol(b.get("id", ""), b.get("name", ""),
-                                        group=b.get("group", ""),
-                                        ai_hosted=bool(b.get("ai_hosted", False)),
-                                        sis_id=b.get("sis_id", "")))
-            elif p == "/api/roster/delete":
-                self._send(200, C.unenrol(b.get("id", "")))
-            elif p == "/api/roster/group":
-                self._send(200, C.set_group(b.get("id", ""), b.get("group", "")))
-            elif p == "/api/roster/ai":                 # Phase E: grant hosted-AI capacity
-                self._send(200, C.set_ai_hosted(b.get("id", ""), bool(b.get("on"))))
-            elif p == "/api/roster/reset":              # un-claim an account (student forgot password)
-                self._send(200, _ACCTS.reset(b.get("id", "")))
-            elif p == "/api/persona":
-                self._send(200, S["prof"].persona.save(b))
-            elif p == "/api/review/correct":
-                self._send(200, self._correct(S, b))
-            elif p == "/api/reply":                     # a plain instructor reply from the mailbox
-                to = b.get("to", "") or f"teacher:{b.get('student', '')}"
-                self._send(200, S["social"].post_to_channel(to, b.get("body", ""),
-                                                            from_label="Prof", kind="human"))
-            elif p == "/api/messages/delete":
-                self._send(200, S["social"].set_deleted(TEACHER_ID, "teacher",
-                                                        b.get("message_id", ""),
-                                                        bool(b.get("deleted", True))))
-            else:
-                self._send(404)
-            return True
-        return False
-
-    def _correct(self, S, b) -> dict:
-        """THE CORRECTION LOOP — how the persona improves without prompt engineering.
-
-        The teacher rewrites a ProfAI answer. The correction is posted to the student's thread **as
-        Prof** (so the student gets the real answer from the real authority), the AI answer is marked
-        reviewed, and — if asked — the correction is promoted into the persona as a standing answer,
-        so the next student who asks the same thing gets the teacher's words, not a guess."""
-        student = b.get("student", "")
-        correction = (b.get("correction") or "").strip()
-        if not (student and correction):
-            return {"ok": False, "error": "Need a student and a correction."}
-        # posted as HUMAN: this is the instructor speaking for themselves, and the student must be
-        # able to see that the real authority has now answered.
-        posted = S["social"].reply_to_student(student, correction, from_label="Prof", kind="human")
-        S["prof"].mark_reviewed(b.get("message_id", ""))
-        if b.get("promote") and b.get("question"):
-            S["prof"].persona.add_standing_answer(b["question"], correction)
-        return {"ok": True, "message": posted["message"]}
-
-    def do_GET(self):  # noqa: N802
-        # _activity_routes FIRST: _teacher_routes claims every /api/ path and 401s it without a
-        # teacher session, which would swallow the code-authenticated endpoints.
-        if (self._activity_routes() or self._auth_routes()
-                or self._teacher_routes() or self._social_routes()):
-            return
-        if not self._authed():
-            return self._send(401)
-        m = _MANIFEST.match(self.path)
-        if m:
-            # STUDENT-facing manifest: released lessons only. A draft experiment (awaiting the
-            # teacher's playtest + approval) is never sent to students.
-            p = ROOT / "courses" / m.group(1) / "manifest.json"
-            rows = json.loads(p.read_text()) if p.exists() else []
-            return self._send(200, [r for r in rows if r.get("status", "released") != "draft"])
-        m = _PACK.match(self.path)
-        if m:
-            p = ROOT / "lessons" / m.group(1) / "lesson.yaml"
-            return self._send(200, text=p.read_text()) if p.exists() else self._send(404)
-        m = _PROFILE.match(self.path)
-        if m:
-            if not self._is(m.group(1)):        # a session for A must not read B's profile
-                return self._send(403, {"error": "That isn't your profile."})
-            prof = _STORE.profile(m.group(1))
-            return self._send(200, prof or {"student_id": m.group(1), "lessons": {}})
-        self._send(404)
-
-    def do_PUT(self):  # noqa: N802
-        if not self._authed():
-            return self._send(401)
-        m = _PROFILE.match(self.path)
-        if not m:
-            return self._send(404)
-        if not self._is(m.group(1)):            # …nor write it
-            return self._send(403, {"error": "That isn't your profile."})
-        incoming = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        existing = _STORE.profile(m.group(1)) or {"student_id": m.group(1), "lessons": {}}
-        _STORE.put_profile(m.group(1), _merge_profiles(existing, incoming))
-        self._send(204)
-
-    def do_POST(self):  # noqa: N802
-        if (self._activity_routes() or self._auth_routes()
-                or self._teacher_routes() or self._social_routes()):
-            return
         me = self._who()
         if me is None:
-            return self._send(401)
-        m = _SUBMIT.match(self.path)
-        if not m:
-            return self._send(404)
-        rec = self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
-        # A submission is a CLAIM ABOUT A PERSON, so the server decides who that person is — the
-        # client doesn't get to say. Otherwise anyone could file results under someone else's name.
-        try:
-            obj = json.loads(rec.decode() or "{}")
-        except json.JSONDecodeError:
-            return self._send(400, {"error": "malformed submission"})
-        obj["student"] = me["who"]
-        _STORE.add_submission(obj)
-        self._send(201, {"ok": True})
+            self._send(401, {"error": "Sign in required."})
+            return True
 
-    def log_message(self, *a):  # quiet
-        pass
+        if self.command == "GET":
+            self._console_get(p, me)
+        elif self.command == "POST":
+            self._console_post(p, me, self._body())
+        else:
+            self._send(405, {"error": "method not allowed"})
+        return True
+
+    def _console_get(self, p: str, me: dict) -> None:
+        if p == "/api/staff":
+            if not self._is_admin():
+                return self._send(403, {"error": "Admins only."})
+            return self._send(200, _ACCTS.staff())
+
+        if p == "/api/courses":
+            rows = _STORE.courses(me["who"], me["role"])
+            return self._send(200, [{**c, "staff": _STORE.course_staff(c["id"]),
+                                     "activities": len(_STORE.activities(c["id"]))}
+                                    for c in rows])
+
+        course = self._q("course")
+        if p in ("/api/activities", "/api/materials", "/api/submissions"):
+            if not self._may(course):
+                return self._send(403, {"error": "That is not your course."})
+            if p == "/api/activities":
+                out = []
+                for a in _STORE.activities(course):
+                    out.append({**a, "vended": len(_STORE.codes_for(a["id"])),
+                                "submitted": len(_STORE.activity_submissions(a["id"]))})
+                return self._send(200, out)
+            if p == "/api/materials":
+                return self._send(200, _STORE.materials(course))
+            # Never `code`: the list is for reading, and a code in a response is a code that can
+            # be replayed.
+            return self._send(200, [{k: s.get(k) for k in
+                                     ("receipt", "activity", "ts", "verdict", "artifact_hash",
+                                      "student_id", "claimed_at")}
+                                    for s in _STORE.course_submissions(course)])
+
+        if p == "/api/receipt":
+            row = _STORE.submission_by_receipt(self._q("receipt").strip().upper())
+            if not row:
+                return self._send(404, {"error": "No submission with that receipt."})
+            act = _STORE.activity(row["activity"]) or {}
+            if not self._may(act.get("course", "")):
+                return self._send(403, {"error": "That is not your course."})
+            twins = _STORE.artifact_twins(row.get("artifact_hash", ""), exclude_code=row["code"])
+            return self._send(200, _act.report(row, act, twins,
+                                              _STORE.claim_attempts(row["receipt"])))
+
+        self._send(404, {"error": f"No endpoint at {p} for {self.command}."})
+
+    def _console_post(self, p: str, me: dict, b: dict) -> None:
+        # --- staff (admin only) ---
+        if p.startswith("/api/staff"):
+            if not self._is_admin():
+                return self._send(403, {"error": "Admins only."})
+            if p == "/api/staff":
+                return self._send(200, _ACCTS.add_staff(b.get("username", ""),
+                                                        b.get("role", "teacher")))
+            if p == "/api/staff/delete":
+                return self._send(200, _ACCTS.remove_staff(b.get("username", "")))
+            if p == "/api/staff/role":
+                return self._send(200, _ACCTS.set_role(b.get("username", ""),
+                                                       b.get("role", "teacher")))
+
+        # --- courses: creating one is the admin's; staffing is too ---
+        if p == "/api/courses":
+            if not self._is_admin():
+                return self._send(403, {"error": "Admins only."})
+            cid = (b.get("id") or "").strip().lower()
+            if not _ID_RE.match(cid):
+                return self._send(200, {"ok": False, "error": "Use letters, digits, . _ - for an "
+                                                              "id."})
+            if _STORE.course(cid):
+                return self._send(200, {"ok": False, "error": "That course already exists."})
+            _STORE.put_course({"id": cid, "title": b.get("title", ""), "created": time.time()})
+            _STORE.add_staff(cid, me["who"])       # the creator staffs it, or nobody can use it
+            return self._send(200, {"ok": True, "id": cid})
+
+        if p in ("/api/courses/staff", "/api/courses/unstaff", "/api/courses/archive"):
+            if not self._is_admin():
+                return self._send(403, {"error": "Admins only."})
+            cid = b.get("course", "")
+            if not _STORE.course(cid):
+                return self._send(200, {"ok": False, "error": "No such course."})
+            if p == "/api/courses/staff":
+                _STORE.add_staff(cid, (b.get("username") or "").strip().lower())
+            elif p == "/api/courses/unstaff":
+                _STORE.remove_staff(cid, (b.get("username") or "").strip().lower())
+            else:
+                c = dict(_STORE.course(cid))
+                c["archived"] = 0 if int(c.get("archived", 0)) else 1
+                _STORE.put_course(c)
+            return self._send(200, {"ok": True})
+
+        # --- everything below is course-scoped ---
+        course = b.get("course", "")
+        if not self._may(course):
+            return self._send(403, {"error": "That is not your course."})
+
+        if p == "/api/activities/save":
+            return self._send(200, self._save_activity(course, b))
+        if p == "/api/activities/release":
+            return self._send(200, self._set_released(course, b, True))
+        if p == "/api/activities/unrelease":
+            return self._send(200, self._set_released(course, b, False))
+        if p == "/api/materials":
+            return self._send(200, self._add_material(course, b))
+        if p == "/api/activities/delete":
+            return self._send(200, self._delete_activity(course, b))
+        if p == "/api/submissions/claim":
+            return self._send(200, self._claim(course, b))
+        if p == "/api/materials/delete":
+            m = _STORE.material(b.get("id", ""))
+            if m and m["course"] == course:
+                if m["kind"] == "file":
+                    (MATERIALS / m["course"] / m["filename"]).unlink(missing_ok=True)
+                _STORE.material_delete(m["id"])
+            return self._send(200, {"ok": True})
+
+        self._send(404, {"error": f"No endpoint at {p} for {self.command}."})
+
+    # -- activity lifecycle ------------------------------------------------ #
+    def _save_activity(self, course: str, b: dict) -> dict:
+        lab = (b.get("lab") or "").strip().lower()
+        if not _ID_RE.match(lab):
+            return {"ok": False, "error": "Give the lab an id like 'lab1'."}
+        aid = _act.activity_id(course, lab)
+        prev = _STORE.activity(aid) or {}
+        # A browser that doesn't do `datetime-local` sends the raw typed text, and `float()` then
+        # raises — which used to take the connection down with it and cost the teacher a lab with
+        # no explanation. A field the server cannot read is a thing to say out loud, not to crash on.
+        try:
+            vend = _number(b.get("vend_until"), prev.get("vend_until"), 0, float)
+        except ValueError:
+            return {"ok": False, "error": "That deadline could not be read. Pick a date and time."}
+        try:
+            mins = _number(b.get("session_minutes"), prev.get("session_minutes"), 60, int)
+        except ValueError:
+            return {"ok": False, "error": "Minutes per attempt must be a number."}
+        if mins <= 0:
+            return {"ok": False, "error": "Minutes per attempt must be more than zero."}
+        _STORE.activity_put({
+            "id": aid, "course": course, "lab": lab,
+            "title": b.get("title") or prev.get("title") or lab,
+            "brief": b.get("brief", prev.get("brief", "")),
+            "status": prev.get("status", "draft"),
+            "vend_until": vend, "session_minutes": mins,
+            "created": prev.get("created") or time.time(),
+            "released": prev.get("released", 0)})
+        return {"ok": True, "activity": aid, "status": prev.get("status", "draft")}
+
+    def _set_released(self, course: str, b: dict, on: bool) -> dict:
+        aid = _act.activity_id(course, (b.get("lab") or "").strip().lower())
+        row = _STORE.activity(aid)
+        if not row:
+            return {"ok": False, "error": "No such activity."}
+        row = dict(row)
+        if on and not float(row.get("vend_until") or 0):
+            # Without it nothing ever closes the activity, and the vending deadline IS the
+            # late-submission control.
+            return {"ok": False, "error": "Set when codes stop being issued first."}
+        row["status"] = "released" if on else "draft"
+        row["released"] = time.time() if on else row.get("released", 0)
+        _STORE.activity_put(row)
+        return {"ok": True, "status": row["status"]}
+
+    def _delete_activity(self, course: str, b: dict) -> dict:
+        """Remove a lab. Two gates, for two different mistakes.
+
+        **Typed confirmation** catches the slip: the lab id has to be typed again, so a delete is
+        something a teacher decided rather than something their mouse did.
+
+        **Submissions are a hard refusal, not a scarier warning.** Work handed in is the one thing
+        in here that cannot be recreated — a student cannot re-run a lab whose deadline has passed,
+        and the proof chain is the record they are marked on. No confirmation dialog is worth that,
+        so a lab with submissions can only be CLOSED. If it truly has to go, that is a decision to
+        make deliberately with the database in front of you, not at 2am in a web form.
+        """
+        lab = (b.get("lab") or "").strip().lower()
+        aid = _act.activity_id(course, lab)
+        row = _STORE.activity(aid)
+        if not row:
+            return {"ok": False, "error": "No such activity."}
+        if (b.get("confirm") or "").strip().lower() != lab:
+            return {"ok": False, "error": f"Type the lab id ({lab}) to confirm."}
+
+        subs = len(_STORE.activity_submissions(aid))
+        if subs:
+            return {"ok": False, "error": f"{lab} has {subs} submission"
+                                          f"{'' if subs == 1 else 's'} and cannot be deleted — "
+                                          f"that is student work you could not get back. Close it "
+                                          f"instead to stop new codes."}
+        codes = _STORE.codes_delete_for(aid)
+        _STORE.activity_delete(aid)
+        return {"ok": True, "lab": lab, "codes": codes}
+
+    # -- claiming ---------------------------------------------------------- #
+    def _claim(self, course: str, b: dict) -> dict:
+        """Record whose work a receipt is. A STAFF action: the student hands over the receipt, the
+        instructor types it in with the student id.
+
+        A second claim under a different id is refused rather than overwritten — the first claim
+        stands until a person decides otherwise — but the refusal NAMES the existing claimant,
+        because the whole reason to record an id was so a contested receipt can be taken up with
+        both students instead of one of them silently losing their evening.
+        """
+        receipt = str(b.get("receipt") or "").strip().upper()
+        student = " ".join(str(b.get("student_id") or "").split())[:64]
+        if not receipt or not student:
+            return {"ok": False, "error": "Enter both a receipt and a student ID."}
+        row = _STORE.submission_by_receipt(receipt)
+        if not row:
+            return {"ok": False, "reason": _act.NO_SUCH_RECEIPT,
+                    "error": _act.message(_act.NO_SUCH_RECEIPT)}
+        act = _STORE.activity(row.get("activity", "")) or {}
+        if act.get("course") != course:
+            return {"ok": False, "error": "That receipt is not from this course."}
+        held = (row.get("student_id") or "").strip()
+        if held == student:
+            return {"ok": True, "receipt": receipt, "student_id": student}   # retyping a done row
+
+        # Go through the store even when the answer is knowable here, because the store is what
+        # RECORDS the attempt. Returning early would refuse the second student and forget them,
+        # throwing away the one fact that makes the refusal actionable.
+        ok, outcome = _STORE.claim(receipt, student, time.time())
+        if ok:
+            return {"ok": True, "receipt": receipt, "student_id": student}
+        if outcome == _act.ALREADY_CLAIMED:
+            return {"ok": False, "reason": outcome, "held_by": held,
+                    "error": f"That receipt is already recorded as {held}'s work. "
+                             f"Both claims are kept, so you can take it up with them."}
+        return {"ok": False, "reason": outcome, "error": _act.message(outcome)}
+
+    # -- materials --------------------------------------------------------- #
+    def _add_material(self, course: str, b: dict) -> dict:
+        kind = "link" if b.get("url") else "file"
+        mid = secrets.token_urlsafe(9)
+        rec = {"id": mid, "course": course, "kind": kind, "title": b.get("title", ""),
+               "uploaded": time.time()}
+        if kind == "link":
+            rec["url"] = b.get("url", "")
+        else:
+            import base64
+            name = Path(b.get("filename", "file")).name          # never trust a client path
+            try:
+                blob = base64.b64decode(b.get("data", ""), validate=True)
+            except Exception:                                    # noqa: BLE001
+                return {"ok": False, "error": "That file could not be read."}
+            if len(blob) > _MAX_UPLOAD:
+                return {"ok": False, "error": f"Files are limited to "
+                                              f"{_MAX_UPLOAD // (1024 * 1024)} MB."}
+            d = MATERIALS / course
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{mid}-{name}").write_bytes(blob)
+            rec.update(filename=f"{mid}-{name}", size=len(blob), title=rec["title"] or name)
+        _STORE.material_put(rec)
+        return {"ok": True, "id": mid}
+
+    # -- dispatch ---------------------------------------------------------- #
+    def _dispatch(self) -> None:
+        """One entry point, and it always answers.
+
+        An exception escaping a handler makes `BaseHTTPRequestHandler` drop the connection, so the
+        browser sees a network failure with no status and no body — the console can only say
+        "something went wrong", which is useless to the teacher AND useless to whoever has to fix
+        it. Answering with the exception text costs nothing here: every caller is authenticated
+        staff or a code holder, and the traceback still goes to the server's own console.
+        """
+        try:
+            if self._open_routes() or self._console_routes():
+                return
+            self._send(404, {"error": f"No endpoint at {self.path.split('?')[0]}."})
+        except Exception as e:                                            # noqa: BLE001
+            traceback.print_exc()
+            try:
+                self._send(500, {"ok": False,
+                                 "error": f"The server hit an error handling that request: "
+                                          f"{type(e).__name__}: {e}"})
+            except Exception:                                             # noqa: BLE001
+                pass          # the socket is already gone; the traceback above is the record
+
+    def do_GET(self):        # noqa: N802
+        self._dispatch()
+
+    def do_POST(self):       # noqa: N802
+        self._dispatch()
+
+
+def serve(host: str = "0.0.0.0", port: int = PORT) -> None:
+    MATERIALS.mkdir(parents=True, exist_ok=True)
+    token = _ACCTS.ensure_admin()
+    who = os.environ.get("ADMIN_ID", "admin")
+    print(f"GINI Teaching Center  ·  http://127.0.0.1:{port}/")
+    print(f"  data     {ROOT}")
+    if token:
+        print(f"\n  FIRST RUN — claim the admin account:")
+        print(f"    username     {who}")
+        print(f"    claim token  {token}")
+        print(f"  (or set ADMIN_PASSWORD and restart)\n")
+    else:
+        print(f"  admin    {who}\n")
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":
-    setup = _ACCTS.ensure_teacher()
-    print(f"GINI Teaching Center (reference) on :{PORT}, serving {ROOT}")
-    if setup:
-        tid = os.environ.get("TEACHER_ID", "teacher")
-        print("\n  ⚠  No teacher account yet. Claim it ONCE, from the console sign-in:")
-        print(f"       teacher id : {tid}")
-        print(f"       setup token: {setup}")
-        print("     (or set TEACHER_ID / TEACHER_PASSWORD in the environment)\n")
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    serve()

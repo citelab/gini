@@ -21,7 +21,9 @@ still gets its full session.
 *file* was handed in twice. An artifact collision means the same *topology* was built under two
 codes — the collusion case a receipt cannot see, because the chain binds the ticket and the
 timestamps, so identical work under different codes produces different receipts (pinned by
-`frontend-ng/tests/test_receipt_distinctness.py`).
+`frontend-ng/tests/test_receipt_distinctness.py`). In v1 this pair IS the point: there is no
+observation plan, so the report describes what happened and these two checks are what stop the same
+work being handed in twice.
 """
 from __future__ import annotations
 
@@ -39,7 +41,8 @@ VENDING_CLOSED = "vending_closed"
 UNKNOWN_CODE = "unknown_code"
 EXPIRED = "expired"
 ALREADY_USED = "already_used"
-PLAN_MOVED = "plan_moved"
+ALREADY_CLAIMED = "already_claimed"
+NO_SUCH_RECEIPT = "no_such_receipt"
 
 _MESSAGES = {
     NO_ACTIVITY: "There is no activity here. Check the link your instructor gave you.",
@@ -48,7 +51,12 @@ _MESSAGES = {
     UNKNOWN_CODE: "That code was not issued by this course.",
     EXPIRED: "That code has expired. Take a new one if the activity is still open.",
     ALREADY_USED: "Work has already been submitted under that code. Take a new one.",
-    PLAN_MOVED: "This activity changed after that code was issued. Take a new one.",
+    # Says only THAT it is claimed, never by whom: naming the first student to the second would
+    # hand out one student's id on nothing more than a guessed receipt. The teacher sees both.
+    ALREADY_CLAIMED: "That receipt has already been claimed. If you believe it is yours, speak to "
+                     "your instructor — they can see every claim on it.",
+    NO_SUCH_RECEIPT: "No work has been submitted under that receipt. Check it, and make sure "
+                     "gBuilder finished submitting.",
 }
 
 
@@ -99,7 +107,6 @@ def mint_code(activity: dict, now: float | None = None) -> dict:
     """
     return {"code": _ticket.mint().code,
             "activity": activity["id"],
-            "plan_hash": activity.get("plan_hash", ""),
             "issued": now if now is not None else time.time(),
             "valid_until": valid_until_for(activity),
             "used": 0}
@@ -126,11 +133,6 @@ def check_code(code_row: dict | None, activity: dict | None,
     valid_until = float(code_row.get("valid_until") or 0)
     if valid_until and t >= valid_until:
         return False, EXPIRED
-    # A code names the instrument it was minted against. If the teacher re-released a changed plan,
-    # this code belongs to a plan that no longer exists — and a student must never be measured by an
-    # instrument other than the one their code named.
-    if code_row.get("plan_hash") and code_row["plan_hash"] != activity.get("plan_hash"):
-        return False, PLAN_MOVED
     return True, ""
 
 
@@ -152,12 +154,10 @@ class Rejected(Exception):
 
 
 BAD_PROOF = "bad_proof"
-WRONG_PLAN = "wrong_plan"
 DUPLICATE = "duplicate"
 
 _MESSAGES.update({
     BAD_PROOF: "That proof does not verify. It may have been edited after it was produced.",
-    WRONG_PLAN: "That proof was recorded against a different version of this activity.",
     DUPLICATE: "A submission already exists for that code or that proof.",
 })
 
@@ -173,19 +173,6 @@ def session_seconds(proof: dict) -> tuple[float, float]:
     if not entries:
         return 0.0, 0.0
     return float(entries[0].get("t") or 0), float(entries[-1].get("t") or 0)
-
-
-def genesis_plan_hash(proof: dict) -> str:
-    """The plan a chain was recorded against.
-
-    Read from the genesis entry directly: `proof.verify_proof` cross-checks the ticket and the
-    assignment but not this, so relying on verification alone would let a proof recorded against an
-    older plan pass silently.
-    """
-    entries = proof.get("entries") or []
-    if not entries:
-        return ""
-    return str((entries[0].get("data") or {}).get("plan_hash") or "")
 
 
 def artifact_hash(proof: dict) -> str:
@@ -221,15 +208,10 @@ def prepare(payload: dict, code_row: dict, activity: dict,
     if not verdict.ok:
         raise Rejected(BAD_PROOF, verdict.reason or "the chain does not verify")
 
-    recorded_plan = genesis_plan_hash(proof)
-    if recorded_plan and recorded_plan != activity.get("plan_hash"):
-        raise Rejected(WRONG_PLAN)
-
     started, finished = session_seconds(proof)
     return {"code": code_row["code"],
             "receipt": _proof.receipt_code(proof),
             "activity": activity["id"],
-            "plan_hash": activity.get("plan_hash", ""),
             "artifact_hash": artifact_hash(proof),
             "ts": now if now is not None else time.time(),
             "started": started, "finished": finished,
@@ -247,3 +229,59 @@ def within_session(row: dict, activity: dict) -> bool:
     if not limit or not row.get("started") or not row.get("finished"):
         return True
     return (float(row["finished"]) - float(row["started"])) <= limit
+
+
+# --------------------------------------------------------------------------- #
+# the report
+# --------------------------------------------------------------------------- #
+def narrate(proof: dict) -> str:
+    """The submission as prose: what was built, in what order, what was run.
+
+    THIS IS THE REPORT in v1. There is no observation plan, so nothing is scored against
+    expectations — the account is simply what the chain says happened, which is true by
+    construction. `domain/narration.py` is model-free, so the same submission always reads the same
+    way and a teacher can be shown it without a model in the loop.
+    """
+    try:
+        from gini.domain import narration as _n
+        from gini.domain import proof as _p
+        entries = [_p.Entry(seq=e.get("seq", i), t=e.get("t", 0.0), kind=e.get("kind", ""),
+                            data=e.get("data") or {}, prev=e.get("prev", ""))
+                   for i, e in enumerate(proof.get("entries") or [])]
+        return _n.narrate(entries)
+    except Exception as e:                      # noqa: BLE001 — a report must still render
+        return f"(could not narrate this chain: {e})"
+
+
+def report(row: dict, activity: dict, twins: list, attempts: list | None = None) -> dict:
+    """Everything a teacher sees for one receipt.
+
+    Integrity, the account of what happened, whether it fit the session window, the duplicate flags,
+    and who claimed it. Deliberately no score: v1 describes, the teacher judges.
+    """
+    payload = row.get("data")
+    payload = json.loads(payload) if isinstance(payload, str) and payload else (payload or {})
+    proof = payload.get("proof") or {}
+    return {
+        "receipt": row.get("receipt", ""),
+        "activity": row.get("activity", ""),
+        "title": (activity or {}).get("title", ""),
+        "verdict": row.get("verdict", ""),
+        "started": row.get("started", 0), "finished": row.get("finished", 0),
+        "minutes": round(((row.get("finished") or 0) - (row.get("started") or 0)) / 60.0, 1),
+        "within_session": within_session(row, activity or {}),
+        "narration": narrate(proof),
+        "entries": len(proof.get("entries") or []),
+        "artifact": payload.get("artifact"),
+        # Same topology under another code. FLAGGED, never rejected: a shared starter topology is a
+        # legitimate reason for two submissions to match, and only the teacher can tell.
+        "twins": twins,
+        # Who claimed this work, and who ELSE tried. A refused claim is shown only here, to staff:
+        # it is the reason the refusal is not a dead end, because the teacher can now take it up
+        # with both students instead of one of them silently losing their evening.
+        "student_id": row.get("student_id", ""),
+        "claimed_at": row.get("claimed_at", 0),
+        "contested_by": [a["student_id"] for a in (attempts or [])
+                         if a.get("outcome") == "already_claimed"],
+        "attempts": attempts or [],
+    }

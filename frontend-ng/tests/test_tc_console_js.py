@@ -23,7 +23,7 @@ import pytest
 _TC = Path(__file__).resolve().parents[2] / "teaching-center"
 pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
 
-PAGES = ("teacher.html", "getcode.html")
+PAGES = ("console.html", "getcode.html")
 
 
 def scripts(name: str) -> str:
@@ -64,7 +64,7 @@ def test_the_guard_would_have_caught_the_bug_that_shipped(tmp_path):
     """A test whose failure mode is 'silently stops testing' is worse than none, so prove the
     check still detects the original defect."""
     f = tmp_path / "bad.js"
-    f.write_text(scripts("teacher.html") + "\nconst esc = 1;\n", encoding="utf-8")
+    f.write_text(scripts("console.html") + "\nconst esc = 1;\n", encoding="utf-8")
     r = subprocess.run([shutil.which("node"), "--check", str(f)],
                        capture_output=True, text=True, timeout=30)
     assert r.returncode != 0

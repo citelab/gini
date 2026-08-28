@@ -1,145 +1,185 @@
 """The Teaching Center's system of record — SQLite, behind one small data-access layer.
 
-Why this exists: the old flat-file store (roster.json, messages.jsonl, …) corrupts under concurrent
-writes. The server is threaded, so two students submitting at the same instant — or a heartbeat
-landing mid-write — can interleave and truncate a file. For "cannot be lost" class data that is the
-real risk, and SQLite closes it: atomic transactions, durable WAL writes, no torn files. It ships
-with Python, so there is nothing to deploy.
+Why this exists: a flat-file store corrupts under concurrent writes. The server is threaded, so two
+submissions landing at the same instant can interleave and truncate a file. For class data that
+"cannot be lost" that is the real risk, and SQLite closes it: atomic transactions, durable WAL
+writes, no torn files. It ships with Python, so there is nothing to deploy.
 
-Everything goes through `Store`. It's the seam: the method surface here is deliberately storage-shaped
-(get/put/list), not SQL-shaped, so a move to Postgres later is a swap of this one file, not a rewrite
-of accounts/social/teacher.
+Everything goes through `Store`. The method surface is deliberately storage-shaped (get/put/list),
+not SQL-shaped, so moving to Postgres later is a swap of this one file.
 
-Concurrency: one connection, WAL mode, guarded by a re-entrant lock. Classroom scale doesn't need a
-pool, and a single guarded connection is the simplest thing that is provably correct under threads.
+Concurrency: one connection, WAL mode, guarded by a re-entrant lock. Classroom scale does not need
+a pool, and a single guarded connection is the simplest thing that is provably correct.
+
+**v1 scope.** Staff, courses, activities (labs), and course materials. No lessons, no roster, no
+messages, no AI — see TEACHING_CENTER_V1_SPEC.md. The previous, larger schema is in git history if
+v2 needs it back.
 """
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS enrolment (
-  username   TEXT PRIMARY KEY,
-  name       TEXT DEFAULT '',
-  sis_id     TEXT DEFAULT '',
-  token      TEXT DEFAULT '',
-  grp        TEXT DEFAULT '',
-  ai_hosted  INTEGER DEFAULT 0
-);
+-- Staff only. `admin` is the portal owner (the initial password); `teacher` runs courses.
+-- There is deliberately NO student account table: a student never signs in. A vended activity code
+-- is the entire interaction, which is what keeps the portal from ever learning who did the work.
 CREATE TABLE IF NOT EXISTS account (
   username   TEXT PRIMARY KEY,
-  role       TEXT DEFAULT 'student',
+  role       TEXT DEFAULT 'teacher',        -- admin | teacher
   salt       TEXT, hash TEXT, n INTEGER, r INTEGER, p INTEGER,
-  claimed_at INTEGER,
-  photo      TEXT DEFAULT ''
+  claimed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS session (
   token   TEXT PRIMARY KEY,
   who     TEXT, role TEXT, expires INTEGER
 );
-CREATE TABLE IF NOT EXISTS profile (
-  student TEXT PRIMARY KEY,
-  data    TEXT
+
+CREATE TABLE IF NOT EXISTS course (
+  id       TEXT PRIMARY KEY,                -- "comp535"
+  title    TEXT DEFAULT '',
+  created  REAL DEFAULT 0,
+  archived INTEGER DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS submission (
-  id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  student   TEXT, lesson_id TEXT, ts REAL, data TEXT
-);
-CREATE TABLE IF NOT EXISTS message (
-  id         TEXT PRIMARY KEY,
-  ts         REAL,
-  channel    TEXT, chan_kind TEXT,
-  sender     TEXT, author TEXT, recipient TEXT,
-  kind       TEXT, persona_version TEXT,
-  body       TEXT,
-  deleted    INTEGER DEFAULT 0,
-  read_by    TEXT DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS ix_message_channel ON message(channel, ts);
-CREATE TABLE IF NOT EXISTS presence (
-  who      TEXT PRIMARY KEY,
-  ts       REAL, progress TEXT
-);
-CREATE TABLE IF NOT EXISTS report (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts       REAL, by_who TEXT, note TEXT, message TEXT
-);
-CREATE TABLE IF NOT EXISTS review (
-  message_id      TEXT PRIMARY KEY,
-  ts              REAL, student TEXT, question TEXT, answer TEXT,
-  kind            TEXT, persona_version TEXT,
-  escalate        INTEGER, reviewed INTEGER DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS kv (
-  k TEXT PRIMARY KEY, v TEXT
+-- Which teachers run which course. An admin sees everything; a teacher sees only their own, so a
+-- shared portal does not become a shared filing cabinet.
+CREATE TABLE IF NOT EXISTS course_staff (
+  course   TEXT NOT NULL,
+  username TEXT NOT NULL,
+  PRIMARY KEY (course, username)
 );
 
--- Activities: free-form assessed work observed against a frozen Activity Observation Plan.
---
--- NOTE THE ABSENCE OF A `student` COLUMN in all three tables. That absence IS the privacy
--- property: an activity submission is keyed by the code that scoped it, and who did the work is
--- never recorded here. The teacher maps a receipt to a name in their own gradebook, where the
--- mapping is actually needed. A later migration adding an identifying column would silently
--- revoke a guarantee students were given.
+-- A lab. No plan and no plan_hash in v1: gBuilder records what the student DID and the report
+-- narrates it, rather than scoring it against expectations.
 CREATE TABLE IF NOT EXISTS activity (
-  id              TEXT PRIMARY KEY,          -- "<course>/<lab>"
+  id              TEXT PRIMARY KEY,         -- "<course>/<lab>"
   course          TEXT NOT NULL,
   lab             TEXT NOT NULL,
   title           TEXT DEFAULT '',
-  intent          TEXT DEFAULT '',           -- the teacher's own words
-  selection       TEXT DEFAULT '',           -- the model's choice, for audit + regeneration
-  plan            TEXT DEFAULT '',           -- the frozen AOP, canonical JSON
-  plan_hash       TEXT DEFAULT '',
-  status          TEXT DEFAULT 'draft',      -- draft | released
+  brief           TEXT DEFAULT '',          -- what the student is told, plain prose
+  status          TEXT DEFAULT 'draft',     -- draft | released
   vend_until      REAL DEFAULT 0,
   session_minutes INTEGER DEFAULT 60,
   created         REAL DEFAULT 0,
   released        REAL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS ix_activity_course ON activity(course, lab);
 
 CREATE TABLE IF NOT EXISTS activity_code (
   code        TEXT PRIMARY KEY,
   activity    TEXT NOT NULL,
-  plan_hash   TEXT NOT NULL,   -- the instrument this code was minted against
   issued      REAL DEFAULT 0,
-  valid_until REAL DEFAULT 0,  -- absolute; vend_until + session_minutes, so hoarding gains nothing
+  valid_until REAL DEFAULT 0,   -- absolute: vend_until + session, so hoarding gains nothing
   used        INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS ix_activity_code_act ON activity_code(activity);
 
 CREATE TABLE IF NOT EXISTS activity_submission (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   code          TEXT NOT NULL UNIQUE,   -- one code, one submission
   receipt       TEXT NOT NULL UNIQUE,   -- the same proof cannot be handed in twice
   activity      TEXT NOT NULL,
-  plan_hash     TEXT NOT NULL,
   artifact_hash TEXT DEFAULT '',        -- indexed; collisions FLAG for review, never reject
   ts            REAL DEFAULT 0,
   started       REAL DEFAULT 0,         -- from the chain, for the session-window check
   finished      REAL DEFAULT 0,
   verdict       TEXT DEFAULT '',        -- integrity of the proof, NOT quality of the work
-  data          TEXT DEFAULT ''         -- proof + artifact + report
+  data          TEXT DEFAULT '',        -- proof + artifact + narration
+  student_id    TEXT DEFAULT '',        -- who CLAIMED it; empty until they do
+  claimed_at    REAL DEFAULT 0
 );
+
+-- Course materials: notes, handouts, links. Files live on disk under COURSE_ROOT/materials/;
+-- only the metadata is here, so the database stays small and a file can be served directly.
+CREATE TABLE IF NOT EXISTS material (
+  id       TEXT PRIMARY KEY,
+  course   TEXT NOT NULL,
+  kind     TEXT DEFAULT 'file',           -- file | link
+  title    TEXT DEFAULT '',
+  filename TEXT DEFAULT '',               -- kind=file
+  url      TEXT DEFAULT '',               -- kind=link
+  size     INTEGER DEFAULT 0,
+  uploaded REAL DEFAULT 0
+);
+
+-- Every attempt to claim a receipt, including the refused ones. Refused attempts are the WHOLE
+-- point: a second claim is turned away, but the teacher must still learn who made it, or "escalate
+-- to the students" is impossible and the refusal is just a dead end for one of them.
+CREATE TABLE IF NOT EXISTS claim_attempt (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  receipt    TEXT NOT NULL,
+  student_id TEXT NOT NULL,
+  ts         REAL DEFAULT 0,
+  outcome    TEXT DEFAULT ''          -- claimed | already_claimed | no_such_receipt
+);
+
+CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+"""
+
+_INDEXES = """
+-- Created AFTER the column migration: an index over a column a v0 table does not have
+-- yet fails outright, and it fails during startup, before anything can report why.
+CREATE INDEX IF NOT EXISTS ix_activity_course ON activity(course, lab);
+CREATE INDEX IF NOT EXISTS ix_activity_code_act ON activity_code(activity);
 CREATE INDEX IF NOT EXISTS ix_activity_sub_act ON activity_submission(activity);
 CREATE INDEX IF NOT EXISTS ix_activity_sub_artifact ON activity_submission(artifact_hash);
+CREATE INDEX IF NOT EXISTS ix_material_course ON material(course, uploaded);
+CREATE INDEX IF NOT EXISTS ix_claim_receipt ON claim_attempt(receipt, ts);
 """
 
 
+def _canonical_ddl(table: str) -> str:
+    """The column block of `table` as `_SCHEMA` declares it.
+
+    Read from the schema rather than restated in Python, so a rebuild cannot drift from the real
+    definition — a migration that quietly builds a slightly different table is worse than one that
+    fails.
+    """
+    m = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);", _SCHEMA, re.S)
+    if not m:
+        raise KeyError(f"no canonical schema for {table}")
+    lines = []
+    for line in m.group(1).splitlines():
+        line = re.sub(r"\s*--.*$", "", line).rstrip()      # comments confuse nothing, but shorten
+        if line.strip():
+            lines.append(line.rstrip(","))
+    return ",\n".join(lines)
+
+
+def _canonical_columns() -> dict[str, list[str]]:
+    """Table -> the column names v1 owns, in declaration order."""
+    out: dict[str, list[str]] = {}
+    for table, block in re.findall(
+            r"CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\);", _SCHEMA, re.S):
+        cols = []
+        for line in block.splitlines():
+            line = re.sub(r"\s*--.*$", "", line).strip()
+            if not line or line.upper().startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN KEY")):
+                continue
+            for part in _split_columns(line):
+                name = part.strip().split()[0]
+                if name.upper() not in ("PRIMARY", "UNIQUE", "FOREIGN", "CHECK"):
+                    cols.append(name)
+        out[table] = cols
+    return out
+
+
+def _split_columns(line: str) -> list[str]:
+    """One schema line may declare several columns (`salt TEXT, hash TEXT, n INTEGER,`)."""
+    return [p for p in line.rstrip(",").split(",") if p.strip()]
+
+
 class Store:
-    _instances: dict[str, "Store"] = {}
-    _instances_lock = threading.Lock()
+    """One store per COURSE_ROOT, keyed so repeated construction returns the same connection."""
+
+    _instances: dict = {}
+    _guard = threading.Lock()
 
     def __new__(cls, root):
-        """One Store per course root (one SQLite connection per DB file). Multiple Course/Social/
-        Accounts objects over the same root must share the connection, or WAL gives them stale reads
-        of each other's writes."""
         key = str(Path(root).resolve())
-        with cls._instances_lock:
+        with cls._guard:
             inst = cls._instances.get(key)
             if inst is None:
                 inst = super().__new__(cls)
@@ -149,15 +189,116 @@ class Store:
 
     def _init(self, key: str) -> None:
         self.lock = threading.RLock()
-        data = Path(key) / "data"
+        self.root = Path(key)
+        data = self.root / "data"
         data.mkdir(parents=True, exist_ok=True)
         self.path = data / "gini.db"
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")     # concurrent readers + durable writes
         self.db.execute("PRAGMA synchronous=NORMAL")
-        self.db.executescript(_SCHEMA)
+        self.db.executescript(_SCHEMA)     # tables first...
+        self._migrate()                    # ...then reconcile an older database's columns...
+        self.db.executescript(_INDEXES)    # ...and only then index them
         self.db.commit()
+
+    def _migrate(self) -> None:
+        """Bring a database created by an older version up to the current schema.
+
+        `CREATE TABLE IF NOT EXISTS` does exactly nothing to a table that already exists, so a v0
+        database keeps its v0 columns and the first write to a new one dies with
+        `table activity has no column named brief`. Every real installation has an existing
+        database — a fresh temp directory is the ONE case where this cannot go wrong, which is
+        precisely why it went unnoticed.
+
+        Additive only: columns are added, never dropped or retyped, so a downgrade still reads and
+        nothing a teacher already has is thrown away. Retired v0 tables are left in place for the
+        same reason; they cost a few KB and they are somebody's archive.
+        """
+        want = {                       # column -> DDL type, per table the schema owns
+            "account": {"role": "TEXT DEFAULT 'teacher'", "salt": "TEXT", "hash": "TEXT",
+                        "n": "INTEGER", "r": "INTEGER", "p": "INTEGER", "claimed_at": "INTEGER"},
+            "session": {"who": "TEXT", "role": "TEXT", "expires": "INTEGER"},
+            "course": {"title": "TEXT DEFAULT ''", "created": "REAL DEFAULT 0",
+                       "archived": "INTEGER DEFAULT 0"},
+            "activity": {"course": "TEXT DEFAULT ''", "lab": "TEXT DEFAULT ''",
+                         "title": "TEXT DEFAULT ''", "brief": "TEXT DEFAULT ''",
+                         "status": "TEXT DEFAULT 'draft'", "vend_until": "REAL DEFAULT 0",
+                         "session_minutes": "INTEGER DEFAULT 60", "created": "REAL DEFAULT 0",
+                         "released": "REAL DEFAULT 0"},
+            "activity_code": {"activity": "TEXT DEFAULT ''", "issued": "REAL DEFAULT 0",
+                              "valid_until": "REAL DEFAULT 0", "used": "INTEGER DEFAULT 0"},
+            "activity_submission": {"code": "TEXT DEFAULT ''", "receipt": "TEXT DEFAULT ''",
+                                    "activity": "TEXT DEFAULT ''",
+                                    "artifact_hash": "TEXT DEFAULT ''", "ts": "REAL DEFAULT 0",
+                                    "started": "REAL DEFAULT 0", "finished": "REAL DEFAULT 0",
+                                    "verdict": "TEXT DEFAULT ''", "data": "TEXT DEFAULT ''",
+                                    "student_id": "TEXT DEFAULT ''",
+                                    "claimed_at": "REAL DEFAULT 0"},
+            "material": {"course": "TEXT DEFAULT ''", "kind": "TEXT DEFAULT 'file'",
+                         "title": "TEXT DEFAULT ''", "filename": "TEXT DEFAULT ''",
+                         "url": "TEXT DEFAULT ''", "size": "INTEGER DEFAULT 0",
+                         "uploaded": "REAL DEFAULT 0"},
+        }
+        for table, cols in want.items():
+            have = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if not have:
+                continue                                   # the schema above just created it
+            for name, ddl in cols.items():
+                if name not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+        self._relax_retired_columns()
+
+        # v0 stored the course on the activity id only ("comp535/lab1"). Backfill the columns the
+        # v1 queries filter on, or a teacher's existing labs are invisible in their own course.
+        for row in self.db.execute(
+                "SELECT id FROM activity WHERE course IS NULL OR course=''").fetchall():
+            aid = row["id"]
+            if "/" in aid:
+                course, _, lab = aid.partition("/")
+                self.db.execute("UPDATE activity SET course=?, lab=? WHERE id=?",
+                                (course, lab, aid))
+
+        # A course row must exist for a course to be listed or staffed at all.
+        for row in self.db.execute("SELECT DISTINCT course FROM activity WHERE course<>''"):
+            self.db.execute("INSERT OR IGNORE INTO course(id, title, created) VALUES(?, ?, ?)",
+                            (row["course"], row["course"], time.time()))
+
+    def _relax_retired_columns(self) -> None:
+        """Rebuild any table whose OLD schema demands a column v1 no longer writes.
+
+        Adding columns cannot fix this one. v0 declared `activity_code.plan_hash NOT NULL`, and v1
+        has no plan to name — so vending a code fails on a constraint, and
+        `activity_submission.plan_hash` would fail the same way on every student submission, at
+        deadline time, with a class waiting.
+
+        Nothing is lost: the table is rebuilt to the v1 shape, retired columns are carried over as
+        NULLABLE rather than dropped, and every row is copied. So this relaxes a constraint, it
+        does not discard the AOP data that v2 may still want.
+        """
+        for table, canonical in _canonical_columns().items():
+            info = list(self.db.execute(f"PRAGMA table_info({table})"))
+            if not info:
+                continue
+            blocking = [r["name"] for r in info
+                        if r["notnull"] and r["dflt_value"] is None and not r["pk"]
+                        and r["name"] not in canonical]
+            if not blocking:
+                continue
+            legacy = [(r["name"], r["type"] or "TEXT") for r in info
+                      if r["name"] not in canonical]
+            keep = [c for c in canonical if c in {r["name"] for r in info}]
+            cols = keep + [n for n, _ in legacy]
+            ddl = _canonical_ddl(table)
+            extra = "".join(f",\n  {n} {t}" for n, t in legacy)   # carried over, now nullable
+            tmp = f"{table}__migrating"
+            self.db.execute(f"DROP TABLE IF EXISTS {tmp}")
+            self.db.execute(f"CREATE TABLE {tmp} (\n{ddl}{extra}\n)")
+            names = ",".join(cols)
+            self.db.execute(f"INSERT INTO {tmp}({names}) SELECT {names} FROM {table}")
+            self.db.execute(f"DROP TABLE {table}")                # takes its indexes with it...
+            self.db.execute(f"ALTER TABLE {tmp} RENAME TO {table}")   # ..._INDEXES rebuilds them
 
     # -- low-level -------------------------------------------------------- #
     def _all(self, sql: str, args=()) -> list[dict]:
@@ -173,203 +314,76 @@ class Store:
             self.db.execute(sql, args)
             self.db.commit()
 
-    # -- enrolment (the roster) ------------------------------------------- #
-    def roster(self) -> list[dict]:
-        rows = self._all("SELECT * FROM enrolment ORDER BY username")
-        for r in rows:
-            r["id"] = r.pop("username")
-            r["group"] = r.pop("grp")
-            r["ai_hosted"] = bool(r["ai_hosted"])
-        return rows
-
-    def enrolment(self, username: str) -> dict | None:
-        r = self._one("SELECT * FROM enrolment WHERE username=?", (username,))
-        if r is None:
-            return None
-        r["id"] = r.pop("username")
-        r["group"] = r.pop("grp")
-        r["ai_hosted"] = bool(r["ai_hosted"])
-        return r
-
-    def upsert_enrolment(self, username, *, name, sis_id, token, group, ai_hosted) -> None:
-        self._run(
-            "INSERT INTO enrolment(username,name,sis_id,token,grp,ai_hosted) VALUES(?,?,?,?,?,?) "
-            "ON CONFLICT(username) DO UPDATE SET name=excluded.name, sis_id=excluded.sis_id, "
-            "token=excluded.token, grp=excluded.grp, ai_hosted=excluded.ai_hosted",
-            (username, name, sis_id, token, group, 1 if ai_hosted else 0))
-
-    def delete_enrolment(self, username: str) -> None:
-        self._run("DELETE FROM enrolment WHERE username=?", (username,))
-
-    def set_field(self, username: str, field: str, value) -> None:
-        col = {"group": "grp", "ai_hosted": "ai_hosted", "name": "name", "sis_id": "sis_id"}[field]
-        if col == "ai_hosted":
-            value = 1 if value else 0
-        self._run(f"UPDATE enrolment SET {col}=? WHERE username=?", (value, username))
-
     # -- accounts --------------------------------------------------------- #
     def account(self, username: str) -> dict | None:
         return self._one("SELECT * FROM account WHERE username=?", (username,))
 
-    def accounts(self) -> dict:
-        return {r["username"]: r for r in self._all("SELECT * FROM account")}
+    def accounts(self) -> list[dict]:
+        return self._all("SELECT username, role, claimed_at FROM account ORDER BY role, username")
 
-    def put_account(self, username, *, role, salt, hash, n, r, p, claimed_at) -> None:
-        self._run(
-            "INSERT INTO account(username,role,salt,hash,n,r,p,claimed_at) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(username) DO UPDATE SET role=excluded.role, salt=excluded.salt, "
-            "hash=excluded.hash, n=excluded.n, r=excluded.r, p=excluded.p, "
-            "claimed_at=excluded.claimed_at",
-            (username, role, salt, hash, n, r, p, claimed_at))
+    def put_account(self, username: str, **f) -> None:
+        cols = ("role", "salt", "hash", "n", "r", "p", "claimed_at")
+        self._run(f"INSERT OR REPLACE INTO account(username,{','.join(cols)}) "
+                  f"VALUES(?,{','.join('?' * len(cols))})",
+                  (username, *(f.get(c) for c in cols)))
 
     def delete_account(self, username: str) -> None:
         self._run("DELETE FROM account WHERE username=?", (username,))
-
-    def set_photo(self, username: str, photo: str) -> None:
-        self._run("UPDATE account SET photo=? WHERE username=?", (photo, username))
-
-    def photo(self, username: str) -> str:
-        r = self.account(username)
-        return (r or {}).get("photo", "") or ""
+        self._run("DELETE FROM session WHERE who=?", (username,))
+        self._run("DELETE FROM course_staff WHERE username=?", (username,))
 
     # -- sessions --------------------------------------------------------- #
-    def put_session(self, token, who, role, expires) -> None:
+    def put_session(self, token: str, who: str, role: str, expires: int) -> None:
         self._run("INSERT OR REPLACE INTO session(token,who,role,expires) VALUES(?,?,?,?)",
                   (token, who, role, expires))
 
     def session(self, token: str) -> dict | None:
         return self._one("SELECT * FROM session WHERE token=?", (token,))
 
-    def delete_session(self, token: str) -> None:
+    def drop_session(self, token: str) -> None:
         self._run("DELETE FROM session WHERE token=?", (token,))
 
-    def delete_sessions_of(self, who: str) -> None:
-        self._run("DELETE FROM session WHERE who=?", (who,))
+    # -- courses ---------------------------------------------------------- #
+    def put_course(self, rec: dict) -> None:
+        self._run("INSERT OR REPLACE INTO course(id,title,created,archived) VALUES(?,?,?,?)",
+                  (rec["id"], rec.get("title", ""), rec.get("created") or time.time(),
+                   int(rec.get("archived", 0))))
 
-    def gc_sessions(self, now: float) -> None:
-        self._run("DELETE FROM session WHERE expires < ?", (now,))
+    def course(self, cid: str) -> dict | None:
+        return self._one("SELECT * FROM course WHERE id=?", (cid,))
 
-    # -- profiles --------------------------------------------------------- #
-    def profile(self, student: str) -> dict | None:
-        r = self._one("SELECT data FROM profile WHERE student=?", (student,))
-        return json.loads(r["data"]) if r else None
+    def courses(self, username: str = "", role: str = "") -> list[dict]:
+        """An admin sees every course; a teacher sees only the ones they staff."""
+        if role == "admin" or not username:
+            return self._all("SELECT * FROM course ORDER BY archived, id")
+        return self._all(
+            "SELECT c.* FROM course c JOIN course_staff s ON s.course = c.id "
+            "WHERE s.username=? ORDER BY c.archived, c.id", (username,))
 
-    def put_profile(self, student: str, data: dict) -> None:
-        self._run("INSERT OR REPLACE INTO profile(student,data) VALUES(?,?)",
-                  (student, json.dumps(data)))
+    def add_staff(self, course: str, username: str) -> None:
+        self._run("INSERT OR REPLACE INTO course_staff(course,username) VALUES(?,?)",
+                  (course, username))
 
-    # -- submissions ------------------------------------------------------ #
-    def add_submission(self, rec: dict) -> None:
-        self._run("INSERT INTO submission(student,lesson_id,ts,data) VALUES(?,?,?,?)",
-                  (rec.get("student", ""), rec.get("lesson_id", ""), time.time(), json.dumps(rec)))
+    def remove_staff(self, course: str, username: str) -> None:
+        self._run("DELETE FROM course_staff WHERE course=? AND username=?", (course, username))
 
-    def submissions(self) -> list[dict]:
-        return [json.loads(r["data"]) for r in
-                self._all("SELECT data FROM submission ORDER BY id")]
+    def course_staff(self, course: str) -> list[str]:
+        return [r["username"] for r in
+                self._all("SELECT username FROM course_staff WHERE course=? ORDER BY username",
+                          (course,))]
 
-    # -- messages --------------------------------------------------------- #
-    def add_message(self, m: dict) -> None:
-        self._run(
-            "INSERT OR REPLACE INTO message(id,ts,channel,chan_kind,sender,author,recipient,kind,"
-            "persona_version,body,deleted,read_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (m["id"], m["ts"], m["channel"], m["chan_kind"], m.get("from", ""), m.get("author", ""),
-             m.get("to", ""), m.get("kind", "human"), m.get("persona_version", ""),
-             m.get("body", ""), int(m.get("deleted", 0)), m.get("read_by", "")))
-
-    def _msg_row(self, r: dict) -> dict:
-        return {"id": r["id"], "ts": r["ts"], "channel": r["channel"], "chan_kind": r["chan_kind"],
-                "from": r["sender"], "author": r["author"], "to": r["recipient"], "kind": r["kind"],
-                "persona_version": r["persona_version"], "body": r["body"],
-                "deleted": bool(r["deleted"]), "read_by": r["read_by"] or ""}
-
-    def messages(self, *, include_deleted: bool = False) -> list[dict]:
-        sql = "SELECT * FROM message"
-        if not include_deleted:
-            sql += " WHERE deleted=0"
-        sql += " ORDER BY ts"
-        return [self._msg_row(r) for r in self._all(sql)]
-
-    def message(self, mid: str) -> dict | None:
-        r = self._one("SELECT * FROM message WHERE id=?", (mid,))
-        return self._msg_row(r) if r else None
-
-    def set_deleted(self, mid: str, deleted: bool) -> None:
-        self._run("UPDATE message SET deleted=? WHERE id=?", (1 if deleted else 0, mid))
-
-    def purge_deleted_before(self, ts: float) -> int:
-        with self.lock:
-            cur = self.db.execute("DELETE FROM message WHERE chan_kind='dm' AND ts < ?", (ts,))
-            self.db.commit()
-            return cur.rowcount
-
-    # -- presence --------------------------------------------------------- #
-    def put_presence(self, who: str, ts: float, progress: dict | None) -> None:
-        cur = self._one("SELECT progress FROM presence WHERE who=?", (who,))
-        prog = json.dumps(progress) if progress else (cur or {}).get("progress", "")
-        self._run("INSERT OR REPLACE INTO presence(who,ts,progress) VALUES(?,?,?)",
-                  (who, ts, prog or ""))
-
-    def presence(self, who: str) -> dict:
-        r = self._one("SELECT * FROM presence WHERE who=?", (who,))
-        if not r:
-            return {"ts": 0, "progress": {}}
-        return {"ts": r["ts"], "progress": json.loads(r["progress"]) if r["progress"] else {}}
-
-    # -- reports ---------------------------------------------------------- #
-    def add_report(self, ts, by_who, note, message) -> None:
-        self._run("INSERT INTO report(ts,by_who,note,message) VALUES(?,?,?,?)",
-                  (ts, by_who, note, json.dumps(message)))
-
-    def reports(self) -> list[dict]:
-        return [{"ts": r["ts"], "by": r["by_who"], "note": r["note"],
-                 "message": json.loads(r["message"])}
-                for r in self._all("SELECT * FROM report ORDER BY id DESC")]
-
-    # -- review queue ----------------------------------------------------- #
-    def add_review(self, rec: dict) -> None:
-        self._run(
-            "INSERT OR REPLACE INTO review(message_id,ts,student,question,answer,kind,"
-            "persona_version,escalate,reviewed) VALUES(?,?,?,?,?,?,?,?,?)",
-            (rec["message_id"], rec["ts"], rec["student"], rec["question"], rec["answer"],
-             rec.get("kind", ""), rec.get("persona_version", ""), int(rec.get("escalate", 0)),
-             int(rec.get("reviewed", 0))))
-
-    def review(self, only_unreviewed: bool = True) -> list[dict]:
-        sql = "SELECT * FROM review"
-        if only_unreviewed:
-            sql += " WHERE reviewed=0"
-        sql += " ORDER BY escalate DESC, ts DESC"
-        out = []
-        for r in self._all(sql):
-            d = dict(r)
-            d["escalate"] = bool(d["escalate"])
-            d["reviewed"] = bool(d["reviewed"])
-            out.append(d)
-        return out
-
-    def mark_reviewed(self, mid: str) -> None:
-        self._run("UPDATE review SET reviewed=1 WHERE message_id=?", (mid,))
-
-    # -- kv (persona, teacher_setup) -------------------------------------- #
-    def kv_get(self, k: str) -> dict | None:
-        r = self._one("SELECT v FROM kv WHERE k=?", (k,))
-        return json.loads(r["v"]) if r else None
-
-    def kv_put(self, k: str, v: dict) -> None:
-        self._run("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (k, json.dumps(v)))
-
-    def kv_delete(self, k: str) -> None:
-        self._run("DELETE FROM kv WHERE k=?", (k,))
+    def staffs(self, course: str, username: str, role: str = "") -> bool:
+        if role == "admin":
+            return True
+        return self._one("SELECT 1 FROM course_staff WHERE course=? AND username=?",
+                         (course, username)) is not None
 
     # -- activities ------------------------------------------------------- #
-    # Storage-shaped only, like everything else here: the RULES (deadlines, hoarding, duplicate
-    # detection) live in `activities.py` so they are testable without a database.
     def activity_put(self, rec: dict) -> None:
-        cols = ("id", "course", "lab", "title", "intent", "selection", "plan", "plan_hash",
-                "status", "vend_until", "session_minutes", "created", "released")
+        cols = ("id", "course", "lab", "title", "brief", "status", "vend_until",
+                "session_minutes", "created", "released")
         self._run(f"INSERT OR REPLACE INTO activity({','.join(cols)}) "
-                  f"VALUES({','.join('?' * len(cols))})",
-                  tuple(rec.get(c, "") for c in cols))
+                  f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
 
     def activity(self, activity_id: str) -> dict | None:
         return self._one("SELECT * FROM activity WHERE id=?", (activity_id,))
@@ -383,10 +397,10 @@ class Store:
         self._run("DELETE FROM activity WHERE id=?", (activity_id,))
 
     def code_put(self, rec: dict) -> None:
-        self._run("INSERT OR REPLACE INTO activity_code"
-                  "(code,activity,plan_hash,issued,valid_until,used) VALUES(?,?,?,?,?,?)",
-                  (rec["code"], rec["activity"], rec["plan_hash"],
-                   rec.get("issued", 0.0), rec.get("valid_until", 0.0), int(rec.get("used", 0))))
+        self._run("INSERT OR REPLACE INTO activity_code(code,activity,issued,valid_until,used) "
+                  "VALUES(?,?,?,?,?)",
+                  (rec["code"], rec["activity"], rec.get("issued", 0.0),
+                   rec.get("valid_until", 0.0), int(rec.get("used", 0))))
 
     def code(self, code: str) -> dict | None:
         return self._one("SELECT * FROM activity_code WHERE code=?", (code,))
@@ -394,23 +408,31 @@ class Store:
     def code_mark_used(self, code: str) -> None:
         self._run("UPDATE activity_code SET used=1 WHERE code=?", (code,))
 
+    def codes_delete_for(self, activity_id: str) -> int:
+        """Drop the codes minted for an activity. Only meaningful when the activity itself goes:
+        an orphaned code already refuses with "no activity here", but leaving thousands of dead
+        rows behind makes the vended count of a re-created lab a lie."""
+        with self.lock:
+            n = self.db.execute("DELETE FROM activity_code WHERE activity=?",
+                                (activity_id,)).rowcount
+            self.db.commit()
+            return n
+
     def codes_for(self, activity_id: str) -> list[dict]:
         return self._all("SELECT * FROM activity_code WHERE activity=? ORDER BY issued",
                          (activity_id,))
 
     def submission_put(self, rec: dict) -> bool:
-        """Insert a submission. Returns False when the code or receipt is already present.
+        """Insert a submission. False when the code or receipt is already present.
 
-        The uniqueness is enforced by the SCHEMA, not by a prior read: two students submitting at
-        the same instant would both pass a check-then-insert, and the loser must be rejected rather
-        than silently overwriting the winner.
+        Uniqueness is the SCHEMA's, not a prior read's: two submissions racing would both pass a
+        check-then-insert, and the loser must be rejected rather than silently overwriting.
         """
-        cols = ("code", "receipt", "activity", "plan_hash", "artifact_hash",
+        cols = ("code", "receipt", "activity", "artifact_hash",
                 "ts", "started", "finished", "verdict", "data")
         try:
             self._run(f"INSERT INTO activity_submission({','.join(cols)}) "
-                      f"VALUES({','.join('?' * len(cols))})",
-                      tuple(rec.get(c, "") for c in cols))
+                      f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
             return True
         except sqlite3.IntegrityError:
             return False
@@ -422,8 +444,47 @@ class Store:
         return self._one("SELECT * FROM activity_submission WHERE code=?", (code,))
 
     def activity_submissions(self, activity_id: str) -> list[dict]:
-        return self._all("SELECT * FROM activity_submission WHERE activity=? ORDER BY ts",
+        return self._all("SELECT * FROM activity_submission WHERE activity=? ORDER BY ts DESC",
                          (activity_id,))
+
+    def course_submissions(self, course: str) -> list[dict]:
+        return self._all(
+            "SELECT s.* FROM activity_submission s JOIN activity a ON a.id = s.activity "
+            "WHERE a.course=? ORDER BY s.ts DESC", (course,))
+
+    def claim(self, receipt: str, student_id: str, now: float) -> tuple[bool, str]:
+        """Bind a student id to a submission. Returns (accepted, outcome).
+
+        Every attempt is recorded before anything is decided, so a refusal still leaves the teacher
+        able to see who tried. Done under one lock: two students claiming the same receipt at the
+        same instant must not both win.
+        """
+        with self.lock:
+            row = self._one("SELECT * FROM activity_submission WHERE receipt=?", (receipt,))
+            if row is None:
+                outcome = "no_such_receipt"
+            elif (row.get("student_id") or "").strip():
+                outcome = "already_claimed"
+            else:
+                self.db.execute(
+                    "UPDATE activity_submission SET student_id=?, claimed_at=? WHERE receipt=?",
+                    (student_id, now, receipt))
+                outcome = "claimed"
+            self.db.execute(
+                "INSERT INTO claim_attempt(receipt, student_id, ts, outcome) VALUES(?,?,?,?)",
+                (receipt, student_id, now, outcome))
+            self.db.commit()
+            return outcome == "claimed", outcome
+
+    def claim_attempts(self, receipt: str) -> list[dict]:
+        return self._all("SELECT * FROM claim_attempt WHERE receipt=? ORDER BY ts", (receipt,))
+
+    def unclaimed(self, before: float = 0.0) -> list[dict]:
+        """Submissions nobody has claimed. The retention policy the student page describes."""
+        sql = "SELECT * FROM activity_submission WHERE student_id='' OR student_id IS NULL"
+        if before:
+            return self._all(sql + " AND ts < ? ORDER BY ts", (before,))
+        return self._all(sql + " ORDER BY ts")
 
     def artifact_twins(self, artifact_hash: str, exclude_code: str = "") -> list[dict]:
         """Other submissions built from the same topology — the collusion signal a receipt cannot
@@ -432,5 +493,31 @@ class Store:
         if not artifact_hash:
             return []
         return self._all(
-            "SELECT code,receipt,ts FROM activity_submission "
+            "SELECT code,receipt,activity,ts FROM activity_submission "
             "WHERE artifact_hash=? AND code<>? ORDER BY ts", (artifact_hash, exclude_code))
+
+    # -- materials -------------------------------------------------------- #
+    def material_put(self, rec: dict) -> None:
+        cols = ("id", "course", "kind", "title", "filename", "url", "size", "uploaded")
+        self._run(f"INSERT OR REPLACE INTO material({','.join(cols)}) "
+                  f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
+
+    def material(self, mid: str) -> dict | None:
+        return self._one("SELECT * FROM material WHERE id=?", (mid,))
+
+    def materials(self, course: str) -> list[dict]:
+        return self._all("SELECT * FROM material WHERE course=? ORDER BY uploaded DESC", (course,))
+
+    def material_delete(self, mid: str) -> None:
+        self._run("DELETE FROM material WHERE id=?", (mid,))
+
+    # -- kv --------------------------------------------------------------- #
+    def kv_get(self, k: str) -> dict | None:
+        r = self._one("SELECT v FROM kv WHERE k=?", (k,))
+        return json.loads(r["v"]) if r else None
+
+    def kv_put(self, k: str, v: dict) -> None:
+        self._run("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", (k, json.dumps(v)))
+
+    def kv_delete(self, k: str) -> None:
+        self._run("DELETE FROM kv WHERE k=?", (k,))

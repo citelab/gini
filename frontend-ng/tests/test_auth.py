@@ -1,12 +1,16 @@
-"""Phase A — identity. These tests are written as ATTACKS, because that's what they defend against.
+"""Identity in the v1 Teaching Center. Written as ATTACKS, because that is what it defends against.
 
-Before this, a Bearer token was "any non-empty string". That meant: read any student's profile,
-submit results as anyone, and — the real one — GET /api/roster, which serves the enrolment tokens for
-the entire class. An open teacher console isn't an oversight, it's a master key on an open port.
+v1 has **staff accounts only** — a student never signs in, so the whole roster/enrolment-token
+surface these tests used to cover is gone along with the thing it protected. What remains is
+smaller and more load-bearing: a staff session vends codes and reads every submission in a course,
+so an account taken over is a master key on an open port.
+
+The claim-token flow is the specific hole being closed. Usernames are guessable, so
+first-password-wins would let a stranger become a teacher just by reaching the portal first.
 """
-import json
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,220 +18,166 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 _TC = Path(__file__).resolve().parents[2] / "teaching-center"
+pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
 sys.path.insert(0, str(_TC))
 
 import accounts as A                                     # noqa: E402
-from store import Store                                   # noqa: E402
+from store import Store                                  # noqa: E402
 
-from gini.agent import teaching_center as TC             # noqa: E402
-
-
-def _seed(root, rows):
-    """Seed the roster through the store (the real enrolment path), not a raw JSON file."""
-    s = Store(root)
-    for r in rows:
-        s.upsert_enrolment(r["id"], name=r.get("name", r["id"]), sis_id=r.get("sis_id", ""),
-                           token=r.get("token", ""), group=r.get("group", ""),
-                           ai_hosted=r.get("ai_hosted", False))
-    return s
+GOOD = "a-good-password"
 
 
 @pytest.fixture()
-def course(tmp_path):
-    _seed(tmp_path, [{"id": "mahesh", "name": "Mahesh", "token": "TOK-mahesh"},
-                     {"id": "ana", "name": "Ana", "token": "TOK-ana"}])
-    return A.Accounts(tmp_path)
+def portal(tmp_path, monkeypatch):
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("ADMIN_ID", "boss")
+    Store._instances.clear()
+    acc = A.Accounts(tmp_path)
+    acc.root = tmp_path
+    return acc
 
 
-# -- claiming ---------------------------------------------------------------- #
-def test_a_classmate_cannot_claim_your_account(course):
-    """THE hole the enrolment token exists to close. Student ids are guessable, so
-    first-password-wins would let anyone claim anyone — and then BE them, in a system with chat."""
-    bad = course.claim("mahesh", "TOK-ana", "hunter2hunter2")     # Ana's token, Mahesh's id
-    assert not bad["ok"] and "token" in bad["error"].lower()
-    assert "mahesh" not in course.accounts()                      # nothing was created
-
-    guess = course.claim("mahesh", "", "hunter2hunter2")
-    assert not guess["ok"]
-    assert "mahesh" not in course.accounts()
+# -- claiming ----------------------------------------------------------------- #
+def test_a_stranger_cannot_claim_an_account_they_guessed(portal):
+    """THE hole the claim token exists to close."""
+    portal.add_staff("ada")
+    r = portal.claim("ada", "guessed", GOOD)
+    assert not r["ok"]
 
 
-def test_only_an_enrolled_student_can_claim(course):
-    r = course.claim("stranger", "whatever", "hunter2hunter2")
-    assert not r["ok"] and "no account" in r["error"].lower()
+def test_the_claim_token_is_spent_on_use(portal):
+    made = portal.add_staff("ada")
+    assert portal.claim("ada", made["claim_token"], GOOD)["ok"]
+    assert not portal.claim("ada", made["claim_token"], "another-password")["ok"]
 
 
-def test_the_token_is_spent_after_the_claim(course):
-    assert course.claim("mahesh", "TOK-mahesh", "correct horse")["ok"]
-    again = course.claim("mahesh", "TOK-mahesh", "a different password")
-    assert not again["ok"] and "already been set up" in again["error"]
-
-
-def test_a_claim_returns_a_session_and_never_stores_the_password(course):
-    r = course.claim("mahesh", "TOK-mahesh", "correct horse")
+def test_claiming_returns_a_session_and_never_stores_the_password(portal):
+    made = portal.add_staff("ada")
+    r = portal.claim("ada", made["claim_token"], GOOD)
     assert r["ok"] and r["session"]
-    rec = course.accounts()["mahesh"]
-    blob = json.dumps(rec)
-    assert "correct horse" not in blob                            # not the password…
-    assert rec["hash"] != "correct horse" and len(rec["salt"]) == 32
-    assert course.whoami(r["session"]) == {"who": "mahesh", "role": "student"}
+    rec = portal.store.account("ada")
+    assert GOOD not in str(rec)                       # not in the row, in any field
+    assert rec["hash"] and rec["salt"]
 
 
-def test_weak_passwords_are_refused(course):
-    assert not course.claim("mahesh", "TOK-mahesh", "short")["ok"]
+def test_weak_passwords_are_refused(portal):
+    made = portal.add_staff("ada")
+    assert not portal.claim("ada", made["claim_token"], "short")["ok"]
 
 
-# -- login ------------------------------------------------------------------- #
-def test_wrong_password_is_refused_and_right_one_is_not(course):
-    course.claim("mahesh", "TOK-mahesh", "correct horse")
-    assert not course.login("mahesh", "correcthorse")["ok"]
-    assert not course.login("mahesh", "")["ok"]
-    ok = course.login("mahesh", "correct horse")
-    assert ok["ok"] and course.whoami(ok["session"])["who"] == "mahesh"
+def test_an_unclaimed_account_is_told_to_claim_rather_than_just_refused(portal):
+    """A teacher staring at 'wrong password' will retype it ten times. Say what is actually
+    needed."""
+    portal.add_staff("ada")
+    r = portal.login("ada", GOOD)
+    assert not r["ok"] and "claim" in r["error"].lower()
 
 
-def test_an_unclaimed_student_is_told_to_claim_rather_than_just_refused(course):
-    r = course.login("ana", "anything")
-    assert not r["ok"] and "enrolment token" in r["error"]        # actionable, not a dead end
+def test_a_genuinely_unknown_username_says_so_plainly(portal):
+    assert "No such account" in portal.login("nobody", GOOD)["error"]
 
 
-def test_sessions_expire_and_expired_tokens_stop_working(course, monkeypatch):
-    s = course.claim("mahesh", "TOK-mahesh", "correct horse")["session"]
-    assert course.whoami(s)
-
-    real_time = A.time.time                                       # capture BEFORE patching
-    monkeypatch.setattr(A.time, "time", lambda: real_time() + A.SESSION_TTL + 10)
-    assert course.whoami(s) is None                               # a stale session is no session
-
-
-def test_logout_kills_the_session(course):
-    s = course.login  # (silence linters)
-    s = course.claim("mahesh", "TOK-mahesh", "correct horse")["session"]
-    course.logout(s)
-    assert course.whoami(s) is None
+# -- sessions ----------------------------------------------------------------- #
+def test_wrong_password_is_refused_and_the_right_one_is_not(portal):
+    made = portal.add_staff("ada")
+    portal.claim("ada", made["claim_token"], GOOD)
+    assert not portal.login("ada", "wrong")["ok"]
+    assert portal.login("ada", GOOD)["ok"]
 
 
-def test_teacher_reset_revokes_live_sessions(course):
-    """Resetting an account must not leave the old session usable — otherwise 'reset' is theatre."""
-    s = course.claim("mahesh", "TOK-mahesh", "correct horse")["session"]
-    assert course.whoami(s)
-    course.reset("mahesh")
-    assert course.whoami(s) is None
-    assert course.claim("mahesh", "TOK-mahesh", "a new password")["ok"]   # can claim again
+def test_sessions_expire_and_expired_tokens_stop_working(portal, monkeypatch):
+    made = portal.add_staff("ada")
+    s = portal.claim("ada", made["claim_token"], GOOD)["session"]
+    assert portal.whoami(s)["who"] == "ada"
+    later = time.time() + A.SESSION_TTL + 1
+    monkeypatch.setattr(A.time, "time", lambda: later)   # patch the module under test, not stdlib
+    assert portal.whoami(s) is None
 
 
-# -- the teacher console is a master key ------------------------------------- #
-def test_the_teacher_account_cannot_be_claimed_by_whoever_arrives_first(course, monkeypatch):
-    monkeypatch.delenv("TEACHER_PASSWORD", raising=False)
-    setup = course.ensure_teacher()
-    assert setup                                    # a one-time setup token is printed at boot
-    assert not course.claim_teacher("teacher", "guess", "hunter2hunter2")["ok"]
-    ok = course.claim_teacher("teacher", setup, "hunter2hunter2")
-    assert ok["ok"] and course.whoami(ok["session"]) == {"who": "teacher", "role": "teacher"}
-    # spent
-    assert not course.claim_teacher("teacher", setup, "another one")["ok"]
+def test_logout_kills_the_session(portal):
+    made = portal.add_staff("ada")
+    s = portal.claim("ada", made["claim_token"], GOOD)["session"]
+    portal.logout(s)
+    assert portal.whoami(s) is None
 
 
-# -- the client refuses to leak your password -------------------------------- #
-def test_client_refuses_to_send_a_password_over_plaintext_http():
-    """Campus wifi is the same wifi whether or not the class is small."""
-    with pytest.raises(TC.InsecureTransport):
-        TC.refuse_plaintext_password("http://gini.myuni.edu:8080")
-
-    TC.refuse_plaintext_password("https://gini.myuni.edu:8080")        # fine
-    TC.refuse_plaintext_password("http://localhost:8080")              # never leaves the machine
-    TC.refuse_plaintext_password("http://127.0.0.1:8080")
-    TC.refuse_plaintext_password("http://gini.myuni.edu:8080", allow_insecure=True)   # conscious
+def test_a_made_up_token_is_nobody(portal):
+    assert portal.whoami("not-a-real-token") is None
+    assert portal.whoami("") is None
 
 
-def test_the_client_stores_a_session_not_a_password(tmp_path):
-    calls = []
-
-    def fake(method, path, body=None):
-        calls.append((method, path, body))
-        if path == "/auth/login":
-            return 200, {"ok": True, "session": "SESSION-XYZ", "role": "student"}
-        return 200, []
-
-    c = TC.TeachingCenterClient("http://localhost:8080", course="c1", student_id="mahesh",
-                                cache_dir=tmp_path, transport=fake)
-    assert not c.signed_in()
-    assert c.login("correct horse")["ok"]
-    assert c.signed_in() and c.session == "SESSION-XYZ"
-
-    on_disk = " ".join(p.read_text() for p in tmp_path.rglob("*.json"))
-    assert "SESSION-XYZ" in on_disk
-    assert "correct horse" not in on_disk               # the password touched nothing durable
-
-    # a fresh client picks the session back up — you don't retype your password every launch
-    c2 = TC.TeachingCenterClient("http://localhost:8080", course="c1", student_id="mahesh",
-                                 cache_dir=tmp_path, transport=fake)
-    assert c2.signed_in() and c2.session == "SESSION-XYZ"
+# -- roles -------------------------------------------------------------------- #
+def test_a_new_account_is_a_teacher_unless_asked_otherwise(portal):
+    assert portal.add_staff("ada")["role"] == A.TEACHER
+    assert portal.add_staff("zoe", role=A.ADMIN)["role"] == A.ADMIN
 
 
-def test_an_expired_session_reads_as_sign_in_again_not_as_offline(tmp_path):
-    """Sending a student to debug the network when they just need to re-enter a password is a small
-    betrayal — so we distinguish 'the server rejected us' from 'the server isn't there'."""
-    def rejects(method, path, body=None):
-        return 401, None
-
-    c = TC.TeachingCenterClient("http://localhost:8080", course="c1", student_id="mahesh",
-                                session="STALE", cache_dir=tmp_path, transport=rejects)
-    assert c.online() is False
-    assert c.session_expired() is True
-
-    def unreachable(method, path, body=None):
-        return 0, None
-
-    c2 = TC.TeachingCenterClient("http://localhost:8080", course="c1", student_id="mahesh",
-                                 session="FINE", cache_dir=tmp_path, transport=unreachable)
-    assert c2.online() is False
-    assert c2.session_expired() is False                 # genuinely offline — do NOT ask for a password
+def test_the_session_carries_the_role_it_was_signed_in_with(portal):
+    made = portal.add_staff("zoe", role=A.ADMIN)
+    s = portal.claim("zoe", made["claim_token"], GOOD)["session"]
+    assert portal.whoami(s)["role"] == A.ADMIN
 
 
-# -- username vs school-id vs name (a real user hit this) -------------------- #
-def test_username_is_the_login_and_school_id_is_just_bookkeeping(tmp_path):
-    """The teacher's mental model: 'ravi' is the handle, '2511' is the registrar's number. So the
-    USERNAME (id) is the login; the school id never is. Signing in with the school id — or the full
-    name — must point you at your username, not dead-end."""
-    _seed(tmp_path, [{"id": "ravi", "name": "Ravi Kumar", "sis_id": "2511", "token": "TOK-r"},
-                     {"id": "surya", "name": "Surya P", "sis_id": "2512", "token": "TOK-s"}])
-    c = A.Accounts(tmp_path)
-
-    # sign in with the SCHOOL ID → told the username
-    r = c.claim("2511", "TOK-r", "password123")
-    assert not r["ok"] and "username" in r["error"] and "ravi" in r["error"]
-
-    # sign in with the FULL NAME → told the username
-    r = c.login("Ravi Kumar", "whatever")
-    assert not r["ok"] and "ravi" in r["error"]
-
-    # the username works, and the school id is preserved for records
-    assert c.claim("ravi", "TOK-r", "password123")["ok"]
-    row = next(x for x in c._roster() if x["id"] == "ravi")
-    assert row["sis_id"] == "2511"
+def test_the_last_admin_cannot_be_removed_or_demoted(portal):
+    """Otherwise the portal is left with no way in, and there is no recovery procedure."""
+    portal.ensure_admin()
+    assert not portal.remove_staff("boss")["ok"]
+    assert not portal.set_role("boss", A.TEACHER)["ok"]
 
 
-def test_a_genuinely_unknown_username_says_so_plainly(course):
-    r = course.claim("nobody", "x", "password123")
-    assert not r["ok"] and "no account" in r["error"].lower() and "username" in r["error"].lower()
+def test_an_admin_can_step_down_once_someone_else_is_admin(portal):
+    portal.ensure_admin()
+    made = portal.add_staff("zoe", role=A.ADMIN)
+    portal.claim("zoe", made["claim_token"], GOOD)
+    assert portal.set_role("boss", A.TEACHER)["ok"]
 
 
-def test_TEACHER_PASSWORD_is_authoritative_each_boot(tmp_path, monkeypatch):
-    """The real trap: TEACHER_PASSWORD only applied at account creation, so a teacher who set it on a
-    LATER boot (the account already existing) got 'wrong password'. It must be authoritative each
-    boot — set it, restart, sign in with it."""
-    monkeypatch.setenv("TEACHER_ID", "prof")
-    monkeypatch.setenv("TEACHER_PASSWORD", "firstpass1")
-    a = A.Accounts(tmp_path); a.ensure_teacher()
-    assert a.login("prof", "firstpass1")["ok"]
+def test_a_removed_account_takes_its_pending_claim_with_it(portal):
+    """A claim token left behind is a spare key to an account that no longer exists — until
+    someone re-adds the name."""
+    portal.ensure_admin()
+    portal.add_staff("ada")
+    assert portal.remove_staff("ada")["ok"]
+    assert portal.store.kv_get("claim:ada") is None
 
-    # reboot with a NEW env password → it becomes authoritative
-    monkeypatch.setenv("TEACHER_PASSWORD", "mahesh2511")
-    a2 = A.Accounts(tmp_path); a2.ensure_teacher()
-    assert a2.login("prof", "mahesh2511")["ok"]
-    assert not a2.login("prof", "firstpass1")["ok"]
 
-    # and a stable password across boots doesn't churn the hash needlessly (still logs in)
-    a3 = A.Accounts(tmp_path); a3.ensure_teacher()
-    assert a3.login("prof", "mahesh2511")["ok"]
+# -- bootstrap ---------------------------------------------------------------- #
+def test_a_fresh_portal_mints_a_claim_token_rather_than_standing_open(portal):
+    """Without this, whoever reaches the port first becomes the admin."""
+    token = portal.ensure_admin()
+    assert token
+    assert not portal.login("boss", GOOD)["ok"]
+    assert portal.claim("boss", token, GOOD)["ok"]
+
+
+def test_ADMIN_PASSWORD_is_authoritative_each_boot(portal, monkeypatch):
+    """The real trap, kept from v0: the env password only applied at account *creation*, so an
+    admin who set it on a portal that already existed was silently ignored and locked out."""
+    portal.ensure_admin()                                  # exists, unclaimed
+    monkeypatch.setenv("ADMIN_PASSWORD", "set-on-the-second-boot")
+    assert portal.ensure_admin() is None                   # reconciled, nothing to print
+    assert portal.login("boss", "set-on-the-second-boot")["ok"]
+
+
+def test_setting_ADMIN_PASSWORD_retires_the_claim_token(portal, monkeypatch):
+    token = portal.ensure_admin()
+    monkeypatch.setenv("ADMIN_PASSWORD", "now-there-is-a-password")
+    portal.ensure_admin()
+    assert not portal.claim("boss", token, GOOD)["ok"]
+
+
+def test_ensure_admin_is_idempotent(portal, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "steady-as-she-goes")
+    portal.ensure_admin()
+    portal.ensure_admin()
+    assert portal.login("boss", "steady-as-she-goes")["ok"]
+    assert len([a for a in portal.store.accounts() if a["role"] == A.ADMIN]) == 1
+
+
+# -- privacy ------------------------------------------------------------------ #
+def test_there_is_no_student_account_table_at_all(portal):
+    """v1's privacy property, asserted rather than trusted: the portal cannot leak who did the work
+    because it never learns it."""
+    tables = {r["name"] for r in
+              portal.store._all("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert not (tables & {"enrolment", "profile", "student", "roster"})
