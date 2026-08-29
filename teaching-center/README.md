@@ -53,9 +53,16 @@ sudo -u gini-tc /opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/d
     --tls-cert /etc/ssl/certs/gini.crt --tls-key /opt/gini-tc/gini.key
 ```
 
-There is no HTTP mode — see [TLS](#5-tls-is-not-optional) below — so the certificate has to exist
-before the first start. For a quick look before you have one, `./teaching-center/run.sh` makes a
-self-signed loopback certificate for you.
+There is no HTTP mode — see [TLS](#5-tls-is-not-optional) below — so a certificate has to exist
+before the first start. For your own machine, `--make-cert` makes one and serves with it:
+
+```bash
+gini-teaching-center --data ./tc-data --port 8443 --make-cert
+```
+
+It writes `<data>/tls/cert.pem` and `key.pem`, **reuses them if they are already there** (a fresh
+certificate would throw away any trust you had given the old one), and prints the two ways to make
+gBuilder trust it. `./teaching-center/run.sh` does the same thing for a checkout.
 
 ```
 GINI Teaching Center  ·  https://127.0.0.1:8443/
