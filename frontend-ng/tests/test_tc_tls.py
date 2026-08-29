@@ -39,12 +39,40 @@ needs_openssl = pytest.mark.skipif(
 
 @pytest.fixture
 def certs(tmp_path):
-    """A self-signed pair — which is also the realistic 'wrong' case for a client."""
+    """A self-signed pair — which is also the realistic 'wrong' case for a client.
+
+    The subjectAltName is not decoration. A certificate carrying only CN=localhost is rejected by
+    OpenSSL 3 and by macOS regardless of whether the issuer is trusted, so a `-subj "/CN=localhost"`
+    fixture makes the trusted-certificate test fail for a reason that has nothing to do with trust
+    — and it fails only on the newer stack, which is how it passed here and failed on the Mac.
+
+    Written as a config file rather than `-addext` because LibreSSL, which is what `openssl` is on
+    macOS, has not always supported that flag.
+    """
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cfg = tmp_path / "openssl.cnf"
+    cfg.write_text("[req]\n"
+                   "distinguished_name = dn\n"
+                   "x509_extensions = v3\n"
+                   "prompt = no\n"
+                   "[dn]\n"
+                   "CN = localhost\n"
+                   "[v3]\n"
+                   "subjectAltName = DNS:localhost, IP:127.0.0.1\n"
+                   "basicConstraints = critical, CA:TRUE\n", encoding="utf-8")
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                     "-keyout", str(key), "-out", str(cert), "-days", "1",
-                    "-subj", "/CN=localhost"], check=True, capture_output=True)
+                    "-config", str(cfg)], check=True, capture_output=True)
     return cert, key
+
+
+@needs_openssl
+def test_the_fixture_certificate_has_a_subject_alt_name(certs):
+    """Guard the fixture. Without a SAN the trusted-certificate test below fails on a certificate
+    technicality while looking exactly like a trust failure."""
+    out = subprocess.run(["openssl", "x509", "-in", str(certs[0]), "-noout", "-text"],
+                         capture_output=True, text=True, check=True).stdout
+    assert "Subject Alternative Name" in out and "DNS:localhost" in out
 
 
 @pytest.fixture
@@ -193,6 +221,14 @@ def test_a_trusted_certificate_just_works(tls_server, monkeypatch):
     """
     url, cert = tls_server
     monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+    # Confirm the lever actually moved before trusting the result. If a Python build ignores
+    # SSL_CERT_FILE, this test would fail with `Untrusted` and read exactly like a bug in the
+    # classification it is meant to be checking — so say which of the two it is.
+    loaded = ssl.create_default_context().get_ca_certs()
+    if not any("localhost" in str(c.get("subject", ())) for c in loaded):
+        pytest.skip(f"this Python ignores SSL_CERT_FILE ({len(loaded)} CAs loaded, none ours), so "
+                    f"trust cannot be injected here — the untrusted-path tests still cover the "
+                    f"classification")
     # The certificate is CN=localhost, so connect by that name — an IP would fail hostname
     # verification even with the CA trusted, which is its own (correct) refusal.
     r = tc_submit.check_code(url.replace("127.0.0.1", "localhost"), "AAAA-AAAA")
