@@ -161,3 +161,44 @@ def test_release_and_version_bumps_are_documented_somewhere_findable():
     assert "setuptools-scm" in scripts
     for level in ("patch", "minor", "major"):
         assert f"release.sh {level}" in scripts or level in scripts
+
+
+# -- every distribution must have a way to be published ------------------------ #
+#
+# This is the test that would have caught it: `release-pypi.sh` was the only thing that ever
+# published gini-toolkit, and deleting it left the package with no publisher at all. A tag would
+# have shipped a new gini-core while the app students actually install stayed behind — and nothing
+# would have failed. The release would simply have been half a release.
+
+def _distributions() -> list[str]:
+    return sorted(d.name for d in ROOT.iterdir()
+                  if (d / "pyproject.toml").exists() and d.name != "legacy")
+
+
+def test_every_distribution_has_a_publish_workflow():
+    flows = (ROOT / ".github" / "workflows")
+    published = "\n".join(f.read_text(encoding="utf-8") for f in flows.glob("*.yml"))
+    for d in _distributions():
+        name = (ROOT / d / "pyproject.toml").read_text(encoding="utf-8")
+        dist = next(l.split('"')[1] for l in name.splitlines() if l.startswith("name ="))
+        assert f"outdir dist/ {d}/" in published, (
+            f"{dist} (in {d}/) is built by no workflow — a tag would publish the others and "
+            f"silently leave this one behind")
+
+
+def test_each_project_gets_its_own_workflow_file():
+    """PyPI's trusted publishing binds one workflow file per project, and a shared file would let
+    one distribution's failure block the rest."""
+    flows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    assert len(flows) >= len(_distributions())
+    for f in flows:
+        built = [l for l in f.read_text(encoding="utf-8").splitlines() if "outdir dist/" in l]
+        assert len(built) == 1, f"{f.name} builds {len(built)} distributions; expected exactly 1"
+
+
+def test_the_release_script_names_every_workflow_it_will_trigger():
+    """The script prints what the tag is about to publish, and you confirm from that list. If it
+    under-reports, you approve a release believing something shipped that did not."""
+    script = (ROOT / "scripts" / "release.sh").read_text(encoding="utf-8")
+    for f in (ROOT / ".github" / "workflows").glob("*.yml"):
+        assert f.name in script, f"release.sh does not mention {f.name} in its confirmation"

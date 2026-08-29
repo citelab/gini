@@ -1,0 +1,53 @@
+# Publishes gini-toolkit (the gBuilder desktop app) to PyPI.
+#
+# One workflow file per project, like the other two: PyPI's trusted publishing binds a single
+# workflow to a project, and a shared file would let a failure in one distribution block the rest.
+#
+# This is the one students install (`pipx install gini-toolkit`), so a tag that publishes gini-core
+# WITHOUT publishing this leaves the app pinned at the old release while its dependency moves
+# underneath it — which is exactly what happened when the hand-run release-pypi.sh went away and
+# nothing replaced it for this package.
+name: publish gini-toolkit
+
+on:
+  push:
+    tags: ["v*"]           # setuptools-scm derives the version from the tag
+  workflow_dispatch:       # and a manual run, for a re-publish after a hiccup
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi      # create this Environment in repo Settings and require a reviewer
+    permissions:
+      id-token: write      # THE line that makes trusted publishing work — no API token anywhere
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # setuptools-scm needs the full history AND the tags, not a shallow clone
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade build
+      - run: python -m build --sdist --wheel --outdir dist/ frontend-ng/
+      # `gini` is a namespace package split with gini-core. Both halves install into the same
+      # directory, so a mistake here is not a build error — it is a working install of a broken
+      # import, discovered by a student. Check the artifact, not the config.
+      - name: the wheel carries the app and NOT the domain model
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          w = glob.glob("dist/gini_toolkit-*.whl")[0]
+          names = zipfile.ZipFile(w).namelist()
+          assert any(n.startswith("gini/ui/") for n in names), "no gini/ui in the wheel"
+          assert any(n.startswith("gini/services/") for n in names), "no gini/services in the wheel"
+          # gini-core owns this. Two copies on one machine means the resolved one is whichever
+          # landed second, and a proof format that disagrees rejects a student's real work.
+          assert not any(n.startswith("gini/domain/") for n in names), \
+              "shipped gini/domain — that belongs to gini-core and would shadow it"
+          assert "gini/__init__.py" not in names, "shipped __init__.py — that shadows gini-core"
+          entry = [n for n in names if n.endswith("entry_points.txt")]
+          assert entry and b"gbuilder" in zipfile.ZipFile(w).read(entry[0]), \
+              "no gbuilder entry point — the install would leave no command to run"
+          print(w, "ok:", len(names), "files")
+          PY
+      - uses: pypa/gh-action-pypi-publish@release/v1

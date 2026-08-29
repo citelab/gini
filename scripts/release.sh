@@ -81,6 +81,7 @@ cat <<INFO
 
   This tags $BRANCH and pushes. The tag push is what publishes:
     .github/workflows/gini-core.yml       -> PyPI gini-core $VERSION
+    .github/workflows/gini-toolkit.yml    -> PyPI gini-toolkit $VERSION
     .github/workflows/teaching-center.yml -> PyPI gini-teaching-center $VERSION
 
   Container images are NOT built by this — they are slow and need both machines:
