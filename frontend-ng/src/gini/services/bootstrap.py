@@ -48,12 +48,23 @@ def arch() -> str:
 def plan(app_version: str | None, *, run=subprocess.run, backend_hint: str | None = None) -> dict:
     """Survey the machine and say what should happen. Never raises, never touches the network."""
     os_name = runtime.detect_os()
-    have_docker = runtime.docker_available(run=run)
+    rt_state = runtime.docker_state(run=run)          # "ok" | "stopped" | "missing"
+    have_docker = rt_state == "ok"
     backend = images.find_backend(backend_hint)
     done = marker.is_setup_done()
     stale = marker.needs_update(app_version or "")
 
-    if not have_docker:
+    if rt_state == "stopped":
+        # Installed, but the engine is not answering. Distinct from "missing" because the advice is
+        # the opposite: telling somebody to install Docker when they already have it sends them to
+        # fix the wrong thing, and never names the one action that works.
+        rp = runtime.runtime_plan(os_name)
+        state, why = NEEDS_RUNTIME, (
+            f"{rp.get('runtime', 'Docker')} is installed on this machine, but its engine is not "
+            f"running — so nothing can be downloaded or started yet. Start it, then launch "
+            f"gBuilder again:\n\n    {rp.get('start', '')}\n\nBuilding and reading topologies "
+            f"works meanwhile; Run does not.")
+    elif not have_docker:
         state, why = NEEDS_RUNTIME, (
             f"GINI runs each device in a container, and no container runtime was found. "
             f"{runtime.runtime_plan(os_name).get('runtime', 'Docker')} needs to be installed "
@@ -80,6 +91,7 @@ def plan(app_version: str | None, *, run=subprocess.run, backend_hint: str | Non
         "os": os_name,
         "arch": arch(),                    # shown, never used to choose an image
         "docker": have_docker,
+        "runtime_state": rt_state,   # "ok" | "stopped" | "missing"
         "source": str(backend) if backend else "",
         "app_version": app_version or "",
         "image_tag": images.image_tag(app_version),

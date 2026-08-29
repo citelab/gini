@@ -50,6 +50,56 @@ def test_pull_images_records_success_and_failure():
     assert res["r/gini-xv6:1"] is True and res["r/gini-oszoo:1"] is False
 
 
+def test_local_name_is_the_name_the_runtime_actually_resolves():
+    assert images.local_name("ghcr.io/gini-toolkit/gini-grouter:6.1.0") == "gini-grouter:latest"
+    assert images.local_name("ghcr.io/gini-toolkit/gini-xv6:latest") == "gini-xv6:latest"
+
+
+def test_a_pull_also_tags_the_image_under_the_name_the_runtime_looks_for():
+    """THE bug that left every pip install unable to Run anything.
+
+    `docker pull` leaves an image under its REGISTRY reference, and nothing looks for it there:
+    the orchestrator inspects `gini-grouter`, the compiler writes `gini-xv6:latest` into the
+    compose file. Setup reported four successful pulls and the machine still had nothing runnable
+    — and the error surfaced later, elsewhere, as "the gRouter image isn't built yet", pointing at
+    a backend/ that a wheel does not contain.
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return types.SimpleNamespace(returncode=0)
+
+    ref = f"{REGISTRY}/gini-grouter:6.1.0"
+    assert dict(images.pull_images([ref], run=fake_run))[ref] is True
+    assert ["docker", "pull", ref] in calls
+    assert ["docker", "tag", ref, "gini-grouter:latest"] in calls
+
+
+def test_an_image_that_pulls_but_cannot_be_tagged_counts_as_a_failure():
+    """Otherwise setup writes a marker saying this machine is ready, over an image nothing finds."""
+    def fake_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=1 if cmd[1] == "tag" else 0)
+
+    res = dict(images.pull_images(["r/gini-xv6:1"], run=fake_run))
+    assert res["r/gini-xv6:1"] is False
+
+
+def test_docker_state_tells_a_stopped_engine_from_an_absent_one(monkeypatch):
+    ok = types.SimpleNamespace(returncode=0)
+    bad = types.SimpleNamespace(returncode=1)
+    monkeypatch.setattr(runtime.shutil, "which", lambda _c: None)
+    assert runtime.docker_state() == "missing"
+    monkeypatch.setattr(runtime.shutil, "which", lambda _c: "/usr/bin/docker")
+    assert runtime.docker_state(run=lambda *a, **k: ok) == "ok"
+    assert runtime.docker_state(run=lambda *a, **k: bad) == "stopped"   # installed, not answering
+
+
+def test_every_os_says_how_to_START_the_runtime_not_only_how_to_install_it():
+    for os_name in ("macos", "linux", "windows", "unknown-os"):
+        assert runtime.runtime_plan(os_name).get("start"), os_name
+
+
 def test_marker_roundtrip_and_status(tmp_path, monkeypatch):
     monkeypatch.setenv("GINI_HOME", str(tmp_path))
     assert marker.is_setup_done() is False

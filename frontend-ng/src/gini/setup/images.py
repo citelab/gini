@@ -23,13 +23,41 @@ def image_refs(version: str | None) -> list[str]:
     return [f"{REGISTRY}/{name}:{tag}" for name in IMAGES]
 
 
+def local_name(ref: str) -> str:
+    """The plain name the runtime resolves, derived from a registry reference.
+
+    `ghcr.io/gini-toolkit/gini-grouter:6.1.0` -> `gini-grouter:latest`
+    """
+    return ref.rsplit("/", 1)[-1].split(":", 1)[0] + ":latest"
+
+
 def pull_images(refs, run=subprocess.run) -> list[tuple[str, bool]]:
-    """Pull each ref; return [(ref, ok)]. A failure is captured, not raised (image may be unpublished)."""
+    """Pull each ref AND give it the plain local name; return [(ref, ok)].
+
+    The tag is not cosmetic, and leaving it out made every pip install unable to Run anything.
+    `docker pull` leaves an image under its REGISTRY reference, but nothing looks for it there:
+    the orchestrator inspects `gini-grouter` and writes `image: gini-grouter` into the compose
+    file (services/orchestrator.py), and the compiler writes `gini-xv6:latest` and
+    `gini-oszoo:latest` (services/compiler.py). So a pull that reported success left nothing
+    under the names anything runs, and the failure surfaced much later and somewhere else, as
+    "the gRouter image isn't built yet" — pointing at a `backend/` that a wheel does not contain.
+
+    A source build already produces exactly these names (BUILD_SPECS below, whose comment promises
+    "a source build drops in exactly where a registry pull would"). This is the half that makes
+    that true.
+
+    A failed tag fails the image on purpose: a pulled-but-unreachable image is worse than an
+    honest failure, because setup would write a marker saying this machine is ready.
+    """
     out = []
     for ref in refs:
         try:
             r = run(["docker", "pull", ref], timeout=1800)
-            out.append((ref, r.returncode == 0))
+            ok = r.returncode == 0
+            if ok:
+                t = run(["docker", "tag", ref, local_name(ref)], timeout=60)
+                ok = t.returncode == 0
+            out.append((ref, ok))
         except Exception:
             out.append((ref, False))
     return out

@@ -15,15 +15,26 @@ def detect_os() -> str:
         platform.system(), "unknown")
 
 
-def docker_available(run=subprocess.run) -> bool:
-    """True if a Docker-compatible CLI is present AND a daemon answers (Colima/Desktop/Engine/Podman)."""
+def docker_state(run=subprocess.run) -> str:
+    """`"ok"` | `"stopped"` | `"missing"` — because the two failures need OPPOSITE advice.
+
+    This used to be a bare yes/no, so "Docker is not installed" and "Docker is installed but its
+    engine is not running" produced the same message: install it. Telling somebody who already has
+    Docker to install it again sends them off to fix the wrong thing, and never mentions the one
+    action that would work.
+    """
     if not shutil.which("docker"):
-        return False
+        return "missing"
     try:
         r = run(["docker", "info"], capture_output=True, timeout=15)
-        return r.returncode == 0
-    except Exception:
-        return False
+        return "ok" if r.returncode == 0 else "stopped"
+    except Exception:            # a timeout is a daemon that is starting or wedged, not an absent one
+        return "stopped"
+
+
+def docker_available(run=subprocess.run) -> bool:
+    """True if a Docker-compatible CLI is present AND a daemon answers (Colima/Desktop/Engine/Podman)."""
+    return docker_state(run=run) == "ok"
 
 
 # Per-OS plan: the runtime we recommend, the commands we CAN auto-run (with consent), and the manual
@@ -37,6 +48,7 @@ _PLANS = {
         "manual": ("Install Homebrew from https://brew.sh, then run:\n"
                    "    brew install colima docker\n"
                    "    colima start --cpu 2 --memory 4 --disk 30"),
+        "start": "colima start --cpu 2 --memory 4 --disk 30\n(or just open Docker Desktop, if that is what you use)",
     },
     "linux": {
         "runtime": "Docker Engine",
@@ -45,6 +57,7 @@ _PLANS = {
         "manual": ("Install Docker Engine for your distro "
                    "(https://docs.docker.com/engine/install/) and add your user to the 'docker' "
                    "group:  sudo usermod -aG docker $USER  (then log out/in). Podman also works."),
+        "start": "sudo systemctl start docker",
     },
     "windows": {
         "runtime": "Docker Desktop (or Podman Desktop)",
@@ -52,13 +65,15 @@ _PLANS = {
         "needs": "winget + admin",
         "manual": ("Install Docker Desktop (https://www.docker.com/products/docker-desktop) or "
                    "Podman Desktop, then start it. (Colima is not available on Windows.)"),
+        "start": "Start Docker Desktop (or Podman Desktop) from the Start menu.",
     },
 }
 
 
 def runtime_plan(os_name: str) -> dict:
     return _PLANS.get(os_name, {"runtime": "a Docker-compatible runtime", "auto": [], "needs": "",
-                                "manual": "Install Docker or a compatible runtime and start it."})
+                                "manual": "Install Docker or a compatible runtime and start it.",
+                                "start": "Start your container runtime, then launch gBuilder again."})
 
 
 def run_shell(cmd: str, run=subprocess.run) -> int:

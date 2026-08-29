@@ -39,17 +39,23 @@ def _docker_ok(*a, **k):
 def with_docker(monkeypatch):
     """Pretend a runtime is present.
 
-    Patched at `runtime.docker_available` rather than by injecting `run`, because that function
+    Patched at `runtime.docker_state` rather than by injecting `run`, because that function
     checks `shutil.which("docker")` FIRST — on a machine with no Docker (CI, this sandbox) the
     injected `run` is never reached, and every test would silently exercise the no-runtime path
     while appearing to test the others.
     """
-    monkeypatch.setattr(B.runtime, "docker_available", lambda run=None: True)
+    monkeypatch.setattr(B.runtime, "docker_state", lambda run=None: "ok")
 
 
 @pytest.fixture
 def without_docker(monkeypatch):
-    monkeypatch.setattr(B.runtime, "docker_available", lambda run=None: False)
+    monkeypatch.setattr(B.runtime, "docker_state", lambda run=None: "missing")
+
+
+@pytest.fixture
+def stopped_docker(monkeypatch):
+    """Installed, but the engine is not answering — the case a plain yes/no could not express."""
+    monkeypatch.setattr(B.runtime, "docker_state", lambda run=None: "stopped")
 
 
 # -- the architecture rule ----------------------------------------------------- #
@@ -90,6 +96,32 @@ def test_no_runtime_is_reported_without_pretending_we_can_fix_it(monkeypatch, wi
     assert p["state"] == B.NEEDS_RUNTIME
     assert "container runtime" in p["why"]
     assert "Run" in p["why"]                    # says what will not work, not just what is missing
+
+
+def test_a_stopped_engine_is_told_to_start_not_to_install(monkeypatch, stopped_docker):
+    """The two failures need OPPOSITE actions, and they used to share one message.
+
+    A stopped engine reported as "no container runtime was found … needs to be installed first"
+    sends somebody who already has Docker off to install it again, and never names the one thing
+    that would work. This is exactly what happened on a Mac with Colima installed but not started.
+    """
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    p = B.plan("6.1.0", run=_docker_ok)
+    assert p["state"] == B.NEEDS_RUNTIME          # still blocks Run
+    assert p["runtime_state"] == "stopped"        # …but for a different reason
+    assert "not running" in p["why"]
+    assert "needs to be installed" not in p["why"]
+    # and it names the command for THIS os, rather than leaving them to guess
+    start = B.runtime.runtime_plan(B.runtime.detect_os())["start"].splitlines()[0]
+    assert start in p["why"]
+
+
+def test_a_missing_runtime_still_says_install(monkeypatch, without_docker):
+    """The other half of the pair, so the test above cannot pass by weakening both messages."""
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    p = B.plan("6.1.0", run=_docker_ok)
+    assert p["runtime_state"] == "missing"
+    assert "needs to be installed" in p["why"] and "not running" not in p["why"]
 
 
 def test_a_fresh_install_plans_a_pull(monkeypatch, with_docker):
@@ -139,8 +171,13 @@ def test_a_pull_records_only_what_actually_arrived(monkeypatch, with_docker):
     refs = images.image_refs("6.1.0")
 
     def half(cmd, **k):
+        # Two calls per image now — `docker pull <ref>`, then `docker tag <ref> <name>:latest`, so
+        # the pulled image carries the name the runtime resolves. Both must succeed for the image
+        # to count, so key off the REF in either shape rather than the last argument.
+        target = cmd[2] if cmd[1] == "tag" else cmd[-1]
+
         class R:
-            returncode = 0 if cmd[-1] == refs[0] else 1
+            returncode = 0 if target == refs[0] else 1
         return R()
 
     r = B.execute(B.plan("6.1.0", run=_docker_ok), run=half)

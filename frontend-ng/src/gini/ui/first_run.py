@@ -53,7 +53,10 @@ class FirstRunDialog(QDialog):
         # The runtime case is the one we cannot fix for them, so it gets the instructions verbatim
         # rather than a button that would only fail.
         if plan["state"] == bootstrap.NEEDS_RUNTIME:
-            hint = (plan.get("runtime_plan") or {}).get("needs", "")
+            rp = plan.get("runtime_plan") or {}
+            # A stopped engine needs the START command; an absent one needs the INSTALL steps.
+            hint = (rp.get("start", "") if plan.get("runtime_state") == "stopped"
+                    else rp.get("manual", "") or rp.get("needs", ""))
             if hint:
                 man = QLabel(hint)
                 man.setWordWrap(True)
@@ -89,6 +92,9 @@ class FirstRunDialog(QDialog):
 
     # -- text ---------------------------------------------------------------- #
     def _headline(self) -> str:
+        if (self.plan["state"] == bootstrap.NEEDS_RUNTIME
+                and self.plan.get("runtime_state") == "stopped"):
+            return "Your container runtime is not running"
         return {
             bootstrap.NEEDS_RUNTIME: "A container runtime is needed",
             bootstrap.BUILD: "Build the container images",
