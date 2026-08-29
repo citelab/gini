@@ -37,6 +37,23 @@ needs_openssl = pytest.mark.skipif(
     reason="openssl not available")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_opener(monkeypatch):
+    """Every test here decides its own trust — none inherits the previous one's TLS context.
+
+    `urllib.request.urlopen` builds an opener once and caches it in the module global `_opener`,
+    and `HTTPSHandler.__init__` resolves its SSL context at CONSTRUCTION time. So the first
+    `urlopen` anywhere in the process freezes the context every later call uses: patching
+    `ssl._create_default_https_context` after that point changes nothing, and the trusted-
+    certificate test below fails as `Untrusted`. That is why it passed when run alone and failed
+    in the file and in the suite — the untrusted tests above it had already built the opener.
+
+    Clearing the cache per test makes the patch take effect, and, just as importantly, stops a
+    trusting opener leaking forward into the tests that must NOT trust this certificate.
+    """
+    monkeypatch.setattr(urllib.request, "_opener", None)
+
+
 @pytest.fixture
 def certs(tmp_path):
     """A self-signed pair — which is also the realistic 'wrong' case for a client.
