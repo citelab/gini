@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Cut a release. You never type a version number.
+# Cut a release. Normally you never type a version number.
 #
 #   ./scripts/release.sh                  # show where we are and what each bump would give
 #   ./scripts/release.sh patch            # 6.1.0 -> 6.1.1   bug fixes
 #   ./scripts/release.sh minor            # 6.1.0 -> 6.2.0   new features, nothing broken
 #   ./scripts/release.sh major            # 6.1.0 -> 7.0.0   something changed that will break people
+#   ./scripts/release.sh 6.1.0            # this exact version — see "naming one" below
+#
+# **Naming one.** A bump is derived from the newest git TAG, and that is only the right answer while
+# the tags are ahead of every package on PyPI. They were not: gini-toolkit was published at 6.0.0
+# by hand, before a tag drove it, while the repo's newest tag was v0.1.0. Bumping gave 0.2.0 — which
+# uploads fine and then loses, because pip serves the HIGHEST version, so every `pipx install
+# gini-toolkit` would have kept getting 6.0.0 and no further 0.x release could ever have won. Say
+# the version outright when the derived one would land below what is already published; check with
+#     pip index versions gini-toolkit
 #
 # The version is derived from the git tag by setuptools-scm, for all three packages at once —
 # gini-core, gini-toolkit and gini-teaching-center share this repo and share a number. Pushing the
@@ -47,12 +56,18 @@ if [ -z "$level" ]; then
   echo "  minor -> $(next minor)"
   echo "  major -> $(next major)"
   echo
-  echo "usage: $0 {patch|minor|major}"
+  echo "usage: $0 {patch|minor|major|X.Y.Z}"
   exit 0
 fi
-case "$level" in patch|minor|major) ;; *) echo "usage: $0 {patch|minor|major}" >&2; exit 2 ;; esac
-
-VERSION="$(next "$level")"
+case "$level" in
+  patch|minor|major) VERSION="$(next "$level")" ;;
+  # An explicit X.Y.Z, for when the derived bump is the wrong answer — see the header.
+  *) if printf '%s' "$level" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+       VERSION="$level"
+     else
+       echo "usage: $0 {patch|minor|major|X.Y.Z}" >&2; exit 2
+     fi ;;
+esac
 TAG="v$VERSION"
 
 # --- guards ---------------------------------------------------------------- #
@@ -90,7 +105,14 @@ cat <<INFO
 
 INFO
 read -r -p "Tag and push $TAG? [y/N] " ok
-[ "$ok" = "y" ] || { echo "Nothing done."; exit 0; }
+# Accept the capital too. `[ "$ok" = "y" ]` matched lowercase ONLY, so answering the [y/N] prompt
+# with "Y" printed "Nothing done." after a two-minute test run — indistinguishable from a guard
+# refusing the release, and the obvious next move is to look for what is wrong with the release.
+# (A `case` rather than `${ok,,}`: macOS ships bash 3.2, which has no case conversion.)
+case "$ok" in
+  y|Y|yes|Yes|YES) ;;
+  *) echo "Nothing done."; exit 0 ;;
+esac
 
 git tag -a "$TAG" -m "$TAG"
 git push origin "$BRANCH"
