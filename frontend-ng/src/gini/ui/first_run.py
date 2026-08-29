@@ -31,9 +31,10 @@ class FirstRunDialog(QDialog):
     stepped = Signal(str)
     finished_setup = Signal(dict)
 
-    def __init__(self, plan: dict, parent=None) -> None:
+    def __init__(self, plan: dict, parent=None, on_tour=None) -> None:
         super().__init__(parent)
         self.plan = plan
+        self._on_tour = on_tour
         self.setWindowTitle("Set up GINI")
         self.setModal(False)              # the canvas stays usable while images download
         self.setMinimumWidth(560)
@@ -75,6 +76,13 @@ class FirstRunDialog(QDialog):
         root.addWidget(self.bar)
 
         row = QHBoxLayout()
+        # The launch no longer opens the tour over this panel, so this is the way in. Left-aligned
+        # and never the default: it is the optional one of the two things on offer here.
+        self.tour = QPushButton("Take the tour")
+        self.tour.setAutoDefault(False)
+        self.tour.clicked.connect(self._show_tour)
+        self.tour.setVisible(on_tour is not None)
+        row.addWidget(self.tour)
         row.addStretch(1)
         self.later = QPushButton("Not now")
         self.later.clicked.connect(self.reject)
@@ -102,6 +110,10 @@ class FirstRunDialog(QDialog):
             bootstrap.UPDATE: "Refresh the container images",
         }.get(self.plan["state"], "Set up GINI")
 
+    def _show_tour(self) -> None:
+        if self._on_tour is not None:
+            self._on_tour()
+
     def _action_label(self) -> str:
         return "Build them" if self.plan["state"] == bootstrap.BUILD else "Get them"
 
@@ -125,6 +137,11 @@ class FirstRunDialog(QDialog):
         self.bar.hide()
         self.detail.setText(result.get("message", ""))
         self.later.setText("Close")
+        if result.get("ok"):
+            # Setup is done, so the tour becomes the sensible next step rather than an interruption.
+            self.go.hide()
+            self.tour.setDefault(True)
+            return
         if not result.get("ok"):
             # Offer another go: the commonest cause is a dropped connection, and making them
             # restart the app to retry would be a poor answer to that.
@@ -132,10 +149,12 @@ class FirstRunDialog(QDialog):
             self.go.setEnabled(True)
 
 
-def offer(plan: dict, parent=None) -> FirstRunDialog | None:
+def offer(plan: dict, parent=None, on_tour=None) -> FirstRunDialog | None:
     """Show the panel for a plan that needs something. Returns the dialog, or None if not needed."""
     if not plan or plan.get("state") == bootstrap.READY:
         return None
-    dlg = FirstRunDialog(plan, parent)
+    dlg = FirstRunDialog(plan, parent, on_tour=on_tour)
     dlg.show()
+    dlg.raise_()              # nothing should sit on top of the one thing that has to happen
+    dlg.activateWindow()
     return dlg

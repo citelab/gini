@@ -31,6 +31,44 @@ def local_name(ref: str) -> str:
     return ref.rsplit("/", 1)[-1].split(":", 1)[0] + ":latest"
 
 
+def missing_locally(refs, run=subprocess.run) -> list[str]:
+    """Which of these images are NOT on this machine, by the name the runtime resolves.
+
+    The setup marker records what a pull REPORTED, and that is not the same as what Docker holds.
+    Both failures this project has shipped wrote a marker saying the machine was ready over a
+    machine that could not start anything — 6.0.0 pulled arm64-only images on an Intel Mac, and
+    6.1.0 pulled successfully but left nothing under the names the runtime resolves — and nothing
+    ever re-checked, so gBuilder reported READY for ever and the panel never came back.
+
+    A marker is a cache. This is its invalidation: cheap, local, and the same question the
+    orchestrator will ask at Run time.
+
+    An unreachable Docker returns [] rather than "everything is missing": that machine is already
+    heading for NEEDS_RUNTIME, and guessing here would put a download in front of somebody whose
+    engine is simply stopped.
+    """
+    names = [local_name(r) for r in refs]
+    if not names:
+        return []
+    try:
+        r = run(["docker", "image", "inspect", "--format", "{{.Id}}", *names],
+                capture_output=True, timeout=30)
+        if r.returncode == 0:
+            return []                      # one call, and the common case answers here
+    except Exception:                      # noqa: BLE001 — cannot ask; claim nothing
+        return []
+    missing = []
+    for ref, name in zip(refs, names):     # only when something IS missing, to say which
+        try:
+            one = run(["docker", "image", "inspect", "--format", "{{.Id}}", name],
+                      capture_output=True, timeout=15)
+            if one.returncode != 0:
+                missing.append(ref)
+        except Exception:                  # noqa: BLE001
+            missing.append(ref)
+    return missing
+
+
 def pull_images(refs, run=subprocess.run) -> list[tuple[str, bool]]:
     """Pull each ref AND give it the plain local name; return [(ref, ok)].
 

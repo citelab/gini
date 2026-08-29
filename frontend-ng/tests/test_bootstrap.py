@@ -164,6 +164,53 @@ def test_planning_touches_no_network(monkeypatch, with_docker):
     B.plan("6.1.0", run=explode)
 
 
+def _images_gone(cmd, **k):
+    """Docker answers normally, except that no image is present."""
+    class R:
+        returncode = 1 if list(cmd[:3]) == ["docker", "image", "inspect"] else 0
+    return R()
+
+
+def test_a_marker_cannot_claim_images_that_docker_does_not_have(monkeypatch, with_docker):
+    """THE reason a broken setup was permanent.
+
+    The marker records what a pull REPORTED, and both failures this project shipped wrote one over
+    a machine that could not run anything: 6.0.0 pulled arm64-only images on an Intel Mac, and
+    6.1.0 pulled successfully but left nothing under the names the runtime resolves. `plan()` then
+    said READY for ever — and since the panel only appears at launch, there was no way back short
+    of deleting ~/.gini/setup.json, which nothing tells you to do.
+    """
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    marker.write_marker({"version": "6.1.1", "images": ["ghcr.io/x/gini-xv6:6.1.1"]})
+    p = B.plan("6.1.1", run=_images_gone)
+    assert p["state"] == B.PULL                    # offered again rather than declared ready
+    assert p["missing"]                            # and it can say which
+    assert "no longer on this machine" in p["why"]
+
+
+def test_a_matching_marker_with_the_images_present_is_ready(monkeypatch, with_docker):
+    """The other half: this must not turn into "always offer", which would nag on every launch."""
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    marker.write_marker({"version": "6.1.1", "images": ["ghcr.io/x/gini-xv6:6.1.1"]})
+    p = B.plan("6.1.1", run=_docker_ok)
+    assert p["state"] == B.READY and p["missing"] == []
+
+
+def test_a_source_checkout_missing_its_images_is_told_to_build(monkeypatch, with_docker):
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: Path("/src/backend"))
+    marker.write_marker({"version": "6.1.1", "images": ["ghcr.io/x/gini-xv6:6.1.1"]})
+    assert B.plan("6.1.1", run=_images_gone)["state"] == B.BUILD
+
+
+def test_a_stopped_engine_is_never_reported_as_missing_images(monkeypatch, stopped_docker):
+    """Docker cannot answer, so "your images are gone" would be a guess — and it would put a
+    download in front of somebody whose engine is merely stopped."""
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    marker.write_marker({"version": "6.1.1", "images": ["ghcr.io/x/gini-xv6:6.1.1"]})
+    p = B.plan("6.1.1", run=_images_gone)
+    assert p["state"] == B.NEEDS_RUNTIME and p["missing"] == []
+
+
 # -- doing it ------------------------------------------------------------------ #
 def test_a_pull_records_only_what_actually_arrived(monkeypatch, with_docker):
     """A partial success remembered as a full one means the app never offers to finish the job."""

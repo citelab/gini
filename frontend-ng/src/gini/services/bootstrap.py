@@ -53,6 +53,11 @@ def plan(app_version: str | None, *, run=subprocess.run, backend_hint: str | Non
     backend = images.find_backend(backend_hint)
     done = marker.is_setup_done()
     stale = marker.needs_update(app_version or "")
+    # Trust Docker over the marker. Asked only when the marker claims there is nothing to do —
+    # the other branches already end in an offer, so this is the one case where a wrong marker
+    # would silence the panel permanently.
+    absent = (images.missing_locally(images.image_refs(app_version), run=run)
+              if (have_docker and done and not stale) else [])
 
     if rt_state == "stopped":
         # Installed, but the engine is not answering. Distinct from "missing" because the advice is
@@ -82,6 +87,13 @@ def plan(app_version: str | None, *, run=subprocess.run, backend_hint: str | Non
         state, why = UPDATE, (
             f"gBuilder was upgraded to {app_version}, but the images on this machine were set up "
             f"for {marker.setup_version()}. Refreshing them keeps the two in step.")
+    elif absent:
+        # The marker says setup ran, Docker says otherwise. Docker wins.
+        names = ", ".join(images.local_name(r).split(":")[0] for r in absent)
+        state, why = (BUILD if backend is not None else PULL), (
+            f"Setup has run here before, but {len(absent)} of the container images "
+            f"{'is' if len(absent) == 1 else 'are'} no longer on this machine ({names}), so Run "
+            f"cannot start anything. Getting them again takes a few minutes and is a one-off.")
     else:
         state, why = READY, "Everything needed is already here."
 
@@ -92,6 +104,7 @@ def plan(app_version: str | None, *, run=subprocess.run, backend_hint: str | Non
         "arch": arch(),                    # shown, never used to choose an image
         "docker": have_docker,
         "runtime_state": rt_state,   # "ok" | "stopped" | "missing"
+        "missing": absent,           # images the marker claimed but Docker lacks
         "source": str(backend) if backend else "",
         "app_version": app_version or "",
         "image_tag": images.image_tag(app_version),

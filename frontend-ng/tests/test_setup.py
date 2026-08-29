@@ -100,6 +100,39 @@ def test_every_os_says_how_to_START_the_runtime_not_only_how_to_install_it():
         assert runtime.runtime_plan(os_name).get("start"), os_name
 
 
+def test_missing_locally_asks_docker_by_the_name_the_runtime_resolves():
+    """Not by the registry reference — that is the name nothing looks for."""
+    seen = []
+
+    def fake(cmd, **k):
+        seen.append(list(cmd))
+        return types.SimpleNamespace(returncode=0)
+
+    assert images.missing_locally([f"{REGISTRY}/gini-xv6:6.1.1"], run=fake) == []
+    assert "gini-xv6:latest" in seen[0]
+    assert not any(c.startswith("ghcr.io") for c in seen[0])
+
+
+def test_missing_locally_names_exactly_what_is_gone():
+    refs = [f"{REGISTRY}/gini-xv6:6.1.1", f"{REGISTRY}/gini-pox:6.1.1"]
+
+    def fake(cmd, **k):
+        names = [c for c in cmd if c.endswith(":latest")]
+        present = len(names) == 1 and names[0].startswith("gini-pox")   # pox here, xv6 not
+        return types.SimpleNamespace(returncode=0 if present else 1)
+
+    assert images.missing_locally(refs, run=fake) == [f"{REGISTRY}/gini-xv6:6.1.1"]
+
+
+def test_an_unreachable_docker_does_not_claim_the_images_are_gone():
+    """That machine is already heading for NEEDS_RUNTIME; guessing here would offer a download to
+    somebody whose engine is simply stopped."""
+    def boom(cmd, **k):
+        raise OSError("cannot talk to docker")
+
+    assert images.missing_locally([f"{REGISTRY}/gini-xv6:6.1.1"], run=boom) == []
+
+
 def test_marker_roundtrip_and_status(tmp_path, monkeypatch):
     monkeypatch.setenv("GINI_HOME", str(tmp_path))
     assert marker.is_setup_done() is False

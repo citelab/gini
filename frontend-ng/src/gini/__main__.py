@@ -68,6 +68,23 @@ def _setup_preflight() -> dict | None:
         return None
 
 
+def launch_steps(plan: dict | None, args) -> dict:
+    """What happens after the window is shown: the setup panel, the tour, or neither.
+
+    They must not both run. The tour is a MODAL `CueCards(...).exec()` and the setup panel is a
+    non-modal `show()`, so starting both put a "here are all the features" dialog in front of the
+    one action that has to happen before any of those features work — and the panel underneath it
+    could not even be clicked. Setup wins; the panel carries a button into the tour, so nothing is
+    lost for the person who wanted it.
+
+    Split out of `main()` so the rule is testable without a QApplication.
+    """
+    interactive = not ({"--demo", "--selftest"} & set(args))
+    if plan and interactive:
+        return {"setup": True, "tour": False}
+    return {"setup": False, "tour": True}
+
+
 def main() -> int:
     args = set(sys.argv[1:])
     from PySide6.QtCore import Qt
@@ -115,17 +132,21 @@ def main() -> int:
     plan = _setup_preflight()                      # local + fast; never delays the window
     win.show()
     from PySide6.QtCore import QTimer
-    if plan and not ({"--demo", "--selftest"} & args):
+    steps = launch_steps(plan, args)
+    if steps["setup"]:
         # AFTER show(), so the panel appears over a real window rather than an empty screen — and
         # deferred, so a slow dialog construction cannot be mistaken for a slow launch.
         def _offer():
             try:
                 from .ui.first_run import offer
-                win._first_run = offer(plan, win)      # kept alive; a local would be collected
+                # on_tour: the tour is no longer launched over this panel, so the panel owns the
+                # way into it. Nothing is lost; it just stops covering the thing that matters.
+                win._first_run = offer(plan, win, on_tour=win.show_feature_tour)
             except Exception:                          # noqa: BLE001
                 pass                                   # setup is a convenience, never a blocker
         QTimer.singleShot(700, _offer)
-    QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted
+    if steps["tour"]:
+        QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted
     return app.exec()
 
 
