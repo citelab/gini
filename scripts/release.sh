@@ -83,8 +83,7 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
 fi
 
 echo "Running the tests before tagging anything…"
-if ! ( cd frontend-ng && python3 -m pytest tests/ -q -x \
-        --ignore=tests/test_qt_suite.py 2>&1 | tail -5 ); then
+if ! ( cd frontend-ng && python3 -m pytest tests/ -q -x 2>&1 | tail -5 ); then
   echo "Tests failed — nothing tagged." >&2
   exit 1
 fi

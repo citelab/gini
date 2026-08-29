@@ -41,9 +41,15 @@ test)
   # tests/test_bootstrap.py` should run that file, not the whole suite plus that file.
   targets=("${@:2}")
   [ ${#targets[@]} -eq 0 ] && targets=(tests/)
-  # The Qt suite is excluded by default: it needs a display, and app-level setStyleSheet re-polishes
-  # every live widget, which makes it quadratic and slow. Run it explicitly when touching the UI.
-  exec $PY -m pytest "${targets[@]}" -q --ignore=tests/test_qt_suite.py
+  # This runs EVERYTHING, Qt included. There is no separate Qt suite to exclude: an --ignore for
+  # `tests/test_qt_suite.py` used to sit here, and no such file has ever existed in this repo, so
+  # it excluded nothing while advertising a suite you could not run.
+  #
+  # Most UI tests set QT_QPA_PLATFORM=offscreen themselves at import (~90 files). Three do not and
+  # build a QApplication anyway — test_board_dialog, test_flash_dialog, test_pricing — so on a
+  # machine with no display, export it for the whole run:
+  #     QT_QPA_PLATFORM=offscreen ./scripts/dev.sh test
+  exec $PY -m pytest "${targets[@]}" -q
   ;;
 
 check)

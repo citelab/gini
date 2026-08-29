@@ -304,12 +304,16 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full map.
 ## Testing
 
 ```bash
-./scripts/dev.sh test                    # the suite, minus the Qt tests
+./scripts/dev.sh test                            # the whole suite, Qt tests included
 ./scripts/dev.sh test tests/test_tc_tls.py       # one file
 
-# the Qt suite needs a display, and is slow enough to be excluded by default:
-cd frontend-ng && QT_QPA_PLATFORM=offscreen pytest tests/test_qt_suite.py
+# on a machine with no display (a CI runner, a headless VM):
+QT_QPA_PLATFORM=offscreen ./scripts/dev.sh test
 ```
+
+Nothing is excluded — there is no separate Qt suite. Most UI tests set
+`QT_QPA_PLATFORM=offscreen` themselves at import, so they need no display; a few build a
+`QApplication` without it, which is why a headless run wants the variable exported for everything.
 
 The gRouter has end-to-end forwarding proofs under `backend/grouter-build/tests/`
 (`forward_test.py`, `multihop_test.py`, …), runnable against a built `grouter` binary.
