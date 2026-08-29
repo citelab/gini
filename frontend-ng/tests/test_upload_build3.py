@@ -95,6 +95,13 @@ objectives:
 
 @pytest.fixture()
 def live(tmp_path):
+    # TEACHING_CENTER_V1_SPEC.md §3.1, the open decision. v1 removed lesson authoring from the
+    # server, so there is no endpoint left to upload a fragment TO. The version gate and the client
+    # shape are pure and still run above; only the round trip through a live TC is retired.
+    #
+    # Skipped rather than deleted, for the same reason as test_ota_build4: if Missions must keep
+    # syncing from the Teaching Center, this path comes back.
+    pytest.skip("fragment upload retired by Teaching Center v1 — see spec §3.1 (decision pending)")
     root = tmp_path / "course"
     (root / "data").mkdir(parents=True)
     (root / "courses" / "c1").mkdir(parents=True)

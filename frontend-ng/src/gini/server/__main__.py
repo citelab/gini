@@ -21,9 +21,9 @@ def _adduser(argv: list[str]) -> int:
         return 2
     from .auth import hash_password
     path, user = Path(argv[0]), argv[1]
-    users = json.loads(path.read_text()) if path.exists() else {}
+    users = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     users[user] = hash_password(getpass.getpass(f"password for {user}: "))
-    path.write_text(json.dumps(users, indent=2))
+    path.write_text(json.dumps(users, indent=2), encoding="utf-8")
     print(f"saved {user} to {path}")
     return 0
 

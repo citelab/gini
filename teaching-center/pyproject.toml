@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gini-teaching-center"
+dynamic = ["version"]
+description = "GINI Teaching Center — courses, lab codes, and proof-of-activity submissions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "GINI Toolkit" }]
+# ONE dependency, and it is pure Python. `gini-core` carries the proof format, the ticket codes and
+# the narration — the code this server and every student's gBuilder must agree on exactly. It
+# deliberately does NOT depend on gini-toolkit: that would pull PySide6 and a Chromium build onto a
+# headless VM to run a web server that never opens a window.
+dependencies = ["gini-core"]
+
+[project.urls]
+Homepage = "https://github.com/citelab/gini"
+
+[project.scripts]
+gini-teaching-center = "gini_teaching_center.cli:main"
+gini-tc = "gini_teaching_center.cli:main"          # the one you will actually type on a server
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# The console and the student page are served straight off disk, so they must ride along in the
+# wheel. Without this the server installs and then 500s on its own front page.
+"gini_teaching_center" = ["static/*.html"]
+
+[tool.setuptools_scm]
+root = ".."
+version_file = "src/gini_teaching_center/_version.py"
+local_scheme = "no-local-version"

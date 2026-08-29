@@ -13,10 +13,14 @@ Thin by design: every decision belongs to `services.proof_recorder`, which is te
 """
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
+
+from ..services import outbox, tc_submit
 
 
 class ProofStrip(QWidget):
@@ -27,6 +31,12 @@ class ProofStrip(QWidget):
     # goes through a Signal, which Qt queues onto the GUI thread — touching a widget from the
     # emitting thread would be a crash waiting for a slow afternoon.
     changed = Signal()
+    # Network work happens on a worker thread and comes back through these. Touching a widget from
+    # the emitting thread is a crash waiting for a slow afternoon, and every one of these calls can
+    # block for twenty seconds on campus wifi.
+    armChecked = Signal(str, dict)          # typed code, server's answer ({} == unreachable)
+    handedIn = Signal(dict, dict)           # generate_proof result, server's answer
+    flushed = Signal(dict)                  # outbox.flush summary
 
     def __init__(self, theme, recorder, parent=None) -> None:
         super().__init__(parent)
@@ -69,6 +79,9 @@ class ProofStrip(QWidget):
         if hasattr(theme, "themeChanged"):
             theme.themeChanged.connect(self._restyle)
         self.changed.connect(self._on_recorder_changed)
+        self.armChecked.connect(self._on_arm_checked)
+        self.handedIn.connect(self._on_handed_in)
+        self.flushed.connect(self._on_flushed)
         if recorder is not None and hasattr(recorder, "set_on_change"):
             recorder.set_on_change(self.changed.emit)
         self._restyle()
@@ -81,16 +94,71 @@ class ProofStrip(QWidget):
         else:
             self._arm()
 
+    def _tc_url(self) -> str:
+        """Where the Teaching Center is, or "" if this gBuilder is not attached to a course.
+
+        Read through the recorder, which already holds the app context — the strip does not need
+        one of its own, and an offline gBuilder must keep working exactly as it does today.
+        """
+        try:
+            return (self.recorder.ctx.settings.tc_url or "").strip()
+        except AttributeError:
+            return ""
+
     def _arm(self) -> None:
         if self.recorder is None:
             return
-        ok, message = self.recorder.arm(self.code.text())
+        typed = self.code.text()
+        url = self._tc_url()
+        if not (url and typed.strip()):
+            self._arm_locally(typed)
+            return
+
+        # Ask the course server FIRST. A GINI code is self-checking, so a code the course never
+        # issued — or one that expired last night — arms perfectly well offline, and the student
+        # finds out only when they try to hand in.
+        #
+        # On a WORKER thread: this is a network call with a twenty-second timeout, and freezing the
+        # canvas while a lab is running would be a worse bug than the one it prevents.
+        self._say("Checking that code with the course server…", bad=False)
+
+        def work():
+            try:
+                answer = tc_submit.check_code(url, typed)
+            except tc_submit.Untrusted as e:
+                # A certificate problem is NOT a flaky network: retrying will never help, and
+                # recording locally under a code we could not verify hides a real misconfiguration.
+                answer = {"ok": False, "error": str(e)}
+            except tc_submit.Unreachable:
+                answer = {}                       # empty == could not ask, NOT a refusal
+            self.armChecked.emit(typed, answer)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_arm_checked(self, typed: str, answer: dict) -> None:
+        if answer and not answer.get("ok"):
+            self._say(answer.get("error", "That code cannot be used."), bad=True)
+            self.refresh(keep_hint=True)
+            return
+        if not answer:
+            # The code may be perfectly good and the wifi bad. Recording locally is the only
+            # answer that cannot cost a student their evening.
+            self._say("Could not reach the course server — recording locally.", bad=False)
+            self._arm_locally(typed, keep_hint=True)
+            return
+        self._arm_locally(typed)
+
+    def _arm_locally(self, typed: str, keep_hint: bool = False) -> None:
+        ok, message = self.recorder.arm(typed)
         if ok:
             self.code.clear()
         # The refusal is shown in the strip, not in a modal: a mistyped code is an everyday
         # slip, and a dialog for it would train students to dismiss dialogs without reading.
-        self._say(message, bad=not ok)
+        if not (keep_hint and ok):
+            self._say(message, bad=not ok)
         self.refresh(keep_hint=True)
+        if ok:
+            self.flush_outbox()
 
     def _generate(self) -> None:
         if self.recorder is None:
@@ -103,12 +171,117 @@ class ProofStrip(QWidget):
         receipt = result.get("receipt", "")
         self._say(f"Proof generated · receipt <b>{receipt}</b>", bad=False)
         self.refresh(keep_hint=True)
-        QMessageBox.information(
-            self, "Proof generated",
-            f"Your proof was written to:\n{result.get('path', '')}\n\n"
+        self._hand_in(result, receipt)
+
+    def _hand_in(self, result: dict, receipt: str) -> None:
+        """Queue the work, then try to send it.
+
+        Queued FIRST, always. The receipt the student is about to be shown is computed from the
+        proof's MAC, and the server computes it the same way — so a receipt handed to an instructor
+        before the upload lands is still the right one afterwards. That is the property that makes
+        a retry safe, and the reason the student is never asked to come back for a new one.
+        """
+        proof = result.get("proof") or {}
+        path = result.get("path", "")
+        try:
+            outbox.queue(proof, result.get("topology"))
+        except Exception as e:                                   # noqa: BLE001
+            # The proof file is still on disk; say so rather than pretending nothing happened.
+            self._say(f"Could not queue the submission: {e}", bad=True)
+
+        url = self._tc_url()
+        if not url:
+            QMessageBox.information(
+                self, "Proof generated",
+                f"Your proof was written to:\n{path}\n\nReceipt code: {receipt}\n\n"
+                "This gBuilder is not attached to a course server, so nothing was sent. Hand the "
+                "proof file to your instructor.")
+            return
+
+        self._say(f"Sending your work · receipt <b>{receipt}</b>", bad=False)
+
+        def work():
+            try:
+                answer = tc_submit.submit(url, str(proof.get("ticket", "")), proof,
+                                          result.get("topology"))
+            except tc_submit.Untrusted as e:
+                answer = {"ok": False, "untrusted": True, "error": str(e)}
+            except tc_submit.Unreachable as e:
+                answer = {"ok": False, "unreachable": True, "error": str(e)}
+            self.handedIn.emit(result, answer)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_handed_in(self, result: dict, answer: dict) -> None:
+        receipt = result.get("receipt", "")
+        path = result.get("path", "")
+
+        if answer.get("ok"):
+            outbox.forget(answer.get("receipt", receipt))
+            receipt = answer.get("receipt", receipt)
+            late = "" if answer.get("within_session", True) else (
+                "\n\nNote: this took longer than the time the code allowed. Your instructor can "
+                "see that, and can still mark it.")
+            self._say(f"Handed in · receipt <b>{receipt}</b>", bad=False)
+            QMessageBox.information(
+                self, "Handed in",
+                f"Your work has been sent to the course server.\n\n"
+                f"Receipt code: {receipt}\n\n"
+                f"Give this receipt to your instructor — it is how they find your work and record "
+                f"it as yours. Nothing else needs to be handed in.\n\n"
+                f"A copy is also on disk at:\n{path}{late}")
+            return
+
+        if answer.get("reason") in outbox.SETTLED:
+            outbox.forget(receipt)               # an earlier attempt already landed
+
+        if answer.get("untrusted"):
+            # Saying "is it still running?" here would send a student chasing a server that is up,
+            # and no amount of retrying fixes a certificate. Name it, and point at the instructor.
+            self._say(f"Not sent · certificate not trusted · receipt <b>{receipt}</b>", bad=True)
+            QMessageBox.warning(
+                self, "The course server's certificate is not trusted",
+                f"Your work is safe. The proof is on disk at:\n{path}\n\n"
+                f"Receipt code: {receipt}\n\n{answer.get('error', '')}\n\n"
+                f"gBuilder will keep the submission and try again, but this will not clear up on "
+                f"its own. Give your instructor the receipt either way.")
+            return
+
+        # It did NOT go. The receipt is still correct and still theirs, and gBuilder will keep
+        # trying — so the message has to prevent the one action that would make it worse, which is
+        # a panicked student redoing the lab under a new code.
+        self._say(f"Not sent yet · receipt <b>{receipt}</b> · will retry", bad=True)
+        QMessageBox.warning(
+            self, "Saved — not sent yet",
+            f"Your work is safe. The proof is on disk at:\n{path}\n\n"
             f"Receipt code: {receipt}\n\n"
-            "Hand in the proof file. The receipt is only so you and your instructor can check "
-            "at a glance that you are both looking at the same submission.")
+            f"It could not reach the course server: {answer.get('error', 'refused')}\n\n"
+            f"gBuilder will try again automatically next time it starts or you enter a code. "
+            f"This receipt stays valid — give it to your instructor either way, and do not redo "
+            f"the lab.")
+
+    # -- the outbox ---------------------------------------------------------- #
+    def flush_outbox(self) -> None:
+        """Try anything that never made it. Safe to call often: it is a no-op when empty."""
+        url = self._tc_url()
+        if not url or not outbox.pending():
+            return
+
+        def work():
+            self.flushed.emit(outbox.flush(url, tc_submit.submit))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_flushed(self, summary: dict) -> None:
+        sent, kept = summary.get("sent") or [], summary.get("kept") or []
+        if sent:
+            # Worth a word: the student was last told it had NOT been sent, and silence would
+            # leave them believing that.
+            self._say(f"Caught up · {len(sent)} earlier submission"
+                      f"{'' if len(sent) == 1 else 's'} sent", bad=False)
+        elif kept:
+            self._say(f"{len(kept)} submission{'' if len(kept) == 1 else 's'} still waiting to "
+                      f"send", bad=True)
 
     # -- rendering ----------------------------------------------------------- #
     def _on_recorder_changed(self) -> None:

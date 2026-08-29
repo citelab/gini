@@ -81,7 +81,7 @@ class NullEmbeddings:
 
 def load_index(path: Path = _INDEX_PATH) -> dict | None:
     try:
-        return json.loads(Path(path).read_text())
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 

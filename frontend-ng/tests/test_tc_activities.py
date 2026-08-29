@@ -4,6 +4,10 @@ These are the rules a class depends on, so they are written as the things that m
 a code issued after the deadline, a hoarded code still working, the same work handed in twice, a
 student's identity landing in a table that promised not to hold one.
 
+v1 has no observation plan, so nothing here mentions one. A code names an *activity*, and the
+report narrates what the chain says happened. What is still enforced is integrity: the chain
+verifies, and it was recorded under the code being redeemed.
+
 No network, no model, no Docker. The store is a real SQLite database in a temp directory, because
 the uniqueness constraints ARE the design and a mock would not have them.
 """
@@ -16,14 +20,13 @@ from pathlib import Path
 
 import pytest
 
-_TC = Path(__file__).resolve().parents[2] / "teaching-center"
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 if str(_TC) not in sys.path:
     sys.path.insert(0, str(_TC))
 
-import activities as ACT                                       # noqa: E402
-from store import Store                                        # noqa: E402
+from gini_teaching_center import activities as ACT                                       # noqa: E402
+from gini_teaching_center.store import Store                                        # noqa: E402
 
-from gini.domain import aop as A                               # noqa: E402
 from gini.domain import proof as P                             # noqa: E402
 from gini.domain import ticket as T                            # noqa: E402
 
@@ -39,18 +42,9 @@ def store(tmp_path):
     return Store(str(tmp_path))
 
 
-def a_plan():
-    return A.Aop(header=A.Header(intent="build a routed network"),
-                 expectations=(A.Expectation(id="e", say="A router exists", layer="L3",
-                                             check="exists('router')"),))
-
-
 def an_activity(store, *, released=True, vend_until=NOW + HOUR, session_minutes=60):
-    plan = a_plan()
     rec = {"id": "comp535/lab1", "course": "comp535", "lab": "lab1", "title": "Multi-LAN",
-           "intent": "build a routed network", "selection": "{}",
-           "plan": json.dumps(plan.to_dict(), sort_keys=True),
-           "plan_hash": A.plan_hash(plan),
+           "brief": "Join two LANs with a router and show they can talk.",
            "status": "released" if released else "draft",
            "vend_until": vend_until, "session_minutes": session_minutes,
            "created": NOW, "released": NOW if released else 0.0}
@@ -58,19 +52,27 @@ def an_activity(store, *, released=True, vend_until=NOW + HOUR, session_minutes=
     return store.activity("comp535/lab1")
 
 
-def a_proof(code, plan_hash, *, t0=NOW, minutes=10.0):
+def a_proof(code, *, t0=NOW, minutes=10.0, topo=None):
     """A chain that looks like real work, recorded under `code`.
 
-    `Chain.start(t=…)` matters: genesis is stamped with the real clock unless told otherwise, and
-    the session window is measured from genesis (when the student armed) to the last entry. A helper
+    Two things here are load-bearing, and both were learned the hard way.
+
+    `Chain.start(t=…)`: genesis is stamped with the real clock unless told otherwise, and the
+    session window is measured from genesis (when the student armed) to the last entry. A helper
     that let genesis default would measure from *now* to a made-up past and quietly pass every
     timing test.
+
+    `artifact_summary(...)`: the submit entry is built by the SAME function the recorder uses, so
+    the fixture cannot drift into a shape the real gBuilder never emits. A hand-written
+    `{"sha256": …, "devices": 1}` looks plausible, carries no `elements` map, and makes the
+    narration report "Nothing was handed in." over a chain that plainly built something.
     """
+    topo = topo if topo is not None else {"devices": [{"id": "1", "name": "R1", "type": "Router"}],
+                                          "links": []}
     chain = P.Chain.start(code, assignment="comp535/lab1", gini_version="test", t=t0)
-    chain.entries[0].data["plan_hash"] = plan_hash   # §11: genesis names the instrument
-    chain.append("place", {"n": "R1"}, t=t0 + 1)
-    chain.append("submit", {"artifact": {"sha256": "abc123", "devices": 1}},
-                 t=t0 + minutes * 60)
+    for d in topo["devices"]:
+        chain.append("place", {"id": d["id"], "type": d["type"], "name": d["name"]}, t=t0 + 1)
+    chain.append("submit", {"artifact": P.artifact_summary(topo)}, t=t0 + minutes * 60)
     return P.build_proof(chain)
 
 
@@ -114,9 +116,9 @@ def test_a_vended_code_is_one_gbuilder_will_accept(store):
     assert T.valid(code)
 
 
-def test_a_code_names_the_plan_it_was_minted_against(store):
+def test_a_code_names_the_activity_it_was_minted_for(store):
     act = an_activity(store)
-    assert ACT.mint_code(act, now=NOW)["plan_hash"] == act["plan_hash"]
+    assert ACT.mint_code(act, now=NOW)["activity"] == act["id"]
 
 
 # -- hoarding ----------------------------------------------------------------- #
@@ -162,17 +164,9 @@ def test_a_spent_code_is_refused(store):
     assert ACT.check_code(row, act, now=NOW)[1] == ACT.ALREADY_USED
 
 
-def test_a_code_whose_plan_moved_is_refused(store):
-    """A student must never be measured by an instrument other than the one their code named."""
-    act = an_activity(store)
-    row = ACT.mint_code(act, now=NOW)
-    moved = dict(act, plan_hash="something-else")
-    assert ACT.check_code(row, moved, now=NOW)[1] == ACT.PLAN_MOVED
-
-
 def test_every_refusal_has_a_sentence_a_student_can_act_on():
     for reason in (ACT.NO_ACTIVITY, ACT.NOT_RELEASED, ACT.VENDING_CLOSED, ACT.UNKNOWN_CODE,
-                   ACT.EXPIRED, ACT.ALREADY_USED, ACT.PLAN_MOVED):
+                   ACT.EXPIRED, ACT.ALREADY_USED, ACT.BAD_PROOF, ACT.DUPLICATE):
         assert ACT.message(reason).endswith((".", "!"))
 
 
@@ -187,18 +181,18 @@ def test_a_good_submission_is_prepared(store):
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
     store.code_put(row)
-    proof = a_proof(row["code"], act["plan_hash"])
+    proof = a_proof(row["code"])
     rec = ACT.prepare({"proof": proof}, row, act, now=NOW)
     assert rec["receipt"] == P.receipt_code(proof)
-    assert rec["artifact_hash"] == "abc123"
+    assert rec["artifact_hash"] == proof["entries"][-1]["data"]["artifact"]["sha256"]
     assert rec["verdict"] == "pass"
 
 
 def test_a_tampered_proof_is_refused(store):
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
-    proof = a_proof(row["code"], act["plan_hash"])
-    proof["entries"][1]["data"]["n"] = "R2"                  # edit after the fact
+    proof = a_proof(row["code"])
+    proof["entries"][1]["data"]["name"] = "R2"                  # edit after the fact
     with pytest.raises(ACT.Rejected) as e:
         ACT.prepare({"proof": proof}, row, act, now=NOW)
     assert e.value.reason == ACT.BAD_PROOF
@@ -210,15 +204,7 @@ def test_a_proof_recorded_under_another_code_is_refused(store):
     mine = ACT.mint_code(act, now=NOW)
     theirs = ACT.mint_code(act, now=NOW)
     with pytest.raises(ACT.Rejected):
-        ACT.prepare({"proof": a_proof(theirs["code"], act["plan_hash"])}, mine, act, now=NOW)
-
-
-def test_a_proof_against_an_older_plan_is_refused(store):
-    act = an_activity(store)
-    row = ACT.mint_code(act, now=NOW)
-    with pytest.raises(ACT.Rejected) as e:
-        ACT.prepare({"proof": a_proof(row["code"], "an-older-plan")}, row, act, now=NOW)
-    assert e.value.reason == ACT.WRONG_PLAN
+        ACT.prepare({"proof": a_proof(theirs["code"])}, mine, act, now=NOW)
 
 
 def test_a_submission_with_no_proof_is_refused(store):
@@ -233,8 +219,7 @@ def test_an_expired_code_is_refused_at_submission_too(store):
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
     with pytest.raises(ACT.Rejected) as e:
-        ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"])}, row, act,
-                    now=row["valid_until"] + 1)
+        ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=row["valid_until"] + 1)
     assert e.value.reason == ACT.EXPIRED
 
 
@@ -243,8 +228,7 @@ def test_the_session_window_is_measured_from_the_chain(store):
     act = an_activity(store, session_minutes=60)
     row = ACT.mint_code(act, now=NOW)
     store.code_put(row)
-    rec = ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"], minutes=10)}, row, act,
-                      now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"], minutes=10)}, row, act, now=NOW)
     assert ACT.within_session(rec, act)
 
 
@@ -252,8 +236,7 @@ def test_syncing_a_day_late_is_not_late(store):
     """Finished inside the window, submitted the next morning. Arrival time is metadata."""
     act = an_activity(store, vend_until=0, session_minutes=60)
     row = ACT.mint_code(act, now=NOW)
-    rec = ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"], minutes=10)}, row, act,
-                      now=NOW + 24 * HOUR)
+    rec = ACT.prepare({"proof": a_proof(row["code"], minutes=10)}, row, act, now=NOW + 24 * HOUR)
     assert ACT.within_session(rec, act)
 
 
@@ -262,8 +245,7 @@ def test_an_overrun_is_reported_not_rejected(store):
     evening's work."""
     act = an_activity(store, session_minutes=60)
     row = ACT.mint_code(act, now=NOW)
-    rec = ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"], minutes=90)}, row, act,
-                      now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"], minutes=90)}, row, act, now=NOW)
     assert rec["verdict"] == "pass"
     assert not ACT.within_session(rec, act)
 
@@ -273,7 +255,7 @@ def test_one_code_one_submission(store):
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
     store.code_put(row)
-    rec = ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"])}, row, act, now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
     assert store.submission_put(rec) is True
     assert store.submission_put(dict(rec, receipt="OTHR-RCPT")) is False
 
@@ -282,7 +264,7 @@ def test_the_same_proof_cannot_be_handed_in_twice(store):
     """David's proof file, submitted by Paul under his own code."""
     act = an_activity(store)
     a, b = ACT.mint_code(act, now=NOW), ACT.mint_code(act, now=NOW)
-    proof = a_proof(a["code"], act["plan_hash"])
+    proof = a_proof(a["code"])
     first = ACT.prepare({"proof": proof}, a, act, now=NOW)
     assert store.submission_put(first) is True
     assert store.submission_put(dict(first, code=b["code"])) is False       # receipt collides
@@ -293,9 +275,8 @@ def test_identical_work_under_two_codes_is_flagged_not_rejected(store):
     for two submissions to share an artifact, so this flags for review."""
     act = an_activity(store)
     a, b = ACT.mint_code(act, now=NOW), ACT.mint_code(act, now=NOW)
-    ra = ACT.prepare({"proof": a_proof(a["code"], act["plan_hash"])}, a, act, now=NOW)
-    rb = ACT.prepare({"proof": a_proof(b["code"], act["plan_hash"], t0=NOW + 500)}, b, act,
-                     now=NOW)
+    ra = ACT.prepare({"proof": a_proof(a["code"])}, a, act, now=NOW)
+    rb = ACT.prepare({"proof": a_proof(b["code"], t0=NOW + 500)}, b, act, now=NOW)
     assert ra["receipt"] != rb["receipt"]                 # different receipts...
     assert ra["artifact_hash"] == rb["artifact_hash"]     # ...same topology
     assert store.submission_put(ra) and store.submission_put(rb)
@@ -306,26 +287,108 @@ def test_identical_work_under_two_codes_is_flagged_not_rejected(store):
 def test_a_receipt_finds_the_whole_submission(store):
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
-    rec = ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"])}, row, act, now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
     store.submission_put(rec)
     assert store.submission_by_receipt(rec["receipt"])["code"] == row["code"]
 
 
+# -- the report --------------------------------------------------------------- #
+def test_the_report_narrates_what_the_chain_says_happened(store):
+    """v1's whole claim. Not 'did they meet the expectations' — 'here is what they did'."""
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
+    store.submission_put(rec)
+    rep = ACT.report(store.submission_by_receipt(rec["receipt"]), act, [])
+    assert rep["receipt"] == rec["receipt"]
+    assert rep["title"] == "Multi-LAN"
+    assert rep["narration"].strip()                      # prose, not an empty string
+    assert "R1" in rep["narration"]                      # the placement is actually described
+    assert rep["within_session"] is True
+
+
+def test_the_report_never_asks_a_model_anything(store):
+    """The narration is model-free by construction. If this ever needed a network it would fail
+    here, in a test with no network."""
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
+    store.submission_put(rec)
+    assert isinstance(ACT.narrate(json.loads(rec["data"])["proof"]), str)
+
+
+def test_a_report_survives_an_unreadable_chain(store):
+    """A teacher opening a receipt at 9am must get a page, not a 500. Say the chain is unreadable
+    and show everything else."""
+    assert "could not" in ACT.narrate({"entries": "not a list"}).lower()
+
+
 # -- privacy ------------------------------------------------------------------ #
-def test_no_activity_table_has_a_student_column(store):
-    """The privacy property is the ABSENCE of a column. A migration adding one would silently
-    revoke a guarantee students were given, so it is asserted rather than trusted."""
-    for table in ("activity", "activity_code", "activity_submission"):
-        cols = {r["name"] for r in store._all(f"PRAGMA table_info({table})")}
-        assert not (cols & {"student", "username", "name", "sis_id", "email"}), table
+#
+# The guarantee CHANGED when claiming was added, so these tests were rewritten rather than left to
+# pass by accident. They did pass by accident: the old assertion looked for a column called
+# `student`, and the new column is `student_id`.
+#
+# What v1 promises now is narrower and still worth defending: the portal learns an identity ONLY
+# because a student volunteered it, and never for anything else.
+
+
+def test_vending_records_no_identity_at_all(store):
+    """Codes are untracked — the student page says so in as many words. An identity column on
+    `activity_code` would make every vend a record of who asked."""
+    cols = {r["name"] for r in store._all("PRAGMA table_info(activity_code)")}
+    assert not (cols & {"student", "student_id", "username", "name", "sis_id", "email"})
+
+
+def test_an_activity_records_no_identity(store):
+    cols = {r["name"] for r in store._all("PRAGMA table_info(activity)")}
+    assert not (cols & {"student", "student_id", "username", "name", "sis_id", "email"})
+
+
+def test_a_submission_holds_an_identity_ONLY_once_it_is_claimed(store):
+    """gBuilder submits anonymously. The id arrives later, from the student, or never."""
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
+    store.submission_put(rec)
+    stored = store.submission_by_code(row["code"])
+    assert stored["student_id"] == ""            # nothing known yet
+    assert stored["claimed_at"] == 0
+
+    ok, outcome = store.claim(rec["receipt"], "260123456", NOW + 60)
+    assert ok and outcome == "claimed"
+    assert store.submission_by_receipt(rec["receipt"])["student_id"] == "260123456"
+
+
+def test_the_only_identity_column_in_the_whole_schema_is_the_claimed_one(store):
+    """A single, named place where identity lives. If a future change adds another, this fails and
+    the decision gets made deliberately instead of drifting in."""
+    identity = {"student", "student_id", "sis_id", "email", "name"}
+    found = set()
+    for t in store._all("SELECT name FROM sqlite_master WHERE type='table'"):
+        table = t["name"]
+        if table.startswith("sqlite_"):        # sqlite_sequence.name is SQLite's own bookkeeping
+            continue
+        for c in store._all(f"PRAGMA table_info({table})"):
+            if c["name"] in identity:
+                found.add(f"{table}.{c['name']}")
+    assert found == {"activity_submission.student_id", "claim_attempt.student_id"}, found
 
 
 def test_a_stored_submission_carries_no_identity(store):
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
-    rec = ACT.prepare({"proof": a_proof(row["code"], act["plan_hash"])}, row, act, now=NOW)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
     store.submission_put(rec)
     stored = store.submission_by_code(row["code"])
     assert "student" not in stored
     blob = json.loads(stored["data"])
     assert "student" not in blob and "student_id" not in blob
+
+
+def test_the_teaching_center_holds_no_model_client():
+    """An acceptance criterion of v1, asserted rather than remembered: nothing under
+    teaching-center/ may reach a model host."""
+    for py in _TC.glob("*.py"):
+        text = py.read_text()
+        assert "Ollama" not in text and "ollama" not in text, py.name

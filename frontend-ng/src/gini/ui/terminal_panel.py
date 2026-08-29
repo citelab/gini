@@ -134,7 +134,7 @@ class TerminalPanel(QWidget):
         if not wd:
             return {}
         try:
-            return json.loads((Path(wd) / TERMINALS_FILE).read_text())
+            return json.loads((Path(wd) / TERMINALS_FILE).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 

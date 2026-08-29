@@ -20,7 +20,7 @@ def marker_path() -> Path:
 
 def read_marker() -> dict:
     try:
-        return json.loads(marker_path().read_text())
+        return json.loads(marker_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -28,7 +28,7 @@ def read_marker() -> dict:
 def write_marker(info: dict) -> None:
     p = marker_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(info, indent=2))
+    p.write_text(json.dumps(info, indent=2), encoding="utf-8")
 
 
 def is_setup_done() -> bool:

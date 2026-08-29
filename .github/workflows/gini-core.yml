@@ -1,0 +1,41 @@
+# Publishes gini-core to PyPI.
+#
+# Separate from the Teaching Center's workflow on purpose: PyPI's trusted publishing binds ONE
+# workflow file per project, and a shared file would mean a failure publishing one distribution
+# blocks the other. It also has to go FIRST — gini-teaching-center depends on gini-core, so
+# publishing them out of order leaves an install that cannot resolve.
+name: publish gini-core
+
+on:
+  push:
+    tags: ["v*"]           # setuptools-scm derives the version from the tag
+  workflow_dispatch:       # and a manual run, for a re-publish after a hiccup
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi      # create this Environment in repo Settings and require a reviewer
+    permissions:
+      id-token: write      # THE line that makes trusted publishing work — no API token anywhere
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # setuptools-scm needs the full history AND the tags, not a shallow clone
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade build
+      - run: python -m build --sdist --wheel --outdir dist/ core/
+      # A wheel that lost gini/domain would install cleanly and break every import that matters,
+      # so check the built artifact rather than trusting the config.
+      - name: the wheel actually contains the domain model
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          w = glob.glob("dist/gini_core-*.whl")[0]
+          names = zipfile.ZipFile(w).namelist()
+          assert any(n.startswith("gini/domain/") for n in names), "no gini/domain in the wheel"
+          assert "gini/__init__.py" not in names, "shipped __init__.py — that shadows gini-toolkit"
+          print(w, "ok:", len(names), "files")
+          PY
+      - uses: pypa/gh-action-pypi-publish@release/v1

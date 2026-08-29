@@ -1693,8 +1693,13 @@ class MainWindow(QMainWindow):
         # here rather than built into Dashboard, so the cost meter stays one self-contained thing.
         # Positioned relative to the end (not a fixed index) because it must stay past the
         # stretch that pushes the tail of the strip rightward, even if the meters change.
+        from PySide6.QtCore import QTimer as _QTimer
         from .proof_strip import ProofStrip
         self.proof_strip = ProofStrip(self.theme, self.proof_recorder)
+        # Catch up on anything that never reached the course server. Deferred so it cannot slow
+        # the window opening, and it runs on a worker thread from there — the usual recovery for
+        # a student whose wifi died mid-submission is simply reopening gBuilder on campus.
+        _QTimer.singleShot(2000, self.proof_strip.flush_outbox)
         _dash = self.dashboard.layout()
         _dash.insertWidget(max(0, _dash.count() - 1), self.proof_strip)
         dash = QDockWidget("Dashboard", self)

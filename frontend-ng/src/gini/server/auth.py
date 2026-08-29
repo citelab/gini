@@ -43,7 +43,7 @@ class UserStore:
     @classmethod
     def from_file(cls, path: str | Path) -> "UserStore":
         p = Path(path)
-        return cls(json.loads(p.read_text()) if p.exists() else {})
+        return cls(json.loads(p.read_text(encoding="utf-8")) if p.exists() else {})
 
     def verify(self, username: str, password: str) -> bool:
         rec = self._users.get(username or "")

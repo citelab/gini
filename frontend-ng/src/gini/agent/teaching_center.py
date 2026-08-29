@@ -88,7 +88,7 @@ class TeachingCenterClient:
             self.session = session
             return
         try:
-            d = json.loads(self._session_path().read_text())
+            d = json.loads(self._session_path().read_text(encoding="utf-8"))
             self.session = d.get("session", "")
             self.role = d.get("role", "student")
         except (OSError, json.JSONDecodeError, AttributeError):
@@ -100,7 +100,7 @@ class TeachingCenterClient:
             self.role = role
         self.cache.mkdir(parents=True, exist_ok=True)
         if session:
-            self._session_path().write_text(json.dumps({"session": session, "role": self.role}))
+            self._session_path().write_text(json.dumps({"session": session, "role": self.role}), encoding="utf-8")
         else:
             self.role = "student"
             self._session_path().unlink(missing_ok=True)
@@ -317,11 +317,12 @@ class TeachingCenterClient:
     # -- cache helpers ------------------------------------------------------ #
     def _cache_write(self, name: str, obj) -> None:
         self.cache.mkdir(parents=True, exist_ok=True)
-        (self.cache / name).write_text(json.dumps(obj) if not isinstance(obj, str) else obj)
+        (self.cache / name).write_text(json.dumps(obj) if not isinstance(obj, str) else obj,
+                                       encoding="utf-8")
 
     def _cache_read(self, name: str):
         try:
-            text = (self.cache / name).read_text()
+            text = (self.cache / name).read_text(encoding="utf-8")
         except OSError:
             return None
         try:
