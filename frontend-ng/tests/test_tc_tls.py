@@ -332,3 +332,27 @@ def test_there_is_no_longer_a_switch_that_turns_encryption_off():
     import inspect
     from gini.agent import teaching_center as TC
     assert "allow_insecure" not in inspect.getsource(TC)
+
+
+@needs_openssl
+def test_a_busy_port_is_a_sentence_not_a_traceback(certs, tmp_path, monkeypatch):
+    """`serve` is the only thing here a person runs by hand, and the commonest way it fails is the
+    last copy still holding the port. A stack trace reads as a bug in the Teaching Center and
+    buries the one useful fact."""
+    import socket
+    from gini_teaching_center import server
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    monkeypatch.setattr(server, "MATERIALS", tmp_path / "m")
+    held = socket.socket()
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    port = held.getsockname()[1]
+    try:
+        with pytest.raises(SystemExit) as e:
+            server.serve(host="127.0.0.1", port=port,
+                         tls_cert=str(certs[0]), tls_key=str(certs[1]))
+    finally:
+        held.close()
+    msg = str(e.value)
+    assert f"Port {port} is already in use" in msg
+    assert "lsof" in msg and "--port" in msg        # how to find it, and how to work around it

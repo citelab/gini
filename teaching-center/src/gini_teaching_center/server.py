@@ -696,7 +696,20 @@ def serve(host: str = "0.0.0.0", port: int = PORT,
     else:
         print(f"  admin    {who}\n")
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    try:
+        httpd = ThreadingHTTPServer((host, port), Handler)
+    except OSError as e:
+        # A busy port is an ordinary thing — usually the last copy of this server, still running.
+        # A traceback here reads as a bug in the Teaching Center and buries the one useful fact.
+        import errno
+        if e.errno != errno.EADDRINUSE:
+            raise
+        raise SystemExit(
+            f"Port {port} is already in use, so the Teaching Center cannot start.\n\n"
+            f"Usually this is an earlier copy of it that is still running. Find out what has the "
+            f"port:\n\n"
+            f"    lsof -nP -iTCP:{port} -sTCP:LISTEN\n\n"
+            f"Then stop that process, or start this one on a different port with --port.") from e
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()
 
