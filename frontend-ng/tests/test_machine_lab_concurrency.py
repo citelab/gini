@@ -140,6 +140,16 @@ def _lab(app, provider):
     from gini.ui.theme import ThemeManager
     st = MachineState(provider, device_id="m1", mode="real")
     lab = MachineLab(None, ThemeManager(app), _Dev(), state=st, live=True)
+    # Silence the Lab's own timers. `live=True` starts them, so the widget polls on its own while
+    # the test below ALSO calls _on_poll() by hand — and a manual poll that lands while a timer's
+    # poll is still in flight returns at the `if self._busy` guard and is silently skipped. The
+    # read then never happens, _read_fails comes up one short, and the test fails perhaps one run
+    # in three, on timing alone. These tests are about the guard, not about the timer, so drive
+    # the polls from the test and nowhere else.
+    for t in ("_poll", "_ov_poll", "_shadow_poll"):
+        timer = getattr(lab, t, None)
+        if timer is not None:
+            timer.stop()
     return lab
 
 
@@ -157,9 +167,12 @@ def test_a_failing_read_does_not_wedge_the_poll(app):
     at the guard and the Lab stopped updating — silently, until reopened."""
     lab = _lab(app, Provider(delay=0, fail=True))
     try:
-        for _ in range(3):
+        for want in (1, 2, 3):
             lab._on_poll()
             assert _settle(app, lab), "_busy was never cleared after a failed read"
+            assert lab._read_fails == want, (
+                f"poll {want} never reached the provider (counted {lab._read_fails}) — a poll was "
+                f"swallowed by the _busy guard rather than run")
         assert lab._read_fails >= 3          # the failures were counted, not swallowed
     finally:
         lab._closed = True
@@ -193,6 +206,43 @@ def test_a_sustained_failure_is_reported_once(app):
         errs = [m for lvl, m in said if lvl == "error"]
         assert len(errs) == 1, f"expected one report, got {len(errs)}"
         assert "readings are failing" in errs[0]
+    finally:
+        lab._closed = True
+        lab.close()
+
+
+def test_a_repaint_only_signal_does_not_touch_the_failure_count(app):
+    """`snap_ready` has two kinds of sender: a finished read, which reports its outcome, and code
+    that just wants a repaint (machine_lab.py ~1005) and emits None.
+
+    Counting moved onto this slot to make it single-writer, so the repaint path had to be taught to
+    leave the counter alone. If it ever starts counting, a few repaints would silently reset a run
+    of failures and the 'readings are failing' warning would never fire."""
+    lab = _lab(app, Provider(delay=0, fail=True))
+    try:
+        lab._on_poll()
+        assert _settle(app, lab)
+        assert lab._read_fails == 1
+        lab.snap_ready.emit(None)               # a plain repaint
+        app.processEvents()
+        assert lab._read_fails == 1, "a repaint reset the failure count"
+    finally:
+        lab._closed = True
+        lab.close()
+
+
+def test_the_count_is_settled_before_the_lab_reports_itself_idle(app):
+    """The ordering that was wrong: `_busy` dropped, and only THEN did the worker update the
+    count — from a worker thread, while the GUI thread read it. Anything that waits for the lab to
+    go idle and then looks at the count raced with the write, and two overlapping polls could lose
+    an increment entirely — stepping past the `== 5` the warning triggers on."""
+    lab = _lab(app, Provider(delay=0, fail=True))
+    try:
+        for want in (1, 2, 3, 4, 5):
+            lab._on_poll()
+            assert _settle(app, lab), "the lab never went idle"
+            assert lab._read_fails == want, (
+                f"went idle reporting {lab._read_fails} failures, expected {want}")
     finally:
         lab._closed = True
         lab.close()

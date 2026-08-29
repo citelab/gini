@@ -23,8 +23,17 @@ def _confirm(question: str) -> bool:
 
 
 def _app_version() -> str:
-    from ..version import __version__
-    return __version__
+    """Never raises. A version is a label on a report; it is not worth failing `--check` over.
+
+    This used to `from ..version import __version__`, which made an unshipped gini.version a hard
+    ModuleNotFoundError out of the CLI — while proof_recorder, doing the same thing inside a
+    try/except, silently recorded an empty version into student proofs instead.
+    """
+    try:
+        from ..version import gini_version
+        return gini_version()
+    except Exception:                       # noqa: BLE001
+        return "0.0.0+unknown"
 
 
 def _do_check(os_name: str) -> int:

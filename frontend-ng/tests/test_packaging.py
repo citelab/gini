@@ -222,3 +222,50 @@ def test_nothing_locates_gini_domain_by_walking_a_file_path():
                 bad.append(f"{f.relative_to(ROOT)}:{n}: {line.strip()}")
     assert not bad, ("these compute a path into gini-core's half of the namespace:\n  "
                      + "\n  ".join(bad))
+
+
+def _pyproject(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8")
+
+
+def _find_include(rel: str) -> list[str]:
+    """The packages.find `include` list. Parsed by hand rather than with tomllib, which is 3.11+
+    while this project supports 3.10 — a test that skips on the older interpreter is a test that
+    is not running for somebody."""
+    m = re.search(r"\[tool\.setuptools\.packages\.find\](.*?)(?=\n\[|\Z)",
+                  _pyproject(rel), re.S)
+    assert m, f"{rel} has no [tool.setuptools.packages.find]"
+    inc = re.search(r"^include\s*=\s*\[([^\]]*)\]", m.group(1), re.M)
+    return re.findall(r'"([^"]+)"', inc.group(1)) if inc else []
+
+
+def _version_file(rel: str) -> str:
+    m = re.search(r'^version_file\s*=\s*"([^"]+)"', _pyproject(rel), re.M)
+    return m.group(1) if m else ""
+
+
+def test_gini_core_ships_the_version_module_and_not_just_the_domain():
+    """`gini/version.py` is imported by gBuilder, the proof recorder and the setup CLI, but it sits
+    directly in the namespace directory rather than under gini/domain — so an include list of only
+    "gini.domain*" left it out of the wheel.
+
+    The failure mode is why this needs a test: every test passes in a source checkout, where the
+    file is simply on the path. Only an INSTALL is missing it, and the setup CLI then died with
+    ModuleNotFoundError while proof_recorder's try/except quietly recorded an empty version into
+    student proofs.
+    """
+    assert (ROOT / "core" / "src" / "gini" / "version.py").exists()
+    include = _find_include("core/pyproject.toml")
+    assert "gini" in include, (
+        f'gini-core include is {include}; without a bare "gini" the namespace directory\'s own '
+        f"modules (version.py) never reach the wheel")
+
+
+def test_the_two_halves_of_gini_generate_different_version_files():
+    """setuptools-scm writes a file into the source tree, and both distributions install into one
+    `gini/` directory — so a shared filename means uninstalling either deletes a file the other
+    still needs."""
+    core = _version_file("core/pyproject.toml").split("/")[-1]
+    toolkit = _version_file("frontend-ng/pyproject.toml").split("/")[-1]
+    assert core and toolkit
+    assert core != toolkit, f"gini-core and gini-toolkit both generate {core} into gini/"
