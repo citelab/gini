@@ -1875,9 +1875,11 @@ def address_map(topo: Topology) -> dict[str, dict]:
 
 
 def overlay_hosts(addressing: dict) -> dict:
-    """device name -> its primary overlay (gini0) IP, from `address_map` output. GINI writes these
-    into each machine's /etc/hosts so names resolve over the DRAWN network (gini0) instead of the
-    Docker bridge — which is what makes DNS/getent/ping/reach ride the overlay."""
+    """device name -> its PRIMARY overlay (gini0) IP, from `address_map` output.
+
+    One address per device, for callers that want "the" address of something. The /etc/hosts block
+    is built from `overlay_host_lines` instead, because a router has more than one.
+    """
     out: dict[str, str] = {}
     for name, info in (addressing or {}).items():
         for itf in info.get("interfaces", []):
@@ -1886,3 +1888,51 @@ def overlay_hosts(addressing: dict) -> dict:
                 out[name] = ip
                 break
     return out
+
+
+def overlay_host_lines(addressing: dict, viewer: str | None = None) -> list[tuple[str, list[str]]]:
+    """EVERY overlay address in the topology, with the names it answers to.
+
+    Returns `[(ip, [canonical, *aliases]), …]` in the order the lines should be written.
+
+    `viewer` is the device this block is being written FOR, and it decides which address a
+    multi-homed name resolves to. Resolution takes the first matching line, so with no viewer a
+    router always answers with its first interface — telling a host on 10.0.2.0/24 that `R1` is
+    `10.0.1.1`, an address on the far side of the router it is directly attached to. Given a
+    viewer, the interface sharing a subnet with it comes first, so `ping R1` answers with the
+    router's address ON YOUR OWN SEGMENT — which is both the useful answer and the one a real
+    network gives. A device with nothing in common with the viewer keeps its first interface, so
+    every name still resolves to something.
+
+    A router has one address PER SUBNET it joins, and binding only the first left every other one
+    nameless — including the address each host on those subnets uses as its DEFAULT GATEWAY. On a
+    two-subnet lab, `10.0.2.1` had no name at all, and a student on 10.0.2.0/24 who resolved `R1`
+    was handed `10.0.1.1`: an address on the far side of the router. It usually still answered,
+    via the default route, which is what kept the gap hidden.
+
+    The device name stays bound to its FIRST interface and stays FIRST in the file, so `ping R1`
+    resolves exactly as it did before. Every further address gains an `R1-eth1` style name and
+    carries the device name as an alias, so nothing in the topology is unnameable and any address
+    reverse-resolves to something that says which interface it is.
+    """
+    addressing = addressing or {}
+    local = {str(i.get("subnet") or "")
+             for i in (addressing.get(viewer) or {}).get("interfaces") or []
+             if i.get("subnet")} if viewer else set()
+
+    lines: list[tuple[str, list[str]]] = []
+    for name, info in addressing.items():
+        ifaces = []
+        for i, itf in enumerate(info.get("interfaces") or []):
+            ip = str(itf.get("ip", "")).split("/")[0].strip()
+            if ip:
+                ifaces.append((ip, f"{name}-{itf.get('name') or f'eth{i}'}",
+                               str(itf.get("subnet") or "")))
+        if not ifaces:
+            continue
+        first = next((n for n, (_ip, _a, sub) in enumerate(ifaces) if sub and sub in local), 0)
+        ordered = [ifaces[first]] + [f for n, f in enumerate(ifaces) if n != first]
+        for pos, (ip, alias, _sub) in enumerate(ordered):
+            # the canonical name on the first line is the device's, so `ping R1` lands there
+            lines.append((ip, [name, alias]) if pos == 0 else (ip, [alias, name]))
+    return lines

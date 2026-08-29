@@ -2532,15 +2532,24 @@ class MainWindow(QMainWindow):
         """Write peer name→overlay-IP lines into each machine's /etc/hosts, so name resolution
         (getent/DNS Probe) and ping/reach ride the DRAWN gini0 network instead of Docker's bridge.
         Off the GUI thread — it's a docker exec per machine. Containers are fresh each run, so no
-        accumulation. This is the 'small Phase-2.x': it makes reachability follow the topology."""
+        accumulation. This is the 'small Phase-2.x': it makes reachability follow the topology.
+
+        EVERY address is written, and the block is built per machine. A router has an address on
+        each subnet it joins; writing one line per device left the others nameless — including the
+        default gateway of every segment but the first — and made `R1` resolve, everywhere, to
+        whichever interface happened to be numbered eth0. Now each machine's `R1` is the router's
+        address on that machine's own segment."""
         import subprocess
         import threading
-        from ..services.compiler import _role, _svc, overlay_hosts
+        from ..services.compiler import _role, _svc, overlay_host_lines
         orch = getattr(self.ctx, "orchestrator", None)
         if orch is None:
             return
-        hosts = overlay_hosts(getattr(self.ctx, "addressing", {}) or {})
-        if len(hosts) < 2:
+        # host_lines, not overlay_hosts: a router has an address on every subnet it joins, and
+        # one line per device left the rest of them — the default gateway of each other subnet —
+        # with no name at all.
+        addressing = getattr(self.ctx, "addressing", {}) or {}
+        if len(overlay_host_lines(addressing)) < 2:
             return
         dc = list(getattr(orch, "_dc", ["docker", "compose"]))
         wd = getattr(orch, "workdir", None)
@@ -2556,15 +2565,20 @@ class MainWindow(QMainWindow):
         # Windows' CreateProcess command-line round-trip. printf expands the escapes inside the
         # container. Deliberately not base64 — busybox (the lean Alpine tier) may be built without
         # the base64 applet, and a missing applet would break this on every platform.
-        esc = "".join(f"{ip}\\t{nm}\\n" for nm, ip in hosts.items())
-        script = (f"{{ printf '{esc}'; cat /etc/hosts; }} > /tmp/gini_hosts && "
-                  "cat /tmp/gini_hosts > /etc/hosts")
+        # PER MACHINE, not one shared block: which address a multi-homed name resolves to depends
+        # on who is asking. A host answers `R1` with the router's address on ITS OWN segment, the
+        # way a real network does, instead of whichever interface happened to be numbered first.
+        def script_for(viewer: str) -> str:
+            esc = "".join(f"{ip}\\t{' '.join(names)}\\n"
+                          for ip, names in overlay_host_lines(addressing, viewer=viewer))
+            return (f"{{ printf '{esc}'; cat /etc/hosts; }} > /tmp/gini_hosts && "
+                    "cat /tmp/gini_hosts > /etc/hosts")
 
         def work():
             import time
             failed = []
             for dev in devs:
-                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", script]
+                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", script_for(dev.name)]
                 err = ""
                 # Retry: this fires right after `up` returns, and a container may not be accepting
                 # execs yet — native Linux docker returns from `up` far sooner than Docker Desktop,
