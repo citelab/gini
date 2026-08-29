@@ -202,3 +202,23 @@ def test_the_release_script_names_every_workflow_it_will_trigger():
     script = (ROOT / "scripts" / "release.sh").read_text(encoding="utf-8")
     for f in (ROOT / ".github" / "workflows").glob("*.yml"):
         assert f.name in script, f"release.sh does not mention {f.name} in its confirmation"
+
+
+def test_nothing_locates_gini_domain_by_walking_a_file_path():
+    """`gini` is a namespace split across two distributions, so `Path(__file__)/../domain` is a
+    lie in a source checkout — core/src and frontend-ng/src are separate roots.
+
+    It is a lie that stays quiet: `xv6_pack._os_missions_dir()` returned a non-existent directory,
+    the loader was called with strict=False, and the OS assignments came back as an empty dict.
+    Nothing raised. Ask the `gini.domain` package where it lives instead; it answers correctly in
+    both a checkout and a wheel.
+    """
+    import re
+    bad = []
+    for f in (ROOT / "frontend-ng" / "src").rglob("*.py"):
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r'__file__.*\bparent\b.*["\']domain["\']', line) or \
+               re.search(r'\bparent\.parent\s*/\s*["\']domain["\']', line):
+                bad.append(f"{f.relative_to(ROOT)}:{n}: {line.strip()}")
+    assert not bad, ("these compute a path into gini-core's half of the namespace:\n  "
+                     + "\n  ".join(bad))
