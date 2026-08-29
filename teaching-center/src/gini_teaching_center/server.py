@@ -513,7 +513,7 @@ class Handler(BaseHTTPRequestHandler):
             snap.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
             path = snap / f"before-reset-{stamp}.json"
-            path.write_text(json.dumps(_STORE.site_snapshot(), indent=2))
+            path.write_text(json.dumps(_STORE.site_snapshot(), indent=2), encoding="utf-8")
         except Exception as e:                                        # noqa: BLE001
             # Refuse rather than proceed. A reset whose safety net failed is exactly the reset
             # that should not happen.
@@ -623,12 +623,57 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch()
 
 
-def serve(host: str = "0.0.0.0", port: int = PORT) -> None:
+def _tls_context(cert: str, key: str) -> "ssl.SSLContext":
+    """A TLS context for the certificate pair, or a refusal that says which half is wrong.
+
+    TLS 1.2 is the floor. Everything below it is broken in ways that matter for a login form, and
+    the only clients here are current browsers and gBuilder's own urllib — nothing that needs 1.0.
+    """
+    import ssl
+
+    for label, path in (("certificate", cert), ("private key", key)):
+        if not Path(path).exists():
+            raise SystemExit(f"TLS {label} not found: {path}")
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ctx.load_cert_chain(certfile=cert, keyfile=key)
+    except ssl.SSLError as e:
+        raise SystemExit(f"That certificate and key do not load together: {e}") from e
+    except PermissionError as e:
+        raise SystemExit(
+            f"Cannot read the TLS key ({e}). It is usually root-owned and mode 600 — either run "
+            f"as a user that can read it, or copy it somewhere the service account can.") from e
+    return ctx
+
+
+def serve(host: str = "0.0.0.0", port: int = PORT,
+          tls_cert: str = "", tls_key: str = "") -> None:
     MATERIALS.mkdir(parents=True, exist_ok=True)
+
+    # Half a pair is always a mistake, and the dangerous kind: without this the server would fall
+    # back to plain HTTP and look like it started fine, while every staff password crossed the
+    # network in the clear.
+    if bool(tls_cert) != bool(tls_key):
+        raise SystemExit("TLS needs BOTH --tls-cert and --tls-key; only one was given.")
+
+    ctx = _tls_context(tls_cert, tls_key) if tls_cert else None
+    scheme = "https" if ctx else "http"
+
     token = _ACCTS.ensure_admin()
     who = os.environ.get("ADMIN_ID", "admin")
-    print(f"GINI Teaching Center  ·  http://127.0.0.1:{port}/")
+    shown = "127.0.0.1" if host in ("127.0.0.1", "localhost") else host
+    print(f"GINI Teaching Center  ·  {scheme}://{shown}:{port}/")
     print(f"  data     {ROOT}")
+    if ctx:
+        print(f"  tls      {tls_cert}")
+    elif host not in ("127.0.0.1", "localhost"):
+        # The one combination worth shouting about: reachable from the network, and staff about to
+        # type a password into it over plain HTTP.
+        print(f"  WARNING  serving plain HTTP on {host} — staff passwords will cross the network")
+        print(f"           in clear text. Use --tls-cert/--tls-key, or put a TLS proxy in front")
+        print(f"           and bind 127.0.0.1.")
     if token:
         print(f"\n  FIRST RUN — claim the admin account:")
         print(f"    username     {who}")
@@ -636,7 +681,11 @@ def serve(host: str = "0.0.0.0", port: int = PORT) -> None:
         print(f"  (or set ADMIN_PASSWORD and restart)\n")
     else:
         print(f"  admin    {who}\n")
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    if ctx:
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

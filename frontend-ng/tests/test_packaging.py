@@ -102,3 +102,62 @@ def test_the_server_binds_localhost_by_default():
     on the campus network in clear text."""
     cli = (_ROOT / "teaching-center" / "src" / "gini_teaching_center" / "cli.py").read_text()
     assert '"HOST", "127.0.0.1"' in cli
+
+
+# -- the READMEs, which are also the PyPI landing pages ------------------------ #
+#
+# These went stale once already and it was invisible: the root README told everyone to run
+# `gini-setup` (deleted) and `pip install -e .` at the root (no pyproject there), and core/README.md
+# was a byte-for-byte copy of the app README — so the gini-core PyPI page advertised a Qt desktop
+# app. Nothing fails when a README is wrong; a person just follows it and gets stuck.
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _readme(rel: str) -> str:
+    f = ROOT / rel
+    assert f.exists(), f"{rel} is missing — it is a package's PyPI description"
+    return f.read_text(encoding="utf-8")
+
+
+def test_no_readme_still_tells_people_to_run_gini_setup():
+    """The command no longer exists; gBuilder does this itself at launch. A reader who types it
+    gets `command not found` and concludes the install failed."""
+    for rel in ("README.md", "core/README.md", "frontend-ng/README.md",
+                "teaching-center/README.md", "scripts/README.md"):
+        assert "gini-setup" not in _readme(rel), f"{rel} still references the deleted gini-setup"
+
+
+def test_the_package_readmes_are_not_copies_of_each_other():
+    """Each is a different PyPI page for a different audience: a domain library, a desktop app, a
+    course server."""
+    a, b, c = (_readme("core/README.md"), _readme("frontend-ng/README.md"),
+               _readme("teaching-center/README.md"))
+    assert a != b and b != c and a != c
+    assert "gini-core" in a.split("\n")[0]
+
+
+def test_the_root_readme_does_not_promise_a_root_level_editable_install():
+    """There is no pyproject.toml at the root — the packages live in core/, frontend-ng/ and
+    teaching-center/. `pip install -e .` here fails with a message about the missing file."""
+    assert not (ROOT / "pyproject.toml").exists(), \
+        "a root pyproject.toml appeared — this test's premise, and the README, need revisiting"
+    assert "pip install -e .\n" not in _readme("README.md")
+
+
+def test_the_source_install_route_points_at_a_script_that_exists():
+    readme = _readme("README.md")
+    assert "./scripts/dev.sh install" in readme
+    for name in ("dev.sh", "release.sh", "images.sh"):
+        if f"scripts/{name}" in readme:
+            assert (ROOT / "scripts" / name).exists(), f"README names scripts/{name}, which is gone"
+
+
+def test_release_and_version_bumps_are_documented_somewhere_findable():
+    """Versions come from git tags via setuptools-scm and nobody types one. That is only useful if
+    a contributor can find out — the root README has to point at where it is written down."""
+    assert "scripts/README.md" in _readme("README.md")
+    scripts = _readme("scripts/README.md")
+    assert "setuptools-scm" in scripts
+    for level in ("patch", "minor", "major"):
+        assert f"release.sh {level}" in scripts or level in scripts

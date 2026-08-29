@@ -22,10 +22,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")),
                     help="port to listen on (env: PORT)")
     ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
-                    help="address to bind. Defaults to LOCALHOST: put a TLS reverse proxy in "
-                         "front rather than exposing this directly (env: HOST)")
+                    help="address to bind. Defaults to LOCALHOST — either terminate TLS in a "
+                         "proxy in front, or pass --tls-cert/--tls-key and bind 0.0.0.0 "
+                         "(env: HOST)")
     ap.add_argument("--admin", default=os.environ.get("ADMIN_ID", "admin"),
                     help="the portal admin's username (env: ADMIN_ID)")
+    ap.add_argument("--tls-cert", default=os.environ.get("TLS_CERT", ""), metavar="FILE",
+                    help="serve HTTPS with this certificate chain (env: TLS_CERT). Needs "
+                         "--tls-key too. Without it, bind localhost and proxy TLS in front")
+    ap.add_argument("--tls-key", default=os.environ.get("TLS_KEY", ""), metavar="FILE",
+                    help="the private key for --tls-cert (env: TLS_KEY)")
     ap.add_argument("--version", action="version", version=f"gini-teaching-center {__version__}")
     args = ap.parse_args(argv)
 
@@ -38,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import server
     try:
-        server.serve(host=args.host, port=args.port)
+        server.serve(host=args.host, port=args.port,
+                     tls_cert=args.tls_cert, tls_key=args.tls_key)
     except KeyboardInterrupt:
         print("\nstopped.")
     return 0

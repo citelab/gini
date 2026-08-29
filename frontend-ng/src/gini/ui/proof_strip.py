@@ -125,6 +125,10 @@ class ProofStrip(QWidget):
         def work():
             try:
                 answer = tc_submit.check_code(url, typed)
+            except tc_submit.Untrusted as e:
+                # A certificate problem is NOT a flaky network: retrying will never help, and
+                # recording locally under a code we could not verify hides a real misconfiguration.
+                answer = {"ok": False, "error": str(e)}
             except tc_submit.Unreachable:
                 answer = {}                       # empty == could not ask, NOT a refusal
             self.armChecked.emit(typed, answer)
@@ -200,6 +204,8 @@ class ProofStrip(QWidget):
             try:
                 answer = tc_submit.submit(url, str(proof.get("ticket", "")), proof,
                                           result.get("topology"))
+            except tc_submit.Untrusted as e:
+                answer = {"ok": False, "untrusted": True, "error": str(e)}
             except tc_submit.Unreachable as e:
                 answer = {"ok": False, "unreachable": True, "error": str(e)}
             self.handedIn.emit(result, answer)
@@ -228,6 +234,18 @@ class ProofStrip(QWidget):
 
         if answer.get("reason") in outbox.SETTLED:
             outbox.forget(receipt)               # an earlier attempt already landed
+
+        if answer.get("untrusted"):
+            # Saying "is it still running?" here would send a student chasing a server that is up,
+            # and no amount of retrying fixes a certificate. Name it, and point at the instructor.
+            self._say(f"Not sent · certificate not trusted · receipt <b>{receipt}</b>", bad=True)
+            QMessageBox.warning(
+                self, "The course server's certificate is not trusted",
+                f"Your work is safe. The proof is on disk at:\n{path}\n\n"
+                f"Receipt code: {receipt}\n\n{answer.get('error', '')}\n\n"
+                f"gBuilder will keep the submission and try again, but this will not clear up on "
+                f"its own. Give your instructor the receipt either way.")
+            return
 
         # It did NOT go. The receipt is still correct and still theirs, and gBuilder will keep
         # trying — so the message has to prevent the one action that would make it worse, which is

@@ -18,11 +18,11 @@ VERSION = 1
 
 def save_project(topo: Topology, path: str | Path) -> None:
     data = {"format": FORMAT, "version": VERSION, "topology": topo.to_dict()}
-    Path(path).write_text(json.dumps(data, indent=2))
+    Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def load_project(path: str | Path) -> Topology:
-    data = json.loads(Path(path).read_text())
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
     if data.get("format") != FORMAT:
         raise ValueError(f"not a GINI project file: {path}")
     return Topology.from_dict(data["topology"])

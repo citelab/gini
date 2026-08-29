@@ -47,7 +47,7 @@ FIRST_EXPERIMENT = "Experiment-01"
 
 def _read_json(path: Path) -> dict:
     try:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:                       # missing or malformed -> empty
         return {}
@@ -108,7 +108,7 @@ def delete_experiment(path, name: str) -> bool:
     meta = _read_json(Path(path) / META_FILE)
     if meta.get("current") == safe_name(name):       # don't point at a file that's gone
         meta["current"] = ""
-        (Path(path) / META_FILE).write_text(json.dumps(meta, indent=2))
+        (Path(path) / META_FILE).write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return True
 
 
@@ -120,7 +120,7 @@ def rename_experiment(path, old: str, new: str) -> bool:
     meta = _read_json(Path(path) / META_FILE)
     if meta.get("current") == safe_name(old):
         meta["current"] = safe_name(new)
-        (Path(path) / META_FILE).write_text(json.dumps(meta, indent=2))
+        (Path(path) / META_FILE).write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return True
 
 
@@ -143,7 +143,7 @@ def migrate_project(path) -> bool:
         legacy.unlink()                              # already migrated; drop the stale copy
     meta.update({"format": META_FORMAT, "version": META_VERSION, "current": name,
                  "name": meta.get("name") or p.name})
-    (p / META_FILE).write_text(json.dumps(meta, indent=2))
+    (p / META_FILE).write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return True
 
 
@@ -168,8 +168,8 @@ def save_project_dir(path, topology: Topology, *, name: str | None = None, brief
         "created": prev.get("created", now),
         "modified": now,
     }
-    (p / META_FILE).write_text(json.dumps(meta, indent=2))
-    (p / AI_FILE).write_text(json.dumps(ai_state or {}, indent=2))
+    (p / META_FILE).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (p / AI_FILE).write_text(json.dumps(ai_state or {}, indent=2), encoding="utf-8")
     return str(p)
 
 

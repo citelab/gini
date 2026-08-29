@@ -23,7 +23,7 @@ def _confirm(question: str) -> bool:
 
 
 def _app_version() -> str:
-    from .. import __version__
+    from ..version import __version__
     return __version__
 
 

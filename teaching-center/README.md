@@ -84,11 +84,16 @@ if a permission is set wrongly later. `deploy/gini-tc.service` is ready to copy.
 Either way, restarts are a backstop rather than a routine event: an exception inside a request is
 caught and answered as a 500, so a bad request cannot take the process down.
 
-### 5. Put TLS in front of it
+### 5. Turn on TLS
 
-The server binds `127.0.0.1` by default, on purpose. **Staff sign in with a password, and this
-server speaks plain HTTP** — on an open port that is a password crossing the campus network in
-clear text, readable by anyone else logged into the same VM. Terminate TLS in nginx:
+**Staff sign in with a password.** Over plain HTTP on a VM the whole school can log into, that
+password is readable by anyone else on the wire or on the box. This is the one step not to skip.
+
+Two ways to do it. Both are supported; the difference is who holds the certificate.
+
+**a. nginx in front — what I would pick on a school-managed VM.**
+
+The server binds `127.0.0.1` by default precisely so this works with nothing else to change:
 
 ```nginx
 server {
@@ -108,7 +113,38 @@ server {
 server { listen 80; server_name gini.cs.mcgill.ca; return 301 https://$host$request_uri; }
 ```
 
-Then point gBuilder at `https://gini.cs.mcgill.ca` in Settings.
+nginx wins on the two things that bite later: it can bind **443** (a privileged port, which the
+`gini-tc` account cannot), and certbot renewal already knows how to reload it. The private key stays
+readable only by root — the Teaching Center process never sees it.
+
+**b. Built-in TLS — when there is no nginx, or no root to configure one.**
+
+```bash
+gini-teaching-center --data /opt/gini-tc/data --host 0.0.0.0 --port 8443 \
+    --tls-cert /etc/ssl/certs/gini.crt --tls-key /etc/ssl/private/gini.key
+```
+
+or, in `/opt/gini-tc/env`, `TLS_CERT=…` and `TLS_KEY=…`. TLS 1.2 is the floor.
+
+Two things to know before choosing this:
+
+* **The `gini-tc` user must be able to read the key.** Keys usually live root-only; loosening that
+  on a shared VM puts the key within reach of anything that account runs. Prefer a key file owned
+  `gini-tc:gini-tc`, mode `0600`, outside `/etc/ssl/private`.
+* **An unprivileged process cannot bind 443.** Use 8443 (and tell students the port), or grant
+  `CAP_NET_BIND_SERVICE`.
+
+**Giving only one half of the pair is refused at startup.** A cert with no key, or a key with no
+cert, exits rather than quietly falling back to HTTP — because that fallback looks like a clean
+start while every password goes out in the clear.
+
+Either way, point gBuilder at `https://gini.cs.mcgill.ca` (or `…:8443`) in Settings.
+
+**About self-signed certificates.** They work, but every student machine will reject the connection
+until the certificate is trusted, and gBuilder says so in as many words: it reports a *certificate*
+problem and tells the student their instructor has to fix it, rather than "is the server running?"
+— which would send them chasing an outage that is not happening. If you go this route, plan how the
+certificate reaches student machines before the first lab, not during it.
 
 If you cannot get a certificate quickly, keep the VPN restriction you planned and treat the window
 before TLS as a testing period rather than a term.
@@ -137,6 +173,26 @@ sudo -u gini-tc sqlite3 /opt/gini-tc/data/gini.db ".backup '/opt/gini-tc/data/ba
 `.backup` rather than `cp`, because the server is running and WAL mode means a plain copy can catch
 a torn moment. The Site Reset in the console also writes a full JSON snapshot to `data/backups/`
 before it removes anything.
+
+## Running from a source checkout
+
+For development on your own machine — no install, edits take effect immediately:
+
+```bash
+./teaching-center/run.sh                     # localhost:8080, data in ./tc-data
+PORT=9000 ADMIN_PASSWORD=secret ./teaching-center/run.sh
+```
+
+It puts `core/src` and `teaching-center/src` on `PYTHONPATH` and runs the package with `-m`. That
+last part matters: the modules import each other as a package now, so running `server.py` as a
+path breaks every one of those imports.
+
+If you would rather have the `gini-tc` command while still editing the checkout, install it
+editable:
+
+```bash
+pip install -e ./core -e ./teaching-center
+```
 
 ## Configuration
 

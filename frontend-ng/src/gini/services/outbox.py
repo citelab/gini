@@ -53,7 +53,7 @@ def queue(proof: dict, topology: dict | None = None, *, root: Path | None = None
     queued = now if now is not None else time.time()
     if p.exists():
         try:
-            queued = float(json.loads(p.read_text()).get("queued", queued))
+            queued = float(json.loads(p.read_text(encoding="utf-8")).get("queued", queued))
         except Exception:                                          # noqa: BLE001
             pass
     p.write_text(json.dumps({
@@ -65,7 +65,7 @@ def queue(proof: dict, topology: dict | None = None, *, root: Path | None = None
         "queued": queued,
         "attempts": 0,
         "last_error": "",
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
     return p
 
 
@@ -75,7 +75,7 @@ def pending(root: Path | None = None) -> list[dict]:
     out = []
     for f in sorted(root.glob("*.json")) if root.exists() else []:
         try:
-            out.append(dict(json.loads(f.read_text()), _path=str(f)))
+            out.append(dict(json.loads(f.read_text(encoding="utf-8")), _path=str(f)))
         except Exception:                                          # noqa: BLE001
             continue          # a half-written file is not worth crashing a launch over
     return sorted(out, key=lambda e: e.get("queued", 0))
@@ -115,10 +115,10 @@ def _bump(path: Path, error: str, now: float | None) -> None:
     """Record that an attempt happened and why it failed. Best effort — a failure to write the
     bookkeeping must never lose the entry itself."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         data["attempts"] = int(data.get("attempts", 0)) + 1
         data["last_error"] = error
         data["last_attempt"] = now if now is not None else time.time()
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:                                              # noqa: BLE001
         pass

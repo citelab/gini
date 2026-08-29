@@ -107,13 +107,13 @@ class Profile:
     def save(self, path) -> None:
         from pathlib import Path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2))
+        Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, path, *, student_id: str = "") -> "Profile":
         from pathlib import Path
         try:
-            return cls.from_dict(json.loads(Path(path).read_text()))
+            return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             return cls(student_id=student_id)
 

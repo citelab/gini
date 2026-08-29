@@ -21,6 +21,7 @@ safe.
 from __future__ import annotations
 
 import json
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,27 @@ TIMEOUT = 20.0          # generous for a big topology on bad wifi, short enough 
 class Unreachable(Exception):
     """The server could not be reached at all. Distinct from a refusal, because the advice differs:
     a refusal is about the code, this is about the network."""
+
+
+class Untrusted(Unreachable):
+    """The server answered, but its TLS certificate was not trusted.
+
+    A subclass so existing `except Unreachable` still catches it, but distinguishable because the
+    advice is completely different — "is it still running?" is wrong and sends a student chasing a
+    server that is up. In practice this means a self-signed certificate: real ones from the school
+    CA verify without anyone doing anything.
+    """
+
+
+def _wrap(e: Exception) -> Unreachable:
+    """Classify a transport failure. A certificate problem is NOT an outage."""
+    cause = getattr(e, "reason", e)
+    if isinstance(cause, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+        return Untrusted(
+            "the course server's security certificate is not trusted by this machine. The server "
+            "is running — this is a certificate problem, so nothing you do in gBuilder will fix "
+            "it. Tell your instructor, and keep your proof file.")
+    return Unreachable(str(e))
 
 
 def _post(url: str, path: str, body: dict) -> tuple[int, dict]:
@@ -47,7 +69,7 @@ def _post(url: str, path: str, body: dict) -> tuple[int, dict]:
         except json.JSONDecodeError:
             return e.code, {"error": f"The course server replied with {e.code}."}
     except Exception as e:                                   # noqa: BLE001
-        raise Unreachable(str(e)) from e
+        raise _wrap(e) from e
 
 
 def _get(url: str, path: str) -> tuple[int, dict]:
@@ -61,7 +83,7 @@ def _get(url: str, path: str) -> tuple[int, dict]:
         except json.JSONDecodeError:
             return e.code, {"error": f"The course server replied with {e.code}."}
     except Exception as e:                                   # noqa: BLE001
-        raise Unreachable(str(e)) from e
+        raise _wrap(e) from e
 
 
 def check_code(url: str, code: str) -> dict:

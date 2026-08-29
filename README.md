@@ -58,7 +58,7 @@ It's designed to anchor three courses:
 - **Python 3.10+** (3.12 recommended). The Qt 6 GUI — **PySide6** plus **QtWebEngine** (for the
   embedded Desktop / OS-Zoo screens) — installs **automatically** as a dependency; you never install
   Qt separately, whichever install route you pick.
-- A **container runtime** — Docker, or **Colima**/**Podman** (`gini-setup` detects it and can help
+- A **container runtime** — Docker, or **Colima**/**Podman** (gBuilder detects it at launch and can help
   install it) — needed to *Run* topologies. You can explore fully in **Demo mode** without one.
 - Works on **macOS, Linux, and Windows**. *Optional:* a local **[Ollama](https://ollama.com)** model
   for richer GINI AI answers.
@@ -67,66 +67,84 @@ It's designed to anchor three courses:
 
 ## Install
 
-There are **two ways to install, both fully supported** — pick one (don't mix the two; see
-Troubleshooting). Either way the Qt GUI (PySide6 + QtWebEngine) is pulled in automatically.
+**Two ways, both fully supported** — pick one (don't mix them; see Troubleshooting). Either way the
+Qt GUI (PySide6 + QtWebEngine) is pulled in automatically, and **there is no setup command to run**:
+gBuilder checks what the machine needs the first time it launches and offers to do it.
 
-### 1. From source — the latest code
+### 1. Pre-compiled package — the simplest, most stable
 
-Recommended if you want the newest features, plan to build the xv6 kernel image yourself, or want to
-contribute. You track `main`, so you always have the freshest bits.
-
-```bash
-# in your clone of the repo:
-cd frontend-ng
-pip install -e .              # editable install; PySide6 + QtWebEngine come with it
-gini-setup                    # brings in the container runtime + images (one time)
-gbuilder                      # launch
-```
-
-### 2. Pre-compiled package — the simplest, most stable
-
-The hands-off route. It may be a version or two behind `main`, but it's the more stable, "just
-install and go" option — good for students and classroom setups.
+The hands-off route, and the right one for students and classroom setups.
 
 ```bash
 pipx install gini-toolkit     # the app, isolated. `pip install gini-toolkit` also works.
-gini-setup                    # brings in the container runtime + images (one time)
-gbuilder                      # launch
+gbuilder                      # launch — it offers the container setup on first run
 ```
-
-Either way, `gbuilder` opens immediately — build, save, and explore topologies, with the AI tutor and
-everything in **Demo mode** working right away. Live **Run** (real containers) lights up once
-`gini-setup` finishes. After upgrading (`git pull` for source, or `pipx upgrade gini-toolkit` for the
-package), re-run `gini-setup --update` to refresh images.
 
 > No `pipx`? Install it once (`brew install pipx` on macOS, or `pip install pipx`), or use
 > `pip install gini-toolkit` inside a virtual environment.
 
+### 2. From source — the latest code
+
+For the newest features, building the xv6 kernel image yourself, or contributing.
+
+```bash
+git clone https://github.com/citelab/gini && cd gini
+python3 -m venv .venv && source .venv/bin/activate
+./scripts/dev.sh install      # editable installs of all three packages
+gbuilder                      # launch
+```
+
+**Use the script rather than `pip install -e .`.** The `gini` package is a *namespace* split across
+two distributions — `gini-core` (the domain model and proof format) and `gini-toolkit` (the app) —
+so installing one alone leaves half the tree unimportable, and the error names a missing module
+rather than a missing install. The script also installs them in the right order: `gini-core` first,
+or pip fetches the published one from PyPI over the top of your checkout. `./scripts/dev.sh check`
+prints what is installed and from where.
+
+Either way `gbuilder` opens immediately — build, save, and explore topologies, with the AI tutor and
+everything in **Demo mode**, before any container exists. Live **Run** lights up once the runtime and
+images are in place. After an upgrade, gBuilder notices the version moved and offers to refresh the
+images; nothing to remember.
+
+<details>
+<summary><b>The Teaching Center (instructors)</b></summary>
+
+A separate package, deliberately: it holds no Qt, so a headless VM installs 2.3MB instead of 400MB
+of PySide6.
+
+```bash
+pip install gini-teaching-center
+gini-tc --data ./data --port 8080
+```
+
+`teaching-center/README.md` has the full server setup — pm2/systemd, TLS, upgrades.
+</details>
+
 <details>
 <summary><b>macOS details</b></summary>
 
-`gini-setup` uses **Colima** — a free, lightweight Docker runtime, no Docker Desktop license needed.
-On a clean Mac with [Homebrew](https://brew.sh) it offers to run:
+gBuilder's first-run setup uses **Colima** — a free, lightweight Docker runtime, no Docker Desktop
+license needed. On a clean Mac with [Homebrew](https://brew.sh) it offers to run:
 
 ```bash
 brew install colima docker
 colima start --cpu 2 --memory 4 --disk 30
 ```
 
-If Docker Desktop (or Colima) is already running, `gini-setup` detects it and just pulls the images.
+If Docker Desktop (or Colima) is already running, it detects that and just pulls the images.
 </details>
 
 <details>
 <summary><b>Linux details</b></summary>
 
-Install **Docker Engine** first — it needs `sudo`, so `gini-setup` guides rather than auto-installs:
+Install **Docker Engine** first — it needs `sudo`, so gBuilder guides rather than auto-installs:
 
 ```bash
 # https://docs.docker.com/engine/install/ for your distro, then:
 sudo usermod -aG docker $USER      # log out / back in afterwards
 ```
 
-Podman works too. Then run `gini-setup` to pull the images.
+Podman works too. Then launch gBuilder and accept the setup it offers.
 </details>
 
 <details>
@@ -138,7 +156,7 @@ Colima isn't available on Windows — use **Docker Desktop** or **Podman Desktop
 winget install -e --id Docker.DockerDesktop
 ```
 
-Start it, then run `gini-setup`. (Live-Run networking on Windows is still being validated;
+Start it, then launch gBuilder. (Live-Run networking on Windows is still being validated;
 Demo mode works fully.)
 </details>
 
@@ -146,23 +164,28 @@ Demo mode works fully.)
 <summary><b>Dev tools & building images locally</b></summary>
 
 ```bash
-# extra dev tooling (tests, linters) on top of the source install:
-cd frontend-ng && pip install -e ".[dev]"
+./scripts/dev.sh install                      # all three packages, editable
+cd frontend-ng && pip install -e ".[dev]"     # + tests and linters
+./scripts/dev.sh test                         # the suite
 
 # build the container images yourself instead of pulling them
 # (needed to hack the xv6 kernel via shadows):
-docker build -t gini-xv6:latest backend/xv6      # + oszoo / grouter / pox
+./scripts/images.sh build 6.1.0
 ```
 
 Point the app at a different image registry with `GINI_REGISTRY=ghcr.io/<owner>`.
+See [`scripts/README.md`](scripts/README.md) for releases, version bumps and multi-arch images.
 </details>
 
 <details>
 <summary><b>Troubleshooting</b></summary>
 
-- **"runtime not set up yet"** — run `gini-setup`. Demo mode still works without it.
-- **`gini-setup` pull says `denied` / `not found`** — images unreachable: check your network, or that
+- **"runtime not set up yet"** — accept the setup gBuilder offers at launch, or open it from the
+  Help menu. Demo mode works without it.
+- **The image pull says `denied` / `not found`** — images unreachable: check your network, or that
   the registry (`ghcr.io/gini-toolkit`) is correct and its packages are public.
+- **`ModuleNotFoundError: gini.domain`** — `gini-core` is missing. From a checkout, run
+  `./scripts/dev.sh install`; otherwise `pip install gini-core`.
 - **Two `gbuilder`s on your PATH** — you installed with both pip *and* pipx; keep one
   (`pip uninstall gini-toolkit` or `pipx uninstall gini-toolkit`).
 </details>
@@ -262,7 +285,10 @@ so a program inside them reaches services by name (`psql -h database1`,
 ## Repository layout
 
 ```
-frontend-ng/        gBuilder 6.0 — PySide6 app (domain · ui · agent · runtime · services)
+core/               gini-core — the domain model + proof format, no Qt (PyPI: gini-core)
+frontend-ng/        gBuilder 6.0 — PySide6 app (ui · agent · runtime · services) (PyPI: gini-toolkit)
+teaching-center/    the course server, no Qt (PyPI: gini-teaching-center)
+scripts/            install, test, release, container images — see scripts/README.md
 backend/
   src/grouter/      the real C gRouter (~20k lines) incl. OpenFlow/SDN mode
   grouter-build/      C build + Dockerfile (gini-grouter) + e2e forwarding tests
@@ -278,10 +304,11 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full map.
 ## Testing
 
 ```bash
-cd frontend-ng
-pytest                                   # ~95 tests
-# headless / CI:
-QT_QPA_PLATFORM=offscreen pytest
+./scripts/dev.sh test                    # the suite, minus the Qt tests
+./scripts/dev.sh test tests/test_tc_tls.py       # one file
+
+# the Qt suite needs a display, and is slow enough to be excluded by default:
+cd frontend-ng && QT_QPA_PLATFORM=offscreen pytest tests/test_qt_suite.py
 ```
 
 The gRouter has end-to-end forwarding proofs under `backend/grouter-build/tests/`

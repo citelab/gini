@@ -16,6 +16,11 @@ Group=gini-tc
 WorkingDirectory=/opt/gini-tc
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/opt/gini-tc/env
+# Loopback only, for nginx to proxy to. To serve TLS from this process instead (README §5b),
+# append:  --tls-cert /opt/gini-tc/tls/gini.crt --tls-key /opt/gini-tc/tls/gini.key
+# and move the port to 8443 — an unprivileged unit cannot bind 443 without the capability below.
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Half a pair is refused at startup, so a mistyped path fails loudly instead of serving HTTP.
 ExecStart=/opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8080 --host 127.0.0.1
 Restart=always
 RestartSec=2
@@ -28,6 +33,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/gini-tc/data
+# ProtectSystem=strict makes the filesystem read-only, not unreadable, so a certificate anywhere
+# still loads — but the KEY must be readable by this user. Own it gini-tc:gini-tc mode 0600 in
+# /opt/gini-tc/tls rather than loosening /etc/ssl/private, which the whole VM shares.
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

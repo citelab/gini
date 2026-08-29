@@ -15,6 +15,10 @@ module.exports = {
     // Full path if pm2 runs without your shell's PATH — which it usually does under `pm2 startup`.
     // Change this to wherever the venv lives:
     //   script: "/opt/gini-tc/venv/bin/gini-teaching-center",
+    // Binds loopback only, for nginx to proxy to. To serve TLS directly instead, see README §5b:
+    //   args: "--data /opt/gini-tc/data --port 8443 --host 0.0.0.0" +
+    //         " --tls-cert /opt/gini-tc/tls/gini.crt --tls-key /opt/gini-tc/tls/gini.key",
+    // Giving only one of the two is refused at startup rather than silently serving plain HTTP.
     args: "--data /opt/gini-tc/data --port 8080 --host 127.0.0.1",
     interpreter: "none",              // it is an installed console script, not a .js file
 
@@ -31,6 +35,7 @@ module.exports = {
       // /opt/gini-tc/env (chmod 600) and load it, or set the admin password once through the
       // one-time claim token the server prints on first run and never store it at all.
       ADMIN_ID: "admin",
+      // TLS_CERT / TLS_KEY work here too, if you would rather not put them in args.
       PYTHONUNBUFFERED: "1",          // or logs arrive in 4KB lumps, hours late
     },
 

@@ -2,7 +2,8 @@
 __pycache__/
 *.pyc
 *.egg-info/
-dist/                  # build artifacts — never commit (keeps the tree clean for setuptools-scm)
+# build artifacts — never commit (keeps the tree clean for setuptools-scm)
+dist/
 .pytest_cache/
 pytest-cache-files-*/
 .venv/
@@ -14,7 +15,8 @@ pytest-cache-files-*/
 *.zigobj.o
 config.log
 backend/build/
-backend/.zig-cache/    # legacy: Zig removed; kept so any stray cache never re-enters git
+# legacy: Zig removed; kept so any stray cache never re-enters git
+backend/.zig-cache/
 bin/
 build/
 lib/

@@ -51,21 +51,21 @@ def _apply_branding(app) -> None:
             pass                          # no pyobjc → bundle a .app for a permanent Dock icon
 
 
-def _setup_preflight() -> None:
-    """Soft check: Demo mode always works; live Run needs the container runtime + images from
-    `gini-setup`. We only nudge here — never block — so the app is explorable immediately."""
+def _setup_preflight() -> dict | None:
+    """What does this machine still need? Local and fast — no network, so it cannot delay launch.
+
+    Returns the plan for the window to act on, or None if nothing is needed. There is no longer a
+    separate `gini-setup` command to nudge people towards: a student who ran `pip install
+    gini-toolkit` and typed `gbuilder` should not have to discover a second command, and the old
+    message was printed to a terminal most of them never look at.
+    """
     try:
-        from . import __version__
-        from .setup import marker
-        if not marker.is_setup_done():
-            print("[gini] Runtime not set up yet — Demo mode works now. To enable live Run: "
-                  "`gini-setup` (installs the runtime + pulls images), or from a source "
-                  "checkout `gini-setup --build` (builds the images locally).")
-        elif marker.needs_update(__version__):
-            print(f"[gini] App is {__version__} but images were set up for {marker.setup_version()} "
-                  "— run `gini-setup --update` to refresh them.")
-    except Exception:
-        pass
+        from .services import bootstrap
+        from .version import __version__
+        p = bootstrap.plan(__version__)
+        return None if p["state"] == bootstrap.READY else p
+    except Exception:                      # noqa: BLE001 — never block launch on the preflight
+        return None
 
 
 def main() -> int:
@@ -112,9 +112,19 @@ def main() -> int:
     if not ({"--demo", "--selftest"} & args):
         win.restore_last_project()                 # reopen last session's project
 
-    _setup_preflight()                             # non-blocking: Demo always works
+    plan = _setup_preflight()                      # local + fast; never delays the window
     win.show()
     from PySide6.QtCore import QTimer
+    if plan and not ({"--demo", "--selftest"} & args):
+        # AFTER show(), so the panel appears over a real window rather than an empty screen — and
+        # deferred, so a slow dialog construction cannot be mistaken for a slow launch.
+        def _offer():
+            try:
+                from .ui.first_run import offer
+                win._first_run = offer(plan, win)      # kept alive; a local would be collected
+            except Exception:                          # noqa: BLE001
+                pass                                   # setup is a convenience, never a blocker
+        QTimer.singleShot(700, _offer)
     QTimer.singleShot(450, win.maybe_start_tour)   # feature tour, once the window is painted
     return app.exec()
 

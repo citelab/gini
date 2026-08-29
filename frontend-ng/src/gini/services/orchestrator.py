@@ -1377,7 +1377,7 @@ class Orchestrator:
         # fixed two-space service indent, so the block runs from "  <service>:" to the
         # next line at that indent.
         out, in_block, replaced = [], False, False
-        for line in compose.read_text().splitlines():
+        for line in compose.read_text(encoding="utf-8").splitlines():
             if line.startswith("  ") and line.rstrip().endswith(":") and not line.startswith("   "):
                 in_block = (line.strip().rstrip(":") == service)
             if in_block and line.strip().startswith("POX_APP:"):
@@ -1387,7 +1387,7 @@ class Orchestrator:
             out.append(line)
         if not replaced:
             return False, f"no POX_APP entry found for service '{service}'"
-        compose.write_text("\n".join(out) + "\n")
+        compose.write_text("\n".join(out) + "\n", encoding="utf-8")
 
         # --no-deps so only the controller is touched; --force-recreate so the new
         # environment is actually picked up rather than the old container restarted.

@@ -67,7 +67,7 @@ def ensure_dirs() -> None:
 
 def load_config() -> dict:
     try:
-        return json.loads(config_path().read_text())
+        return json.loads(config_path().read_text(encoding="utf-8"))
     except Exception:                       # missing or malformed -> defaults
         return {}
 
@@ -75,7 +75,7 @@ def load_config() -> dict:
 def save_config(data: dict) -> None:
     ensure_dirs()
     try:
-        config_path().write_text(json.dumps(data, indent=2))
+        config_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
 
@@ -88,7 +88,7 @@ def recents_path() -> Path:
 
 def load_recents() -> dict:
     try:
-        data = json.loads(recents_path().read_text())
+        data = json.loads(recents_path().read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -97,7 +97,7 @@ def load_recents() -> dict:
 def save_recents(data: dict) -> None:
     ensure_dirs()
     try:
-        recents_path().write_text(json.dumps(data, indent=2))
+        recents_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
 
