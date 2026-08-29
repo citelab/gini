@@ -466,3 +466,77 @@ def test_a_failing_ui_callback_does_not_stop_recording(rec):
     rec.set_on_change(lambda: 1 / 0)
     _build_a_lan(rec)
     assert sum(1 for k in _kinds(rec) if k == ev.PLACE) == 2
+
+
+# ---- pausing, and coming back ------------------------------------------------ #
+def test_pausing_keeps_the_chain_and_offers_the_code_back(rec):
+    """Recording used to be a one-way door: nothing disarmed — not even generating a proof — so a
+    student who armed the wrong code had to restart gBuilder to get out. Pausing is only safe to
+    offer if coming back is one click and loses nothing."""
+    rec.arm(CODE)
+    _build_a_lan(rec)
+    before = rec.count
+    assert before > 0
+
+    rec.disarm()
+    assert rec.armed is False                       # really stopped
+    st = rec.status()
+    assert st["can_resume"] is True                 # …and the way back is on offer
+    assert st["paused"] and st["paused_short"]
+
+    ok, message = rec.resume()
+    assert ok and rec.armed is True
+    assert rec.count == before                      # SAME chain, not a second one
+    assert "Resumed" in message and str(before) in message
+
+
+def test_nothing_is_recorded_while_paused(rec):
+    """A pause that still recorded would be a lie told in the one place that must not lie."""
+    rec.arm(CODE)
+    _build_a_lan(rec)
+    rec.disarm()
+    at_pause = rec.count                            # 0 while unarmed — nothing is loaded
+    rec.ctx.add_device("router")                    # work done off the record
+    rec.resume()
+    assert rec.count == at_pause or rec.count > 0   # resumed chain, unchanged by the paused work
+    kinds = rec._chain.kinds()
+    assert kinds.get("place", 0) == 2               # the two from _build_a_lan, not three
+
+
+def test_arming_a_different_code_replaces_what_would_be_resumed(rec):
+    """'Enter a new code and you are recording again' — the old one must stop being advertised."""
+    other = mint(lambda n: bytes((i * 7 + 3) % 256 for i in range(n))).pretty
+    rec.arm(CODE)
+    rec.disarm()
+    assert rec.status()["can_resume"] is True
+    assert rec.arm(other)[0] is True
+    assert rec.status()["can_resume"] is False      # nothing stale left on offer
+    rec.disarm()
+    assert rec.status()["paused"].replace("-", "") == other.replace("-", "")
+
+
+def test_resume_refuses_when_there_is_nothing_to_resume(rec):
+    ok, message = rec.resume()
+    assert ok is False and "nothing to resume" in message.lower()
+
+
+def test_a_paused_code_whose_chain_is_gone_is_not_offered(rec, tmp_path):
+    """`can_resume` asks the store, so a chain deleted underneath us stops being advertised
+    instead of failing when the student presses the button."""
+    rec.arm(CODE)
+    rec.disarm()
+    assert rec.status()["can_resume"] is True
+    for f in tmp_path.rglob("*.jsonl"):
+        f.unlink()
+    assert rec.status()["can_resume"] is False
+
+
+def test_generating_a_proof_leaves_the_recording_state_visible(rec):
+    """The strip reads `submitted` to say so. It never did, which is why 'recording' stayed on
+    screen with no way out after a hand-in."""
+    rec.arm(CODE)
+    _build_a_lan(rec)
+    assert rec.status()["submitted"] is False
+    assert rec.generate_proof()["ok"] is True
+    assert rec.status()["submitted"] is True
+    assert rec.armed is True                        # still armed — pausing is how you leave

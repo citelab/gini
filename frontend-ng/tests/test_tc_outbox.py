@@ -36,6 +36,39 @@ HOUR = 3600.0
 # --------------------------------------------------------------------------- #
 # the outbox on its own — no server needed
 # --------------------------------------------------------------------------- #
+
+
+def test_summary_surfaces_what_was_recorded_but_never_shown(box):
+    """attempts / last_error / queued were written from the start and never reached the screen, so
+    a submission retried and refused eleven times looked exactly like one never tried."""
+    outbox.queue(a_proof("ABCD1234EFGH"), root=box, now=1000.0)
+    outbox.queue(a_proof("MNPQ5678RSTU"), root=box, now=2000.0)
+
+    def refuse(url, code, proof, topo):
+        return {"ok": False, "error": "the course server refused: code expired"}
+
+    outbox.flush("http://x", refuse, root=box, now=3000.0)
+    outbox.flush("http://x", refuse, root=box, now=3100.0)
+
+    info = outbox.summary(root=box, now=1000.0 + 2 * HOUR)
+    assert info["count"] == 2
+    assert info["attempts"] == 2                       # it HAS been trying
+    assert "expired" in info["last_error"]             # and this is why it is not landing
+    assert info["oldest_age_s"] == pytest.approx(2 * HOUR)   # stuck since the first one
+    assert len(info["receipts"]) == 2
+
+
+def test_summary_of_an_empty_outbox_says_nothing_is_owed(box):
+    info = outbox.summary(root=box)
+    assert info == {"count": 0, "oldest_age_s": 0.0, "attempts": 0,
+                    "last_error": "", "receipts": []}
+
+
+def test_summary_survives_a_half_written_entry(box):
+    """`pending` already tolerates these; the summary must not be the thing that crashes a launch."""
+    outbox.queue(a_proof(), root=box, now=500.0)
+    (box / "torn.json").write_text("{not json", encoding="utf-8")
+    assert outbox.summary(root=box, now=500.0)["count"] == 1
 @pytest.fixture
 def box(tmp_path):
     return tmp_path / "outbox"
@@ -313,7 +346,8 @@ def _load_strip(monkeypatch):
     core.Qt = _W()
     core.Signal = lambda *a: _Sig()
     widgets = types.ModuleType("PySide6.QtWidgets")
-    for n in ("QHBoxLayout", "QLabel", "QLineEdit", "QPushButton", "QVBoxLayout", "QWidget"):
+    for n in ("QHBoxLayout", "QLabel", "QLineEdit", "QProgressBar", "QPushButton",
+              "QVBoxLayout", "QWidget"):
         setattr(widgets, n, _W)
     seen = []
     widgets.QMessageBox = type("QMessageBox", (), {
@@ -348,6 +382,7 @@ def test_the_strip_queues_the_work_BEFORE_it_tries_to_send(tmp_path, monkeypatch
     strip.recorder = type("R", (), {"ctx": type("C", (), {
         "settings": type("S", (), {"tc_url": "http://127.0.0.1:9"})()})()})()
     strip._say = lambda *a, **k: None
+    strip._busy = lambda *a, **k: None          # the send-in-flight progress bar
     strip.handedIn = type("S", (), {"emit": staticmethod(lambda *a: order.append("emitted"))})()
 
     strip._hand_in({"ok": True, "proof": proof, "topology": topo,
@@ -368,6 +403,7 @@ def test_the_strip_tells_the_student_not_to_redo_the_lab(tmp_path, monkeypatch):
 
     strip = object.__new__(mod.ProofStrip)
     strip._say = lambda *a, **k: None
+    strip._busy = lambda *a, **k: None          # the send-in-flight progress bar
     strip._on_handed_in({"receipt": receipt, "path": "/tmp/p.json", "proof": proof},
                         {"ok": False, "unreachable": True, "error": "network down"})
 
@@ -388,6 +424,7 @@ def test_a_successful_hand_in_clears_the_outbox_entry(tmp_path, monkeypatch):
 
     strip = object.__new__(mod.ProofStrip)
     strip._say = lambda *a, **k: None
+    strip._busy = lambda *a, **k: None          # the send-in-flight progress bar
     strip._on_handed_in({"receipt": receipt, "path": "/tmp/p.json", "proof": proof},
                         {"ok": True, "receipt": receipt, "within_session": True})
     assert outbox.pending(box) == []

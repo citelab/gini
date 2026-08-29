@@ -86,6 +86,30 @@ def forget(receipt: str, root: Path | None = None) -> None:
     _path(root, receipt).unlink(missing_ok=True)
 
 
+def summary(root: Path | None = None, now: float | None = None) -> dict:
+    """One dict describing everything still waiting, for the UI to render.
+
+    Queueing already recorded `attempts`, `last_error` and `queued` per entry, and none of it ever
+    reached the screen — so a submission that had been retried and refused eleven times looked
+    exactly like one that had never been tried. "Saved, not sent" is only reassuring if the student
+    can also see that it is still being worked on, and how long it has been stuck.
+    """
+    items = pending(root)
+    now = now if now is not None else time.time()
+    if not items:
+        return {"count": 0, "oldest_age_s": 0.0, "attempts": 0, "last_error": "", "receipts": []}
+    oldest = min(float(e.get("queued", now) or now) for e in items)
+    last_error = ""
+    for e in items:                       # the most recent non-empty error wins
+        if e.get("last_error"):
+            last_error = str(e["last_error"])
+    return {"count": len(items),
+            "oldest_age_s": max(0.0, now - oldest),
+            "attempts": max(int(e.get("attempts", 0) or 0) for e in items),
+            "last_error": last_error,
+            "receipts": [str(e.get("receipt", "")) for e in items]}
+
+
 def flush(url: str, send, *, root: Path | None = None, now: float | None = None) -> dict:
     """Try every pending submission. Returns `{sent, kept, errors}`.
 
