@@ -25,6 +25,9 @@
 #                   `pip install` skips. That is how a "published" package became uninstallable.
 #   existing tag    PyPI refuses to re-upload a version. Ever. Catching it here costs a second;
 #                   catching it after the upload costs a version number.
+#   stale images    a release whose container images miss an architecture strands every user on
+#                   it — and gBuilder asks for the images of ITS OWN version, so they cannot
+#                   upgrade their way out without knowing to. 6.0.0 went out arm64-only.
 #   failing tests   a release is the worst time to find out.
 set -euo pipefail
 
@@ -80,6 +83,30 @@ fi
 if git rev-parse "$TAG" >/dev/null 2>&1; then
   echo "$TAG already exists. PyPI never allows a version to be reused — pick the next one up." >&2
   exit 1
+fi
+
+# Images are built AFTER a tag (see the note this script prints at the end), so this cannot check
+# the version being cut — the newest thing it CAN check is the last release, and cutting a new one
+# on top of a broken one just buries the problem. Fails soft if the registry cannot be read: a
+# flaky network must not block a release, but it must not read as a pass either.
+if [ -n "$last" ] && [ -z "${GINI_SKIP_IMAGE_CHECK:-}" ]; then
+  echo "Checking the images published for $last cover both architectures…"
+  "$(dirname "${BASH_SOURCE[0]}")/images.sh" verify "${last#v}" && img_rc=0 || img_rc=$?
+  if [ "${img_rc:-0}" -ne 0 ]; then
+    cat >&2 <<MSG
+
+$last's images are incomplete, so anyone who installs it cannot Run anything. Cutting $TAG on top
+would leave them stranded: gBuilder asks for the images of its OWN version, so upgrading is the
+only way out and nothing tells them that.
+
+Finish them   ./scripts/images.sh build ${last#v}   (on the missing architecture, then merge)
+or yank ${last#v} from PyPI so nobody new lands on it. Then re-run this.
+
+Deliberate exception:  GINI_SKIP_IMAGE_CHECK=1 $0 $level
+MSG
+    exit 1
+  fi
+  echo
 fi
 
 echo "Running the tests before tagging anything…"
