@@ -316,6 +316,37 @@ The gRouter has end-to-end forwarding proofs under `backend/grouter-build/tests/
 
 ---
 
+## Releasing
+
+You never type a version number. `setuptools-scm` derives it from the git tag, so **one tag
+versions all three packages at once**:
+
+```bash
+./scripts/release.sh              # show the current version and what each bump would give
+./scripts/release.sh minor        # runs the tests, tags, pushes
+```
+
+Pushing the tag is what publishes: the workflows in `.github/workflows/` fire on `v*` and upload
+`gini-core`, `gini-toolkit` and `gini-teaching-center` to PyPI via trusted publishing, so there is
+no API token anywhere.
+
+Container images are **not** built by a release — they are slow and want a machine of each
+architecture, since these images compile a C router and a RISC-V toolchain:
+
+```bash
+./scripts/images.sh build 6.1.0   # on an arm64 Mac, and again on an amd64 Linux box
+./scripts/images.sh merge 6.1.0   # once, after both — publishes a multi-arch manifest list
+```
+
+One tag then resolves per-architecture at the registry, which is why gBuilder contains no
+architecture logic at all: a client-side guess could be wrong, and wrong means confidently pulling
+binaries that will not run.
+
+Full detail — the release guards and why each exists, GHCR login, the QEMU fallback — is in
+**[`scripts/README.md`](scripts/README.md)**.
+
+---
+
 ## Status
 
 gBuilder 6.0 is under active development. Working today: the visual builder, real packet
