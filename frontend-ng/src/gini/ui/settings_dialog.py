@@ -191,9 +191,12 @@ class SettingsDialog(QDialog):
         tcf.addRow("Enrolment token", self.tc_token)
         tcf.addRow("", _note("Your password is never stored — signing in exchanges it for a session. "
                              "The enrolment token is used ONCE, to claim your account.\n\n"
-                             "GINI refuses to send a password over plain HTTP to a remote server: on "
-                             "shared wifi anyone could read it. Tick the box above only for a demo on "
-                             "a network you trust (localhost is always allowed).\n\n"
+                             "The course server must be https:// — GINI will not send your work, or "
+                             "your password, over an unencrypted connection. That applies to "
+                             "localhost too, which can hold a certificate like any other name.\n\n"
+                             "Course, Username and Enrolment token are for Missions and lessons. "
+                             "Handing work in uses only the server address and the assignment code "
+                             "you type on the dashboard — no sign-in.\n\n"
                              "Leave the server blank to work offline — Missions then offers the local "
                              "practice catalog."))
 

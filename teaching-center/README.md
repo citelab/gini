@@ -155,6 +155,25 @@ fallback looks like a clean start while every password goes out in the clear.
 
 Either way, point gBuilder at `https://gini.cs.mcgill.ca` (or `…:8443`) in Settings.
 
+**Where the certificate comes from.** For a real course server on a real name, either a school
+certificate (McGill has an institutional service — ask IT first; those are usually 1-year and your
+sysadmins already know the renewal path) or Let's Encrypt.
+
+If you use Let's Encrypt, two things decide how:
+
+* **Validation needs reachability.** HTTP-01 wants inbound `:80` and TLS-ALPN-01 wants `:443`. A VM
+  reachable only inside the campus VPN can satisfy neither — use **DNS-01**, which proves control of
+  the name through the DNS zone and needs no inbound connection at all.
+* **Renewal does not reach a running server.** The certificate is read once, at startup. With nginx
+  in front this is a non-issue: certbot reloads nginx and the backend keeps its own loopback cert.
+  Serving the public certificate from this process instead, you must restart it on renewal —
+
+  ```bash
+  certbot renew --deploy-hook 'systemctl restart gini-tc'
+  ```
+
+  Without that hook it keeps serving the old certificate and expires 90 days in, mid-term.
+
 **About self-signed certificates.** They encrypt, but they are not trusted, and gBuilder verifies
 properly — so every student machine rejects the connection until the certificate is trusted. It
 says so in as many words: a *certificate* problem, for the instructor to fix, rather than "is the

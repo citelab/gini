@@ -190,6 +190,13 @@ class ProofStrip(QWidget):
         except AttributeError:
             return ""
 
+    def _tc_course(self) -> str:
+        """The course this gBuilder is configured for, or "". Advisory only — see `_announce`."""
+        try:
+            return (self.recorder.ctx.settings.tc_course or "").strip()
+        except AttributeError:
+            return ""
+
     def _arm(self) -> None:
         if self.recorder is None:
             return
@@ -235,9 +242,34 @@ class ProofStrip(QWidget):
             self._say("Could not reach the course server — recording locally.", bad=False)
             self._arm_locally(typed, keep_hint=True)
             return
-        self._arm_locally(typed)
+        if self._arm_locally(typed, keep_hint=True):
+            self._announce(answer)
 
-    def _arm_locally(self, typed: str, keep_hint: bool = False) -> None:
+    def _announce(self, answer: dict) -> None:
+        """Say WHICH activity is now being recorded, and whose course it belongs to.
+
+        The server has always sent this back — `activity` is `course/lab`, plus the title — and the
+        strip threw all of it away, checking only `ok`. So a student who pasted a code from their
+        other course armed silently, worked for two hours, and handed in there. Correctly, and with
+        nothing on screen ever having said so.
+
+        A mismatch is a WARNING, never a refusal. A student legitimately enrolled in two courses
+        must still be able to hand in to the one this code belongs to, and a hard check would
+        produce a false rejection at deadline time — the worst possible moment to be wrong.
+        """
+        activity = str(answer.get("activity") or "").strip()
+        title = str(answer.get("title") or "").strip()
+        what = " · ".join([b for b in (f"<b>{activity}</b>" if activity else "",
+                                       f"“{title}”" if title else "") if b]) or "this code"
+        course = activity.split("/")[0] if "/" in activity else ""
+        mine = self._tc_course()
+        if course and mine and course.lower() != mine.lower():
+            self._say(f"Recording for {what} — note this code is for <b>{course}</b>, but your "
+                      f"course is set to <b>{mine}</b>.", bad=True)
+        else:
+            self._say(f"Recording for {what}.")
+
+    def _arm_locally(self, typed: str, keep_hint: bool = False) -> bool:
         ok, message = self.recorder.arm(typed)
         if ok:
             self.code.clear()
@@ -248,6 +280,7 @@ class ProofStrip(QWidget):
         self.refresh(keep_hint=True)
         if ok:
             self.flush_outbox()
+        return ok
 
     def _generate(self) -> None:
         if self.recorder is None:

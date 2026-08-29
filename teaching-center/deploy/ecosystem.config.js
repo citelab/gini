@@ -15,11 +15,15 @@ module.exports = {
     // Full path if pm2 runs without your shell's PATH — which it usually does under `pm2 startup`.
     // Change this to wherever the venv lives:
     //   script: "/opt/gini-tc/venv/bin/gini-teaching-center",
-    // Binds loopback only, for nginx to proxy to. To serve TLS directly instead, see README §5b:
-    //   args: "--data /opt/gini-tc/data --port 8443 --host 0.0.0.0" +
-    //         " --tls-cert /opt/gini-tc/tls/gini.crt --tls-key /opt/gini-tc/tls/gini.key",
-    // Giving only one of the two is refused at startup rather than silently serving plain HTTP.
-    args: "--data /opt/gini-tc/data --port 8080 --host 127.0.0.1",
+    // TLS is required — there is no HTTP mode — so the certificate is part of the command.
+    // Loopback gets one too: nginx proxies to https://127.0.0.1:8443 and does not verify an
+    // upstream certificate, so a self-signed cert made on the box is enough here, and the real
+    // certificate stays with nginx where root owns the key.
+    // To serve the public certificate from this process instead, use --host 0.0.0.0 (README §5b
+    // covers binding 443 unprivileged, and the Let's Encrypt renewal hook — a renewed certificate
+    // does NOT reach a running process, which reads it once at startup).
+    args: "--data /opt/gini-tc/data --port 8443 --host 127.0.0.1" +
+          " --tls-cert /opt/gini-tc/tls/gini.crt --tls-key /opt/gini-tc/tls/gini.key",
     interpreter: "none",              // it is an installed console script, not a .js file
 
     instances: 1,                     // MUST stay 1: SQLite with one writer, one process

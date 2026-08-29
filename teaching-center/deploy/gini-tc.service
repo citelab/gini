@@ -16,12 +16,21 @@ Group=gini-tc
 WorkingDirectory=/opt/gini-tc
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/opt/gini-tc/env
-# Loopback only, for nginx to proxy to. To serve TLS from this process instead (README §5b),
-# append:  --tls-cert /opt/gini-tc/tls/gini.crt --tls-key /opt/gini-tc/tls/gini.key
-# and move the port to 8443 — an unprivileged unit cannot bind 443 without the capability below.
+# TLS is required — there is no HTTP mode — so the certificate paths are part of the command, not
+# an optional extra. Loopback still gets one: nginx proxies to https://127.0.0.1:8443 and does not
+# verify an upstream certificate, so a self-signed cert made on the box is enough here. Behind
+# nginx the REAL certificate stays with nginx, root-owned, and this process never sees it.
+#
+# To serve the public certificate from this process instead (README §5b), point --tls-cert at it,
+# use --host 0.0.0.0, and note that an unprivileged unit cannot bind 443 without:
 #   AmbientCapabilities=CAP_NET_BIND_SERVICE
-# Half a pair is refused at startup, so a mistyped path fails loudly instead of serving HTTP.
-ExecStart=/opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8080 --host 127.0.0.1
+#
+# If that certificate comes from Let's Encrypt, renewal does NOT reach a running process: the cert
+# is read once at startup. Add a certbot hook, or the server silently serves an expired cert 90
+# days in:
+#   certbot renew --deploy-hook 'systemctl restart gini-tc'
+ExecStart=/opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8443 --host 127.0.0.1 \
+    --tls-cert /opt/gini-tc/tls/gini.crt --tls-key /opt/gini-tc/tls/gini.key
 Restart=always
 RestartSec=2
 
