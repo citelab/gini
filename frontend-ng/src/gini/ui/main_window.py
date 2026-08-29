@@ -134,6 +134,8 @@ class MainWindow(QMainWindow):
         # starts signed-out and you sign in from it.
         self._remote = None              # RemoteClient when connected to a GINI server, else None
         self._running = False
+        self._launching = False        # `up` is in flight: containers may already be appearing
+        self._orphaned = False         # a launch failed and may have left containers behind
         self._stopping = False
         self._workdir: str | None = None
         self._project_path: str | None = None
@@ -1376,9 +1378,31 @@ class MainWindow(QMainWindow):
         self._autosave_timer.timeout.connect(self._persist_current_project)
         self._autosave_timer.start()
 
+    def containers_busy(self) -> bool:
+        """True while containers of ours may exist — which is wider than `_running`.
+
+        `_running` only goes true once `up` REPORTS success. On a real topology `docker compose up`
+        takes tens of seconds, and for all of it containers are appearing while `_running` is still
+        False — so a quit in that window was allowed, the window vanished, and the lab stayed up.
+        From outside that is indistinguishable from a crash: no traceback, no crash report, just an
+        app that is gone and containers that are not.
+
+        A failed launch has the same shape (`compose up` can bring half a topology up and still
+        fail), and stopping does too, which is why `_switch_blocked` already refused to change
+        project on `_stopping` while quitting — the more destructive act — did not.
+        """
+        return bool(self._running or self._launching or self._orphaned
+                    or getattr(self, "_stopping", False))
+
+    def _busy_quit_message(self) -> str:
+        if self._launching:
+            return ("The topology is still starting — wait for it to finish, then press Stop "
+                    "before quitting.")
+        return "The topology is still running — press Stop before quitting."
+
     def closeEvent(self, e) -> None:
-        if self._running:                    # don't quit out from under a live topology
-            self.ctx.log("The topology is still running — press Stop before quitting.", "error")
+        if self.containers_busy():           # don't quit out from under a live topology
+            self.ctx.log(self._busy_quit_message(), "error")
             e.ignore()
             return
         self._persist_current_project()      # never lose the active project's work / chat
@@ -1396,8 +1420,8 @@ class MainWindow(QMainWindow):
 
         Called by GiniApplication.event(). Deliberately NOT an eventFilter — see ui/app.py.
         """
-        if self._running:
-            self.ctx.log("The topology is still running — press Stop before quitting.", "error")
+        if self.containers_busy():
+            self.ctx.log(self._busy_quit_message(), "error")
             return True
         return False
 
@@ -2155,6 +2179,12 @@ class MainWindow(QMainWindow):
         if self._running:
             self.ctx.log("Already running — stop first.", "info")
             return
+        if self._launching:
+            # A second launch during the boot window would replace _workdir and orphan the compose
+            # project already coming up. The run button's state machine hides this (it offers Stop
+            # while "booting"), but _run is reachable from the menu too.
+            self.ctx.log("Still starting — wait for the current launch to finish.", "info")
+            return
         cfg = self._compile()
         runnable = (cfg.machines or cfg.routers or cfg.ovs_switches
                     or cfg.controllers or cfg.services or cfg.k8s or cfg.faas)
@@ -2194,12 +2224,21 @@ class MainWindow(QMainWindow):
 
         self.run_button.set_state("booting")        # ring fills as containers come up
 
+        self._launching = True          # from HERE, `docker compose up` may be making containers
+
         def worker(workdir=self._workdir, ai=auto_internet, lid=self._laptop_id()):
-            ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai, laptop_id=lid)
+            # `up` writes files and shells out, so it can raise — and an exception here used to
+            # kill this thread with run_state never emitted, leaving the button stuck on "booting"
+            # for ever with no error anywhere the user looks. Always report something.
+            try:
+                ok, msg = self._gloader.up(cfg, workdir, auto_internet=ai, laptop_id=lid)
+            except Exception as e:                      # noqa: BLE001
+                ok, msg = False, f"{type(e).__name__}: {e}"
             self.ctx.bus.run_state.emit(ok, msg)
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_run_state(self, ok: bool, msg: str) -> None:
+        self._launching = False            # settled, one way or the other
         if self._remote is not None:           # remote backend has its own (lighter) handling
             self._on_remote_run_state(ok, msg)
             return
@@ -2254,11 +2293,18 @@ class MainWindow(QMainWindow):
         else:
             self.run_button.set_state("error")
             self.ctx.log(f"Run failed: {msg}", "error")
+            # `compose up` can bring half a topology up and still fail, so containers may be out
+            # there. Mark it, and start the reconciler — that is what clears the mark once they
+            # are gone, and what keeps Stop available meanwhile.
+            self._orphaned = True
+            self._poll.start()
+            self.ctx.log("Some containers from that launch may still be running — press Stop to "
+                         "clean up.", "warn")
         self._update_status()
 
     def _stop(self) -> None:
         import threading
-        if not self._running:
+        if not (self._running or self._orphaned):
             self.ctx.log("Not running.", "info")
             return
         self._stopping = True
@@ -2292,9 +2338,11 @@ class MainWindow(QMainWindow):
 
         # finished stopping, or everything died externally
         if not any_up:
-            if self._running or self._stopping:
+            if self._running or self._stopping or self._orphaned:
+                was_live = self._running or self._stopping
                 self._running = False
                 self._stopping = False
+                self._orphaned = False          # nothing of ours is left out there
                 self._poll.stop()
                 self._set_runtime_status("idle")
                 self.dashboard.stop()           # freeze the session's GINI $ bill
@@ -2313,7 +2361,8 @@ class MainWindow(QMainWindow):
                 self.inspector.set_fabric_snapshot({})
                 self.inspector.set_k8s_snapshot({})
                 self.run_button.set_state("ready")
-                self.ctx.log("All containers stopped.", "info")
+                self.ctx.log("All containers stopped." if was_live
+                             else "Nothing from that launch is still running.", "info")
                 self._update_status()
             return
         if self._stopping:
@@ -2574,11 +2623,17 @@ class MainWindow(QMainWindow):
             return (f"{{ printf '{esc}'; cat /etc/hosts; }} > /tmp/gini_hosts && "
                     "cat /tmp/gini_hosts > /etc/hosts")
 
+        # Built HERE, on the GUI thread, not inside work(). `addressing` is GUI-thread data that
+        # _recompute_addressing replaces from under us, and the worker has no business reading it —
+        # only finished strings cross the boundary. Per-machine blocks made it tempting to build
+        # them where they are used; that is exactly how a worker ends up walking live state.
+        scripts = {dev.name: script_for(dev.name) for dev in devs}
+
         def work():
             import time
             failed = []
             for dev in devs:
-                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", script_for(dev.name)]
+                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", scripts[dev.name]]
                 err = ""
                 # Retry: this fires right after `up` returns, and a container may not be accepting
                 # execs yet — native Linux docker returns from `up` far sooner than Docker Desktop,

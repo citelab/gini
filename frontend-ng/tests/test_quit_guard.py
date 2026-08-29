@@ -46,6 +46,63 @@ def test_the_guard_blocks_app_quit_while_running():
     assert w._quit_blocked() is False                   # idle → let it through
 
 
+# -- the window where the app is gone and the lab is not ------------------------ #
+def test_quitting_is_blocked_while_a_launch_is_still_in_flight():
+    """THE one that looks like a crash.
+
+    `_running` only becomes true once `up` REPORTS success, but `docker compose up` on a real
+    topology takes tens of seconds and containers appear throughout. Quitting in that window was
+    allowed: the window vanished and the lab stayed up, which from outside is indistinguishable
+    from a crash — no traceback, no crash report, just an app that is gone and containers that
+    are not.
+    """
+    app, w = _win()
+    logs = []
+    w.ctx.bus.log.connect(lambda lvl, msg: logs.append(msg))
+    w._running, w._launching = False, True          # exactly the boot window
+    assert w.containers_busy() is True
+    ev = QCloseEvent(); ev.accept()
+    w.closeEvent(ev)
+    assert not ev.isAccepted()
+    assert w._quit_blocked() is True                # and the ⌘Q backstop agrees
+    assert any("still starting" in m for m in logs)  # says WHY, not just "still running"
+
+
+def test_quitting_is_blocked_after_a_launch_that_may_have_left_containers():
+    """`compose up` can bring half a topology up and still report failure."""
+    app, w = _win()
+    w._running, w._launching, w._orphaned = False, False, True
+    assert w.containers_busy() is True
+    assert w._quit_blocked() is True
+
+
+def test_quitting_is_blocked_while_stopping():
+    """_switch_blocked already refused to change project while stopping; quitting — which is more
+    destructive — did not."""
+    app, w = _win()
+    w._running, w._stopping = False, True
+    assert w.containers_busy() is True
+    assert w._quit_blocked() is True
+
+
+def test_an_idle_window_is_busy_in_no_sense():
+    app, w = _win()
+    w._running = w._launching = w._orphaned = w._stopping = False
+    assert w.containers_busy() is False
+    assert w._quit_blocked() is False
+
+
+def test_stop_is_available_after_a_failed_launch():
+    """Otherwise a half-launched lab can only be cleaned up from a terminal, and the UI insists
+    nothing is running while eight containers are."""
+    app, w = _win()
+    w._running, w._orphaned = False, True
+    logs = []
+    w.ctx.bus.log.connect(lambda lvl, msg: logs.append(msg))
+    w._stop()
+    assert not any("Not running" in m for m in logs)
+
+
 def test_the_application_consults_the_guard():
     """End to end: a real QEvent.Quit through GiniApplication.event()."""
     from gini.ui.app import GiniApplication
