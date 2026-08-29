@@ -652,28 +652,42 @@ def serve(host: str = "0.0.0.0", port: int = PORT,
           tls_cert: str = "", tls_key: str = "") -> None:
     MATERIALS.mkdir(parents=True, exist_ok=True)
 
-    # Half a pair is always a mistake, and the dangerous kind: without this the server would fall
-    # back to plain HTTP and look like it started fine, while every staff password crossed the
-    # network in the clear.
+    # TLS is not optional. It used to be, with a printed warning for the reachable case — and a
+    # warning is not a control: the server still came up, staff still typed passwords into it, and
+    # the 12-hour session token that came back rode every subsequent request in clear text.
+    #
+    # There is no longer an excuse to skip it, because loopback can have a certificate like
+    # anything else: bind 127.0.0.1 with a self-signed cert and the transport is encrypted and
+    # authenticated exactly as it is on a public name. The old carve-out existed on the assumption
+    # that it could not.
     if bool(tls_cert) != bool(tls_key):
         raise SystemExit("TLS needs BOTH --tls-cert and --tls-key; only one was given.")
+    if not tls_cert:
+        raise SystemExit(
+            "The Teaching Center only serves HTTPS. Pass --tls-cert and --tls-key.\n\n"
+            "Staff sign in with a password and get a session token that is good for twelve hours;\n"
+            "on plain HTTP both are readable by anyone on the same network, and so is every\n"
+            "student's assignment code and submitted work.\n\n"
+            "For a local or loopback server, make one (the subjectAltName is required — a bare\n"
+            "CN is rejected by OpenSSL 3 and by macOS):\n\n"
+            "    printf '[req]\\ndistinguished_name=dn\\nx509_extensions=v3\\nprompt=no\\n"
+            "[dn]\\nCN=localhost\\n[v3]\\nsubjectAltName=DNS:localhost,IP:127.0.0.1\\n' > tls.cnf\n"
+            "    openssl req -x509 -newkey rsa:2048 -nodes -days 365 \\\n"
+            "        -keyout key.pem -out cert.pem -config tls.cnf\n\n"
+            "Then trust it on the machines running gBuilder (mkcert does both steps for you, and\n"
+            "installs into the system trust store: `mkcert -install && mkcert localhost 127.0.0.1`).\n\n"
+            "Terminating TLS in a proxy? Give the backend a loopback certificate too and point the\n"
+            "proxy at https://127.0.0.1 — nginx does not verify an upstream certificate by default.")
 
-    ctx = _tls_context(tls_cert, tls_key) if tls_cert else None
-    scheme = "https" if ctx else "http"
+    ctx = _tls_context(tls_cert, tls_key)
+    scheme = "https"
 
     token = _ACCTS.ensure_admin()
     who = os.environ.get("ADMIN_ID", "admin")
     shown = "127.0.0.1" if host in ("127.0.0.1", "localhost") else host
     print(f"GINI Teaching Center  ·  {scheme}://{shown}:{port}/")
     print(f"  data     {ROOT}")
-    if ctx:
-        print(f"  tls      {tls_cert}")
-    elif host not in ("127.0.0.1", "localhost"):
-        # The one combination worth shouting about: reachable from the network, and staff about to
-        # type a password into it over plain HTTP.
-        print(f"  WARNING  serving plain HTTP on {host} — staff passwords will cross the network")
-        print(f"           in clear text. Use --tls-cert/--tls-key, or put a TLS proxy in front")
-        print(f"           and bind 127.0.0.1.")
+    print(f"  tls      {tls_cert}")
     if token:
         print(f"\n  FIRST RUN — claim the admin account:")
         print(f"    username     {who}")
@@ -683,8 +697,7 @@ def serve(host: str = "0.0.0.0", port: int = PORT,
         print(f"  admin    {who}\n")
 
     httpd = ThreadingHTTPServer((host, port), Handler)
-    if ctx:
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()
 
 

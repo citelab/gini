@@ -1,6 +1,6 @@
 # GINI Teaching Center
 
-Courses, lab codes, and proof-of-activity submissions. A small threaded HTTP server over SQLite,
+Courses, lab codes, and proof-of-activity submissions. A small threaded HTTPS server over SQLite,
 with no AI and no external services.
 
 ```
@@ -49,11 +49,16 @@ so the portal is never standing open on a port with no password, which is what "
 wins" would mean on a shared machine.
 
 ```bash
-sudo -u gini-tc /opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8080
+sudo -u gini-tc /opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8443 \
+    --tls-cert /etc/ssl/certs/gini.crt --tls-key /opt/gini-tc/gini.key
 ```
 
+There is no HTTP mode — see [TLS](#5-tls-is-not-optional) below — so the certificate has to exist
+before the first start. For a quick look before you have one, `./teaching-center/run.sh` makes a
+self-signed loopback certificate for you.
+
 ```
-GINI Teaching Center  ·  http://127.0.0.1:8080/
+GINI Teaching Center  ·  https://127.0.0.1:8443/
 
   FIRST RUN — claim the admin account:
     username     admin
@@ -84,16 +89,24 @@ if a permission is set wrongly later. `deploy/gini-tc.service` is ready to copy.
 Either way, restarts are a backstop rather than a routine event: an exception inside a request is
 caught and answered as a 500, so a bad request cannot take the process down.
 
-### 5. Turn on TLS
+### 5. TLS is not optional
 
-**Staff sign in with a password.** Over plain HTTP on a VM the whole school can log into, that
-password is readable by anyone else on the wire or on the box. This is the one step not to skip.
+**The Teaching Center serves HTTPS and nothing else**, and gBuilder refuses a `http://` course
+server address. There is no flag to turn either off.
+
+It used to be optional, with a printed warning when the bind was reachable — but a warning is not
+a control: the server still came up, staff still typed passwords into it, and the twelve-hour
+session token that came back rode every later request in clear text, along with every student's
+assignment code and submitted work. The one argument for keeping an HTTP mode was that you cannot
+always have a certificate; loopback can hold one exactly like a public name, so it does not hold.
 
 Two ways to do it. Both are supported; the difference is who holds the certificate.
 
 **a. nginx in front — what I would pick on a school-managed VM.**
 
-The server binds `127.0.0.1` by default precisely so this works with nothing else to change:
+The server binds `127.0.0.1` by default precisely so this works with nothing else to change. Give
+the backend its own loopback certificate (`./teaching-center/run.sh` will make one, or see the
+`openssl` recipe the server prints if you start it without one):
 
 ```nginx
 server {
@@ -105,7 +118,9 @@ server {
     client_max_body_size 32m;          # submitted topologies and course handouts
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        # https, because the backend has no HTTP mode. nginx does not verify an upstream
+        # certificate by default, so a self-signed loopback cert on the backend is enough.
+        proxy_pass https://127.0.0.1:8443;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
@@ -134,20 +149,27 @@ Two things to know before choosing this:
 * **An unprivileged process cannot bind 443.** Use 8443 (and tell students the port), or grant
   `CAP_NET_BIND_SERVICE`.
 
-**Giving only one half of the pair is refused at startup.** A cert with no key, or a key with no
-cert, exits rather than quietly falling back to HTTP — because that fallback looks like a clean
-start while every password goes out in the clear.
+**Half a pair, or no pair, is refused at startup.** A cert with no key, a key with no cert, or
+neither, exits with the `openssl` command that would fix it. Nothing falls back to HTTP, because a
+fallback looks like a clean start while every password goes out in the clear.
 
 Either way, point gBuilder at `https://gini.cs.mcgill.ca` (or `…:8443`) in Settings.
 
-**About self-signed certificates.** They work, but every student machine will reject the connection
-until the certificate is trusted, and gBuilder says so in as many words: it reports a *certificate*
-problem and tells the student their instructor has to fix it, rather than "is the server running?"
-— which would send them chasing an outage that is not happening. If you go this route, plan how the
-certificate reaches student machines before the first lab, not during it.
+**About self-signed certificates.** They encrypt, but they are not trusted, and gBuilder verifies
+properly — so every student machine rejects the connection until the certificate is trusted. It
+says so in as many words: a *certificate* problem, for the instructor to fix, rather than "is the
+server running?", which would send a student chasing an outage that is not happening.
 
-If you cannot get a certificate quickly, keep the VPN restriction you planned and treat the window
-before TLS as a testing period rather than a term.
+For a class, get a real certificate for a real name. Self-signed is for your own machine, where
+either of these makes it trusted:
+
+```bash
+SSL_CERT_FILE=/path/to/cert.pem gbuilder        # per-launch, nothing installed
+mkcert -install && mkcert localhost 127.0.0.1   # a local CA, once, in the system trust store
+```
+
+The certificate **must carry a subjectAltName**. A bare `CN=localhost` is rejected by OpenSSL 3 and
+by macOS however it is signed, and it fails looking exactly like a trust problem.
 
 ---
 

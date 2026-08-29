@@ -112,13 +112,12 @@ class Settings:
     gini_server_user: str = ""           # username; password is entered at connect, never stored
     # Teaching Center (the course server): released lessons, profile sync, submissions.
     # Empty url = not enrolled -> Missions falls back to the local practice catalog.
-    tc_url: str = ""                     # e.g. http://localhost:8080
+    tc_url: str = ""                     # e.g. https://gini.cs.example.edu (HTTPS only)
     tc_course: str = ""                  # e.g. cs4480-fall26
     tc_student: str = ""                 # the student's id in the course
     tc_token: str = ""                   # one-time ENROLMENT token (spent when you claim the account)
     # Passwords are never stored — a session token lives in the cache instead. This flag is the
     # conscious override that lets a password go over plain HTTP to a remote host (demos only).
-    tc_allow_insecure: bool = False
     # auto-internet: every container gets a default eth to the internet (Docker NAT).
     # Off = "faithful mode": no internet unless an Internet element is drawn + wired.
     auto_internet: bool = False
@@ -369,8 +368,7 @@ class AppContext:
         try:
             from ..agent.teaching_center import TeachingCenterClient
             self.teaching_center = TeachingCenterClient(
-                s.tc_url, course=s.tc_course, student_id=s.tc_student, token=s.tc_token,
-                allow_insecure=bool(getattr(s, "tc_allow_insecure", False)))
+                s.tc_url, course=s.tc_course, student_id=s.tc_student, token=s.tc_token)
         except Exception as e:                            # noqa: BLE001
             self.log(f"Teaching Center: {e}", "info")
             self.teaching_center = None

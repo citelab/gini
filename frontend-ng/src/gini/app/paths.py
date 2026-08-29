@@ -123,7 +123,6 @@ PERSISTED_KEYS = (
     "backend", "gini_server_host", "gini_server_port", "gini_server_user",
     "show_help_on_launch",
     "tc_url", "tc_course", "tc_student", "tc_token",   # Teaching Center enrolment
-    "tc_allow_insecure",                              # the conscious plaintext-password override
     # GINI32 hardware. `laptop_id` must be stable or every claimed board orphans at
     # once; `claimed_boards` is a property of this laptop, never of a topology, so a
     # colleague's .gini file cannot hand you their hardware.

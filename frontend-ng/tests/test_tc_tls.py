@@ -5,6 +5,9 @@ else logged into the same machine, so TLS is not decoration here.
 
 Two things are worth defending, and neither is "does openssl work":
 
+* **Plain HTTP is not an option at all.** It used to be, with a printed warning — and a warning is
+  not a control. Loopback can hold a certificate like any other name, so the one argument for
+  keeping an HTTP mode ("you cannot always have a cert") does not survive contact with `openssl`.
 * **Half a certificate pair must refuse to start.** Falling back to plain HTTP would look like a
   successful launch while every password crossed the network in the clear — the worst kind of
   failure, because nothing appears wrong.
@@ -264,3 +267,68 @@ def test_a_real_outage_is_still_reported_as_one():
     with pytest.raises(tc_submit.Unreachable) as e:
         tc_submit.check_code("https://127.0.0.1:9", "AAAA-AAAA")
     assert not isinstance(e.value, tc_submit.Untrusted)
+
+
+# -- HTTP is gone, on both sides ------------------------------------------------ #
+def test_the_server_refuses_to_start_without_tls_at_all(tmp_path, monkeypatch):
+    """The rule. Previously this served plain HTTP and printed a warning if the bind was
+    reachable — so the dangerous configuration started fine and told you afterwards."""
+    from gini_teaching_center import server
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    monkeypatch.setattr(server, "MATERIALS", tmp_path / "m")
+    with pytest.raises(SystemExit) as e:
+        server.serve(host="127.0.0.1", port=0)          # loopback is not an excuse either
+    assert "only serves HTTPS" in str(e.value)
+
+
+def test_the_refusal_says_how_to_make_a_certificate(tmp_path, monkeypatch):
+    """A mandate you cannot satisfy is a mandate people work around. The error carries the openssl
+    recipe INCLUDING the subjectAltName, because a bare CN fails looking like a trust problem."""
+    from gini_teaching_center import server
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    monkeypatch.setattr(server, "MATERIALS", tmp_path / "m")
+    with pytest.raises(SystemExit) as e:
+        server.serve(host="0.0.0.0", port=0)
+    msg = str(e.value)
+    assert "openssl req -x509" in msg and "subjectAltName" in msg
+    assert "mkcert" in msg                      # and the one-command route for a trusted local CA
+
+
+@pytest.mark.parametrize("url", ["http://gini.example.edu", "http://127.0.0.1:8080",
+                                 "http://localhost:8080", "HTTP://LOCALHOST:8080"])
+def test_the_student_path_refuses_plain_http(url):
+    """The code travels in a query string and the whole proof in a body. This path replaced the
+    old client for everything a student does, and guarded none of it — while the client it
+    replaced had guarded passwords from the beginning.
+
+    localhost included: "it never leaves the machine" was the justification for the exemption, and
+    loopback TLS removes it.
+    """
+    with pytest.raises(tc_submit.Insecure):
+        tc_submit.check_code(url, "AAAA-AAAA")
+    with pytest.raises(tc_submit.Insecure):
+        tc_submit.submit(url, "AAAA-AAAA", {"ticket": "AAAA-AAAA"})
+
+
+def test_insecure_is_not_an_outage():
+    """It must NOT be catchable as Unreachable: retrying cannot fix an address, the server may be
+    perfectly up, and "check your network" sends a student to the wrong place entirely."""
+    assert not issubclass(tc_submit.Insecure, tc_submit.Unreachable)
+
+
+def test_a_password_is_refused_over_http_even_on_localhost():
+    from gini.agent.teaching_center import InsecureTransport, refuse_plaintext_password
+    for url in ("http://localhost:8080", "http://127.0.0.1:8080", "http://elsewhere"):
+        with pytest.raises(InsecureTransport):
+            refuse_plaintext_password(url)
+    refuse_plaintext_password("https://localhost:8443")         # https is fine anywhere
+
+
+def test_there_is_no_longer_a_switch_that_turns_encryption_off():
+    """The override existed for demos. An override that reaches a server which no longer speaks
+    HTTP would only produce a more confusing failure."""
+    from gini.app.context import Settings
+    assert not hasattr(Settings(), "tc_allow_insecure")
+    import inspect
+    from gini.agent import teaching_center as TC
+    assert "allow_insecure" not in inspect.getsource(TC)

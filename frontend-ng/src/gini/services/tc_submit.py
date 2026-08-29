@@ -29,6 +29,34 @@ import urllib.request
 TIMEOUT = 20.0          # generous for a big topology on bad wifi, short enough not to look hung
 
 
+class Insecure(Exception):
+    """The course server was named over plain HTTP. Refused rather than sent.
+
+    Not a subclass of `Unreachable`: retrying cannot fix it and the server may be perfectly up, so
+    the advice is neither "check the network" nor "wait". It is a wrong address, and the person who
+    can fix it is the instructor who published it.
+    """
+
+
+def _require_tls(url: str) -> None:
+    """Refuse to speak anything but HTTPS.
+
+    This carried the assignment code in a query string and the whole proof and topology in a body,
+    over whatever scheme happened to be configured — and `agent/teaching_center.py` had guarded
+    passwords this way since the beginning while this path, which replaced it for everything a
+    student does, guarded nothing.
+
+    No exemption for localhost. Loopback can hold a certificate like any other name, so "it never
+    leaves the machine" is not a reason to drop the guarantee — and an exemption is exactly the
+    thing that quietly becomes the deployment.
+    """
+    if not str(url).lower().startswith("https://"):
+        raise Insecure(
+            f"the course server address is not HTTPS ({url}). GINI will not send your assignment "
+            f"code or your work over an unencrypted connection, where anyone on the same network "
+            f"could read them. Ask your instructor for the https:// address.")
+
+
 class Unreachable(Exception):
     """The server could not be reached at all. Distinct from a refusal, because the advice differs:
     a refusal is about the code, this is about the network."""
@@ -97,6 +125,7 @@ def check_code(url: str, code: str) -> dict:
     """
     if not url:
         return {"ok": False, "error": "No course server is configured."}
+    _require_tls(url)
     _, r = _get(url, "/api/activity?code=" + urllib.parse.quote(code))
     return r if isinstance(r, dict) else {"ok": False, "error": "Unexpected reply."}
 
@@ -110,6 +139,7 @@ def submit(url: str, code: str, proof: dict, topology: dict | None = None) -> di
     """
     if not url:
         return {"ok": False, "error": "No course server is configured."}
+    _require_tls(url)
     body: dict = {"code": code, "proof": proof}
     if topology:
         body["topology"] = topology

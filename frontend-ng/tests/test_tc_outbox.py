@@ -197,7 +197,7 @@ def test_an_empty_outbox_is_a_no_op(box):
 # end to end: stuck, then caught up, against a real server
 # --------------------------------------------------------------------------- #
 @pytest.fixture
-def tc(tmp_path, monkeypatch):
+def tc(tmp_path, monkeypatch, tls_pair, trust_tls):
     monkeypatch.setenv("COURSE_ROOT", str(tmp_path))
     monkeypatch.setenv("ADMIN_ID", "boss")
     monkeypatch.setenv("ADMIN_PASSWORD", "correct-horse")
@@ -213,9 +213,14 @@ def tc(tmp_path, monkeypatch):
     server._ACCTS = A.Accounts(tmp_path)
     server._STORE = Store(tmp_path)
     server._ACCTS.ensure_admin()
+    # HTTPS, because that is the only thing GINI speaks now — including on loopback, which can
+    # hold a certificate like any other name.
+    cert, key = tls_pair
+    ctx = server._tls_context(str(cert), str(key))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{httpd.server_address[1]}"
+    url = f"https://127.0.0.1:{httpd.server_address[1]}"
     tok = _call(url, "/auth/login", {"id": "boss", "password": "correct-horse"})["session"]
     _call(url, "/api/courses", {"id": "comp535", "title": "Networks"}, tok)
     _call(url, "/api/activities/save",
@@ -267,7 +272,7 @@ def test_a_stuck_submission_catches_up_on_the_next_flush(tc, tmp_path):
     receipt = P.receipt_code(proof)
 
     outbox.queue(proof, topo, root=box)
-    outbox.flush("http://127.0.0.1:9", tc_submit.submit, root=box)      # offline: nothing lands
+    outbox.flush("https://127.0.0.1:9", tc_submit.submit, root=box)      # offline: nothing lands
     assert _call(url, "/api/receipt?receipt=" + receipt, None, tok).get("error")
     assert len(outbox.pending(box)) == 1
 
@@ -380,7 +385,7 @@ def test_the_strip_queues_the_work_BEFORE_it_tries_to_send(tmp_path, monkeypatch
 
     strip = object.__new__(mod.ProofStrip)
     strip.recorder = type("R", (), {"ctx": type("C", (), {
-        "settings": type("S", (), {"tc_url": "http://127.0.0.1:9"})()})()})()
+        "settings": type("S", (), {"tc_url": "https://127.0.0.1:9"})()})()})()
     strip._say = lambda *a, **k: None
     strip._busy = lambda *a, **k: None          # the send-in-flight progress bar
     strip.handedIn = type("S", (), {"emit": staticmethod(lambda *a: order.append("emitted"))})()

@@ -177,7 +177,7 @@ class SettingsDialog(QDialog):
         # --- Teaching Center ---------------------------------------------- #
         tcf = _page(tabs, "Teaching Center")
         self.tc_url = QLineEdit(settings.tc_url)
-        self.tc_url.setPlaceholderText("http://localhost:8080")
+        self.tc_url.setPlaceholderText("https://localhost:8443")
         tcf.addRow("Course server", self.tc_url)
         self.tc_course = QLineEdit(settings.tc_course)
         self.tc_course.setPlaceholderText("cs4480-fall26")
@@ -189,9 +189,6 @@ class SettingsDialog(QDialog):
         self.tc_token.setPlaceholderText("one-time token from your instructor")
         self.tc_token.setEchoMode(QLineEdit.Password)
         tcf.addRow("Enrolment token", self.tc_token)
-        self.tc_insecure = QCheckBox("Allow insecure (plain HTTP) connection")
-        self.tc_insecure.setChecked(bool(getattr(settings, "tc_allow_insecure", False)))
-        tcf.addRow("", self.tc_insecure)
         tcf.addRow("", _note("Your password is never stored — signing in exchanges it for a session. "
                              "The enrolment token is used ONCE, to claim your account.\n\n"
                              "GINI refuses to send a password over plain HTTP to a remote server: on "
@@ -274,7 +271,6 @@ class SettingsDialog(QDialog):
             "tc_course": self.tc_course.text().strip(),
             "tc_student": self.tc_student.text().strip(),
             "tc_token": self.tc_token.text().strip(),
-            "tc_allow_insecure": self.tc_insecure.isChecked(),
             # GINI32: the lab Wi-Fi written to boards over USB. Not stripped of case —
             # SSIDs are case-sensitive — but surrounding whitespace is, because a name
             # pasted from a slide routinely carries a trailing space and the board would

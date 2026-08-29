@@ -33,37 +33,32 @@ class InsecureTransport(RuntimeError):
     """Raised rather than sending a password over plaintext HTTP to a remote host."""
 
 
-def is_local(url: str) -> bool:
-    host = urllib.parse.urlsplit(url).hostname or ""
-    return host in ("localhost", "127.0.0.1", "::1", "")
-
-
-def refuse_plaintext_password(url: str, *, allow_insecure: bool = False) -> None:
+def refuse_plaintext_password(url: str) -> None:
     """A password on plain HTTP over campus wifi is readable by everyone on that wifi — and
-    'classroom-scale' doesn't change that, because it's the same wifi. So we refuse, loudly, rather
-    than quietly doing the unsafe thing. localhost is exempt (it never leaves the machine), and an
-    explicit override exists for demos — but it has to be a conscious act."""
-    if allow_insecure or is_local(url):
-        return
+    'classroom-scale' doesn't change that, because it's the same wifi.
+
+    No exemptions any more. The localhost carve-out rested on "it never leaves the machine", and
+    the demo override on "you cannot always have a certificate" — but loopback can hold a
+    certificate like any other name, so neither holds. The Teaching Center now refuses to serve
+    anything but HTTPS for the same reason, so an override here would only let a client reach a
+    server that no longer exists.
+    """
     if not url.lower().startswith("https://"):
         raise InsecureTransport(
             "Refusing to send your password over an unencrypted connection.\n\n"
             f"The course server ({url}) isn't using HTTPS, so anyone on the same network could read "
-            "your password. Ask your instructor for the https:// address.\n\n"
-            "(If this is a demo on a trusted network, tick “Allow insecure connection” in "
-            "Settings → Teaching Center.)")
+            "your password. Ask your instructor for the https:// address.")
 
 
 class TeachingCenterClient:
     def __init__(self, base_url: str, *, course: str, student_id: str, token: str = "",
                  session: str = "", cache_dir: str | Path = "", transport=None,
-                 timeout: float = 8.0, allow_insecure: bool = False) -> None:
+                 timeout: float = 8.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.course = course
         self.student_id = student_id
         self.token = token                 # the ENROLMENT token (one-time, spent on claim)
         self.timeout = timeout
-        self.allow_insecure = allow_insecure
         # honour GINI_HOME_DIR like everything else. Hard-coding ~/.gini meant the cache (and now the
         # SESSION TOKEN) escaped the app's own home-directory override — including under test.
         if cache_dir:
@@ -111,14 +106,14 @@ class TeachingCenterClient:
     # -- sign-in ------------------------------------------------------------- #
     def claim(self, password: str, enrolment_token: str = "") -> dict:
         """First login: exchange the teacher-issued enrolment token for a password + session."""
-        refuse_plaintext_password(self.base_url, allow_insecure=self.allow_insecure)
+        refuse_plaintext_password(self.base_url)
         status, obj = self._transport("POST", "/auth/claim", {
             "id": self.student_id, "enrolment_token": enrolment_token or self.token,
             "password": password})
         return self._after_auth(status, obj)
 
     def login(self, password: str) -> dict:
-        refuse_plaintext_password(self.base_url, allow_insecure=self.allow_insecure)
+        refuse_plaintext_password(self.base_url)
         status, obj = self._transport("POST", "/auth/login",
                                       {"id": self.student_id, "password": password})
         return self._after_auth(status, obj)

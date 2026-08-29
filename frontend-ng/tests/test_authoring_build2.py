@@ -111,12 +111,12 @@ def test_the_client_tracks_teacher_role_from_login(tmp_path):
         if path == "/auth/login":
             return 200, {"ok": True, "session": "S", "role": "teacher"}
         return 200, []
-    c = TC.TeachingCenterClient("http://localhost:8080", course="c1", student_id="prof",
+    c = TC.TeachingCenterClient("https://localhost:8443", course="c1", student_id="prof",
                                 cache_dir=tmp_path, transport=as_teacher)
     assert not c.is_teacher()                            # not until signed in
     c.login("pw")
     assert c.is_teacher()
     # role persists across a fresh client (cached session)
-    c2 = TC.TeachingCenterClient("http://localhost:8080", course="c1", student_id="prof",
+    c2 = TC.TeachingCenterClient("https://localhost:8443", course="c1", student_id="prof",
                                  cache_dir=tmp_path, transport=as_teacher)
     assert c2.is_teacher()

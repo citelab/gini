@@ -36,7 +36,7 @@ HOUR = 3600.0
 
 
 @pytest.fixture
-def tc(tmp_path, monkeypatch):
+def tc(tmp_path, monkeypatch, tls_pair, trust_tls):
     monkeypatch.setenv("COURSE_ROOT", str(tmp_path))
     monkeypatch.setenv("ADMIN_ID", "boss")
     monkeypatch.setenv("ADMIN_PASSWORD", "correct-horse")
@@ -52,9 +52,14 @@ def tc(tmp_path, monkeypatch):
     server._ACCTS = A.Accounts(tmp_path)
     server._STORE = Store(tmp_path)
     server._ACCTS.ensure_admin()
+    # HTTPS, because that is the only thing GINI speaks now — including on loopback, which can
+    # hold a certificate like any other name.
+    cert, key = tls_pair
+    ctx = server._tls_context(str(cert), str(key))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{httpd.server_address[1]}"
+    url = f"https://127.0.0.1:{httpd.server_address[1]}"
 
     tok = _call(url, "/auth/login", {"id": "boss", "password": "correct-horse"})["session"]
     _call(url, "/api/courses", {"id": "comp535", "title": "Networks"}, tok)
@@ -218,9 +223,9 @@ def test_an_unreachable_server_is_distinguishable_from_a_refusal(tc):
     """Different advice: a refusal is about the code, this is about the network — and a student
     whose wifi dropped must not be told their code is bad."""
     with pytest.raises(tc_submit.Unreachable):
-        tc_submit.check_code("http://127.0.0.1:9", "AAAA-AAAA")
+        tc_submit.check_code("https://127.0.0.1:9", "AAAA-AAAA")
     with pytest.raises(tc_submit.Unreachable):
-        tc_submit.submit("http://127.0.0.1:9", "AAAA-AAAA", {})
+        tc_submit.submit("https://127.0.0.1:9", "AAAA-AAAA", {})
 
 
 # -- backwards compatibility ---------------------------------------------------- #
