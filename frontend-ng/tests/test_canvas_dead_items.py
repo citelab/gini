@@ -145,3 +145,60 @@ def test_a_healthy_scene_is_left_alone(app):
     w.ctx.bus.present_clear.emit()
     assert set(w.canvas.scene_.nodes) == before, "pruned a live node"
     assert not [m for m in logs if "dropped a deleted" in m], "cried wolf on a healthy scene"
+
+
+def test_no_bus_signal_the_canvas_listens_to_raises_on_dead_items(app):
+    """The general form of the bug, and the reason the failing test kept MOVING.
+
+    `_on_clear_stage` was guarded; `_refresh_node_labels`, `_on_addressing` and `_on_warnings`
+    swept the same dicts unguarded and raised out of the Qt event loop. Because those exceptions
+    surface wherever the loop next spins, pytest-qt attributed them to whichever test happened to
+    be running — so the suite failed in a different place depending on ordering, and passed
+    entirely where pytest-qt was absent.
+
+    Testing the three known handlers would just re-fix today's bug. This walks EVERY bus signal
+    the scene subscribes to, so a handler added next year is covered without anyone remembering
+    this file exists.
+    """
+    w = _win(app)
+    w.api.add_device("router", x=0, y=0)
+    w.api.add_device("host", x=60, y=60)
+    ids = list(w.ctx.topology.devices)
+    w.ctx.topology.add_link(*ids[:2])
+    sc = w.canvas.scene_
+    bus = w.ctx.bus
+
+    # A plausible argument for each signal, by name — no signal is skipped silently.
+    args = {
+        "device_added": (ids[0],), "device_removed": (ids[0],), "device_changed": (ids[0],),
+        "link_added": (next(iter(w.ctx.topology.links)),),
+        "link_removed": (next(iter(w.ctx.topology.links)),),
+        "present_spotlight": (ids,), "present_highlight": (ids,),
+        "present_callout": (ids[0], "text"), "present_packet": (ids[0], ids[1]),
+        "wizard_ghosts_requested": ("goal",), "wizard_ghosts_ready": ({},),
+    }
+
+    connected = [n for n in dir(bus) if not n.startswith("_")
+                 and f"bus.{n}.connect" in _canvas_source()]
+    assert len(connected) > 8, f"only found {connected}; the scan is not finding the connections"
+
+    _orphan_everything(sc)
+    failures = []
+    for name in connected:
+        signal = getattr(bus, name)
+        for a in (args.get(name, ()), ()):          # try the typed argument, then no-arg
+            try:
+                signal.emit(*a)
+                break
+            except (TypeError, ValueError):
+                continue                            # wrong arity for this signal; try the other
+            except RuntimeError as e:
+                failures.append(f"{name}: {e}")
+                break
+    assert not failures, "bus handlers raised on deleted items:\n  " + "\n  ".join(failures)
+
+
+def _canvas_source() -> str:
+    from pathlib import Path
+    import gini.ui.canvas as c
+    return Path(c.__file__).read_text(encoding="utf-8")

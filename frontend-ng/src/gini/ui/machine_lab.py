@@ -1371,18 +1371,31 @@ class MachineLab(QDialog):
                 err = f"{type(e).__name__}: {e}"
             try:
                 if not self._closed:            # don't signal a dialog that's being torn down
-                    self.snap_ready.emit(None)  # marshal back to the GUI thread — clears _busy
+                    # Carry the outcome WITH the signal. The count used to be updated here, after
+                    # the emit — so `_busy` was already cleared, the next poll could start, and two
+                    # workers then read-modify-wrote `_read_fails` from separate threads while the
+                    # GUI thread read it. Consequences, in order of how much they matter:
+                    #   * the "readings are failing" warning triggers on `== 5` exactly, and a lost
+                    #     update steps straight past 5 — so nobody is told the machine is gone,
+                    #     which is the entire purpose of the counter;
+                    #   * a caller that observes the lab right after a read sees a stale count.
+                    # Counting on the GUI thread makes it single-writer and orders it BEFORE
+                    # `_busy` drops, so a finished read is fully finished.
+                    self.snap_ready.emit(err)   # marshal back to the GUI thread — clears _busy
             except RuntimeError:
                 return                          # dialog went away between the check and the emit
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_snap(self, err=None) -> None:
+        """Always on the GUI thread. `err` is "" for a good read, a message for a failed one, and
+        None from callers that are only asking for a repaint (they must not touch the counter)."""
+        if err is not None:
             # Report a run of failures once rather than every poll: a single dropped read is
             # normal under load, a sustained run means the machine is gone.
             self._read_fails = (self._read_fails + 1) if err else 0
             if err and self._read_fails == 5:
                 self._log("error", f"Machine Lab: readings are failing — {err}")
-        threading.Thread(target=work, daemon=True).start()
-
-    def _on_snap(self, _obj) -> None:
-        self._busy = False
+        self._busy = False                      # cleared LAST: the read is now wholly accounted for
         if self._closed:
             return
         self._render()

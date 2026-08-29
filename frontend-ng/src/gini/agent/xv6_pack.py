@@ -28,7 +28,17 @@ class Xv6Observer:
 
 
 def _os_missions_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "domain" / "missions" / "os"
+    """Where the OS mission YAML lives — asked of the `gini.domain` package, not computed from
+    this file's path.
+
+    `gini` is a NAMESPACE package split across two distributions: `gini.agent` ships in
+    gini-toolkit, `gini.domain` in gini-core. Walking `../domain` from here assumes both halves sit
+    in one directory tree. They do in a wheel install; they do NOT in a source checkout, where
+    core/src and frontend-ng/src are separate roots — so this silently returned a path that does
+    not exist and the OS assignments loaded as an empty dict, with `strict=False` swallowing it.
+    """
+    from .. import domain
+    return Path(domain.__file__).resolve().parent / "missions" / "os"
 
 
 class Xv6Pack:

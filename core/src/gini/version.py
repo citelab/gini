@@ -12,11 +12,11 @@ from __future__ import annotations
 
 def gini_version() -> str:
     """The installed version, preferring the full toolkit over the core it depends on."""
-    try:
-        from ._version import version          # written by setuptools-scm at build time
-        return str(version)
-    except Exception:                          # noqa: BLE001 — a raw source checkout
-        pass
+    for mod in ("._version", "._core_version"):   # gini-toolkit's, then gini-core's
+        try:
+            return str(__import__(f"gini{mod}", fromlist=["version"]).version)
+        except Exception:                      # noqa: BLE001 — a raw source checkout has neither
+            continue
     from importlib.metadata import version as _v
     for dist in ("gini-toolkit", "gini-core", "gini-teaching-center"):
         try:

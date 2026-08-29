@@ -902,17 +902,17 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.mission_changed.connect(self._on_mission)
 
     def _on_mission(self, _mission) -> None:
-        for n in self.nodes.values():                # show/hide off-goal ✕ badges
+        for n in self._live_nodes():                 # show/hide off-goal ✕ badges
             n.update()
 
     def _on_restyle(self) -> None:
         """Re-route every edge after the connector style (bent/straight) changes."""
-        for edge in self.edges.values():
+        for edge in self._live_edges():
             edge.refresh()
 
 
     def _on_addressing(self) -> None:
-        for n in self.nodes.values():
+        for n in self._live_nodes():
             n.update()
 
     def set_theme(self, theme: Theme) -> None:
@@ -1123,19 +1123,19 @@ class CanvasScene(QGraphicsScene):
             group.update()                      # repaint title/CIDR after an edit
 
     def _refresh_node_labels(self) -> None:
-        for node in self.nodes.values():
+        for node in self._live_nodes():
             node.update()                       # repaint IP labels after addressing changes
 
     def _on_warnings(self) -> None:
         warns = self.ctx.warnings
-        for node in self.nodes.values():
+        for node in self._live_nodes():
             msgs = warns.get(node.inst.name)
             node.setToolTip("\n".join(msgs) if msgs else "")
             node.update()
 
     def _on_mission_flags(self) -> None:
         flags = getattr(self.ctx, "mission_flags", {})
-        for node in self.nodes.values():
+        for node in self._live_nodes():
             reason = flags.get(node.inst.id)
             if reason:
                 node.setToolTip(reason)
@@ -1194,6 +1194,40 @@ class CanvasScene(QGraphicsScene):
                 return e
         return None
 
+    def _live(self, book: dict, name: str) -> list:
+        """The tracked items whose C++ object still exists, dropping any that no longer does.
+
+        Use this instead of `book.values()` in ANYTHING that sweeps every item. `_on_clear_stage`
+        called `_prune_dead()` first and was safe; `_refresh_node_labels`, `_on_addressing` and
+        `_on_warnings` swept the same dict without it and each raised
+
+            RuntimeError: Internal C++ object (NodeItem) already deleted.
+
+        straight out of the Qt event loop. Putting the guard in the loop header rather than in a
+        line at the top of each handler is the difference that matters: the next handler someone
+        writes gets it by construction instead of by remembering.
+
+        Cost is one cheap call per item, so a sweep stays O(n) — deliberately NOT a prune on every
+        bus signal, which would make loading an n-device project O(n²).
+        """
+        out = []
+        for key, item in list(book.items()):
+            try:
+                item.opacity()                         # cheapest call that touches the C++ object
+                out.append(item)
+            except RuntimeError:
+                book.pop(key, None)
+                self.ctx.bus.log.emit(
+                    "error", f"canvas: dropped a deleted {name} still tracked as {key} — "
+                             f"please report this with what you had just done")
+        return out
+
+    def _live_nodes(self) -> list:
+        return self._live(self.nodes, "node")
+
+    def _live_edges(self) -> list:
+        return self._live(self.edges, "edge")
+
     def _prune_dead(self) -> None:
         """Drop tracked items whose C++ object Qt has already deleted.
 
@@ -1212,15 +1246,8 @@ class CanvasScene(QGraphicsScene):
         the path that orphans the item has not been reproduced, and that message is the evidence
         needed to find it.
         """
-        for name, book in (("node", self.nodes), ("edge", self.edges), ("group", self.groups)):
-            for key, item in list(book.items()):
-                try:
-                    item.opacity()                     # cheapest call that touches the C++ object
-                except RuntimeError:
-                    book.pop(key, None)
-                    self.ctx.bus.log.emit(
-                        "error", f"canvas: dropped a deleted {name} still tracked as {key} — "
-                                 f"please report this with what you had just done")
+        for book, name in ((self.nodes, "node"), (self.edges, "edge"), (self.groups, "group")):
+            self._live(book, name)                     # pruning is the side effect we want here
         for attr in ("_spotlit", "_highlit", "_callouts"):
             live = []
             for item in getattr(self, attr, []):
@@ -1239,9 +1266,9 @@ class CanvasScene(QGraphicsScene):
             n.set_highlight(False)
         self._spotlit = []
         self._highlit = []
-        for node in self.nodes.values():
+        for node in self._live_nodes():
             node.setOpacity(1.0)
-        for edge in self.edges.values():
+        for edge in self._live_edges():
             edge.setOpacity(1.0)
         for c in self._callouts:
             self.removeItem(c)

@@ -25,12 +25,15 @@ Homepage = "https://github.com/citelab/gini"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["gini.domain*"]
+# `gini` itself is listed so gini/version.py — which gBuilder, the proof recorder and the setup CLI
+# all import — actually reaches the wheel. With only "gini.domain*" it did not, so `gini.version`
+# existed in a source checkout and in NO installed environment.
+include = ["gini", "gini.domain*"]
 
 [tool.setuptools.package-data]
 "gini.domain" = ["missions/**/*.yaml"]
 
 [tool.setuptools_scm]
 root = ".."
-version_file = "src/gini/_version.py"
+version_file = "src/gini/_core_version.py"   # NOT _version.py: gini-toolkit owns that path
 local_scheme = "no-local-version"
