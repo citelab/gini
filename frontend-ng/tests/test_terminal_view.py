@@ -16,7 +16,17 @@ pytest.importorskip("pyte")
 
 from PySide6.QtCore import Qt
 
+from gini.ui import terminal_view as _tv
 from gini.ui.terminal_view import DEFAULT_COLS, DEFAULT_ROWS, TerminalView, encode_key
+
+# The terminal's Control key, as Qt reports it HERE. On macOS Qt swaps the two: Qt.ControlModifier
+# is Command and Qt.MetaModifier is the physical Ctrl. Writing Qt.ControlModifier below therefore
+# asserted, on a Mac, that Cmd-C sends SIGINT — the exact bug terminal_ctrl() exists to prevent, so
+# these tests failed on the one platform whose behaviour motivated the code.
+CTRL = Qt.MetaModifier if _tv._MAC else Qt.ControlModifier
+# Both branches of that swap are driven explicitly, on every platform, by forcing the flag in
+# test_terminal_selection.py — so a Linux run still protects Mac users. Here we only need the
+# modifier that means "the terminal's Ctrl" on the machine running the test.
 
 
 @pytest.fixture(scope="module")
@@ -33,16 +43,16 @@ def _view(app, w=640, h=320):
 # -- keys ------------------------------------------------------------------- #
 def test_ctrl_c_interrupts():
     """Without this a student who runs `ping` with no count has no way to stop it."""
-    assert encode_key(Qt.Key_C, Qt.ControlModifier, "\x03") == b"\x03"
+    assert encode_key(Qt.Key_C, CTRL, "\x03") == b"\x03"
 
 
 def test_ctrl_d_ends_the_router_cli():
-    assert encode_key(Qt.Key_D, Qt.ControlModifier, "\x04") == b"\x04"
+    assert encode_key(Qt.Key_D, CTRL, "\x04") == b"\x04"
 
 
 def test_the_whole_control_range_maps():
     for key, want in ((Qt.Key_A, b"\x01"), (Qt.Key_Z, b"\x1a"), (Qt.Key_L, b"\x0c")):
-        assert encode_key(key, Qt.ControlModifier, "") == want
+        assert encode_key(key, CTRL, "") == want
 
 
 def test_arrows_are_escape_sequences():
@@ -162,7 +172,7 @@ def test_a_key_press_emits_bytes(app):
     v = _view(app)
     sent = []
     v.key_bytes.connect(sent.append)
-    v.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_C, Qt.ControlModifier, "\x03"))
+    v.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_C, CTRL, "\x03"))
     assert sent == [b"\x03"]
 
 
@@ -241,3 +251,4 @@ def test_it_paints_without_raising(app):
     v = _view(app)
     v.feed(b"\033[31mred\033[0m \033[1mbold\033[0m plain\r\nsecond line\r\n")
     v.render(QPixmap(v.size()))
+

@@ -212,27 +212,34 @@ def test_untrusted_is_still_caught_by_code_that_expects_unreachable(tls_server):
 
 @needs_openssl
 def test_a_trusted_certificate_just_works(tls_server, monkeypatch):
-    """With a certificate the machine trusts, gBuilder needs no configuration at all — the request
-    goes through and comes back as an ordinary refusal rather than a transport failure.
+    """With a certificate the machine trusts, gBuilder needs no configuration at all: the request
+    goes through and comes back as an ordinary refusal, not a transport failure.
 
-    Trust is established via SSL_CERT_FILE, which is what Python's default context honours. Worth
-    knowing: it is also the escape hatch for a school that runs its own CA and has not managed to
-    get the root into every student's system trust store.
+    Trust is injected at `ssl._create_default_https_context`, the hook `http.client` calls when no
+    context is passed — which is the path `tc_submit` takes. The earlier version set SSL_CERT_FILE
+    and it failed on macOS while passing on Linux: certificates loaded through
+    `set_default_verify_paths()` are read lazily, so the guard that was supposed to detect an
+    unhonoured env var saw an empty CA list and could not tell "ignored" from "not loaded yet".
+    Patching the hook depends on nothing about the host's trust store, so it means the same thing
+    on every machine. (SSL_CERT_FILE remains the real-world escape hatch for a school CA; it is
+    just not a sound thing to build a test on.)
     """
     url, cert = tls_server
-    monkeypatch.setenv("SSL_CERT_FILE", str(cert))
-    # Confirm the lever actually moved before trusting the result. If a Python build ignores
-    # SSL_CERT_FILE, this test would fail with `Untrusted` and read exactly like a bug in the
-    # classification it is meant to be checking — so say which of the two it is.
-    loaded = ssl.create_default_context().get_ca_certs()
-    if not any("localhost" in str(c.get("subject", ())) for c in loaded):
-        pytest.skip(f"this Python ignores SSL_CERT_FILE ({len(loaded)} CAs loaded, none ours), so "
-                    f"trust cannot be injected here — the untrusted-path tests still cover the "
-                    f"classification")
-    # The certificate is CN=localhost, so connect by that name — an IP would fail hostname
-    # verification even with the CA trusted, which is its own (correct) refusal.
+    ctx = ssl.create_default_context(cafile=str(cert))      # check_hostname stays ON
+    monkeypatch.setattr(ssl, "_create_default_https_context", lambda: ctx)
+    # Connect by name, not by IP: the fixture certificate carries DNS:localhost, and hostname
+    # verification is part of what "trusted" has to mean.
     r = tc_submit.check_code(url.replace("127.0.0.1", "localhost"), "AAAA-AAAA")
-    assert r.get("ok") is False and "error" in r        # a refusal, not a transport failure
+    assert r.get("ok") is False and "error" in r            # a refusal, not a transport failure
+
+
+@needs_openssl
+def test_the_same_server_is_untrusted_without_that_trust(tls_server):
+    """The other half of the pair, so the test above cannot pass for an unrelated reason: the very
+    same server, reached the same way, is refused when its certificate is not trusted."""
+    url, _ = tls_server
+    with pytest.raises(tc_submit.Untrusted):
+        tc_submit.check_code(url.replace("127.0.0.1", "localhost"), "AAAA-AAAA")
 
 
 def test_a_real_outage_is_still_reported_as_one():
