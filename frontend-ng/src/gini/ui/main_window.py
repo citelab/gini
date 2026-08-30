@@ -957,18 +957,18 @@ class MainWindow(QMainWindow):
 
         # assemble: [ left (expand) ] [ centred project chip ] [ right (expand) ]
         self._make_nav_button()
-        left, right = _cluster(_build_left), _cluster(_build_right)
-        tb.addWidget(left)
+        tb.addWidget(_cluster(_build_left))
         tb.addWidget(self._nav_btn)
-        tb.addWidget(right)
-        # Expanding alone does NOT make them equal: Qt shares the SPARE space evenly and each side
-        # keeps its own natural width underneath, so the chip sits off-centre by half the
-        # difference. The left cluster holds four trays and a Run button; the right holds two pills
-        # and a theme picker, and it shed 150px the day two pills were removed. Equal minimums make
-        # the two sides equal whatever either one is carrying.
-        widest = max(left.sizeHint().width(), right.sizeHint().width())
-        left.setMinimumWidth(widest)
-        right.setMinimumWidth(widest)
+        tb.addWidget(_cluster(_build_right))
+        # The chip sits slightly right of true centre, by half the difference between the two
+        # clusters' natural widths — Expanding shares only the SPARE space evenly, so each side
+        # keeps its own width underneath. That drift grew the day two toolbar pills were removed.
+        #
+        # Do NOT "fix" it by giving both clusters the wider one's minimum width. That was tried:
+        # it makes the toolbar's minimum two wide clusters plus the chip, the window's minimum
+        # width went from 1320 to 7223, and gBuilder opened wider than a 32" 4K screen and could
+        # not be shrunk. A chip a few percent off centre is cosmetic; a window that does not fit
+        # on the display is not. See `test_gbuilder_fits_on_an_ordinary_screen`.
         self._refresh_icons()
 
     @staticmethod

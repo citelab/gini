@@ -42,11 +42,40 @@ def test_project_chip_is_truly_centred():
     # tolerance was really measuring the font, and failed identically on Linux and macOS while the
     # shipped app centred the chip perfectly.
     #
-    # 10% still asserts the thing that matters — the chip is CENTRED, not shoved to one side. The
-    # failures this test has actually caught were 41% (the original) and 26% (a deliberately
-    # widened cluster), both far outside it.
+    # The budget moved from 10% to 15% when two toolbar pills were removed: the chip sits right of
+    # centre by half the difference between the clusters' natural widths, and the right cluster got
+    # narrower. Widening the tolerance is the RIGHT trade here, and the alternative was tried and
+    # reverted — giving both clusters the wider one's minimum width centred the chip perfectly and
+    # took the window's minimum width from 1320 to 7223, so gBuilder opened wider than a 32" 4K
+    # screen. See `test_gbuilder_fits_on_an_ordinary_screen`, which is the guard that matters.
+    #
+    # 15% still asserts the thing this test is for — the chip is CENTRED, not shoved to one side.
+    # The failures it has actually caught were 41% (the original) and 26% (a deliberately widened
+    # cluster), both still far outside it.
     off = abs(cx - tb.width() // 2)
-    assert off <= tb.width() * 0.10, f"chip is {off}px from centre of a {tb.width()}px toolbar"
+    assert off <= tb.width() * 0.15, f"chip is {off}px from centre of a {tb.width()}px toolbar"
+
+
+def test_gbuilder_fits_on_an_ordinary_screen():
+    """The window must be able to be NARROW.
+
+    Written after making it impossible. Centring the project chip by giving both toolbar clusters
+    the wider one's minimum width made the toolbar's minimum two wide clusters plus the chip; the
+    window's minimum width went from 1320 to 7223 and gBuilder opened wider than a 32" 4K display
+    with no way to shrink it. Every other test passed, because nothing anywhere asserted that the
+    application fits on a screen.
+
+    Asserted through `resize` rather than by reading a hint, because a hint read before `show()`
+    is stale — it reported the healthy number while the broken build was on the bench.
+    """
+    w = _win()
+    w.show()
+    QApplication.instance().processEvents()
+    w.resize(1440, 800)                      # a 13" laptop, and the low end of what a class has
+    QApplication.instance().processEvents()
+    assert w.width() <= 1440, (
+        f"gBuilder cannot be narrower than {w.width()}px — it will not fit on a laptop screen")
+    w.close()
     w.close()
 
 
