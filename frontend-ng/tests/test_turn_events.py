@@ -18,9 +18,20 @@ from gini.agent import turn_events as te
 def test_every_builder_returns_a_kind_and_a_dict():
     """The same (kind, data) shape as `domain/proof_events.py`, so a consumer can dispatch on
     kind alone and never has to know which builder produced a line."""
-    for built in (te.phase("x"), te.tick(3), te.say("hi"), te.done({"ok": True})):
+    for built in (te.phase("x"), te.tick(3), te.say("hi"), te.done({"ok": True}),
+                  te.asking_course("comp535"), te.reconsidering(2)):
         kind, data = built
         assert isinstance(kind, str) and isinstance(data, dict)
+
+
+def test_a_composite_builder_is_already_an_event():
+    """`asking_course` and `reconsidering` BUILD a phase — they are not labels to pass to
+    `phase()`. Wrapping one again put the repr of a tuple in front of the student, and the
+    indicator painted it happily because a label is just a string to it."""
+    for built in (te.asking_course("comp535"), te.reconsidering(2)):
+        label = built[1]["label"]
+        assert not label.startswith("("), f"{label!r} looks like a wrapped event"
+        assert "phase" not in label and "{" not in label
 
 
 def test_done_carries_the_whole_result():

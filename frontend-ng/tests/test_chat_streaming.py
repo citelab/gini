@@ -486,15 +486,196 @@ def test_the_audit_is_a_visible_phase(chat, qtbot):
     assert te.CHECKING in [d["label"] for k, d in seen if k == te.PHASE]
 
 
-def test_the_audit_reports_and_does_not_act(chat, qtbot):
-    """This step deliberately stops short of revising. Nothing about an objection reaches the
-    student yet — the point is to learn how often it happens before building on the answer."""
-    chat._loop = _CoveredLoop()
-    _with_course(chat, [ACTIVITY],
-                 coverage='{"text": "x", "coverage": {"addressed": [], "omitted": []}}')
+# ---- the dialectic: audit, revise once, flag what still stands ----------------- #
+# The Twin is "a challenger, never a judge": it does not overrule the answer, it makes the tutor
+# account for what it skipped, and anything still unaddressed is shown rather than shipped
+# silently. In chat that has one hard constraint the mission Twin does not have — a student is
+# reading, so nothing already on screen may be retracted.
+class _RevisingLoop(_CoveredLoop):
+    """Answers, then answers again when asked to add what it left out."""
+
+    def __init__(self, reply="Two LANs need a router.", addition="Your lab asks for exactly this."):
+        super().__init__(reply)
+        self.addition = addition
+        self.prompts = []
+
+    def send(self, text, on_text=None):
+        self.prompts.append((text, self.extra_context))
+        out = self.addition if len(self.prompts) > 1 else self.reply
+        if on_text:
+            on_text(out)
+        return out
+
+
+def _coverages(*reports):
+    """A `_quick_llm` that returns each coverage report in turn."""
+    seq = list(reports)
+
+    def call(prompt, schema=None):
+        return seq.pop(0) if seq else seq_last[0]
+    seq_last = [reports[-1] if reports else ""]
+    return call
+
+
+MISSED = '{"text": "x", "coverage": {"addressed": [], "omitted": []}}'
+COVERED = '{"text": "x", "coverage": {"addressed": ["course:comp535/lab1"], "omitted": []}}'
+
+
+def test_a_missed_concern_makes_the_tutor_add_to_its_answer(chat, qtbot):
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, COVERED)
     with qtbot.waitSignal(chat.answer_ready, timeout=5000):
         chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
-    qtbot.wait(80)
+    qtbot.wait(120)
+    assert chat._twin.metrics["revisions"] == 1
     shown = chat.log.toPlainText()
-    assert chat._twin.metrics["objections"] == 1
-    assert "did not account" not in shown and "Multi-LAN" not in shown
+    assert "Two LANs need a router." in shown          # what they already read is still there
+    assert "Your lab asks for exactly this." in shown  # and the addition followed it
+
+
+def test_the_addition_never_replaces_what_the_student_already_read(chat, qtbot):
+    """The rule the whole design turns on. A revision that rewrote the answer would take back
+    three sentences a student is part-way through."""
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, COVERED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    shown = chat.log.toPlainText()
+    assert shown.index("Two LANs need a router.") < shown.index("Your lab asks for exactly this.")
+
+
+def test_the_model_is_told_to_add_not_to_rewrite(chat, qtbot):
+    """Told to 'improve it', a model returns the whole answer again and the student reads it
+    twice. The instruction has to be explicit."""
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, COVERED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    _, grounding = loop.prompts[-1]
+    assert "Do NOT repeat or rewrite" in grounding
+    assert "Two LANs need a router." in grounding      # it is shown what it already said
+
+
+def test_reconsidering_is_visible_and_says_how_much(chat, qtbot):
+    """An unexplained second pause after the answer has finished arriving reads as a hang.
+    'Reconsidering' alone reads as a machine doubting everything."""
+    seen = []
+    chat.turn_event.connect(lambda e: seen.append(e))
+    chat._loop = _RevisingLoop()
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, COVERED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    labels = [d["label"] for k, d in seen if k == te.PHASE]
+    assert any(l.startswith("Reconsidering — 1 thing") for l in labels), labels
+
+
+def test_an_objection_that_survives_the_revision_is_shown_not_shipped(chat, qtbot):
+    """Never a silent ship. And the Twin's voice is the concern STATEMENT — the course's own
+    words — not more model prose about them."""
+    chat._loop = _RevisingLoop()
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, MISSED)       # the addition did not fix it either
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    shown = chat.log.toPlainText()
+    assert "Also worth a look" in shown and "Multi-LAN routing" in shown
+    assert chat._twin.metrics["flags"] == 1
+
+
+def test_it_revises_at_most_once(chat, qtbot):
+    """Each round is a revision call plus a re-audit call, and a student is waiting. A tutor
+    spending four extra calls arguing with itself is worse than one that missed something."""
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, MISSED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    assert chat._twin.metrics["revisions"] == 1
+    assert len(loop.prompts) == 2                      # the answer, and one addition
+
+
+def test_a_covered_answer_is_left_completely_alone(chat, qtbot):
+    """The common case must cost nothing beyond the one coverage call."""
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(COVERED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    assert chat._twin.metrics["revisions"] == 0
+    assert len(loop.prompts) == 1
+    assert "Also worth a look" not in chat.log.toPlainText()
+
+
+def test_a_justified_omission_defeats_its_objection(chat, qtbot):
+    """The Twin adjudicates rather than nags: an omission with a reason that VALIDATES against
+    ground truth is accepted. Here the question genuinely does not touch the concern."""
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(
+        '{"text": "x", "coverage": {"addressed": [], "omitted": '
+        '[{"id": "course:comp535/lab1", "why": "off topic for this question"}]}}')
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("what colour is a switch?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    assert chat._twin.metrics["revisions"] == 0
+    assert chat._twin.metrics["defeats"] == 1
+
+
+def test_withholding_is_not_a_defence_when_answering(chat, qtbot):
+    """`move_kind="answer"` is load-bearing. Withholding is legitimate for a HINT; a tutor asked a
+    direct question does not get to leave out the student's own lab to make them think."""
+    loop = _RevisingLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(
+        '{"text": "x", "coverage": {"addressed": [], "omitted": '
+        '[{"id": "course:comp535/lab1", "why": "it would give the answer away"}]}}',
+        COVERED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    assert chat._twin.metrics["revisions"] == 1, "the excuse should not have been accepted"
+
+
+def test_a_revision_that_comes_back_empty_flags_instead(chat, qtbot):
+    """Nothing came back to add. Flagging is the honest fallback — looping again would be a tutor
+    arguing with a model that has nothing more to say."""
+    loop = _RevisingLoop(addition="")
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    assert chat._twin.metrics["revisions"] == 0
+    assert "Also worth a look" in chat.log.toPlainText()
+
+
+def test_the_addition_reads_as_a_new_paragraph(chat, qtbot):
+    """Without a break on screen it ran onto the last sentence — "…the two subnets.Your lab asks
+    for exactly this" — which reads as one confused thought rather than the tutor coming back."""
+    chat._loop = _RevisingLoop(reply="A router forwards between the subnets.",
+                               addition="Your lab asks for exactly this.")
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = _coverages(MISSED, COVERED)
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(120)
+    assert "subnets.Your" not in chat.log.toPlainText()
+    assert "Your lab asks for exactly this." in chat.log.toPlainText()

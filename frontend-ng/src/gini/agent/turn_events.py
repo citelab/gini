@@ -39,6 +39,7 @@ CATCHING_UP = "Catching up on this conversation"
 ASKING_COURSE = "Asking your course"           # + " (comp535)" — see `asking_course`
 ANSWERING = "Answering"
 CHECKING = "Checking what it might have missed"
+RECONSIDERING = "Reconsidering"
 USING_TOOL = "Looking at your topology"
 
 
@@ -60,6 +61,17 @@ def say(text: str) -> tuple[str, dict]:
 def done(result) -> tuple[str, dict]:
     """The turn is over. `result` is what the non-streaming path would have returned."""
     return DONE, {"result": result}
+
+
+def reconsidering(n: int) -> tuple[str, dict]:
+    """The Twin objected, and the tutor is adding to its answer.
+
+    Counted, because "Reconsidering" alone reads as a machine having second thoughts about
+    everything. "2 things it may have skipped" says what is actually being weighed, and it is the
+    label that makes the pause afterwards legible rather than alarming.
+    """
+    n = max(1, int(n or 1))
+    return phase(f"{RECONSIDERING} — {n} thing{'' if n == 1 else 's'} it may have skipped")
 
 
 def asking_course(course: str) -> tuple[str, dict]:
@@ -254,4 +266,4 @@ class Progress:
 
 __all__ = ["PHASE", "TICK", "SAY", "DONE", "PULSE", "Progress", "ProseFilter",
            "phase", "tick", "say", "done", "asking_course",
-           "LOOKING", "CATCHING_UP", "ASKING_COURSE", "ANSWERING", "CHECKING", "USING_TOOL"]
+           "LOOKING", "CATCHING_UP", "ASKING_COURSE", "ANSWERING", "CHECKING", "RECONSIDERING", "USING_TOOL", "reconsidering"]

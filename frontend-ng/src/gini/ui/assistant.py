@@ -94,7 +94,7 @@ class Assistant(QWidget):
         from ..agent.twin.dialectic import Twin as _Twin
         # Chat's own Twin: it keeps the covered-concern history and the metrics that say how often
         # the tutor answers around its own course's material.
-        self._twin = _Twin()
+        self._twin = _Twin(max_rounds=1)
         from ..agent import turn_events as _te
         # What the indicator paints from. All the rules live in agent/turn_events (Qt-free and
         # unit-tested); this widget only draws what `line()` says.
@@ -2188,7 +2188,7 @@ class Assistant(QWidget):
         lab = current_lab_of(getattr(self.ctx, "proof_recorder", None))
         return tc_ask.as_context(answer), course_concerns(answer.hits, current_lab=lab)
 
-    def _audit_course(self, concerns: list, answer: str, emit) -> None:
+    def _audit_course(self, concerns: list, answer: str, emit, question: str = "") -> None:
         """Did the answer account for what this course says? — the Twin's audit half.
 
         One extra call, deliberately separate from the answer. The Twin's coverage report is a
@@ -2203,7 +2203,7 @@ class Assistant(QWidget):
         before anything is built on top of that answer.
         """
         try:
-            self._audit(concerns, answer, emit)
+            self._audit(concerns, answer, emit, question)
         except Exception as e:                                   # noqa: BLE001
             # The audit runs BEFORE the answer is handed over, because it is part of the turn and
             # the queue must not start the next question alongside it. That makes this guard
@@ -2213,34 +2213,124 @@ class Assistant(QWidget):
             # the student the answer.
             self.ctx.log(f"The course check did not run: {e}", "info")
 
-    def _audit(self, concerns: list, answer: str, emit) -> None:
-        from ..agent import turn_events as te
+    def _coverage(self, concerns: list, answer: str):
+        """Ask the model which concerns its own answer addressed. None = coverage-silent.
+
+        A separate call from the answer, deliberately. The report is JSON and the reply is prose:
+        asking for both at once would mean streaming `{"text": "Well, your rou` a character at a
+        time, which is exactly the noise the Teaching Center's console avoided by keeping its
+        human-facing call apart from its machine-facing one. It also costs the student nothing —
+        by the time it runs they are already reading.
+        """
+        from ..agent.personas import first_json
         from ..agent.twin.contracts import parse_coverage
         from ..agent.twin.dialectic import COVERAGE_SCHEMA, coverage_instruction
-        from ..agent.personas import first_json
-        must = [c for c in concerns if c.salience >= 2]
-        if not must or self._loop is None or not answer.strip():
-            return                       # nothing obligatory, or nothing to audit
-        emit(te.phase(te.CHECKING))
         raw = self._quick_llm(
             "Here is an answer a tutor gave a student:\n\n" + answer.strip()
             + "\n\nReport which of the concerns below that answer addresses."
             + coverage_instruction(concerns), schema=COVERAGE_SCHEMA)
         obj = first_json(raw or "")
-        cov = parse_coverage(obj.get("coverage")) if isinstance(obj, dict) else None
+        return parse_coverage(obj.get("coverage")) if isinstance(obj, dict) else None
+
+    def _twin_ctx(self, question: str):
+        """What omission adjudication needs from a chat turn.
+
+        `move_kind="answer"` is load-bearing: withholding is legitimate for a HINT, and this is
+        not one. A tutor asked a direct question does not get to say it left the course's own lab
+        out to make the student think.
+        """
+        from ..agent.twin.dialectic import TwinContext
+        return TwinContext(move_kind="answer", utterance=question,
+                           world=getattr(self.ctx, "topology", None),
+                           history=self._twin.history, translate=None)
+
+    def _revise(self, answer: str, objections: list, emit) -> str:
+        """One more paragraph, addressing what the answer skipped. Streamed, and ADDED.
+
+        Never a rewrite. A student who has just read three sentences must not watch them be
+        replaced — the words they already read stay, and the tutor carries on from them. That is
+        also why this asks for an addition rather than a better answer: a model told to "improve
+        it" returns the whole thing again, and the student reads it twice.
+        """
+        from ..agent import turn_events as te
+        prose = te.ProseFilter()
+        out: list[str] = []
+        # A paragraph break FIRST, on screen and not only in the copy the re-audit sees. Without it
+        # the addition ran straight onto the last sentence — "…between the two subnets.Your lab
+        # asks for exactly this" — which reads as one confused thought rather than the tutor
+        # coming back with something more.
+        emit(te.say("\n\n"))
+
+        def on_text(delta: str) -> None:
+            out.append(delta)
+            emit(te.tick(len(delta or "")))
+            shown = prose.feed(delta)
+            if shown:
+                emit(te.say(shown))
+
+        try:
+            self._loop.extra_context = (
+                "You have already told the student this, and they have read it:\n\n"
+                + answer.strip()
+                + "\n\nIt did not account for the following. "
+                + self._twin.note(objections)
+                + "\n\nWrite ONE short paragraph that adds what is missing. Do NOT repeat or "
+                  "rewrite what you already said — the student is still reading it.")
+            text = self._loop.send("Add what you left out.", on_text=on_text)
+        except TypeError:
+            text = self._loop.send("Add what you left out.")
+        finally:
+            self._loop.extra_context = ""
+        tail = prose.flush()
+        if tail:
+            emit(te.say(tail))
+        from ..agent.loop import visible_text
+        return visible_text("".join(out) or text or "")
+
+    def _audit(self, concerns: list, answer: str, emit, question: str = "") -> None:
+        """The dialectic: audit, adjudicate, revise once, and flag whatever still stands.
+
+        Bounded to ONE revision round, tighter than the mission Twin's two. Each round is a
+        revision call plus a re-audit call, and a student is waiting; a tutor that spends four
+        extra model calls arguing with itself after every question is worse than one that missed
+        something and said so.
+        """
+        import time
+        from ..agent import turn_events as te
+        must = [c for c in concerns if c.salience >= 2]
+        if not must or self._loop is None or not answer.strip():
+            return                       # nothing obligatory, or nothing to audit
+        emit(te.phase(te.CHECKING))
+        cov = self._coverage(concerns, answer)
         # Coverage-silent is a supported posture, not a failure: `Twin.diff` then objects only
         # about the urgent tier rather than guessing what the prose covered.
-        objections = self._twin.audit(concerns, cov, None)
-        self._twin.record(cov)
+        ctx = self._twin_ctx(question)
+        objections = self._twin.audit(concerns, cov, ctx)
         self._twin.metrics["turns"] += 1
         if cov is None:
             self._twin.metrics["coverage_silent"] += 1
         self._twin.metrics["objections"] += len(objections)
-        for o in objections:
-            # The console, not the chat pane: this is instrumentation for now, and putting it in
-            # front of the student would be acting on it.
-            self.ctx.log(f"Course material the answer did not account for — {o.concern.statement}",
-                         "info")
+
+        rounds, deadline = 0, time.monotonic() + self._twin.budget_s
+        while objections and rounds < self._twin.max_rounds and time.monotonic() < deadline:
+            emit(te.reconsidering(len(objections)))
+            added = self._revise(answer, objections, emit)
+            if not added.strip():
+                break                    # nothing came back; flagging is the honest fallback
+            answer = answer + "\n\n" + added
+            self._stream_buf = answer if self._streaming else self._stream_buf
+            rounds += 1
+            self._twin.metrics["revisions"] += 1
+            cov = self._coverage(concerns, answer)
+            objections = self._twin.audit(concerns, cov, ctx)
+
+        self._twin.record(cov)
+        if objections:
+            # Never a silent ship. The Twin's voice is the concern STATEMENT — grounded text from
+            # the course itself, not more model prose about it.
+            worth = "; ".join(o.concern.statement for o in objections)
+            emit(te.say(f"\n\n(Also worth a look: {worth}.)"))
+            self._twin.metrics["flags"] += 1
 
     def _ask_async(self, prompt: str, device: str, grounded=None, *,
                    proactive: bool = False) -> None:
@@ -2355,7 +2445,7 @@ class Assistant(QWidget):
                 emit(te.say(tail))
             raw = "".join(raw_parts) or text or ""
             if concerns:
-                self._audit_course(concerns, visible_text(raw), emit)
+                self._audit_course(concerns, visible_text(raw), emit, prompt)
             # DONE carries the whole answer even when every delta was already streamed, so a turn
             # that streamed and one that did not end the same way and cannot drift apart.
             self.answer_ready.emit(device or "", visible_text(raw) or "Done.")
