@@ -42,6 +42,7 @@ os.environ.setdefault("GINI_HOME_DIR", str(ROOT))
 
 from . import accounts as _accounts                                       # noqa: E402
 from . import activities as _act                                          # noqa: E402
+from . import search as _search                                     # noqa: E402
 from .store import Store                                            # noqa: E402
 
 _ACCTS = _accounts.Accounts(ROOT)
@@ -164,6 +165,11 @@ class Handler(BaseHTTPRequestHandler):
             self._submit()
             return True
 
+        # --- what this course says about something. Public, like the materials it points at. ---
+        if p == "/api/ask" and self.command == "GET":
+            self._ask()
+            return True
+
         # --- a course material, by link. Public so a student can open it. ---
         if p.startswith("/m/"):
             self._serve_material(p[3:])
@@ -220,6 +226,34 @@ class Handler(BaseHTTPRequestHandler):
         _STORE.code_mark_used(code)
         self._send(200, {"ok": True, "receipt": rec["receipt"],
                          "within_session": _act.within_session(rec, act)})
+
+    def _ask(self) -> None:
+        """Search one course's released material for a student's question.
+
+        Public, and deliberately so. Students have no accounts — a code is a scope, not an identity
+        — and the materials this points at are already served unauthenticated at /m/<id>. Requiring
+        a session here would mean giving every student an account, which is the one thing the whole
+        design avoids.
+
+        What it will NOT do is leak a draft: an unreleased activity is the teacher's private working
+        copy, and its brief describes an assignment nobody has been set yet. `search.rank` drops
+        them rather than trusting this to remember.
+        """
+        course = (self._q("course") or "").strip()
+        query = (self._q("q") or "").strip()[:_search.MAX_QUERY]
+        if not course:
+            return self._send(400, {"ok": False, "reason": "no_course",
+                                    "error": "No course was given."})
+        if _STORE.course(course) is None:
+            # Named plainly, because the fix is in the student's own Settings and nowhere else.
+            return self._send(404, {
+                "ok": False, "reason": "no_such_course",
+                "error": f"This server has no course '{course}'. Check the Course in "
+                         f"Settings → Teaching Center."})
+        if not query:
+            return self._send(200, {"ok": True, "course": course, "hits": []})
+        hits = _search.rank(query, _STORE.activities(course), _STORE.materials(course))
+        self._send(200, {"ok": True, "course": course, "hits": hits})
 
     def _serve_material(self, mid: str) -> None:
         m = _STORE.material(mid)

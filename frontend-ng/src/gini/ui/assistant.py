@@ -1981,6 +1981,24 @@ class Assistant(QWidget):
             return ""
 
     # --- async LLM plumbing: one shared conversation, off the UI thread ----- #
+    def _course_context(self, question: str) -> str:
+        """Ask the Teaching Center what this course says, scoped by the Course in Settings.
+
+        Silent when no course is configured — working offline against the local knowledge base is a
+        normal way to use gBuilder, not a fault. But a course name the server does not KNOW is a
+        typo the student can fix, and staying quiet about it would leave them wondering why the
+        tutor never seems to have heard of their labs. Said once per session, then dropped: a
+        warning on every question would be worse than the problem.
+        """
+        from ..services import tc_ask
+        s = self.ctx.settings
+        answer = tc_ask.ask(getattr(s, "tc_url", "") or "", getattr(s, "tc_course", "") or "",
+                            question)
+        if answer.reason == "no_such_course" and not getattr(self, "_course_warned", False):
+            self._course_warned = True
+            self.ctx.log(answer.error, "warn")
+        return tc_ask.as_context(answer)
+
     def _ask_async(self, prompt: str, device: str, grounded=None) -> None:
         import threading
         # one place for "waiting" feedback: the spinner in the pane (no canvas popup).
@@ -2012,6 +2030,13 @@ class Assistant(QWidget):
                 if offer_rid:
                     ctx += (f"\n\nIf it would help, end by offering to build the "
                             f"'{offer_rid}' example (the student can say 'show me').")
+                # What the STUDENT'S OWN COURSE says about this, if gBuilder is attached to one.
+                # Added here because we are already on the worker thread doing retrieval I/O, and
+                # because it must never be the thing that makes the tutor slow or silent: a failure
+                # comes back as an empty answer, not an exception.
+                course = self._course_context(prompt)
+                if course:
+                    ctx += "\n\n" + course
                 self._loop.extra_context = ctx
             raw_parts: list[str] = []
             try:

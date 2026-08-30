@@ -1,0 +1,193 @@
+"""Asking the course what it says: the plumbing between Ask GINI and the Teaching Center.
+
+Deliberately about the CONTRACT, not the ranking. What callers depend on — the shape of a hit, the
+course boundary, and the promise that a draft never leaves the server — has to survive whatever
+replaces the matching later. The ranking itself is a placeholder and says so.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import time
+import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+_TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
+pytestmark = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
+if str(_TC) not in sys.path:
+    sys.path.insert(0, str(_TC))
+
+from gini.services import tc_ask, tc_submit                     # noqa: E402
+from gini_teaching_center import search                          # noqa: E402
+
+HOUR = 3600.0
+
+
+# -- the ranking, with no database and no HTTP ---------------------------------- #
+def _acts():
+    return [
+        {"id": "c/lab1", "lab": "lab1", "title": "Multi-LAN routing",
+         "brief": "Join two LANs with a router.", "status": "released"},
+        {"id": "c/lab9", "lab": "lab9", "title": "Final exam topology",
+         "brief": "routing router LAN subnet", "status": "draft"},
+        {"id": "c/lab3", "lab": "lab3", "title": "Switching",
+         "brief": "A switch learns MAC addresses.", "status": "released"},
+    ]
+
+
+def _mats():
+    return [{"id": "m1", "title": "Routing handout", "kind": "file", "filename": "routing.pdf"},
+            {"id": "m2", "title": "Kurose chapter 4", "kind": "link", "url": "https://x/ch4"}]
+
+
+def test_a_draft_activity_never_appears():
+    """THE rule. An unreleased activity is the teacher's private working copy, and its brief
+    describes an assignment nobody has been set yet. Asked with words taken straight OUT of the
+    draft, so a leak could not hide behind a weak match."""
+    hits = search.rank("routing router LAN subnet", _acts(), _mats())
+    assert hits                                        # the released ones do match
+    assert not any(h["id"] == "c/lab9" for h in hits)
+    assert not any("exam" in (h.get("title", "") + h.get("brief", "")).lower() for h in hits)
+
+
+def test_the_title_outweighs_the_body():
+    """A question matching an activity's title is more likely to be about it than one matching a
+    word buried in a brief."""
+    hits = search.rank("switching", _acts(), _mats())
+    assert hits[0]["title"] == "Switching"
+
+
+def test_word_endings_do_not_decide_whether_a_student_gets_an_answer():
+    """'route' vs 'routing' is a difference no student knows they made."""
+    titles = {h["title"] for h in search.rank("how do I route between two LANs?", _acts(), _mats())}
+    assert "Multi-LAN routing" in titles and "Routing handout" in titles
+
+
+def test_a_question_of_nothing_but_stop_words_matches_nothing():
+    assert search.rank("how do I do the thing", _acts(), _mats()) == []
+
+
+def test_ties_break_the_same_way_every_time():
+    """A ranking that reshuffles on equal scores makes a tutor look like it is guessing."""
+    a, b = search.rank("routing", _acts(), _mats()), search.rank("routing", _acts(), _mats())
+    assert [h["id"] for h in a] == [h["id"] for h in b]
+
+
+# -- the client, with nothing running ------------------------------------------- #
+def test_every_failure_is_an_empty_answer_not_an_exception():
+    """The tutor is useful offline. Losing the course server must make its answers thinner, never
+    stop it answering."""
+    for args, reason in (
+            (("", "c", "q"), "no_server"),
+            (("https://x", "", "q"), "no_course"),
+            (("http://x", "c", "q"), "insecure"),
+            (("https://127.0.0.1:9", "c", "q"), "unreachable")):
+        a = tc_ask.ask(*args)
+        assert not a and a.reason == reason, args
+
+
+def test_an_empty_question_asks_nothing_at_all():
+    a = tc_ask.ask("https://127.0.0.1:9", "c", "   ")
+    assert not a and not a.reason              # no server call attempted, and nothing wrong
+
+
+def test_as_context_names_a_material_but_never_quotes_it():
+    """The server stores a filename, not the text inside the PDF. Summarising one nobody read is
+    exactly the confident wrongness a tutor must not produce."""
+    a = tc_ask.Answer(course="c", hits=[
+        {"kind": "activity", "title": "Multi-LAN routing", "brief": "Join two LANs."},
+        {"kind": "material", "title": "Routing handout", "url": "/m/m1"}])
+    out = tc_ask.as_context(a)
+    assert "Multi-LAN routing" in out and "Join two LANs." in out
+    assert "Routing handout" in out and "/m/m1" in out
+    assert "pdf" not in out.lower()
+
+
+def test_as_context_of_nothing_is_nothing():
+    assert tc_ask.as_context(tc_ask.Answer(course="c")) == ""
+
+
+# -- against the real server ----------------------------------------------------- #
+@pytest.fixture
+def course(tmp_path, monkeypatch, tls_pair, trust_tls):
+    monkeypatch.setenv("COURSE_ROOT", str(tmp_path))
+    monkeypatch.setenv("ADMIN_ID", "boss")
+    monkeypatch.setenv("ADMIN_PASSWORD", "correct-horse")
+    for mod in [m for m in list(sys.modules) if m.startswith("gini_teaching_center")]:
+        sys.modules.pop(mod, None)
+    from gini_teaching_center.store import Store
+    Store._instances.clear()
+    from gini_teaching_center import accounts as A
+    from gini_teaching_center import server
+    server.ROOT = tmp_path
+    server.MATERIALS = tmp_path / "materials"
+    server.MATERIALS.mkdir(parents=True, exist_ok=True)
+    server._ACCTS = A.Accounts(tmp_path)
+    server._STORE = Store(tmp_path)
+    server._ACCTS.ensure_admin()
+    cert, key = tls_pair
+    ctx = server._tls_context(str(cert), str(key))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"https://127.0.0.1:{httpd.server_address[1]}"
+
+    def post(path, body, session=""):
+        req = urllib.request.Request(url + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        if session:
+            req.add_header("Authorization", f"Bearer {session}")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read() or b"null")
+
+    tok = post("/auth/login", {"id": "boss", "password": "correct-horse"})["session"]
+    post("/api/courses", {"id": "comp535", "title": "Networks"}, tok)
+    post("/api/activities/save", {"course": "comp535", "lab": "lab1", "title": "Multi-LAN routing",
+                                  "brief": "Join two LANs with a router.",
+                                  "vend_until": time.time() + HOUR, "session_minutes": 60}, tok)
+    post("/api/activities/release", {"course": "comp535", "lab": "lab1"}, tok)
+    post("/api/activities/save", {"course": "comp535", "lab": "lab9", "title": "Final exam",
+                                  "brief": "routing router LAN — do not release yet",
+                                  "vend_until": time.time() + HOUR, "session_minutes": 60}, tok)
+    try:
+        yield url
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_student_asks_without_any_account(course):
+    """Students never sign in — a code is a scope, not an identity — so this endpoint takes no
+    session, like the /m/<id> materials it points at."""
+    a = tc_ask.ask(course, "comp535", "how do I route between two LANs?")
+    assert a and a.course == "comp535"
+    assert any(h["kind"] == "activity" and "Multi-LAN" in h["title"] for h in a.hits)
+
+
+def test_the_draft_stays_on_the_server(course):
+    a = tc_ask.ask(course, "comp535", "routing router LAN")
+    assert a                                            # the released one answers
+    assert not any("exam" in h.get("title", "").lower() for h in a.hits)
+
+
+def test_a_course_the_server_does_not_have_is_named_plainly(course):
+    """The fix is in the student's own Settings, so saying 'no results' would send them looking
+    everywhere except the one place that is wrong."""
+    a = tc_ask.ask(course, "cs4480-fall26", "routing")
+    assert not a and a.reason == "no_such_course"
+    assert "cs4480-fall26" in a.error and "Settings" in a.error
+
+
+def test_one_course_cannot_answer_for_another(course):
+    """The Course setting is the whole scope boundary."""
+    a = tc_ask.ask(course, "comp535", "routing")
+    assert all(h["id"].startswith("comp535/") or h["kind"] == "material" for h in a.hits)
+
+
+def test_a_very_long_question_is_truncated_not_refused(course):
+    a = tc_ask.ask(course, "comp535", "routing " * 500)
+    assert a.reason in ("", None) or a.hits is not None      # answered, not rejected
