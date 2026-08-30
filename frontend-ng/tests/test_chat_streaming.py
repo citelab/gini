@@ -679,3 +679,144 @@ def test_the_addition_reads_as_a_new_paragraph(chat, qtbot):
     qtbot.wait(120)
     assert "subnets.Your" not in chat.log.toPlainText()
     assert "Your lab asks for exactly this." in chat.log.toPlainText()
+
+
+# ---- stopping a turn ----------------------------------------------------------- #
+# A turn now runs up to three model calls before the first word and two after it, and until this
+# there was no way out of one: a student who realised their question was wrong had to sit through
+# the answer, the coverage call and possibly a revision. The Teaching Center's console solved the
+# same problem by re-raising BrokenPipeError when a teacher navigated away — a model producing
+# tokens nobody will read should be TOLD to stop, not merely ignored.
+def test_stopping_ends_the_turn(chat, qtbot):
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    assert chat._busy is True
+    chat.stop_turn()
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+
+
+class _StopsItself:
+    """A model that keeps talking, with the stop pressed part-way through.
+
+    The flag is flipped ON THE WORKER THREAD, which is what `stop_turn` does structurally and what
+    makes this deterministic. Triggering the stop from a queued signal instead made the test a
+    race — it passed alone and failed under a full-suite load, because it needed the UI thread to
+    deliver an event while the worker was still running.
+    """
+
+    extra_context = ""
+
+    def __init__(self, chat, after=3, total=1000):
+        self.chat, self.after, self.total = chat, after, total
+        self.delivered = []
+
+    def send(self, text, on_text=None):
+        for i in range(self.total):
+            if i == self.after:
+                self.chat._stop_token.stopped = True
+            on_text(f"token{i} ")
+            self.delivered.append(i)
+        return "never gets here"
+
+
+def test_stopping_unwinds_generation_rather_than_ignoring_it(chat, qtbot):
+    """The point. Raised from the delta callback, it propagates out of `AgentLoop.send` and
+    abandons the backend's generator — the model is told to stop, not left running."""
+    loop = _StopsItself(chat)
+    chat._loop = loop
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("go", "")
+    qtbot.wait(60)
+    assert len(loop.delivered) <= 5, "generation ran on after the stop"
+    assert loop.delivered, "it should have run until the stop, not refused from the start"
+
+
+def test_what_the_student_already_read_survives_the_stop(chat, qtbot):
+    """The retraction rule holds here too: they read it, so it stays. It is MARKED instead, so a
+    truncated answer is not read later as a complete one."""
+    chat._llm_active = 1
+    chat._stop_token = chat._stop_token if getattr(chat, "_stop_token", None) else None
+    from gini.ui.assistant import _Stop
+    chat._stop_token = _Stop()
+    chat._on_chunk("Two LANs need ")
+    chat.stop_turn()
+    shown = chat.log.toPlainText()
+    assert "Two LANs need" in shown and "(stopped)" in shown
+    chat._streaming = False
+    chat._llm_active = 0
+
+
+def test_a_stopped_turn_is_never_audited(chat, qtbot):
+    """Two more model calls deciding whether an abandoned answer was thorough is the opposite of
+    what the student pressed."""
+    calls = []
+    chat._loop = _StopsItself(chat)
+    _with_course(chat, [ACTIVITY])
+    chat._quick_llm = lambda prompt, schema=None: calls.append(1) or MISSED
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert calls == [], "the coverage call ran on a turn the student abandoned"
+
+
+def test_the_button_says_stop_while_a_turn_runs(chat, qtbot):
+    """A separate stop control would sit dead on screen the whole time there is nothing to stop,
+    so the send button morphs — the same trick the Run button uses for play/stop."""
+    slow = SlowLoop()
+    chat._loop = slow
+    assert "Send" in chat.send_btn.toolTip()
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    assert "Stop" in chat.send_btn.toolTip()
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+    qtbot.wait(30)
+    assert "Send" in chat.send_btn.toolTip()
+
+
+def test_pressing_the_button_mid_turn_stops_instead_of_sending(chat, qtbot):
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat.input.setText("a second question")
+    chat._send_or_stop()
+    assert chat._stop_token.stopped is True
+    assert chat._queued is None, "the button stopped the turn — it did not also queue"
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+
+
+def test_stopping_when_nothing_is_running_does_nothing(chat, qtbot):
+    before = len(chat._messages)
+    chat.stop_turn()
+    assert len(chat._messages) == before
+
+
+def test_stopping_twice_is_harmless(chat, qtbot):
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat.stop_turn()
+    chat.stop_turn()
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+    assert chat._llm_active == 0, "the count was dropped twice"
+
+
+def test_a_queued_question_still_runs_after_a_stop(chat, qtbot):
+    """Stop means stop THIS answer. The next question is one they deliberately asked for, and
+    throwing it away would lose input they typed."""
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat._ask_async("second", "")
+    assert chat._queued is not None
+    chat.stop_turn()
+    slow.gate.set()
+    qtbot.waitUntil(lambda: len(slow.prompts) == 2, timeout=5000)

@@ -28,6 +28,27 @@ from .theme import ThemeManager, icons
 from .theme.manager import sp as _sp
 
 
+class Stopped(Exception):
+    """Raised inside a running turn to unwind it when the student presses stop.
+
+    Thrown from the delta callback, which is what actually stops GENERATION: it propagates out of
+    `AgentLoop.send`, abandons the backend's chunk generator, and closes the read from the model.
+    The Teaching Center's console did the same thing with a BrokenPipeError when a teacher
+    navigated away — the point being that a model producing tokens nobody will read should be told
+    to stop, not merely ignored.
+    """
+
+
+class _Stop:
+    """One turn's stop flag. A plain object rather than a bool on the Assistant so a turn that has
+    already been abandoned cannot be un-stopped by the next one starting."""
+
+    __slots__ = ("stopped",)
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+
 class _MissionPanelProxy:
     """Panel adapter for the MissionController: `set_mission` is a synchronous start-time call (UI
     thread), but live updates are EMITTED as ('op', …) tuples so the game master, running on a
@@ -301,12 +322,20 @@ class Assistant(QWidget):
         self.input = QLineEdit()
         self.input.setPlaceholderText("Ask GINI to build, inspect, or explain…")
         self.input.returnPressed.connect(self._send)
-        send = QPushButton()
-        send.setObjectName("Accent")
-        send.setIcon(icons.icon("send", "#ffffff", 16))
-        send.clicked.connect(self._send)
+        # Escape stops the answer as well. The button is the discoverable way out; this is the one
+        # a student's hands already know, and it works without leaving the box they are typing in.
+        from PySide6.QtGui import QShortcut, QKeySequence
+        esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        esc.activated.connect(self.stop_turn)
+        # One button, two jobs — the same morph the Run button uses for ▶/■. A separate stop
+        # control would sit dead on screen for the whole time there is nothing to stop.
+        self.send_btn = QPushButton()
+        self.send_btn.setObjectName("Accent")
+        self.send_btn.setIcon(icons.icon("send", "#ffffff", 16))
+        self.send_btn.setToolTip("Send")
+        self.send_btn.clicked.connect(self._send_or_stop)
         row.addWidget(self.input, 1)
-        row.addWidget(send)
+        row.addWidget(self.send_btn)
         lay.addLayout(row)
         lay.addWidget(self._mode_scroll)          # modes live BELOW what you type — see above
 
@@ -734,6 +763,40 @@ class Assistant(QWidget):
     def showEvent(self, e) -> None:            # panel is chat-ready: cursor waits in the input
         super().showEvent(e)
         self.input.setFocus()
+
+    def _send_or_stop(self) -> None:
+        """The button sends when idle and stops when a turn is running."""
+        if self._busy:
+            self.stop_turn()
+        else:
+            self._send()
+
+    def stop_turn(self) -> None:
+        """Abandon the turn in flight. Visual immediately; the bookkeeping stays the worker's.
+
+        The counter is NOT decremented here. The worker owns it, and it will unwind at the next
+        checkpoint and end the turn the ordinary way — so there is no window in which the UI and
+        the worker both think they finished, which would drop the count twice and start a queued
+        question early. What the student gets at once is the thing they asked for: the indicator
+        stops claiming to be working.
+
+        What is already on screen STAYS. They read it; taking it back would be the retraction this
+        whole design refuses to make. It is marked as stopped instead, so a truncated answer is not
+        read later as a complete one.
+        """
+        token = getattr(self, "_stop_token", None)
+        if token is None or token.stopped or not self._busy:
+            return
+        token.stopped = True
+        self._clear_live()
+        self._say_stopped()
+
+    def _say_stopped(self) -> None:
+        if self._streaming:
+            self._stream_insert("  (stopped)")
+            self._stream_buf += "  (stopped)"
+        else:
+            self._post("GINI", "(stopped)")
 
     def _send(self) -> None:
         text = self.input.text().strip()
@@ -1973,6 +2036,16 @@ class Assistant(QWidget):
     def _begin_turn(self, what: str = "GINI is thinking") -> None:
         self._llm_active += 1
         self._start_spinner(what)
+        self._show_send_button()
+
+    def _show_send_button(self) -> None:
+        """Send when idle, stop when working. Nothing else on screen offers a way out of a turn,
+        and a turn now runs up to three model calls before the first word and two after it."""
+        if not hasattr(self, "send_btn"):
+            return
+        stopping = self._busy
+        self.send_btn.setIcon(icons.icon("stop" if stopping else "send", "#ffffff", 16))
+        self.send_btn.setToolTip("Stop this answer" if stopping else "Send")
 
     def _end_turn(self) -> None:
         """One turn finished. The spinner clears only when the LAST one does.
@@ -1986,6 +2059,7 @@ class Assistant(QWidget):
             self._paint_progress()            # something else is still going — say so
             return
         self._stop_spinner()
+        self._show_send_button()
         self._run_queued()
 
     def _defer(self, run, label: str) -> bool:
@@ -2349,6 +2423,7 @@ class Assistant(QWidget):
             return
         # one place for "waiting" feedback: the spinner in the pane (no canvas popup).
         about = f" about {device}" if device and not device.startswith("__") else ""
+        token = self._stop_token = _Stop()
         self._begin_turn("GINI is thinking" + about)
         self._streaming = False
         self._stream_buf = ""
@@ -2362,10 +2437,20 @@ class Assistant(QWidget):
             def emit(event) -> None:
                 """Say what this turn is doing. Never allowed to break it — a progress line is
                 the least important thing on screen."""
+                if token.stopped:
+                    return                                   # abandoned: say nothing more
                 try:
                     self.turn_event.emit(event)
                 except Exception:                            # noqa: BLE001
                     pass
+
+            def checkpoint() -> None:
+                """Bail out here if the student has stopped. Placed between the steps rather than
+                only inside the delta callback, because most of a turn's time is spent where no
+                tokens flow at all — retrieval, the summariser, and up to eight seconds waiting on
+                the course server."""
+                if token.stopped:
+                    raise Stopped()
 
             concerns: list = []
             if grounded is not None:
@@ -2374,6 +2459,7 @@ class Assistant(QWidget):
                 # are why a grounded answer takes as long as it does: up to three model calls and
                 # a network round-trip before the first word. One label reading "GINI is thinking"
                 # covered the lot, so a slow course server and a slow model looked identical.
+                checkpoint()
                 emit(te.phase(te.LOOKING))
                 # Re-run retrieval WITH the model + embedder now that we're on the worker
                 # thread — this is where the L1 (LLM query-expansion) and L2 (semantic) fallbacks
@@ -2383,6 +2469,7 @@ class Assistant(QWidget):
                 # accumulate this turn's knowledge (small-LLM summary if over budget), then
                 # assemble the full grounded context the reasoning model sees, with a grounding
                 # stance derived from how strongly the KB matched (closed vs. open-but-fenced).
+                checkpoint()
                 emit(te.phase(te.CATCHING_UP))
                 self._session.add(retrieval.cards, llm=self._quick_llm)
                 mcard = self._active_machine_card(prompt)
@@ -2399,6 +2486,7 @@ class Assistant(QWidget):
                 # comes back as an empty answer, not an exception.
                 # Named, because this is the one step whose slowness a student can act on: the
                 # wrong course in Settings, or a VPN that dropped.
+                checkpoint()
                 emit(te.asking_course(getattr(self.ctx.settings, "tc_course", "") or ""))
                 course, concerns = self._course_context(prompt)
                 if course:
@@ -2411,6 +2499,7 @@ class Assistant(QWidget):
                     ctx += "\n\n" + concern_context(concerns)
                 self._loop.extra_context = ctx
             raw_parts: list[str] = []
+            checkpoint()
             emit(te.phase(te.ANSWERING))
             prose = te.ProseFilter()
 
@@ -2426,14 +2515,22 @@ class Assistant(QWidget):
                 # PROSE. Sent raw, a student would watch `<tool_call>{"tool":…` arrive letter by
                 # letter, which is precisely the noise the Teaching Center's console avoided by
                 # streaming only its human-facing call.
+                # Raised, not returned: it unwinds out of `AgentLoop.send`, abandons the
+                # backend's chunk generator and closes the read from the model. Returning quietly
+                # would leave the model generating an answer nobody will ever see.
+                if token.stopped:
+                    raise Stopped()
                 raw_parts.append(delta)
                 emit(te.tick(len(delta or "")))
                 shown = prose.feed(delta)
                 if shown:
                     emit(te.say(shown))
 
+            stopped = False
             try:
                 text = self._loop.send(prompt, on_text=on_text)
+            except Stopped:
+                stopped, text = True, ""         # keep whatever already reached the student
             except TypeError:
                 text = self._loop.send(prompt)   # older loop signature (no streaming)
             except Exception as e:
@@ -2444,12 +2541,27 @@ class Assistant(QWidget):
             if tail:
                 emit(te.say(tail))
             raw = "".join(raw_parts) or text or ""
-            if concerns:
+            # A stopped turn is not audited and never revised. The student asked for it to end;
+            # spending two more model calls deciding whether the abandoned answer was thorough is
+            # the opposite of what they pressed.
+            if concerns and not (stopped or token.stopped):
                 self._audit_course(concerns, visible_text(raw), emit, prompt)
             # DONE carries the whole answer even when every delta was already streamed, so a turn
             # that streamed and one that did not end the same way and cannot drift apart.
             self.answer_ready.emit(device or "", visible_text(raw) or "Done.")
-        threading.Thread(target=work, daemon=True).start()
+
+        def guarded():
+            """A turn that was stopped BEFORE it produced anything still has to end.
+
+            The count is the worker's to drop — the stop handler deliberately does not touch it,
+            so there is no window where both sides think they finished and a queued question
+            starts early against a turn that is still unwinding.
+            """
+            try:
+                work()
+            except Stopped:
+                self.answer_ready.emit(device or "", "")
+        threading.Thread(target=guarded, daemon=True).start()
 
     def _on_chunk(self, delta: str) -> None:
         """A streamed token arrived — begin (or continue) typing it into the pane."""
@@ -2499,6 +2611,12 @@ class Assistant(QWidget):
 
     def _on_answer(self, device: str, text: str) -> None:
         self._end_turn()
+        token = getattr(self, "_stop_token", None)
+        if token is not None and token.stopped and not text:
+            # Stopped before it said anything. The pane already shows why; there is nothing to add
+            # and "Done." would be a lie about a turn that never finished.
+            self._streaming = False
+            return
         if self._streaming:                      # text was already typed live — just persist
             # The streamed text and the finished text are not always the same. `visible_text` also
             # surfaces the *text* of callout/narrate calls, which the prose filter suppressed as
