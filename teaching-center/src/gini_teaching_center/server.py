@@ -684,8 +684,15 @@ def serve(host: str = "0.0.0.0", port: int = PORT,
 
     token = _ACCTS.ensure_admin()
     who = os.environ.get("ADMIN_ID", "admin")
-    shown = "127.0.0.1" if host in ("127.0.0.1", "localhost") else host
-    print(f"GINI Teaching Center  ·  {scheme}://{shown}:{port}/")
+    if host in ("0.0.0.0", "::", ""):
+        # `https://0.0.0.0:8443/` is not an address anybody can open. Name the machine instead and
+        # say plainly that it is listening everywhere.
+        import socket
+        shown = socket.getfqdn() or socket.gethostname() or host
+        print(f"GINI Teaching Center  ·  {scheme}://{shown}:{port}/   (all interfaces)")
+    else:
+        shown = "127.0.0.1" if host in ("127.0.0.1", "localhost") else host
+        print(f"GINI Teaching Center  ·  {scheme}://{shown}:{port}/")
     print(f"  data     {ROOT}")
     print(f"  tls      {tls_cert}")
     if token:

@@ -181,3 +181,35 @@ def test_there_is_no_student_account_table_at_all(portal):
     tables = {r["name"] for r in
               portal.store._all("SELECT name FROM sqlite_master WHERE type='table'")}
     assert not (tables & {"enrolment", "profile", "student", "roster"})
+
+
+# -- getting back in ----------------------------------------------------------- #
+def test_a_pending_claim_token_is_reprinted_on_every_boot(portal):
+    """It was a one-time SIGHTING as well as a one-time secret.
+
+    The token printed only on the boot that created the account. Miss that line in a scrollback —
+    on a run you were doing for some other reason — and the legitimate admin is locked out, with no
+    route back but an environment variable they would have to already know about, or a SQLite
+    query against the live database. Reprinting while it is still unclaimed costs nothing.
+    """
+    first = portal.ensure_admin()
+    assert first                                  # created, token issued
+    assert portal.ensure_admin() == first         # and still offered on the next start
+    assert portal.ensure_admin() == first         # and the one after that
+
+
+def test_claiming_stops_the_reprinting_for_good(portal):
+    """The other half: once it is spent it must not linger on the console for the next person who
+    walks past the terminal."""
+    token = portal.ensure_admin()
+    assert portal.claim("boss", token, GOOD)["ok"]
+    assert portal.ensure_admin() is None
+
+
+def test_an_admin_password_still_beats_a_lost_token(portal, monkeypatch):
+    """The escape hatch that already existed, pinned so the reprint above cannot quietly replace
+    it: ADMIN_PASSWORD is authoritative on every boot, claimed or not."""
+    portal.ensure_admin()
+    monkeypatch.setenv("ADMIN_PASSWORD", GOOD)
+    assert portal.ensure_admin() is None          # no token — the password settled it
+    assert portal.login("boss", GOOD)["ok"]

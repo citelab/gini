@@ -173,6 +173,16 @@ class Accounts:
             self.store.kv_delete(f"claim:{who}")
             return None
         if existing is not None:
+            # An account that exists but was never claimed still has a token waiting for it.
+            # Printing it only on the boot that CREATED the account made it a one-time sighting as
+            # well as a one-time secret: miss that line in a scrollback — on a run you were doing
+            # for some other reason — and the legitimate admin is locked out, with no route back
+            # except an environment variable they would have to already know about, or a SQLite
+            # query. Reprinting while it is still unclaimed gives up nothing: the moment it IS
+            # claimed the token is deleted, and this returns None again.
+            if not existing["hash"]:
+                pending = self.store.kv_get(f"claim:{who}") or {}
+                return pending.get("token") or None
             return None
         self.store.put_account(who, role=ADMIN, salt=None, hash=None, n=None, r=None, p=None,
                                claimed_at=None)

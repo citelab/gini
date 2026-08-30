@@ -42,11 +42,31 @@ sudo -u gini-tc /opt/gini-tc/venv/bin/pip install --upgrade pip
 sudo -u gini-tc /opt/gini-tc/venv/bin/pip install gini-teaching-center
 ```
 
+> **Upgrading a box that once had `pip install --user`?** pipx will not overwrite the console
+> scripts that install left in `~/.local/bin`, and says so — then `gini-tc` keeps running the OLD
+> version, with no other symptom than flags it does not recognise. Clear the way and let pipx
+> place its own:
+>
+> ```bash
+> python3 -m pip uninstall -y gini-teaching-center     # this owns ~/.local/bin/gini-tc
+> pipx install --force gini-teaching-center
+> which -a gini-tc && gini-tc --version                # expect ONE path, and the new version
+> ```
+
 ### 3. The first admin
 
-Start it once by hand. With no `ADMIN_PASSWORD` set, it prints a one-time claim token and waits —
-so the portal is never standing open on a port with no password, which is what "first password
-wins" would mean on a shared machine.
+Start it once by hand. With no `ADMIN_PASSWORD` set, it prints a claim token and waits — so the
+portal is never standing open on a port with no password, which is what "first password wins" would
+mean on a shared machine.
+
+The token is reprinted on every start **until it is claimed**, so missing it in a scrollback is not
+a lockout. If you would rather not use it at all, `ADMIN_PASSWORD` is authoritative on every boot
+and reconciles an existing account's password:
+
+```bash
+ADMIN_PASSWORD='…' gini-tc --data /opt/gini-tc/data --port 8443 \
+    --tls-cert … --tls-key …
+```
 
 ```bash
 sudo -u gini-tc /opt/gini-tc/venv/bin/gini-teaching-center --data /opt/gini-tc/data --port 8443 \
