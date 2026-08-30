@@ -154,10 +154,26 @@ def course(tmp_path, monkeypatch, tls_pair, trust_tls):
                                   "brief": "routing router LAN — do not release yet",
                                   "vend_until": time.time() + HOUR, "session_minutes": 60}, tok)
     try:
-        yield url
+        yield _Course(url, tok, post)
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+class _Course(str):
+    """The server URL, with the staff session and a poster hung off it.
+
+    A `str` subclass so every existing test that passes `course` straight to `tc_ask.ask` keeps
+    working unchanged — the fixture grew a way to add material without the tests that do not need
+    one having to care.
+    """
+    def __new__(cls, url, token, post):
+        self = super().__new__(cls, url)
+        self.token, self._post = token, post
+        return self
+
+    def post(self, path, body):
+        return self._post(path, body, self.token)
 
 
 def test_a_student_asks_without_any_account(course):
@@ -253,3 +269,68 @@ def test_the_check_distinguishes_an_empty_course_from_a_broken_link(course, tmp_
     out = capsys.readouterr().out
     assert "matched nothing" in out
     assert "draft" in out and "PDF" in out          # the reasons, not just the count
+
+
+# ---- materials, all the way through ------------------------------------------ #
+# Everything above tests ACTIVITIES. The materials path — upload, store, rank, hit — had no test
+# of its own, and a materials path that silently returned nothing would look exactly like a course
+# with nothing in it. That ambiguity is not academic: it is what a live server looked like while
+# working out whether a course was empty or the search was broken.
+def test_an_uploaded_file_can_be_found_by_name(course):
+    import base64
+    r = course.post("/api/materials",
+                    {"course": "comp535", "title": "Subnetting handout",
+                     "filename": "subnets.pdf",
+                     "data": base64.b64encode(b"%PDF-1.4 not really a pdf").decode()})
+    assert r["ok"], r
+    a = tc_ask.ask(course, "comp535", "subnetting")
+    hit = next((h for h in a.hits if h["kind"] == "material"), None)
+    assert hit is not None, f"the upload is not searchable: {a.hits}"
+    assert hit["title"] == "Subnetting handout"
+    assert hit["url"] == f"/m/{r['id']}"
+
+
+def test_a_link_is_found_the_same_way_as_a_file(course):
+    r = course.post("/api/materials", {"course": "comp535", "title": "RFC 791 — IP",
+                                       "url": "https://www.rfc-editor.org/rfc/rfc791"})
+    assert r["ok"]
+    a = tc_ask.ask(course, "comp535", "rfc")
+    assert any(h["kind"] == "material" and "RFC" in h["title"] for h in a.hits)
+
+
+def test_a_material_is_pointed_at_never_quoted(course):
+    """The honest limit of the whole feature, pinned so a later change has to be deliberate. No
+    text is extracted from an upload, so a question whose words live only INSIDE the file cannot
+    match — and the context names the material rather than pretending to summarise it."""
+    import base64
+    body = b"the word supercalifragilistic appears only inside this file"
+    course.post("/api/materials",
+                {"course": "comp535", "title": "Week 3 notes", "filename": "w3.txt",
+                 "data": base64.b64encode(body).decode()})
+    assert not tc_ask.ask(course, "comp535", "supercalifragilistic")
+
+    a = tc_ask.ask(course, "comp535", "week")
+    assert any(h["title"] == "Week 3 notes" for h in a.hits)     # findable by its NAME
+    context = tc_ask.as_context(a)
+    assert "Week 3 notes" in context
+    assert "supercalifragilistic" not in context
+
+
+def test_a_material_belongs_to_its_own_course(course):
+    """Materials go through the same scope gate activities do — the Course in Settings is the
+    entire boundary, and it must not have a hole on the materials side."""
+    course.post("/api/courses", {"id": "comp310", "title": "Operating Systems"})
+    course.post("/api/materials", {"course": "comp310", "title": "Paging slides",
+                                   "url": "https://example.edu/paging"})
+    assert not any("Paging" in h.get("title", "")
+                   for h in tc_ask.ask(course, "comp535", "paging slides").hits)
+    assert any("Paging" in h.get("title", "")
+               for h in tc_ask.ask(course, "comp310", "paging slides").hits)
+
+
+def test_a_course_with_nothing_in_it_answers_ok_with_no_hits(course):
+    """Not an error, and it must stay that way: an empty course is a course a teacher has not
+    filled in yet. The CLI leans on this to tell 'nothing posted' apart from 'cannot reach'."""
+    course.post("/api/courses", {"id": "comp999", "title": "Brand new"})
+    a = tc_ask.ask(course, "comp999", "anything at all")
+    assert a.reason == "" and a.error == "" and a.hits == []
