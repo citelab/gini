@@ -73,7 +73,21 @@ def asking_course(course: str) -> tuple[str, dict]:
 
 # What a model may emit into its prose that a student must never watch arrive. `loop.visible_text`
 # strips all of it from the finished reply; this is the same rule applied one delta at a time.
-_OPENERS = ("<tool_call>", "<json>", "```")
+# Opener -> the closer that ends it. Written out rather than derived, because `<|think|>` closes
+# with `<|/think|>` and no rule that turns "<" into "</" gets that right.
+_SUPPRESSED = {
+    "<tool_call>": "</tool_call>",
+    "<json>": "</json>",
+    # A reasoning model's chain of thought. `ollama.strip_thinking` removes it from a whole reply,
+    # but it runs per streamed chunk and a chunk is a FRAGMENT — split across deltas, the block
+    # regex never matches and the reasoning flows straight through. Suppressing it here works
+    # because this filter is stateful across deltas, which is the one thing the per-chunk strip
+    # cannot be.
+    "<think>": "</think>",
+    "<|think|>": "<|/think|>",
+    "```": "```",
+}
+_OPENERS = tuple(_SUPPRESSED)
 #: The longest thing we may have to hold before knowing whether it is markup or prose.
 _HOLD = max(len(o) for o in _OPENERS)
 
@@ -121,7 +135,7 @@ class ProseFilter:
             self._buf = self._buf[cut:]
             opener = next((o for o in _OPENERS if self._buf.startswith(o)), "")
             if opener:
-                self._muted = "```" if opener == "```" else opener.replace("<", "</")
+                self._muted = _SUPPRESSED[opener]
                 self._buf = self._buf[len(opener):]
                 continue
             if self._buf.startswith("{") and _maybe_action(self._buf):

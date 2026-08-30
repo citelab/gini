@@ -127,6 +127,13 @@ def visible_text(raw: str) -> str:
     — `<tool_call>`/`<json>` tag blocks and bare {"tool": …} action objects. So the chat
     shows what the model SAID, while the loop still executes what it DID."""
     raw = raw or ""
+    # A reasoning model inlines its chain of thought in `content`, and `ollama.strip_thinking`
+    # runs per streamed CHUNK — so a block split across two deltas survives it and lands here.
+    # The final text is the authority for what gets persisted and for anything the streamed copy
+    # missed, so it has to be clean too, or a student reads the model's private reasoning at the
+    # bottom of every answer.
+    from .llm.ollama import strip_thinking
+    raw = strip_thinking(raw)
     spoken: list[str] = []
     for obj in _extract_json_objects(raw):
         if obj.get("tool") in ("callout", "narrate"):

@@ -242,3 +242,36 @@ def test_nothing_is_emitted_twice_across_deltas():
     only appear on the split, so it would pass every single-chunk test."""
     raw = "A router joins two LANs. " * 8
     assert _stream(raw, 3) == raw
+
+
+# ---- a reasoning model's private thinking -------------------------------------- #
+# `ollama.strip_thinking` removes the chain of thought from a whole reply, but Ollama's `_parse`
+# calls it PER CHUNK and a streamed chunk is a fragment: split across two deltas, the block regex
+# never matches and the reasoning flows straight through. Before anything streamed that only
+# affected the final text; now a student would watch the model think.
+@pytest.mark.parametrize("chunk", [1, 3, 8, 10_000])
+@pytest.mark.parametrize("tags", [("<think>", "</think>"), ("<|think|>", "<|/think|>")])
+def test_a_models_reasoning_is_never_streamed_to_the_student(chunk, tags):
+    open_t, close_t = tags
+    raw = f"{open_t}they are on different subnets, so say router{close_t}Two LANs need a router."
+    out = _stream(raw, chunk)
+    assert "different subnets, so say router" not in out
+    assert "think" not in out
+    assert out.strip() == "Two LANs need a router."
+
+
+def test_the_filter_and_the_finished_text_agree_about_thinking():
+    """Both ends, or the difference gets appended back on. `_on_answer` adds anything the final
+    text has that the stream did not show — so a clean stream and a dirty final would put the
+    reasoning back at the bottom of the answer."""
+    from gini.agent.loop import visible_text
+    raw = "<think>private reasoning here</think>The answer."
+    assert "private reasoning" not in _stream(raw, 4)
+    assert "private reasoning" not in visible_text(raw)
+
+
+def test_unclosed_thinking_does_not_swallow_the_whole_answer():
+    """A model that opens a think block and never closes it. Nothing after it can be trusted as
+    prose, but the words before it were already legitimate."""
+    out = _stream("Here goes. <think>still reasoning and then the stream ends", 3)
+    assert "Here goes." in out and "still reasoning" not in out
