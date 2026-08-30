@@ -54,6 +54,7 @@ class Assistant(QWidget):
     # emitted from the LLM worker thread; delivered on the UI thread (queued)
     answer_ready = Signal(str, str)         # (device_name_or_empty, text)
     answer_chunk = Signal(str)              # a streamed token delta (live "typing")
+    turn_event = Signal(tuple)              # (kind, data) from agent/turn_events — phase/tick/say
     status_changed = Signal(str, bool)      # (mode label, busy) -> toolbar indicator
     starter_ready = Signal(str, str)        # (type_key, reason) for the Wizard's first element
     # mission game-master runs on a worker thread; its chat/panel updates come back via this
@@ -81,9 +82,14 @@ class Assistant(QWidget):
         self._brief = ""                  # per-project teacher framing, fed to the model
         self._streaming = False           # a streamed answer is being typed into the log
         self._stream_buf = ""             # accumulated streamed text (for persistence)
+        from ..agent import turn_events as _te
+        # What the indicator paints from. All the rules live in agent/turn_events (Qt-free and
+        # unit-tested); this widget only draws what `line()` says.
+        self._progress = _te.Progress()
         self._last_ref: tuple[str, str] | None = None   # what we last explained (for chips)
         self.answer_ready.connect(self._on_answer)
         self.answer_chunk.connect(self._on_chunk)
+        self.turn_event.connect(self._on_turn_event)
         self.starter_ready.connect(self._place_starter)
         self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self._ghost_cache: dict = {}              # (goal, type_key) -> [(type_key, reason)]
@@ -1868,11 +1874,23 @@ class Assistant(QWidget):
         self._wz_banner_box.setVisible(False)
         self._post("GINI", "Goal cleared — X-ray is back to showing every valid connection.")
 
+    def _paint_progress(self, reset_to: str | None = None) -> None:
+        """Draw the live indicator. GUARDED, everywhere, on purpose.
+
+        This is the least important thing on screen and it sits on the path of every answer. An
+        exception here lands in the Qt event loop and costs the student the reply they were
+        waiting for — so a broken indicator degrades to a blank one and the turn carries on.
+        """
+        try:
+            if reset_to is not None:
+                self._progress.reset(reset_to)
+            self._spinner.setText(self._progress.line())
+        except Exception:                                    # noqa: BLE001
+            self._spinner.setText(reset_to or "")
+
     def _start_spinner(self, what: str = "GINI is thinking") -> None:
         self._busy = True
-        self._spin_base = what
-        self._spin_dots = 0
-        self._spinner.setText(what + "…")
+        self._paint_progress(reset_to=what)
         self._spinner.setVisible(True)
         self._spin_timer.start()
         self._emit_status()
@@ -1885,8 +1903,33 @@ class Assistant(QWidget):
         self._emit_status()
 
     def _spin_tick(self) -> None:
-        self._spin_dots = (self._spin_dots + 1) % 4
-        self._spinner.setText(self._spin_base + "." * self._spin_dots)
+        """Repaint. The TIMER only moves the elapsed seconds — the pulse is moved by tokens.
+
+        It used to animate dots, which meant the indicator kept dancing over a hung model: a
+        student sent to check their wifi while Ollama sat there with nothing to say. Now the
+        liveness comes from `turn_event`, so a stalled model shows a stalled pulse, and a frozen
+        indicator is information.
+        """
+        if self._busy:
+            self._paint_progress()
+
+    def _on_turn_event(self, event: tuple) -> None:
+        """A turn said something about itself. Delivered on the UI thread (queued signal).
+
+        Nothing here may raise: the indicator is the least important thing on screen, and a turn
+        that dies because its progress line misbehaved is strictly worse than one with no progress
+        line at all.
+        """
+        from ..agent import turn_events as te
+        try:
+            self._progress.feed(event)
+            kind = event[0] if event else ""
+            if kind == te.SAY:
+                self._on_chunk(event[1].get("text", ""))     # prose is the answer, not a status
+            elif self._busy and not self._streaming:
+                self._paint_progress()
+        except Exception:                                    # noqa: BLE001
+            pass
 
     # --- Ask GINI pipeline: understand -> retrieve -> route -> reason ------- #
     def _mode_name(self) -> str:
@@ -2010,9 +2053,24 @@ class Assistant(QWidget):
 
         def work():
             from ..agent import ask, kb
+            from ..agent import turn_events as te
             from ..agent.loop import visible_text
+
+            def emit(event) -> None:
+                """Say what this turn is doing. Never allowed to break it — a progress line is
+                the least important thing on screen."""
+                try:
+                    self.turn_event.emit(event)
+                except Exception:                            # noqa: BLE001
+                    pass
+
             if grounded is not None:
                 intent, retrieval, offer_rid = grounded
+                # Each step below is a REAL thing that happens, in this order, and together they
+                # are why a grounded answer takes as long as it does: up to three model calls and
+                # a network round-trip before the first word. One label reading "GINI is thinking"
+                # covered the lot, so a slow course server and a slow model looked identical.
+                emit(te.phase(te.LOOKING))
                 # Re-run retrieval WITH the model + embedder now that we're on the worker
                 # thread — this is where the L1 (LLM query-expansion) and L2 (semantic) fallbacks
                 # fire, since they do I/O. The UI-thread pass (for routing) was lexical-only.
@@ -2021,6 +2079,7 @@ class Assistant(QWidget):
                 # accumulate this turn's knowledge (small-LLM summary if over budget), then
                 # assemble the full grounded context the reasoning model sees, with a grounding
                 # stance derived from how strongly the KB matched (closed vs. open-but-fenced).
+                emit(te.phase(te.CATCHING_UP))
                 self._session.add(retrieval.cards, llm=self._quick_llm)
                 mcard = self._active_machine_card(prompt)
                 stance = ask.grounding_stance(retrieval, intent)
@@ -2034,20 +2093,49 @@ class Assistant(QWidget):
                 # Added here because we are already on the worker thread doing retrieval I/O, and
                 # because it must never be the thing that makes the tutor slow or silent: a failure
                 # comes back as an empty answer, not an exception.
+                # Named, because this is the one step whose slowness a student can act on: the
+                # wrong course in Settings, or a VPN that dropped.
+                emit(te.asking_course(getattr(self.ctx.settings, "tc_course", "") or ""))
                 course = self._course_context(prompt)
                 if course:
                     ctx += "\n\n" + course
                 self._loop.extra_context = ctx
             raw_parts: list[str] = []
+            emit(te.phase(te.ANSWERING))
+            prose = te.ProseFilter()
+
+            def on_text(delta: str) -> None:
+                # The wire that was missing. `answer_chunk` was declared, connected to a complete
+                # live-typing handler, and emitted NOWHERE — so the backend streamed, the loop
+                # forwarded every delta, and gBuilder appended them to a list the student never
+                # saw.
+                #
+                # Two channels, because a delta is two different things at once. Every character
+                # is LIVENESS whether or not a student may see it — a model working through a long
+                # tool call is working, and the pulse must say so. Only what survives the filter is
+                # PROSE. Sent raw, a student would watch `<tool_call>{"tool":…` arrive letter by
+                # letter, which is precisely the noise the Teaching Center's console avoided by
+                # streaming only its human-facing call.
+                raw_parts.append(delta)
+                emit(te.tick(len(delta or "")))
+                shown = prose.feed(delta)
+                if shown:
+                    emit(te.say(shown))
+
             try:
-                text = self._loop.send(prompt, on_text=raw_parts.append)
+                text = self._loop.send(prompt, on_text=on_text)
             except TypeError:
                 text = self._loop.send(prompt)   # older loop signature (no streaming)
             except Exception as e:
                 raw_parts, text = [], f"(LLM error: {e})"
             finally:
                 self._loop.extra_context = ""    # never leak grounding into the next turn
+            tail = prose.flush()          # text held at the very end IS prose — never drop it
+            if tail:
+                emit(te.say(tail))
             raw = "".join(raw_parts) or text or ""
+            # DONE carries the whole answer even when every delta was already streamed, so a turn
+            # that streamed and one that did not end the same way and cannot drift apart.
             self.answer_ready.emit(device or "", visible_text(raw) or "Done.")
         threading.Thread(target=work, daemon=True).start()
 
@@ -2084,8 +2172,24 @@ class Assistant(QWidget):
     def _on_answer(self, device: str, text: str) -> None:
         self._stop_spinner()
         if self._streaming:                      # text was already typed live — just persist
+            # The streamed text and the finished text are not always the same. `visible_text` also
+            # surfaces the *text* of callout/narrate calls, which the prose filter suppressed as
+            # markup while it was arriving. Anything it found that the student has not already read
+            # is APPENDED — never swapped in over what they watched appear. Retracting a paragraph
+            # in front of a reader is the one thing streaming must never do.
             final = self._stream_buf or text
-            self._messages.append(("GINI", final, False, False))
+            for line in (text or "").splitlines():
+                line = line.strip()
+                if line and line not in final:
+                    self._stream_insert(("\n" if final else "") + line)
+                    final += ("\n" if final else "") + line
+            # Recorded as Markdown, then repainted once, so a streamed answer ends up formatted
+            # exactly like a buffered one. Streaming inserts plain characters — it has to, since
+            # `**bold` is not bold until the second `**` arrives — and without this settle step a
+            # student would read asterisks and pipe tables that the non-streaming path renders
+            # properly. The WORDS never change; only their formatting resolves.
+            self._messages.append(("GINI", final, False, True))
+            self._rerender()
             self.ctx.bus.assistant_message.emit("GINI", final)
             self._streaming = False
             self._raise_self()
