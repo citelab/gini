@@ -38,6 +38,7 @@ LOOKING = "Looking through what GINI knows"
 CATCHING_UP = "Catching up on this conversation"
 ASKING_COURSE = "Asking your course"           # + " (comp535)" — see `asking_course`
 ANSWERING = "Answering"
+CHECKING = "Checking what it might have missed"
 USING_TOOL = "Looking at your topology"
 
 
@@ -253,4 +254,4 @@ class Progress:
 
 __all__ = ["PHASE", "TICK", "SAY", "DONE", "PULSE", "Progress", "ProseFilter",
            "phase", "tick", "say", "done", "asking_course",
-           "LOOKING", "CATCHING_UP", "ASKING_COURSE", "ANSWERING", "USING_TOOL"]
+           "LOOKING", "CATCHING_UP", "ASKING_COURSE", "ANSWERING", "CHECKING", "USING_TOOL"]

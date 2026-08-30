@@ -91,6 +91,10 @@ class Assistant(QWidget):
         self._brief = ""                  # per-project teacher framing, fed to the model
         self._streaming = False           # a streamed answer is being typed into the log
         self._stream_buf = ""             # accumulated streamed text (for persistence)
+        from ..agent.twin.dialectic import Twin as _Twin
+        # Chat's own Twin: it keeps the covered-concern history and the metrics that say how often
+        # the tutor answers around its own course's material.
+        self._twin = _Twin()
         from ..agent import turn_events as _te
         # What the indicator paints from. All the rules live in agent/turn_events (Qt-free and
         # unit-tested); this widget only draws what `line()` says.
@@ -2161,7 +2165,7 @@ class Assistant(QWidget):
             return ""
 
     # --- async LLM plumbing: one shared conversation, off the UI thread ----- #
-    def _course_context(self, question: str) -> str:
+    def _course_context(self, question: str) -> tuple[str, list]:
         """Ask the Teaching Center what this course says, scoped by the Course in Settings.
 
         Silent when no course is configured — working offline against the local knowledge base is a
@@ -2171,13 +2175,72 @@ class Assistant(QWidget):
         warning on every question would be worse than the problem.
         """
         from ..services import tc_ask
+        from ..agent.twin.course import course_concerns, current_lab_of
         s = self.ctx.settings
         answer = tc_ask.ask(getattr(s, "tc_url", "") or "", getattr(s, "tc_course", "") or "",
                             question)
         if answer.reason == "no_such_course" and not getattr(self, "_course_warned", False):
             self._course_warned = True
             self.ctx.log(answer.error, "warn")
-        return tc_ask.as_context(answer)
+        # The hits are now also CONCERNS, not only context. Pasting the course's material into the
+        # prompt made the model aware of it; nothing checked that it used any of it. A concern is
+        # the same fact with an obligation attached.
+        lab = current_lab_of(getattr(self.ctx, "proof_recorder", None))
+        return tc_ask.as_context(answer), course_concerns(answer.hits, current_lab=lab)
+
+    def _audit_course(self, concerns: list, answer: str, emit) -> None:
+        """Did the answer account for what this course says? — the Twin's audit half.
+
+        One extra call, deliberately separate from the answer. The Twin's coverage report is a
+        JSON object, and the reply we streamed to the student is prose: asking for both at once
+        would mean streaming `{"text": "Well, your rou` a character at a time, which is precisely
+        the noise the Teaching Center's console avoided by keeping its human-facing call apart
+        from its machine-facing one. Asking afterwards also costs the student nothing — they are
+        already reading.
+
+        This REPORTS and does not act. Nothing is revised, nothing is shown to the student. The
+        point of this step is to find out how often a tutor ignores its own course's material
+        before anything is built on top of that answer.
+        """
+        try:
+            self._audit(concerns, answer, emit)
+        except Exception as e:                                   # noqa: BLE001
+            # The audit runs BEFORE the answer is handed over, because it is part of the turn and
+            # the queue must not start the next question alongside it. That makes this guard
+            # load-bearing rather than decorative: an audit that raised took the answer down with
+            # it AND left the turn counted as outstanding for ever, so every later question queued
+            # behind a turn that had already finished. A tutor that cannot check itself still owes
+            # the student the answer.
+            self.ctx.log(f"The course check did not run: {e}", "info")
+
+    def _audit(self, concerns: list, answer: str, emit) -> None:
+        from ..agent import turn_events as te
+        from ..agent.twin.contracts import parse_coverage
+        from ..agent.twin.dialectic import COVERAGE_SCHEMA, coverage_instruction
+        from ..agent.personas import first_json
+        must = [c for c in concerns if c.salience >= 2]
+        if not must or self._loop is None or not answer.strip():
+            return                       # nothing obligatory, or nothing to audit
+        emit(te.phase(te.CHECKING))
+        raw = self._quick_llm(
+            "Here is an answer a tutor gave a student:\n\n" + answer.strip()
+            + "\n\nReport which of the concerns below that answer addresses."
+            + coverage_instruction(concerns), schema=COVERAGE_SCHEMA)
+        obj = first_json(raw or "")
+        cov = parse_coverage(obj.get("coverage")) if isinstance(obj, dict) else None
+        # Coverage-silent is a supported posture, not a failure: `Twin.diff` then objects only
+        # about the urgent tier rather than guessing what the prose covered.
+        objections = self._twin.audit(concerns, cov, None)
+        self._twin.record(cov)
+        self._twin.metrics["turns"] += 1
+        if cov is None:
+            self._twin.metrics["coverage_silent"] += 1
+        self._twin.metrics["objections"] += len(objections)
+        for o in objections:
+            # The console, not the chat pane: this is instrumentation for now, and putting it in
+            # front of the student would be acting on it.
+            self.ctx.log(f"Course material the answer did not account for — {o.concern.statement}",
+                         "info")
 
     def _ask_async(self, prompt: str, device: str, grounded=None, *,
                    proactive: bool = False) -> None:
@@ -2214,6 +2277,7 @@ class Assistant(QWidget):
                 except Exception:                            # noqa: BLE001
                     pass
 
+            concerns: list = []
             if grounded is not None:
                 intent, retrieval, offer_rid = grounded
                 # Each step below is a REAL thing that happens, in this order, and together they
@@ -2246,9 +2310,15 @@ class Assistant(QWidget):
                 # Named, because this is the one step whose slowness a student can act on: the
                 # wrong course in Settings, or a VPN that dropped.
                 emit(te.asking_course(getattr(self.ctx.settings, "tc_course", "") or ""))
-                course = self._course_context(prompt)
+                course, concerns = self._course_context(prompt)
                 if course:
                     ctx += "\n\n" + course
+                if concerns:
+                    # Twin-as-context (the cheap half): the concern set rides in the GROUNDING, so
+                    # the substrate's guaranteed recall shapes the DRAFT rather than only auditing
+                    # it afterwards. Exactly what `reasoning.py` does for the mission personas.
+                    from ..agent.twin.dialectic import concern_context
+                    ctx += "\n\n" + concern_context(concerns)
                 self._loop.extra_context = ctx
             raw_parts: list[str] = []
             emit(te.phase(te.ANSWERING))
@@ -2284,6 +2354,8 @@ class Assistant(QWidget):
             if tail:
                 emit(te.say(tail))
             raw = "".join(raw_parts) or text or ""
+            if concerns:
+                self._audit_course(concerns, visible_text(raw), emit)
             # DONE carries the whole answer even when every delta was already streamed, so a turn
             # that streamed and one that did not end the same way and cannot drift apart.
             self.answer_ready.emit(device or "", visible_text(raw) or "Done.")

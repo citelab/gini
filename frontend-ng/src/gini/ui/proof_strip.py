@@ -254,6 +254,11 @@ class ProofStrip(QWidget):
         """
         activity = str(answer.get("activity") or "").strip()
         title = str(answer.get("title") or "").strip()
+        # Kept, not just printed. The tutor asks the Teaching Center what the course says about a
+        # question, and knowing WHICH lab is being recorded is what separates "your course mentions
+        # this somewhere" from "this is the lab you are being marked on".
+        if self.recorder is not None and hasattr(self.recorder, "note_activity"):
+            self.recorder.note_activity(activity, title)
         what = " · ".join([b for b in (f"<b>{activity}</b>" if activity else "",
                                        f"“{title}”" if title else "") if b]) or "this code"
         course = activity.split("/")[0] if "/" in activity else ""

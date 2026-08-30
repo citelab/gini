@@ -15,6 +15,7 @@ KIND_SALIENCE = {
     "watcher-event": 2,     # OS pedagogical events (starvation, monopoly…) — phase C
     "composition-gap": 2,   # unfilled requires / authoring disagreements — phase C
     "misconception": 2,     # learner-model concerns (3 when touching the current work) — phase D
+    "course": 2,            # the student's own course material (1 unless it is THEIR lab)
     "grammar-option": 1,    # a valid-but-unused possibility — context, never an objection
 }
 

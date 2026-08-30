@@ -353,3 +353,148 @@ def test_a_long_question_does_not_flood_the_indicator(chat, qtbot):
     assert len(chat._queued[1]) <= 40 and chat._queued[1].endswith("…")
     slow.gate.set()
     qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+
+
+def _grounded(chat):
+    """The tuple `_ask_gini` builds — the grounded path is the only one that consults a course."""
+    from gini.agent import kb
+    from gini.agent import understand as U
+    intent = U.understand("how do I connect two LANs?", canvas_names=[], mode="chat")
+    return (intent, kb.retrieve(intent, topology=chat.ctx.topology), "")
+
+
+# ---- the course, audited ------------------------------------------------------- #
+# The course's material was pasted into the prompt and nothing checked that the model used any of
+# it. These drive the audit half through the real assistant: the concerns reach the grounding, the
+# coverage call runs after the answer, and a silent miss is counted.
+class _CoveredLoop(SlowLoop):
+    def __init__(self, reply="Two LANs need a router."):
+        super().__init__()
+        self.gate.set()
+        self.reply = reply
+        self.grounding = ""
+
+    def send(self, text, on_text=None):
+        self.grounding = self.extra_context
+        if on_text:
+            on_text(self.reply)
+        return self.reply
+
+
+def _with_course(chat, hits, lab="comp535/lab1", coverage=None):
+    """Stand in for the Teaching Center and the coverage call."""
+    from gini.agent.twin.course import course_concerns
+    chat._course_context = lambda q: ("From this course's material:\n- Activity “Multi-LAN”",
+                                      course_concerns(hits, current_lab=lab))
+    chat._quick_llm = lambda prompt, schema=None: coverage or ""
+    return chat
+
+
+ACTIVITY = {"kind": "activity", "id": "comp535/lab1", "title": "Multi-LAN routing",
+            "brief": "Join two LANs with a router.", "score": 6.0}
+
+
+def test_the_course_reaches_the_model_as_concerns_not_only_as_context(chat, qtbot):
+    """Twin-as-context, the cheap half: the concern set rides in the GROUNDING so the substrate's
+    guaranteed recall shapes the draft, rather than only auditing it afterwards."""
+    loop = _CoveredLoop()
+    chat._loop = loop
+    _with_course(chat, [ACTIVITY])
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(60)
+    assert "Things that matter right now" in loop.grounding
+    assert "Multi-LAN routing" in loop.grounding
+
+
+def test_an_answer_that_ignores_your_own_lab_is_counted(chat, qtbot):
+    """The whole point. The model answered without accounting for the lab the student is being
+    marked on, and until now nothing anywhere noticed."""
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY],
+                 coverage='{"text": "x", "coverage": {"addressed": [], "omitted": []}}')
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert chat._twin.metrics["objections"] == 1
+    assert chat._twin.metrics["turns"] == 1
+
+
+def test_an_answer_that_uses_the_course_draws_no_objection(chat, qtbot):
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY],
+                 coverage='{"text": "x", "coverage": '
+                          '{"addressed": ["course:comp535/lab1"], "omitted": []}}')
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert chat._twin.metrics["objections"] == 0
+
+
+def test_a_model_that_cannot_report_coverage_is_a_posture_not_a_failure(chat, qtbot):
+    """Coverage-silent: a model without structured outputs, or one that ignored the shape. The
+    Twin then objects only about the urgent tier rather than guessing what the prose covered —
+    and a course concern is salience 2, so it stays quiet."""
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY], coverage="I am afraid I cannot do that")
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert chat._twin.metrics["coverage_silent"] == 1
+    assert chat._twin.metrics["objections"] == 0
+
+
+def test_nothing_obligatory_means_no_second_call_at_all(chat, qtbot):
+    """A student who is not recording owes nothing, so the extra round-trip must not happen. An
+    audit that always runs is a latency cost on every question for no obligation."""
+    calls = []
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY], lab="")           # not recording
+    chat._quick_llm = lambda prompt, schema=None: calls.append(1) or ""
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert calls == []
+
+
+def test_the_audit_never_costs_the_student_their_answer(chat, qtbot):
+    """It runs after the reply is already on screen. A coverage call that throws must not take the
+    turn down with it."""
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY])
+    def boom(prompt, schema=None):
+        raise RuntimeError("the audit fell over")
+    chat._quick_llm = boom
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert "Two LANs need a router." in chat.log.toPlainText()
+    assert chat._busy is False
+
+
+def test_the_audit_is_a_visible_phase(chat, qtbot):
+    """It is a second model call and it takes time; an unexplained pause after the answer has
+    finished arriving would read as a hang."""
+    seen = []
+    chat.turn_event.connect(lambda e: seen.append(e))
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY],
+                 coverage='{"text": "x", "coverage": {"addressed": [], "omitted": []}}')
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    assert te.CHECKING in [d["label"] for k, d in seen if k == te.PHASE]
+
+
+def test_the_audit_reports_and_does_not_act(chat, qtbot):
+    """This step deliberately stops short of revising. Nothing about an objection reaches the
+    student yet — the point is to learn how often it happens before building on the answer."""
+    chat._loop = _CoveredLoop()
+    _with_course(chat, [ACTIVITY],
+                 coverage='{"text": "x", "coverage": {"addressed": [], "omitted": []}}')
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how do I connect two LANs?", "", grounded=_grounded(chat))
+    qtbot.wait(80)
+    shown = chat.log.toPlainText()
+    assert chat._twin.metrics["objections"] == 1
+    assert "did not account" not in shown and "Multi-LAN" not in shown

@@ -73,6 +73,11 @@ class ProofRecorder:
         self._now = now or time.time
         self._chain: _proof.Chain | None = None
         self._ticket: _ticket.Ticket | None = None
+        # WHICH lab this code is for ("course/lab"), as the Teaching Center reported it at arm
+        # time. The strip has always received it and only ever printed it; keeping it is what lets
+        # the tutor know which of a course's activities the student is actually being marked on.
+        self._activity = ""
+        self._activity_title = ""
         # Not every signal reaches us on the GUI thread. `rider_ran` is emitted from a rider's
         # reader thread, and Qt delivers to a plain (non-QObject) slot directly in the emitting
         # thread — so two appends really can race, and an interleaved append would compute `prev`
@@ -123,6 +128,8 @@ class ProofRecorder:
                 "short": self._ticket.short if self._ticket else "",
                 "count": self.count,
                 "submitted": bool(self._chain and self._chain.has_submitted()),
+                "activity": self._activity,
+                "activity_title": self._activity_title,
                 "error": self.last_error}
 
     # -- arming ------------------------------------------------------------- #
@@ -166,6 +173,16 @@ class ProofRecorder:
         return True, (f"Recording under {tk.pretty}." if fresh else
                       f"Resumed recording under {tk.pretty} — {n} event(s) already in the chain.")
 
+    def note_activity(self, activity: str, title: str = "") -> None:
+        """Remember which lab the armed code belongs to, from the course server's arm reply.
+
+        Set from OUTSIDE, because the recorder never talks to the network — a code is
+        self-verifying, so a student with no connection still records perfectly well and simply
+        has no activity to name.
+        """
+        self._activity = str(activity or "")
+        self._activity_title = str(title or "")
+
     def cancel(self) -> None:
         """Leave recording mode. The chain stays on disk; entering the same code resumes it.
 
@@ -187,6 +204,7 @@ class ProofRecorder:
             self._record(ev.stopped(self._topology_dict()))
         self._chain = None
         self._ticket = None
+        self._activity = self._activity_title = ""
         self._changed()
 
 
