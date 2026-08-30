@@ -201,3 +201,146 @@ def test_the_settle_does_not_change_the_words(chat, qtbot):
     _run(chat, qtbot, ["Two ", "LANs ", "need ", "a router."])
     streamed = "".join(d["text"] for k, d in seen if k == te.SAY)
     assert chat._messages[-1][1] == streamed
+
+
+# ---- one turn at a time -------------------------------------------------------- #
+# gBuilder used to accept every request the instant it arrived. `_send` checked nothing, the input
+# was never disabled, and clicking a device while an answer streamed started a SECOND worker.
+# Both then mutated one AgentLoop — an unlocked history list and a single `extra_context` slot
+# that each cleared in its own `finally` — so two turns could interleave into one transcript, and
+# one could answer with the other's grounding.
+class SlowLoop:
+    """A turn that does not finish until it is released."""
+
+    extra_context = ""
+
+    def __init__(self) -> None:
+        import threading
+        self.gate = threading.Event()
+        self.prompts = []
+
+    def send(self, text, on_text=None):
+        self.prompts.append(text)
+        self.gate.wait(5)
+        return f"answered {text}"
+
+
+def test_a_second_question_waits_instead_of_starting_a_second_turn(chat, qtbot):
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    assert chat._busy is True
+    chat._ask_async("second", "")
+    qtbot.wait(30)
+    assert slow.prompts == ["first"], "the second question started its own turn"
+    assert chat._queued is not None
+    slow.gate.set()
+    qtbot.waitUntil(lambda: len(slow.prompts) == 2, timeout=5000)
+    assert chat._queued is None
+
+
+def test_the_student_is_told_when_the_queue_is_full(chat, qtbot):
+    """The answer to 'how does a student know the limit has been reached'. A queue nobody can see
+    is a queue that looks like a hang, and dropping the question silently is worse than either."""
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat._ask_async("second", "")
+    before = len(chat._messages)
+    chat._ask_async("third", "")
+    said = [m[1] for m in chat._messages[before:]]
+    assert any("already waiting" in t for t in said), said
+    assert chat._queued[1] != "third"        # the one that was waiting is untouched
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+
+
+def test_what_is_waiting_is_shown_while_it_waits(chat, qtbot):
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat._ask_async("explain this", "R1")
+    assert "next: R1" in chat._spinner.text()
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+
+
+def test_the_indicator_stays_up_while_anything_is_outstanding(chat, qtbot):
+    """The bug the counter fixes. `_busy` used to mean 'the most recent answer has landed', so the
+    first of two overlapping turns cleared it — the tutor said it was idle with a request still
+    running, then dropped an answer in unannounced."""
+    chat._llm_active = 2                                # two engagements in flight
+    chat._end_turn()
+    assert chat._busy is True, "one finishing must not declare the tutor idle"
+    chat._end_turn()
+    assert chat._busy is False
+
+
+def test_a_queued_question_runs_against_the_canvas_as_it_is_then(chat, qtbot):
+    """Deferred as a CALLABLE, not a captured prompt: a student who asks 'why can't they talk?'
+    and adds a router while waiting should get an answer about the canvas with the router in it."""
+    seen = []
+    chat._ask_gini = lambda text: seen.append((text, len(chat.ctx.topology.devices)))
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    assert chat._defer(lambda: chat._ask_gini("why?"), "why?") is True
+    chat.ctx.topology.add_device("router")              # built while waiting
+    slow.gate.set()
+    qtbot.waitUntil(lambda: bool(seen), timeout=5000)
+    assert seen[0][1] == 1, "the queued turn ran against the older canvas"
+
+
+def test_a_nudge_nobody_asked_for_is_dropped_rather_than_queued(chat, qtbot):
+    """A queued nudge would be shown minutes after the kernel event it is about — a tutor
+    commenting on the past reads as a tutor that is confused."""
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat._ask_async("a nudge about a scheduling event", "", proactive=True)
+    assert chat._queued is None, "a proactive turn should yield, not take the slot"
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+
+
+def test_a_queued_request_that_fails_does_not_block_the_next_one(chat, qtbot):
+    """Cleared before it runs. A stuck entry would refuse every question after it, for ever."""
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    def boom():
+        raise RuntimeError("that went wrong")
+    chat._defer(boom, "a doomed question")
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
+    assert chat._queued is None
+    assert any("that went wrong" in m[1] for m in chat._messages)
+
+
+def test_prose_arriving_hides_the_spinner_without_ending_the_turn(chat, qtbot):
+    """The model may still be working through tool round-trips after its first words. Treating
+    the first token as the end of the turn would let a queued question start alongside it."""
+    chat._llm_active = 1
+    chat._on_chunk("Two LANs ")
+    assert chat._spinner.isVisible() is False
+    assert chat._busy is True
+    chat._streaming = False
+
+
+def test_a_long_question_does_not_flood_the_indicator(chat, qtbot):
+    """It shares one line with the phase and the elapsed time."""
+    slow = SlowLoop()
+    chat._loop = slow
+    chat._ask_async("first", "")
+    qtbot.wait(30)
+    chat._defer(lambda: None, "why can't the machine on my first LAN reach the one on the second "
+                              "LAN when both of them have addresses and the router is running?")
+    assert len(chat._queued[1]) <= 40 and chat._queued[1].endswith("…")
+    slow.gate.set()
+    qtbot.waitUntil(lambda: not chat._busy, timeout=5000)

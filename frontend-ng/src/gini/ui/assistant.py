@@ -74,7 +74,16 @@ class Assistant(QWidget):
         self.wizard_mode = False    # when on, the input box describes a system to scaffold
         self.coach_mode = False     # when on, GINI reviews the canvas for problems to fix
         self.missions_mode = False  # when on, the student picks + plays an assessed Mission
-        self._busy = False    # an LLM answer is in flight
+        # Outstanding work, COUNTED — not a flag. As a flag it meant "the most recent answer has
+        # landed", so the first of two overlapping turns cleared it and the indicator said the
+        # tutor was idle while a second request was still running. Every LLM pathway shares this
+        # one number: chat turns, canvas explanations, and the mission engagements that
+        # `_set_llm_busy` was already counting on its own.
+        self._llm_active = 0
+        # At most ONE request waits behind the turn in flight. Zero would throw away a question a
+        # student has already typed; more than one produces a backlog answered against a canvas
+        # that has moved on, and nobody can hold four pending questions in their head anyway.
+        self._queued: tuple | None = None       # (callable, what to show the student)
         from ..agent.session import SessionKnowledge
         self._session = SessionKnowledge()   # accumulated GINI knowledge for this session
         self._messages: list[tuple[str, str, bool, bool]] = []   # (role, text, err, md)
@@ -1160,9 +1169,12 @@ class Assistant(QWidget):
         if now - getattr(self, "_coach_last_fire", 0.0) < 8.0:     # cooldown
             return
         self._coach_last_fire = now
-        self._run_os_coach(ms)
+        # Nobody asked for this one — it fires off a kernel event. Marked so a busy tutor DROPS it
+        # rather than queueing: by the time a queued nudge was shown, the moment it is about would
+        # be minutes gone, and a tutor commenting on the past reads as a tutor that is confused.
+        self._run_os_coach(ms, proactive=True)
 
-    def _run_os_coach(self, ms) -> None:
+    def _run_os_coach(self, ms, *, proactive: bool = False) -> None:
         """Coach an xv6 experiment: drain the detected teachable moments, then give ONE Socratic,
         budgeted, logged nudge grounded in the live kernel state (the 'measured help' moat)."""
         from ..agent.wizard import os_coach_prompt
@@ -1189,7 +1201,8 @@ class Assistant(QWidget):
                 concerns, focus = [], ""
         if self._loop is not None:               # the model authors the Socratic nudge
             ledger.record(events)
-            self._ask_async(os_coach_prompt(events, card, ledger.remaining(), focus=focus), "")
+            self._ask_async(os_coach_prompt(events, card, ledger.remaining(), focus=focus), "",
+                            proactive=proactive)
         else:                                    # deterministic fallback (Coach is model-gated)
             if concerns:
                 ledger.record(events)
@@ -1450,12 +1463,10 @@ class Assistant(QWidget):
         """Reflect a worker-thread LLM call in the shared 'thinking' indicator. Counted, so several
         overlapping engagements (a game-master reaction + a flag note) show one spinner and clear it
         only when the last finishes. This is what makes EVERY LLM pathway visible, not just chat."""
-        n = max(0, getattr(self, "_llm_active", 0) + (1 if on else -1))
-        self._llm_active = n
-        if n > 0 and not self._busy:
-            self._start_spinner("GINI is thinking")
-        elif n == 0 and self._busy:
-            self._stop_spinner()
+        if on:
+            self._begin_turn("GINI is thinking")
+        else:
+            self._end_turn()
 
     def _dispatch_mission(self, method: str, *args) -> None:
         """Run a controller reaction on a worker thread (one at a time; coalesce extra changes)."""
@@ -1884,19 +1895,84 @@ class Assistant(QWidget):
         try:
             if reset_to is not None:
                 self._progress.reset(reset_to)
-            self._spinner.setText(self._progress.line())
+            line = self._progress.line()
+            if self._queued is not None:
+                line += f"   ·   next: {self._queued[1]}"
+            self._spinner.setText(line)
         except Exception:                                    # noqa: BLE001
             self._spinner.setText(reset_to or "")
 
+    @property
+    def _busy(self) -> bool:
+        """Is ANY turn still outstanding? Read by the context chips, the proactive coach and the
+        toolbar indicator, all of which want 'is the tutor occupied', never 'did the last answer
+        arrive'."""
+        return self._llm_active > 0
+
+    def _begin_turn(self, what: str = "GINI is thinking") -> None:
+        self._llm_active += 1
+        self._start_spinner(what)
+
+    def _end_turn(self) -> None:
+        """One turn finished. The spinner clears only when the LAST one does.
+
+        Draining the queue here, rather than on a timer or a signal, is what makes 'one at a time'
+        true rather than merely intended: the only moment a queued question may start is the moment
+        nothing else is running.
+        """
+        self._llm_active = max(0, self._llm_active - 1)
+        if self._llm_active:
+            self._paint_progress()            # something else is still going — say so
+            return
+        self._stop_spinner()
+        self._run_queued()
+
+    def _defer(self, run, label: str) -> bool:
+        """Hold a request until the current turn finishes. True means the caller must stop here.
+
+        gBuilder used to accept every request the instant it arrived: the input was never disabled,
+        `_send` never checked anything, and clicking a device while an answer streamed started a
+        SECOND worker thread. Both then mutated one `AgentLoop` — an unlocked history list and a
+        single `extra_context` slot that each cleared in its own `finally` — so two turns could
+        interleave into one transcript and one could answer with the other's grounding.
+
+        A callable rather than a captured prompt, because retrieval must run against the canvas as
+        it is when the question is ANSWERED, not as it was when the student pressed Enter. They may
+        have built something in between; the answer should know.
+        """
+        if not self._busy:
+            return False
+        if self._queued is not None:
+            # The honest limit, said out loud. A queue nobody can see is a queue that looks like a
+            # hang, and silently dropping the question is worse than either.
+            self._post("GINI", "One question is already waiting — I'll get to it next. Ask me "
+                               "again once I've answered it.")
+            return True
+        # Clipped: the label goes on one indicator line beside the phase and the elapsed time, and
+        # a student's question can be a paragraph.
+        label = (label or "your question").strip()
+        self._queued = (run, label if len(label) <= 40 else label[:39] + "…")
+        self._paint_progress()
+        return True
+
+    def _run_queued(self) -> None:
+        """Start whatever was waiting. Cleared BEFORE running, so a request that fails cannot
+        leave a stuck entry behind that blocks every question after it."""
+        pending, self._queued = self._queued, None
+        if pending is None:
+            return
+        try:
+            pending[0]()
+        except Exception as e:                                   # noqa: BLE001
+            self._post("GINI", f"Sorry, I couldn't do that: {e}", error=True)
+
     def _start_spinner(self, what: str = "GINI is thinking") -> None:
-        self._busy = True
         self._paint_progress(reset_to=what)
         self._spinner.setVisible(True)
         self._spin_timer.start()
         self._emit_status()
 
     def _stop_spinner(self) -> None:
-        self._busy = False
         self._spin_timer.stop()
         self._spinner.setVisible(False)
         self._spinner.setText("")
@@ -1959,6 +2035,12 @@ class Assistant(QWidget):
     def _ask_gini(self, text: str) -> None:
         """Front door for free-form questions: interpret, retrieve GINI knowledge, and
         route (build a recipe, reason with grounded context, or clarify)."""
+        # Deferred HERE rather than at the model call, so that everything below — the parse, the
+        # retrieval, the routing decision — happens when the question is actually answered. A
+        # student who asks "why can't they talk?" and then adds a router while waiting should get
+        # an answer about the canvas with the router in it.
+        if self._defer(lambda: self._ask_gini(text), text):
+            return
         from ..agent import ask, kb
         from ..agent import understand as U
         names = [d.name for d in self.ctx.topology.devices.values()]
@@ -2042,11 +2124,24 @@ class Assistant(QWidget):
             self.ctx.log(answer.error, "warn")
         return tc_ask.as_context(answer)
 
-    def _ask_async(self, prompt: str, device: str, grounded=None) -> None:
+    def _ask_async(self, prompt: str, device: str, grounded=None, *,
+                   proactive: bool = False) -> None:
         import threading
+        # Every other pathway arrives here: a click on a device, on a lint badge, on a palette
+        # element, the Coach button. None of them went through the text box, and all of them used
+        # to start a turn of their own on top of whatever was already running.
+        #
+        # `proactive` marks the turns NOBODY asked for — the OS Coach nudging about a kernel event.
+        # Those are dropped when busy rather than queued: a nudge about a moment that has already
+        # passed is noise by the time it would be shown.
+        if not proactive and self._defer(
+                lambda: self._ask_async(prompt, device, grounded), device or "your question"):
+            return
+        if proactive and self._busy:
+            return
         # one place for "waiting" feedback: the spinner in the pane (no canvas popup).
         about = f" about {device}" if device and not device.startswith("__") else ""
-        self._start_spinner("GINI is thinking" + about)
+        self._begin_turn("GINI is thinking" + about)
         self._streaming = False
         self._stream_buf = ""
         self._clear_followups()                  # hide stale suggestions while answering
@@ -2144,7 +2239,11 @@ class Assistant(QWidget):
         if not delta:
             return
         if not self._streaming:
-            self._stop_spinner()                 # the answer is appearing; drop the spinner
+            # Visual only. The turn is NOT over — the model may still be working through tool
+            # round-trips — so the count is untouched and a queued question stays queued.
+            self._spin_timer.stop()
+            self._spinner.setVisible(False)
+            self._spinner.setText("")
             self._begin_stream()
             self._streaming = True
         self._stream_buf += delta
@@ -2170,7 +2269,7 @@ class Assistant(QWidget):
         self.log.ensureCursorVisible()
 
     def _on_answer(self, device: str, text: str) -> None:
-        self._stop_spinner()
+        self._end_turn()
         if self._streaming:                      # text was already typed live — just persist
             # The streamed text and the finished text are not always the same. `visible_text` also
             # surfaces the *text* of callout/narrate calls, which the prose filter suppressed as
