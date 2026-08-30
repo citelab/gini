@@ -74,6 +74,13 @@ def ask(url: str, course: str, question: str, *, timeout: float = TIMEOUT) -> An
         return Answer(course=course, reason=obj.get("reason", "refused"),
                       error=obj.get("error", f"The course server replied with {e.code}."))
     except Exception as e:                                       # noqa: BLE001
+        # A certificate failure is NOT an outage, and saying "unreachable" sent someone to check a
+        # VPN and a port number while the server sat there answering. `tc_submit` has told the two
+        # apart since it was written; this asked the same server over the same TLS and did not.
+        import ssl as _ssl
+        cause = getattr(e, "reason", e)
+        if isinstance(cause, _ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+            return Answer(course=course, reason="untrusted", error=str(e))
         # Including a timeout. A tutor that stalls on bad wifi is worse than one that answers from
         # what it already knows.
         return Answer(course=course, reason="unreachable", error=str(e))
@@ -188,6 +195,10 @@ def _cli(argv=None) -> int:                                  # pragma: no cover 
             "no_such_course": "  The server is up and does not have that course. Check "
                               "the spelling against the Teaching Center console.",
             "insecure": "  GINI speaks HTTPS only. The URL must start with https://.",
+            "untrusted": ("  The server IS up — its certificate is not one this machine trusts,\n"
+                          "  which in practice means a self-signed one. Point at it:\n"
+                          "      SSL_CERT_FILE=<the server's cert.pem> gbuilder\n"
+                          "  Retrying, the VPN and the port number are all beside the point."),
             "unreachable": "  The server could not be reached — VPN, or the wrong port.",
         }.get(answer.reason, "  The server refused the question."))
         return 1

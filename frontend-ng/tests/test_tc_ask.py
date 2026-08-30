@@ -380,3 +380,44 @@ def test_activities_and_books_are_kept_apart():
         {"kind": "activity", "title": "Lab 3", "brief": "Add a scheduler."}, LIB]))
     assert out.index("Lab 3") < out.index("VERBATIM")
     assert "From this course's material:" in out and "From the books" in out
+
+
+# ---- a certificate is not a network ------------------------------------------- #
+def test_an_untrusted_certificate_is_not_reported_as_unreachable(tmp_path, monkeypatch):
+    """It said "unreachable — VPN, or the wrong port" about a server that was up and answering,
+    which sent someone to check a VPN and a port number over a self-signed certificate. Retrying
+    cannot fix it and the network is fine; `tc_submit` has told the two apart since it was
+    written, and this asked the same server over the same TLS without doing so."""
+    import ssl
+    import urllib.error
+
+    def boom(*a, **k):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+    monkeypatch.setattr(tc_ask.urllib.request, "urlopen", boom)
+    a = tc_ask.ask("https://127.0.0.1:8443", "comp310", "anything")
+    assert a.reason == "untrusted"
+
+
+def test_a_real_outage_is_still_an_outage(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(tc_ask.urllib.request, "urlopen", boom)
+    assert tc_ask.ask("https://127.0.0.1:9", "comp310", "anything").reason == "unreachable"
+
+
+def test_the_check_names_the_fix_for_an_untrusted_certificate(tmp_path, monkeypatch, capsys):
+    """The advice is the whole point of separating them: one says check your network, the other
+    says trust this certificate, and only one of those is ever going to work."""
+    import ssl
+    import urllib.error
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"tc_url": "https://127.0.0.1:8443", "tc_course": "comp310"}), encoding="utf-8")
+
+    def boom(*a, **k):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+    monkeypatch.setattr(tc_ask.urllib.request, "urlopen", boom)
+    assert tc_ask._cli(["routing"]) == 1
+    out = capsys.readouterr().out
+    assert "SSL_CERT_FILE" in out and "IS up" in out
+    assert "VPN" not in out.split("untrusted")[1].split("SSL_CERT_FILE")[0]
