@@ -75,6 +75,40 @@ def _score(q: set[str], *fields: str) -> float:
     return total
 
 
+#: How much of a matched section travels to the tutor. A whole section is around 1,100 words, and
+#: several of those would crowd out the canvas, the conversation and the course's own activities in
+#: a local model's context — while adding little, because the sentences that answer a question sit
+#: near the words that matched it.
+PASSAGE_WORDS = 90
+
+
+def passage(body: str, query: str, *, words: int = PASSAGE_WORDS) -> str:
+    """The part of a section worth quoting: a window around the first place the question lands.
+
+    Quoted, never summarised. The server has the real text now, so there is no reason to invent a
+    paraphrase — and a paraphrase of a book is exactly the confident wrongness the "never quoted"
+    rule was written to prevent, back when the server held only a filename.
+
+    Falls back to the opening of the section when nothing matches, because a section that ranked
+    well on its title still has an opening worth reading.
+    """
+    body = " ".join((body or "").split())
+    if not body:
+        return ""
+    tokens = body.split(" ")
+    want = {w[:4] for w in terms(query)}
+    start = 0
+    if want:
+        for i, tok in enumerate(tokens):
+            bare = "".join(c for c in tok.lower() if c.isalnum())
+            if bare[:4] in want:
+                start = max(0, i - words // 3)     # a little of the run-up, mostly what follows
+                break
+    cut = tokens[start:start + words]
+    text = " ".join(cut)
+    return ("… " if start else "") + text + (" …" if start + words < len(tokens) else "")
+
+
 def rank(query: str, activities: list[dict], materials: list[dict], *,
          limit: int = MAX_HITS) -> list[dict]:
     """Rank a course's activities and materials against a question.

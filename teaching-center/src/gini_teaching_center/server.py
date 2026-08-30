@@ -254,6 +254,24 @@ class Handler(BaseHTTPRequestHandler):
         if not query:
             return self._send(200, {"ok": True, "course": course, "hits": []})
         hits = _search.rank(query, _STORE.activities(course), _STORE.materials(course))
+        # …and the LIBRARY, but only the shelves this course has linked. A teacher decides which
+        # books the tutor may speak out of, which is a decision about the words a class is taught
+        # in: a course that says "thread" where a book says "process" does not want the two mixed
+        # in front of students, however relevant the book is.
+        sections = _STORE.search_sections(query, _STORE.course_refs(course))
+        if sections:
+            by_ref = {r["id"]: r for r in _STORE.references()}
+            for sec in sections:
+                ref = by_ref.get(sec["ref"], {})
+                hits.append({
+                    "kind": "reference", "id": sec["id"], "score": round(sec["score"], 3),
+                    "title": f"{sec['number']} {sec['title']}".strip(),
+                    "url": sec["url"], "book": ref.get("title", sec["ref"]),
+                    # The passage, and who it belongs to. Both travel together on purpose: the
+                    # licence is carried BY the quote, so there is no path that ships the words
+                    # without the notice.
+                    "passage": _search.passage(sec["body"], query),
+                    "attribution": ref.get("attribution", "")})
         self._send(200, {"ok": True, "course": course, "hits": hits})
 
     def _accept(self, me: dict, b: dict) -> dict:
@@ -344,6 +362,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, [{**c, "staff": _STORE.course_staff(c["id"]),
                                      "activities": len(_STORE.activities(c["id"]))}
                                     for c in rows])
+
+        if p == "/api/references":
+            # The LIBRARY: global, and listed to every staff member. A shelf is not a course's
+            # property — one copy of a book serves every course that links it, which is what stops
+            # five operating-systems courses holding five copies of one index.
+            linked = set(_STORE.course_refs(self._q("course"))) if self._q("course") else set()
+            return self._send(200, [{**r, "linked": r["id"] in linked}
+                                    for r in _STORE.references()])
 
         course = self._q("course")
         if p in ("/api/activities", "/api/materials", "/api/submissions"):
@@ -444,6 +470,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._set_released(course, b, False))
         if p == "/api/materials":
             return self._send(200, self._add_material(course, b))
+        if p == "/api/references/link":
+            # Linking is a COURSE decision, so any staff member of the course may make it. Putting
+            # a book on the shelf is a different act — that is the admin's, below.
+            _STORE.course_ref_set(course, str(b.get("ref", "")), bool(b.get("on")))
+            return self._send(200, {"ok": True, "linked": _STORE.course_refs(course)})
         if p == "/api/activities/delete":
             return self._send(200, self._delete_activity(course, b))
         if p == "/api/submissions/accept":

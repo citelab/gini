@@ -225,3 +225,33 @@ def test_at_most_the_limit_comes_back(store):
     """Filtering happens after the query, so the query asks for more than it needs — without the
     final truncation a permissive question would return everything that survived."""
     assert len(store.search_sections("process page lock", ["xv6-riscv-book"], limit=1)) <= 1
+
+
+# ---- the Library: a global shelf, linked per course ---------------------------- #
+# One copy of a book serves every course that links it — that is what stops five operating-systems
+# courses holding five copies of one index. The link is a TEACHER's decision, and it is not only
+# about topic collisions: it is about which vocabulary a class is taught in. A course that says
+# "thread" where a book says "process" does not want the two mixed in front of students.
+def test_the_shelf_is_global_and_the_link_is_not(store):
+    """The book exists once. Two courses linking it share the same rows and the same index."""
+    store.course_ref_set("comp535", "xv6-riscv-book", True)
+    assert len(store.references()) == 1
+    for course in ("comp310", "comp535"):
+        assert store.course_refs(course) == ["xv6-riscv-book"]
+    assert _titles(store.search_sections("page table", store.course_refs("comp535")))
+
+
+def test_a_reindex_reaches_every_course_at_once(store):
+    """The point of one copy. Per course, you would have to remember which courses had it."""
+    store.course_ref_set("comp535", "xv6-riscv-book", True)
+    store.sections_put("xv6-riscv-book", [dict(SECTIONS[0], body="A brand new edition says this.")])
+    for course in ("comp310", "comp535"):
+        assert _titles(store.search_sections("brand new edition", store.course_refs(course)))
+
+
+def test_unlinking_leaves_the_book_on_the_shelf(store):
+    """Unlinking is a course saying "not in my class", not a librarian throwing a book out."""
+    store.course_ref_set("comp310", "xv6-riscv-book", False)
+    assert store.course_refs("comp310") == []
+    assert len(store.references()) == 1
+    assert store.reference("xv6-riscv-book")["sections"] == len(SECTIONS)

@@ -140,3 +140,35 @@ def test_a_late_submission_says_so_in_both_places():
     js = scripts("console.html")
     assert js.count("r.late") >= 2, "LATE is shown in fewer than both the list and the report"
     assert "r.accepted_by" in js, "the report does not say who took the submission in"
+
+
+# --------------------------------------------------------------------------- #
+# the Library tab
+# --------------------------------------------------------------------------- #
+def test_the_library_is_a_tab_of_its_own():
+    """A shelf is not a course's Content: one copy serves every course that links it."""
+    html, js = _console_html(), scripts("console.html")
+    assert 'data-t="library"' in html and 'id="library"' in html
+    assert "'library'" in js, "the tab is not in TABS, so nothing would ever show it"
+    assert "loadLibrary" in js
+
+
+def test_the_library_says_a_work_is_invisible_until_it_is_linked():
+    """The whole model in one sentence, where a teacher will read it — otherwise indexing a book
+    and finding GINI ignores it looks like a bug rather than a decision they have not made yet."""
+    html = _console_html()
+    lib = html.split('<section id="library"', 1)[1].split("</section>", 1)[0]
+    assert "linked" in lib.lower()
+    assert "vocabulary" in lib.lower(), "the reason for the link is not stated"
+
+
+def test_the_attribution_is_shown_with_every_work():
+    """Carrying the notice is a condition of using most of what is worth indexing, not a
+    courtesy, so it is rendered rather than merely stored."""
+    assert "r.attribution" in scripts("console.html")
+
+
+def test_linking_needs_a_course_and_says_so():
+    js = scripts("console.html")
+    assert "pick a course" in js.lower()
+    assert "'/api/references/link'" in js

@@ -115,6 +115,7 @@
     <button data-t="courses" class="on">Courses</button>
     <button data-t="acts">Activities</button>
     <button data-t="content">Content</button>
+    <button data-t="library">Library</button>
     <button data-t="staff" id="nav-staff">Staff</button>
   </nav>
   <span class="who" id="who"></span>
@@ -197,6 +198,21 @@
   </section>
 
   <!-- CONTENT ---------------------------------------------------------- -->
+  <!-- LIBRARY ---------------------------------------------------------- -->
+  <section id="library" hidden>
+    <h2>Library</h2>
+    <div class="note" style="max-width:70ch">Books and specs indexed once for the whole server, and
+      linked into a course by whoever teaches it. Linking is what lets GINI answer out of a work —
+      so it is also how you keep a class in ONE vocabulary: a course that says "thread" where a
+      book says "process" does not want the two mixed in front of students, however relevant the
+      book is. Nothing here reaches a course until it is linked.</div>
+    <div class="sub" id="lib-sub"></div>
+    <div class="card"><table id="lib-list"></table></div>
+    <div class="note" style="margin-top:14px">A work is put on the shelf from the server, not from
+      here — indexing walks the source a page at a time and takes a minute:
+      <code>gini-tc index-reference --preset xv6</code></div>
+  </section>
+
   <section id="content" hidden>
     <h2>Content</h2>
     <div class="sub" id="content-sub"></div>
@@ -350,7 +366,7 @@ async function signIn(){
 }
 
 // ---- navigation -------------------------------------------------------------
-const TABS = ['courses','acts','content','staff'];
+const TABS = ['courses','acts','content','library','staff'];
 document.querySelectorAll('.top nav button').forEach(b => b.onclick = () => show(b.dataset.t));
 
 function show(t){
@@ -359,7 +375,8 @@ function show(t){
   if ((t === 'acts' || t === 'content') && !COURSE) { show('courses'); return; }
   document.querySelectorAll('.top nav button').forEach(b => b.classList.toggle('on', b.dataset.t===t));
   TABS.forEach(x => $('#'+x).hidden = (x !== t));
-  ({courses:loadCourses, acts:loadActs, content:loadMaterials, staff:loadStaff}[t]||(()=>{}))();
+  ({courses:loadCourses, acts:loadActs, content:loadMaterials, library:loadLibrary,
+    staff:loadStaff}[t]||(()=>{}))();
 }
 
 async function boot(){
@@ -592,6 +609,39 @@ async function ingest(){
   $('#r-code').value = r.receipt;
   await loadSubs();
   openReceipt(r.receipt);
+}
+
+// ---- the library --------------------------------------------------------------
+// Global shelf, per-course link. One copy of a book serves every course that links it, which is
+// what stops five operating-systems courses holding five copies of one index — and the link is a
+// teacher's decision about which vocabulary their class is taught in.
+async function loadLibrary(){
+  $('#lib-sub').textContent = COURSE ? 'Linking into ' + COURSE
+                                     : 'Pick a course first to link a work into it.';
+  const rows = await api('/api/references' + (COURSE ? '?course=' + encodeURIComponent(COURSE) : ''));
+  const list = Array.isArray(rows) ? rows : [];
+  $('#lib-list').innerHTML = list.length ? list.map(r => `
+      <tr>
+        <td>
+          <div><b>${esc(r.title || r.id)}</b></div>
+          <div class="note">${Number(r.sections)||0} sections · <a href="${esc(r.source_url)}"
+             target="_blank" rel="noreferrer">source</a></div>
+          <!-- Shown wherever the work is: carrying the notice is a CONDITION of using most of
+               what is worth indexing, not a courtesy. -->
+          <div class="note">${esc(r.attribution || 'no attribution recorded')}</div>
+        </td>
+        <td style="text-align:right">${COURSE
+          ? `<button class="${r.linked ? 'flat' : 'go'}"
+                     onclick="linkRef('${esc(r.id)}', ${r.linked ? 'false' : 'true'})">${
+               r.linked ? 'Unlink from ' + esc(COURSE) : 'Link into ' + esc(COURSE)}</button>`
+          : '<span class="note">pick a course</span>'}</td>
+      </tr>`).join('')
+    : '<tr><td class="empty">The shelf is empty. Index a work from the server first.</td></tr>';
+}
+
+async function linkRef(ref, on){
+  const r = await api('/api/references/link', {course: COURSE, ref: ref, on: on});
+  if (r.ok) { say(on ? 'Linked.' : 'Unlinked.', true); loadLibrary(); }
 }
 
 // ---- the report -------------------------------------------------------------
