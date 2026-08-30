@@ -103,6 +103,26 @@ def report(url: str, session: str, receipt: str) -> dict:
                  session=session) or {}
 
 
+def accept(url: str, session: str, proof: dict, topology: dict | None = None) -> dict:
+    """Take a late submission into the course from the proof file the student still has.
+
+    The server verifies it exactly as it verifies a student's upload — same chain check, same
+    binding of proof to code and topology to proof. Only the deadline is waived, and it records who
+    waived it.
+
+    This is why gBuilder no longer verifies proofs on its own. A local verdict left the submission
+    off the books entirely: correct, checked, and invisible to the gradebook and to every TA. The
+    record belongs where marking happens.
+    """
+    body: dict = {"proof": proof}
+    if topology:
+        body["topology"] = topology
+    answer = _call(url, "/api/submissions/accept", session=session, body=body) or {}
+    if not answer.get("ok"):
+        raise Refused(answer.get("error") or "The course server would not take that submission.")
+    return answer
+
+
 def topology(url: str, session: str, receipt: str) -> dict:
     """The student's work as a gBuilder project, ready to open and run.
 
@@ -118,4 +138,4 @@ def topology(url: str, session: str, receipt: str) -> dict:
 
 
 __all__ = ["Refused", "Unreachable", "Insecure", "sign_in", "sign_out", "whoami",
-           "report", "topology"]
+           "report", "topology", "accept"]

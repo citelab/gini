@@ -100,6 +100,17 @@ PARKED: dict[str, Parked] = {
         needs=("POST /courses/{course}/photo",),
         code=("agent/teaching_center.py: set_photo", "ui/main_window.py: _set_photo"),
     ),
+    "teacher.verify_proof": Parked(
+        what="Reading a proof file and reporting on it inside gBuilder.",
+        why="NOT a missing endpoint — superseded. The Teaching Center now accepts a late "
+            "submission (POST /api/submissions/accept), verifying it with exactly the same chain "
+            "check and then KEEPING it. Verifying locally produced a correct verdict on a "
+            "submission that then existed nowhere: not in the gradebook, invisible to every TA. "
+            "Kept because the dialog also renders a proof for reading, which a future offline or "
+            "air-gapped marking mode would want.",
+        needs=("nothing — Teacher > Accept a late submission does this through the server",),
+        code=("ui/proof_verify_dialog.py", "ui/main_window.py: _verify_proof"),
+    ),
     "teacher.issue_codes": Parked(
         what="Minting assignment codes from gBuilder's Teacher menu.",
         why="NOT a missing endpoint — a conflict. These codes are minted locally and the course "

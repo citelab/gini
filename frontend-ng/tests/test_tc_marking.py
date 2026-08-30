@@ -179,3 +179,91 @@ def test_no_staff_call_will_speak_plain_http(call):
             "topology": ("http://x", "s", "AAAA-AAAA")}[call]
     with pytest.raises(tc_submit.Insecure):
         fn(*args)
+
+
+# -- taking a late submission by hand ------------------------------------------- #
+def _expired_proof(course, lab="lab1", topo=None):
+    """A code taken, worked under, and left to lapse — the failure this exists for."""
+    from gini_teaching_center import server as S
+    url = course["url"]
+    with urllib.request.urlopen(url + f"/api/activity?course=comp535&lab={lab}", timeout=10) as r:
+        code = json.loads(r.read())["code"]
+    topo = topo if topo is not None else Topology("late")
+    if not topo.devices:
+        topo.add_device("router")
+    chain = P.Chain.start(code.replace("-", ""), assignment="comp535/lab1", gini_version="test")
+    chain.append("submit", {"artifact": P.artifact_summary(topo.to_dict())})
+    proof = P.build_proof(chain, "test")
+    # lapse the code, exactly as the clock would have
+    S._STORE.code_put({**S._STORE.code(code.replace("-", "")), "valid_until": 1.0})
+    return code, proof, topo
+
+
+def test_a_student_can_no_longer_submit_it_at_all(course):
+    """The premise. `expired` is not in outbox.SETTLED, so gBuilder retries this for ever against a
+    server that will refuse it for ever — the student holds a correct receipt for work the Teaching
+    Center has never heard of."""
+    code, proof, topo = _expired_proof(course)
+    answer = tc_submit.submit(course["url"], code, proof, topo.to_dict())
+    assert not answer.get("ok") and answer.get("reason") == "expired"
+
+
+def test_staff_can_take_it_and_the_course_then_has_it(course):
+    code, proof, topo = _expired_proof(course)
+    s = tc_staff.sign_in(course["url"], "boss", "correct-horse")["session"]
+    out = tc_staff.accept(course["url"], s, proof, topo.to_dict())
+    assert out["ok"] and out["receipt"] == P.receipt_code(proof)
+    # …and it is a real submission from then on: markable, downloadable, on the books
+    rep = tc_staff.report(course["url"], s, out["receipt"])
+    assert rep["verdict"] and rep["runnable"] is True
+    assert Topology.from_dict(tc_staff.topology(course["url"], s, out["receipt"])["topology"])
+
+
+def test_the_report_says_who_waived_the_deadline(course):
+    """A late submission that looked like any other would quietly rewrite the deadline."""
+    code, proof, topo = _expired_proof(course)
+    s = tc_staff.sign_in(course["url"], "boss", "correct-horse")["session"]
+    tc_staff.accept(course["url"], s, proof, topo.to_dict())
+    rep = tc_staff.report(course["url"], s, P.receipt_code(proof))
+    assert rep["accepted_by"] == "boss"
+
+
+def test_an_ordinary_submission_is_not_marked_as_accepted_by_anyone(course):
+    s = tc_staff.sign_in(course["url"], "boss", "correct-horse")["session"]
+    assert tc_staff.report(course["url"], s, course["receipt"])["accepted_by"] == ""
+
+
+def test_only_the_clock_is_waived_never_the_chain(course):
+    """The line that makes this safe to offer. A teacher's judgement is about the deadline, not
+    about whether the proof verifies — nobody may launder a tampered chain through a kindness."""
+    code, proof, topo = _expired_proof(course)
+    tampered = json.loads(json.dumps(proof))
+    tampered["entries"][-1]["data"]["artifact"] = {"devices": 99, "links": 99}
+    s = tc_staff.sign_in(course["url"], "boss", "correct-horse")["session"]
+    with pytest.raises(tc_staff.Refused):
+        tc_staff.accept(course["url"], s, tampered, topo.to_dict())
+
+
+def test_a_proof_from_another_course_is_not_a_late_submission(course):
+    """An unknown code is somebody else's work, not a deadline problem."""
+    chain = P.Chain.start("ZZZZZZZZZZZZ", assignment="elsewhere", gini_version="test")
+    chain.append("submit", {"artifact": P.artifact_summary({"devices": [], "links": []})})
+    s = tc_staff.sign_in(course["url"], "boss", "correct-horse")["session"]
+    with pytest.raises(tc_staff.Refused):
+        tc_staff.accept(course["url"], s, P.build_proof(chain, "test"))
+
+
+def test_a_code_already_used_stays_used(course):
+    """A second submission under one code is a duplicate whoever asks. Staff waive the CLOCK, not
+    the one-code-one-submission rule that makes a receipt mean something."""
+    code, proof, topo = _expired_proof(course)
+    s = tc_staff.sign_in(course["url"], "boss", "correct-horse")["session"]
+    assert tc_staff.accept(course["url"], s, proof, topo.to_dict())["ok"]
+    with pytest.raises(tc_staff.Refused):
+        tc_staff.accept(course["url"], s, proof, topo.to_dict())
+
+
+def test_accepting_needs_a_staff_session(course):
+    code, proof, topo = _expired_proof(course)
+    with pytest.raises(tc_staff.Refused):
+        tc_staff.accept(course["url"], "", proof, topo.to_dict())

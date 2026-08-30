@@ -255,6 +255,46 @@ class Handler(BaseHTTPRequestHandler):
         hits = _search.rank(query, _STORE.activities(course), _STORE.materials(course))
         self._send(200, {"ok": True, "course": course, "hits": hits})
 
+    def _accept(self, me: dict, b: dict) -> dict:
+        """Take a late submission by hand, from the proof file the student still has.
+
+        The failure this exists for: a student finishes, their code lapses before the upload lands,
+        and the proof becomes unacceptable FOR EVER — `expired` is deliberately not in
+        `outbox.SETTLED`, so gBuilder keeps retrying something the server will refuse until the end
+        of time. They hold a correct receipt for work the Teaching Center has never heard of.
+
+        Verified exactly as a student's submission is: the same `prepare`, the same chain check, the
+        same binding of proof to code and topology to proof. Only the CLOCK is waived, and only
+        because a member of staff decided to waive it — which is recorded, so the report shows the
+        deadline was overridden and by whom. Nothing here is a way to launder a tampered proof
+        through a kindness.
+        """
+        proof = b.get("proof")
+        if not isinstance(proof, dict):
+            return {"ok": False, "reason": _act.BAD_PROOF,
+                    "error": "That file carried no proof."}
+        code = _act.normalize(str(proof.get("ticket") or ""))
+        row = _STORE.code(code)
+        act = _STORE.activity(row["activity"]) if row else None
+        if not act:
+            # Not a late submission — a proof from somewhere else entirely.
+            return {"ok": False, "reason": _act.UNKNOWN_CODE,
+                    "error": _act.message(_act.UNKNOWN_CODE)}
+        if not self._may(act.get("course", "")):
+            return {"ok": False, "error": "That is not your course."}
+        try:
+            rec = _act.prepare({"proof": proof, "topology": b.get("topology")},
+                               row, act, accepted_by=me["who"])
+        except _act.Rejected as e:
+            return {"ok": False, "reason": e.reason, "error": str(e)}
+        if not _STORE.submission_put(rec):
+            return {"ok": False, "reason": _act.DUPLICATE,
+                    "error": _act.message(_act.DUPLICATE)}
+        _STORE.code_mark_used(rec["code"])
+        return {"ok": True, "receipt": rec["receipt"], "activity": act["id"],
+                "title": act.get("title", ""), "accepted_by": me["who"],
+                "within_session": _act.within_session(rec, act)}
+
     def _serve_material(self, mid: str) -> None:
         m = _STORE.material(mid)
         if not m or m["kind"] != "file":
@@ -405,6 +445,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._add_material(course, b))
         if p == "/api/activities/delete":
             return self._send(200, self._delete_activity(course, b))
+        if p == "/api/submissions/accept":
+            return self._send(200, self._accept(me, b))
         if p == "/api/submissions/claim":
             return self._send(200, self._claim(course, b))
         if p == "/api/materials/delete":

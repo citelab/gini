@@ -19,12 +19,13 @@ receipts would make the tool useless exactly when it is being used most.
 """
 from __future__ import annotations
 
+import pathlib
 import threading
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QPushButton, QVBoxLayout, QWidget,
+    QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..services import tc_staff
@@ -62,6 +63,7 @@ class MarkDialog(QDialog):
     signedIn = Signal(object, str)          # {session, role, who} | None, error
     fetched = Signal(object, str)           # report dict | None, error
     opened = Signal(object, str)            # project dict | None, error
+    accepted = Signal(object, str)          # accept answer | None, error
 
     def __init__(self, ctx, on_open_topology, parent=None) -> None:
         super().__init__(parent)
@@ -135,6 +137,7 @@ class MarkDialog(QDialog):
         root.addLayout(btns)
 
         self.signedIn.connect(self._on_signed_in)
+        self.accepted.connect(self._on_accepted)
         self.fetched.connect(self._on_fetched)
         self.opened.connect(self._on_opened)
         self._sync_auth()
@@ -198,6 +201,58 @@ class MarkDialog(QDialog):
         self.password.clear()
         self.claim.clear()
         self._sync_auth()
+
+    # -- taking a late one by hand ------------------------------------------- #
+    def choose_proof_file(self) -> None:
+        """Pick the proof file a student still has, and offer it to the course server.
+
+        Not verified here. A local verdict is correct and useless: the submission then exists
+        nowhere — not in the gradebook, invisible to every TA. The server runs the same chain check
+        and KEEPS it, recording which member of staff waived the deadline.
+        """
+        if not self._session():
+            self._say("Sign in first — accepting a submission is a staff action.", bad=True)
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Accept a late submission", "", "Proof files (*.json);;All files (*)")
+        if not path:
+            return
+        import json
+        try:
+            payload = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        except Exception as e:                                   # noqa: BLE001
+            self._say(f"That file could not be read: {e}", bad=True)
+            return
+        # gBuilder writes the proof itself; a saved submission may wrap it. Accept either shape
+        # rather than making a teacher know which one they were handed.
+        proof = payload.get("proof") if isinstance(payload, dict) else None
+        if not isinstance(proof, dict):
+            proof = payload if isinstance(payload, dict) and payload.get("ticket") else None
+        if not isinstance(proof, dict):
+            self._say("That file does not look like a GINI proof.", bad=True)
+            return
+        topo = payload.get("topology") if isinstance(payload, dict) else None
+        self._busy(True)
+        self._say("Offering it to the course server…")
+
+        def work(url=self._url(), s=self._session()):
+            try:
+                self.accepted.emit(tc_staff.accept(url, s, proof, topo), "")
+            except Exception as e:                               # noqa: BLE001
+                self.accepted.emit(None, str(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_accepted(self, answer, error: str) -> None:
+        self._busy(False)
+        if not answer:
+            self._say(error or "The course server would not take that submission.", bad=True)
+            return
+        receipt = answer.get("receipt", "")
+        self.receipt.setText(receipt)
+        self._say(f"Accepted · receipt {receipt} · recorded as taken by "
+                  f"{answer.get('accepted_by', 'you')}.")
+        self._look_up()          # show the report for what was just filed
 
     def _look_up(self) -> None:
         code = self.receipt.text().strip()

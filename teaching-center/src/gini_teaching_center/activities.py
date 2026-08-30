@@ -116,12 +116,22 @@ def mint_code(activity: dict, now: float | None = None) -> dict:
 # redeeming
 # --------------------------------------------------------------------------- #
 def check_code(code_row: dict | None, activity: dict | None,
-               now: float | None = None) -> tuple[bool, str]:
+               now: float | None = None, *, staff: bool = False) -> tuple[bool, str]:
     """Whether a code may be armed against right now.
 
     Checked at ARM time, before the student does any work, so an expired or spent code costs them a
     moment rather than an evening. The same function guards submission, because a code can expire
     between arming and submitting.
+
+    `staff=True` waives EXPIRY and nothing else. It is for a teacher accepting a late submission by
+    hand: the student finished, the code lapsed before the upload landed, and the proof is now
+    unacceptable for ever — the outbox keeps retrying something the server will refuse until the end
+    of time, because `expired` is deliberately not in `SETTLED`. A teacher deciding to take it is
+    the authorisation the clock would otherwise have provided.
+
+    What it does NOT waive is who the work belongs to. An unknown code is still refused — that is
+    not a late submission, it is somebody else's proof — and so is a code already spent, because a
+    second submission under one code is a duplicate whoever asks.
     """
     t = now if now is not None else time.time()
     if not code_row:
@@ -131,7 +141,7 @@ def check_code(code_row: dict | None, activity: dict | None,
     if int(code_row.get("used") or 0):
         return False, ALREADY_USED
     valid_until = float(code_row.get("valid_until") or 0)
-    if valid_until and t >= valid_until:
+    if valid_until and t >= valid_until and not staff:
         return False, EXPIRED
     return True, ""
 
@@ -204,14 +214,19 @@ def artifact_hash(proof: dict) -> str:
 
 
 def prepare(payload: dict, code_row: dict, activity: dict,
-            now: float | None = None) -> dict:
+            now: float | None = None, *, accepted_by: str = "") -> dict:
     """Validate a submission and shape the row to store. Raises `Rejected`.
 
     Integrity only. Nothing here judges the *work* — that is the report's job and ultimately the
     teacher's. What this refuses is a proof that has been tampered with, one recorded against a
     different plan, or one arriving under a code that cannot accept it.
+
+    `accepted_by` names the member of staff taking a LATE submission by hand, and is the only thing
+    that waives the code's expiry. Every other check runs exactly as it does for a student, because
+    a teacher's judgement is about the deadline, not about whether the chain verifies — nobody
+    should be able to launder a tampered proof through a kindness.
     """
-    ok, reason = check_code(code_row, activity, now=now)
+    ok, reason = check_code(code_row, activity, now=now, staff=bool(accepted_by))
     if not ok:
         raise Rejected(reason)
 
@@ -232,6 +247,12 @@ def prepare(payload: dict, code_row: dict, activity: dict,
     if topology is not None and not topology_matches(topology, proof):
         raise Rejected(WRONG_TOPOLOGY,
                        "the submitted topology is not the one this proof was generated from")
+
+    if accepted_by:
+        # Recorded IN the payload, so it travels with the submission and shows in the report. A
+        # late submission that looked like any other would quietly rewrite the deadline.
+        payload = dict(payload, accepted_by=str(accepted_by),
+                       accepted_at=now if now is not None else time.time())
 
     started, finished = session_seconds(proof)
     return {"code": code_row["code"],
@@ -290,6 +311,9 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None)
     return {
         "receipt": row.get("receipt", ""),
         "activity": row.get("activity", ""),
+        # Empty for an ordinary submission; the member of staff who took it, when it came in late
+        # by hand. A marker must be able to see that the clock was overridden and by whom.
+        "accepted_by": payload.get("accepted_by", ""),
         "title": (activity or {}).get("title", ""),
         "verdict": row.get("verdict", ""),
         "started": row.get("started", 0), "finished": row.get("finished", 0),

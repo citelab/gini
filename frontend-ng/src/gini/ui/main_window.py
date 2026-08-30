@@ -1823,8 +1823,13 @@ class MainWindow(QMainWindow):
             issue_act.setMenuRole(QAction.MenuRole.NoRole)
         open_act = add(tm, "&Open a submission…", self._open_submission)
         open_act.setMenuRole(QAction.MenuRole.NoRole)
-        verify_act = add(tm, "&Verify proof…", self._verify_proof)
-        verify_act.setMenuRole(QAction.MenuRole.NoRole)
+        # Verifying a proof locally is parked (app/features.py): the Teaching Center now verifies
+        # AND keeps it, so a checked submission is no longer one that exists nowhere.
+        if features.on("teacher.verify_proof"):
+            verify_act = add(tm, "&Verify proof…", self._verify_proof)
+            verify_act.setMenuRole(QAction.MenuRole.NoRole)
+        late_act = add(tm, "Accept a &late submission…", self._accept_late)
+        late_act.setMenuRole(QAction.MenuRole.NoRole)
 
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
@@ -3183,6 +3188,28 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"gBuilder 6.0 — submission {who} · {title}")
         self.ctx.log(f"Opened submission {who} ({title}) — this is a student's work, not your "
                      f"project. Save As if you want to keep changes.", "ok")
+
+    def _accept_late(self) -> None:
+        """Teacher: take a submission the server refused, from the file the student still has.
+
+        The case: they finished, the code lapsed before the upload landed, and gBuilder has been
+        retrying something the server will refuse for ever — `expired` is deliberately not a
+        settled outcome. The proof is valid and unacceptable at the same time.
+
+        Sent to the Teaching Center rather than checked here, because a local verdict leaves the
+        submission off the books: correct, and invisible to the gradebook and to every TA.
+        """
+        from .mark_dialog import MarkDialog
+        existing = getattr(self, "_mark_dialog", None)
+        if existing is not None:
+            try:
+                existing.close()
+            except RuntimeError:
+                pass
+        self._mark_dialog = MarkDialog(self.ctx, self._open_submitted_topology, self)
+        self._mark_dialog.show()
+        self._mark_dialog.raise_()
+        self._mark_dialog.choose_proof_file()
 
     def _verify_proof(self) -> None:
         """Teacher mode: read a student's proof. Read-only — it verifies and renders, never grades."""
