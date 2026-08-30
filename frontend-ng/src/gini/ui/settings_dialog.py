@@ -3,6 +3,7 @@ Pricing, Help). Edits the live Settings; the caller applies + persists the resul
 from __future__ import annotations
 
 from PySide6.QtGui import QDoubleValidator
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
     QTabWidget, QVBoxLayout, QWidget,
@@ -182,23 +183,33 @@ class SettingsDialog(QDialog):
         self.tc_course = QLineEdit(settings.tc_course)
         self.tc_course.setPlaceholderText("cs4480-fall26")
         tcf.addRow("Course", self.tc_course)
+        tcf.addRow("", _note("Handing work in needs no account: the assignment code you type on the "
+                             "dashboard is the whole interaction. Course scopes what Ask GINI can "
+                             "look up in your course's material.\n\n"
+                             "The server must be https:// — GINI will not send your work over an "
+                             "unencrypted connection, and that applies to localhost too, which can "
+                             "hold a certificate like any other name.\n\n"
+                             "Leave the server blank to work offline — Missions then offers the "
+                             "local practice catalog."))
+
+        # -- staff -------------------------------------------------------------- #
+        # Separated because it belongs to a different person. Everything above is every student's;
+        # this is only for marking, and a student who never marks anything can ignore it.
+        marking = QLabel("<b>Marking</b> — staff only")
+        marking.setTextFormat(Qt.RichText)
+        tcf.addRow(marking)
+        # Persisted as `tc_student` for the sake of existing ~/.gini/config.json files. The name is
+        # a leftover from when students had accounts; today only staff sign in.
         self.tc_student = QLineEdit(settings.tc_student)
-        self.tc_student.setPlaceholderText("your username — e.g. ravi")
-        tcf.addRow("Username", self.tc_student)
-        self.tc_token = QLineEdit(settings.tc_token)
-        self.tc_token.setPlaceholderText("one-time token from your instructor")
-        self.tc_token.setEchoMode(QLineEdit.Password)
-        tcf.addRow("Enrolment token", self.tc_token)
-        tcf.addRow("", _note("Your password is never stored — signing in exchanges it for a session. "
-                             "The enrolment token is used ONCE, to claim your account.\n\n"
-                             "The course server must be https:// — GINI will not send your work, or "
-                             "your password, over an unencrypted connection. That applies to "
-                             "localhost too, which can hold a certificate like any other name.\n\n"
-                             "Course, Username and Enrolment token are for Missions and lessons. "
-                             "Handing work in uses only the server address and the assignment code "
-                             "you type on the dashboard — no sign-in.\n\n"
-                             "Leave the server blank to work offline — Missions then offers the local "
-                             "practice catalog."))
+        self.tc_student.setPlaceholderText("your staff username on the course portal")
+        tcf.addRow("Staff username", self.tc_student)
+        tcf.addRow("", _note("Remembered so you do not retype it. The PASSWORD is asked when you "
+                             "open a submission (Teacher → Open a submission…) and is never "
+                             "stored — it is exchanged for a session that the server expires "
+                             "after twelve hours.\n\n"
+                             "Signing in for the first time also needs the one-time claim token "
+                             "your admin gave you; that is asked in the same place, and is "
+                             "deliberately not kept in this file."))
 
         # --- Hardware (GINI32 boards) ------------------------------------- #
         # The one thing a board cannot discover for itself. It is the same network for
@@ -273,7 +284,6 @@ class SettingsDialog(QDialog):
             "tc_url": self.tc_url.text().strip(),
             "tc_course": self.tc_course.text().strip(),
             "tc_student": self.tc_student.text().strip(),
-            "tc_token": self.tc_token.text().strip(),
             # GINI32: the lab Wi-Fi written to boards over USB. Not stripped of case —
             # SSIDs are case-sensitive — but surrounding whitespace is, because a name
             # pasted from a slide routinely carries a trailing space and the board would
