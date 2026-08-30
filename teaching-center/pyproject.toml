@@ -14,7 +14,12 @@ authors = [{ name = "GINI Toolkit" }]
 # the narration — the code this server and every student's gBuilder must agree on exactly. It
 # deliberately does NOT depend on gini-toolkit: that would pull PySide6 and a Chromium build onto a
 # headless VM to run a web server that never opens a window.
-dependencies = ["gini-core"]
+# A FLOOR, not a bare name. 6.3.1 began importing `gini.domain.project`, which exists only from
+# gini-core 6.3.1 — and with an unpinned dependency a resolver is free to install this beside an
+# older core and fail at the first download with `No module named 'gini.domain.project'`. That
+# happened while verifying 6.3.1. All three ship from one tag, so the floor is simply the release
+# that introduced whatever this now needs; raise it whenever a new gini.domain module is used.
+dependencies = ["gini-core>=6.3.2"]
 
 [project.urls]
 Homepage = "https://github.com/citelab/gini"

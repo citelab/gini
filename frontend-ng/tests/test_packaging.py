@@ -335,3 +335,24 @@ def test_the_project_format_is_defined_where_both_sides_can_see_it():
     src = (Path(__file__).resolve().parents[1] / "src" / "gini" / "services"
            / "persistence.py").read_text(encoding="utf-8")
     assert 'FORMAT = "gini-project"' not in src, "persistence redefines the format instead of importing it"
+
+
+def test_both_distributions_pin_a_FLOOR_on_gini_core():
+    """`gini` is one namespace split across two wheels that share a release number, so a mismatched
+    pair fails at IMPORT, not at install — the worst place to find out.
+
+    It happened: gini-teaching-center 6.3.1 began importing `gini.domain.project`, and a bare
+    `gini-core` let a resolver put it beside 6.3.0. The install succeeded and the first download
+    raised `No module named 'gini.domain.project'`.
+    """
+    import re
+    root = Path(__file__).resolve().parents[2]
+    for name in ("frontend-ng", "teaching-center"):
+        text = (root / name / "pyproject.toml").read_text(encoding="utf-8")
+        deps = re.search(r"dependencies\s*=\s*\[(.*?)\]", text, re.S)
+        assert deps, name
+        line = next((l for l in deps.group(1).splitlines() if "gini-core" in l and
+                     not l.strip().startswith("#")), "")
+        assert line, f"{name} does not depend on gini-core at all"
+        assert re.search(r"gini-core\s*>=\s*\d+\.\d+", line), \
+            f"{name} depends on gini-core without a version floor: {line.strip()}"

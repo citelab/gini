@@ -14,7 +14,10 @@ authors = [{ name = "GINI Toolkit" }]
 # container runtime (Docker/Colima) and images are NOT pip-installable — gBuilder detects what is
 # missing at launch and offers to bring them in (gini/services/bootstrap.py).
 dependencies = [
-    "gini-core",                 # the shared domain model + proof format. Split out so a headless
+    "gini-core>=6.3.2",          # A FLOOR, not a bare name: the two halves share a namespace and
+    #                              a release number, and an older core beside a newer toolkit fails
+    #                              at import, not at install. Raise it with any new gini.domain use.
+    #                              the shared domain model + proof format. Split out so a headless
     #                              Teaching Center can install it without dragging in Qt, and so
     #                              there is exactly ONE copy of the format both sides must agree on.
     "PySide6-Essentials>=6.6",   # the Qt6 desktop GUI (gini.ui + the `gbuilder` entrypoint)
