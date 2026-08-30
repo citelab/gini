@@ -160,6 +160,12 @@ class AppContext:
         self.mission_flags: dict[str, str] = {}  # device id -> reason (Mission off-task / bad-link)
         self.mission = None                     # active Wizard objective (domain.missions.Mission)
         self.teaching_center = None             # agent.teaching_center.TeachingCenterClient | None
+        # Staff session for marking (services/tc_staff). IN MEMORY ONLY, for the life of the
+        # window: the password is never stored, the server expires the token after twelve hours,
+        # and a marker on a shared machine leaves nothing behind.
+        self.staff_session = ""
+        self.staff_who = ""
+        self.staff_role = ""
         self.orchestrator = None                # services.orchestrator.Orchestrator (probes exec here)
         # live xv6 kernel state per Machine (domain.machine_state.MachineState) — the bridge the
         # Machine Lab renders from and the Ask GINI agent reads for OS help. device_id -> state.

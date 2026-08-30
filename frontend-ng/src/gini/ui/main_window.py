@@ -1820,6 +1820,8 @@ class MainWindow(QMainWindow):
         if features.on("teacher.issue_codes"):
             issue_act = add(tm, "&Issue codes…", self._issue_codes)
             issue_act.setMenuRole(QAction.MenuRole.NoRole)
+        open_act = add(tm, "&Open a submission…", self._open_submission)
+        open_act.setMenuRole(QAction.MenuRole.NoRole)
         verify_act = add(tm, "&Verify proof…", self._verify_proof)
         verify_act.setMenuRole(QAction.MenuRole.NoRole)
 
@@ -3139,6 +3141,37 @@ class MainWindow(QMainWindow):
         a proof is bound to its code and sharing one defeats the point."""
         from .proof_issue_dialog import ProofIssueDialog
         ProofIssueDialog(self.theme, self).exec()
+
+    def _open_submission(self) -> None:
+        """Teacher: look a receipt up on the course server and open the student's work.
+
+        The marking loop, in the tool the work was built in — because the questions a marker
+        actually has ("does it forward?", "did they wire the second subnet?") are answered by
+        pressing Run, not by reading a summary.
+        """
+        from .mark_dialog import MarkDialog
+        MarkDialog(self.ctx, self._open_submitted_topology, self).exec()
+
+    def _open_submitted_topology(self, project: dict, report: dict) -> None:
+        """Put a downloaded submission on the canvas.
+
+        Loaded through the SAME path as any other project — the server writes gBuilder's own format
+        precisely so there is no conversion step, and a second reader here would be a second thing
+        to keep in step with the format.
+
+        Deliberately leaves `_project_path` unset: this is somebody else's work, and a later Save
+        must not quietly write it over the marker's own project.
+        """
+        from ..domain.topology import Topology
+        topo = Topology.from_dict(project.get("topology") or {})
+        self._project_path = None
+        self._router_programs.clear()
+        self._set_topology(topo)
+        who = report.get("receipt", "")
+        title = report.get("title") or report.get("activity", "")
+        self.setWindowTitle(f"gBuilder 6.0 — submission {who} · {title}")
+        self.ctx.log(f"Opened submission {who} ({title}) — this is a student's work, not your "
+                     f"project. Save As if you want to keep changes.", "ok")
 
     def _verify_proof(self) -> None:
         """Teacher mode: read a student's proof. Read-only — it verifies and renders, never grades."""
