@@ -473,16 +473,24 @@ class MainWindow(QMainWindow):
         if tc is None:
             self._add_signin_items(m)
         else:
+            # Everything gated here is PARKED, not gone — see app/features.py, which records what
+            # each one needs from the Teaching Center before it can come back. Offering a menu item
+            # that silently does nothing is worse than not offering it.
+            from ..app import features
             teacher = tc.is_teacher()
-            if not teacher:                            # 'Due / Completed' is a student view
+            if not teacher and features.on("missions.server"):   # 'Due / Completed' is a student view
                 self._add_mission_items(m, tc)
                 m.addSeparator()
             self._add_teacher_items(m, tc)
-            m.addAction("Messages…").triggered.connect(self._open_messages)
-            m.addAction("Set my photo…").triggered.connect(self._set_photo)
+            if features.on("messaging"):
+                m.addAction("Messages…").triggered.connect(self._open_messages)
+            if features.on("user.photo"):
+                m.addAction("Set my photo…").triggered.connect(self._set_photo)
             if not teacher:                            # groups + AI-proxy are student notions
-                self._add_group_items(m, tc)
-                m.addAction("AI may answer for me…").triggered.connect(self._ai_proxy_consent)
+                if features.on("groups"):
+                    self._add_group_items(m, tc)
+                if features.on("ai.proxy"):
+                    m.addAction("AI may answer for me…").triggered.connect(self._ai_proxy_consent)
             m.addSeparator()
             m.addAction("Sync now").triggered.connect(self._connect_teaching_center)
             m.addAction("Sign in as another user…").triggered.connect(self._sign_in_as)
@@ -600,10 +608,13 @@ class MainWindow(QMainWindow):
         see it. The TC session's role is the single source of truth."""
         if not tc.is_teacher():
             return
+        from ..app import features
         cap = menu.addAction("Teacher tools")
         cap.setEnabled(False)
+        # The Fragment Manager itself is local and works; only its Library tab talked to a server.
         menu.addAction("Fragment Manager…").triggered.connect(self._fragment_manager)
-        menu.addAction("Playtest an experiment…").triggered.connect(self._playtest_experiment)
+        if features.on("missions.server"):        # playtesting a DRAFT the course handed out
+            menu.addAction("Playtest an experiment…").triggered.connect(self._playtest_experiment)
         menu.addSeparator()
 
     def _playtest_experiment(self) -> None:
@@ -1803,8 +1814,12 @@ class MainWindow(QMainWindow):
         # Teacher: verifying a student's proof is an action a marker takes repeatedly, not a
         # preference, so it gets a menu of its own rather than a corner of Settings.
         tm = mb.addMenu("&Teacher")
-        issue_act = add(tm, "&Issue codes…", self._issue_codes)
-        issue_act.setMenuRole(QAction.MenuRole.NoRole)
+        # Issue codes is parked: it mints codes the course server has never heard of, so a student
+        # who types one is refused. The Teaching Center vends codes. See app/features.py.
+        from ..app import features
+        if features.on("teacher.issue_codes"):
+            issue_act = add(tm, "&Issue codes…", self._issue_codes)
+            issue_act.setMenuRole(QAction.MenuRole.NoRole)
         verify_act = add(tm, "&Verify proof…", self._verify_proof)
         verify_act.setMenuRole(QAction.MenuRole.NoRole)
 

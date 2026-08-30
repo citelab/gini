@@ -145,3 +145,20 @@ def serve_tls(handler_cls, cert, key, host="127.0.0.1"):
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"https://{host}:{httpd.server_address[1]}"
+
+
+@pytest.fixture
+def unparked(monkeypatch):
+    """Temporarily switch a parked capability back on, for tests that cover its implementation.
+
+    Parking is a closed door, not deleted code (see `gini/app/features.py`) — and the whole reason
+    to prefer a flag over commenting out is that the code behind the door keeps working and keeps
+    being tested. This is what lets those tests keep running: they assert the behaviour that must
+    still be there on the day the Teaching Center can carry it again.
+    """
+    def _unpark(*names):
+        from gini.app import features
+        monkeypatch.setattr(features, "PARKED",
+                            {k: v for k, v in features.PARKED.items() if k not in names})
+        monkeypatch.setattr(features, "LIVE", features.LIVE | frozenset(names))
+    return _unpark

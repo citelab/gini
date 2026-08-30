@@ -215,7 +215,8 @@ def test_slot_source_survives_composition_and_reload():
     assert got.slot == "root_lans0" and got.slot_source == "cap-lan"
 
 
-def test_deleting_a_fragment_also_deletes_it_on_the_teaching_center(monkeypatch):
+def test_deleting_a_fragment_also_deletes_it_on_the_teaching_center(monkeypatch, unparked):
+    unparked("fragments.library")      # parked; this covers the code behind the door
     """The teacher owns both sides. A local-only delete is undone by the next sign-in's sync, so
     deleting locally must delete centrally too — and an unreachable Center must not block it."""
     _app()
@@ -267,7 +268,8 @@ def test_published_fragments_are_marked_and_unknown_stays_silent():
     assert suffix == "" and "Local only" in tip           # known-absent → explained in the tooltip
 
 
-def test_deleting_drops_the_published_mark_without_a_refetch(monkeypatch):
+def test_deleting_drops_the_published_mark_without_a_refetch(monkeypatch, unparked):
+    unparked("fragments.library")      # parked; this covers the code behind the door
     _app()
     import types
     fm, w = _fm()

@@ -1008,9 +1008,10 @@ class Assistant(QWidget):
     def _assigned_missions(self) -> list:
         """Released, not-past-due missions from a connected Teaching Center (empty when no Center is
         wired — the code path is future-ready; today that means the practice state)."""
+        from ..app import features
         tc = getattr(self.ctx, "teaching_center", None)
-        if tc is None:
-            return []
+        if tc is None or not features.on("missions.server"):
+            return []                                  # parked — see app/features.py
         try:
             return tc.available_lessons() or []
         except Exception:
@@ -1533,9 +1534,10 @@ class Assistant(QWidget):
         """A mission finished — report it to the Teaching Center and sync the profile. Runs on the
         mission worker thread (never the UI thread). Offline is fine: the client queues the
         submission and flushes it on the next successful connect."""
+        from ..app import features
         tc = getattr(self.ctx, "teaching_center", None)
-        if tc is None:
-            return                                  # not enrolled — local practice only
+        if tc is None or not features.on("missions.submit"):
+            return                                  # not enrolled, or parked — local practice only
         from ..domain import grader as _grader
         sent = tc.submit(lesson_id, mission, snapshot=_grader.snapshot_of(self.ctx.topology))
         if self._mission_profile is not None:

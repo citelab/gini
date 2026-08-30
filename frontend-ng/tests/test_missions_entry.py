@@ -45,7 +45,8 @@ def test_practice_state_when_no_teaching_center():
     assert len(_picker_buttons(a)) == len(catalog.all_archetypes())
 
 
-def test_assigned_state_shows_only_mandatory_missions():
+def test_assigned_state_shows_only_mandatory_missions(unparked):
+    unparked("missions.server")        # parked; this covers the code behind the door
     app, w = _win()
     a = w.assistant
     a.ctx.teaching_center = SimpleNamespace(

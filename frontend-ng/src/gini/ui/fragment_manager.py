@@ -397,9 +397,12 @@ exactly what recursion means here.</li>
         when the answer arrives. `force` re-asks after an upload or delete changed it."""
         if self._tc_ids is not None and not force:
             return
+        from ..app import features
         tc = getattr(self.ctx, "teaching_center", None)
-        if tc is None or not getattr(tc, "is_teacher", lambda: False)():
-            return                                        # not a teacher: stays UNKNOWN, shown blank
+        if (tc is None or not features.on("fragments.library")
+                or not getattr(tc, "is_teacher", lambda: False)()):
+            return            # not a teacher, or the shared library is parked (app/features.py):
+            #                   authoring and playing fragments locally is unaffected
         import threading
 
         def work():
@@ -470,9 +473,11 @@ exactly what recursion means here.</li>
     def _delete_on_center(self, fid: str) -> str:
         """Delete the fragment from the Teaching Center too (teacher only). Returns a sentence to
         append to the local confirmation. Never raises — losing the Center must not block a delete."""
+        from ..app import features
         tc = getattr(self.ctx, "teaching_center", None)
-        if tc is None or not getattr(tc, "is_teacher", lambda: False)():
-            return ""                                     # not signed in as teacher: nothing central
+        if (tc is None or not features.on("fragments.library")
+                or not getattr(tc, "is_teacher", lambda: False)()):
+            return ""            # not a teacher, or parked: the local delete still happens
         try:
             res = tc.delete_fragment(fid)
         except Exception as e:                            # noqa: BLE001
@@ -539,7 +544,14 @@ exactly what recursion means here.</li>
         fid = self._selected_id()
         if not fid:
             QMessageBox.information(self, "Upload", "Select a fragment first."); return
+        from ..app import features
         tc = getattr(self.ctx, "teaching_center", None)
+        if not features.on("fragments.library"):
+            QMessageBox.information(
+                self, "Upload",
+                "Sharing fragments through the course is not available on this Teaching Center "
+                "yet. Your fragment is saved locally and works here.")
+            return
         if tc is None or not getattr(tc, "is_teacher", lambda: False)():
             QMessageBox.information(self, "Upload", "Sign in as a teacher to upload fragments.")
             return
