@@ -269,3 +269,69 @@ def test_the_two_halves_of_gini_generate_different_version_files():
     toolkit = _version_file("frontend-ng/pyproject.toml").split("/")[-1]
     assert core and toolkit
     assert core != toolkit, f"gini-core and gini-toolkit both generate {core} into gini/"
+
+
+# --------------------------------------------------------------------------- #
+# what the Teaching Center is allowed to import
+# --------------------------------------------------------------------------- #
+def _tc_sources():
+    root = Path(__file__).resolve().parents[2] / "teaching-center" / "src" / "gini_teaching_center"
+    return sorted(root.rglob("*.py")) if root.exists() else []
+
+
+def test_the_teaching_center_imports_nothing_but_gini_domain():
+    """THE bug this exists for, found on a real VM and not by any test here.
+
+    `_download_topology` imported FORMAT/VERSION/PROJECT_EXT from `gini.services.persistence`.
+    That module is in gini-toolkit, which a Teaching Center never installs — it depends on
+    gini-core alone, on purpose, so a headless server does not drag Qt onto itself. Downloading a
+    submission therefore failed on every real deployment with `No module named 'gini.services'`,
+    while passing every test here, because the tests run in a checkout that happens to have both
+    halves importable.
+
+    A runtime test cannot catch that without a second interpreter with a different set of packages
+    installed. Reading the source can, and does not care what is installed.
+    """
+    import ast
+    bad = []
+    for f in _tc_sources():
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            mods = []
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                mods = [node.module]
+            for m in mods:
+                if m == "gini" or m.startswith("gini."):
+                    if not (m == "gini.domain" or m.startswith("gini.domain.")):
+                        bad.append(f"{f.name}:{node.lineno}  {m}")
+    assert not bad, (
+        "the Teaching Center may only import gini.domain — everything else lives in gini-toolkit, "
+        f"which is never installed beside it:\n  " + "\n  ".join(bad))
+
+
+def test_the_teaching_center_imports_no_qt():
+    """The reason it is a separate distribution at all: 2.3MB on a headless VM, not 400MB."""
+    import ast
+    bad = []
+    for f in _tc_sources():
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+            bad += [f"{f.name}:{node.lineno} {n}" for n in names if n.startswith("PySide6")]
+    assert not bad, f"Qt in the Teaching Center: {bad}"
+
+
+def test_the_project_format_is_defined_where_both_sides_can_see_it():
+    """Anything the two sides must agree on belongs to the package they share. The proof format is
+    already in gini.domain for this reason; the project format now is too, and persistence
+    re-exports rather than redefining — two copies would be two things to keep in step, and the one
+    that drifted would write a file that opens nowhere."""
+    from gini.domain.project import FORMAT, PROJECT_EXT, VERSION
+    from gini.services import persistence
+    assert (persistence.FORMAT, persistence.VERSION, persistence.PROJECT_EXT) == \
+           (FORMAT, VERSION, PROJECT_EXT)
+    src = (Path(__file__).resolve().parents[1] / "src" / "gini" / "services"
+           / "persistence.py").read_text(encoding="utf-8")
+    assert 'FORMAT = "gini-project"' not in src, "persistence redefines the format instead of importing it"

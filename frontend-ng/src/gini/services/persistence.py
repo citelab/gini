@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..domain.project import FORMAT, PROJECT_EXT, VERSION
 from ..domain.topology import Topology
 
-PROJECT_EXT = ".gini"
-FORMAT = "gini-project"
-VERSION = 1
+# Re-exported, not redefined: the Teaching Center writes this same format and only has gini-core,
+# so the constants live in gini.domain.project. Two copies would be two things to keep in step,
+# and the one that drifted would produce a file that opens nowhere.
+__all__ = ["FORMAT", "PROJECT_EXT", "VERSION", "save_project", "load_project"]
 
 
 def save_project(topo: Topology, path: str | Path) -> None:

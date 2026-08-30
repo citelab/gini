@@ -511,8 +511,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "This submission carried no runnable copy — it came "
                                              "from a gBuilder that only sent the proof."})
         # Constants from the module that DEFINES the format, never restated here: a project file
-        # written to a slightly wrong shape would open nowhere and blame the teacher.
-        from gini.services.persistence import FORMAT, PROJECT_EXT, VERSION
+        # written to a slightly wrong shape would open nowhere and blame the teacher. From
+        # gini.domain — the package this server actually has. It used to import them from
+        # gini.services.persistence, which lives in gini-toolkit and is deliberately never
+        # installed beside a Teaching Center, so this endpoint failed on every real deployment.
+        from gini.domain.project import FORMAT, PROJECT_EXT, VERSION
         body = json.dumps({"format": FORMAT, "version": VERSION, "topology": topo}, indent=2)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
