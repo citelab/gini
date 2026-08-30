@@ -70,6 +70,10 @@ class MarkDialog(QDialog):
         self._report: dict = {}
         self.setWindowTitle("Open a submission")
         self.setMinimumWidth(620)
+        # NOT modal, and it does not close when the work opens. A marker reads the account of what
+        # happened WHILE looking at the topology it describes — closing the report the moment the
+        # canvas fills means holding it in your head, or looking the receipt up twice.
+        self.setModal(False)
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -252,4 +256,7 @@ class MarkDialog(QDialog):
             QMessageBox.warning(self, "Could not open it",
                                 f"The submission downloaded, but gBuilder could not open it:\n{e}")
             return
-        self.accept()
+        # Deliberately still open, and pushed behind the window it just filled. The report is the
+        # thing you read while you work through the topology, and the next receipt is typed here.
+        self._say(f"Open on the canvas. Look up another receipt when you are done with this one.")
+        self.lower()

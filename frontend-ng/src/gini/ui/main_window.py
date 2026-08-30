@@ -3150,7 +3150,17 @@ class MainWindow(QMainWindow):
         pressing Run, not by reading a summary.
         """
         from .mark_dialog import MarkDialog
-        MarkDialog(self.ctx, self._open_submitted_topology, self).exec()
+        # show(), not exec(): the report stays readable while the marker works on the canvas it
+        # describes. Kept on self, or Python would collect it the moment this returns.
+        existing = getattr(self, "_mark_dialog", None)
+        if existing is not None:
+            try:
+                existing.close()
+            except RuntimeError:
+                pass                          # already gone on the C++ side
+        self._mark_dialog = MarkDialog(self.ctx, self._open_submitted_topology, self)
+        self._mark_dialog.show()
+        self._mark_dialog.raise_()
 
     def _open_submitted_topology(self, project: dict, report: dict) -> None:
         """Put a downloaded submission on the canvas.

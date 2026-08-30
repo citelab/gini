@@ -116,3 +116,25 @@ def test_a_download_that_fails_says_so_and_stays_open():
     d._on_fetched(REPORT, "")
     d._on_opened(None, "the course server refused")
     assert "refused" in d.hint.text()
+
+
+def test_the_report_stays_open_after_the_work_lands_on_the_canvas():
+    """A marker reads the account of what happened WHILE looking at the topology it describes.
+    Closing the report the moment the canvas fills means holding it in your head, or looking the
+    same receipt up a second time."""
+    _app()
+    opened = {}
+    d = MarkDialog(_ctx(session="S"), lambda proj, rep: opened.update(rep=rep))
+    d.show()                                           # as main_window opens it — show(), not exec()
+    d._on_fetched(REPORT, "")
+    d._on_opened({"format": "gini-project", "topology": {"devices": [], "links": []}}, "")
+    assert opened["rep"]["receipt"] == "4KTP-9QME"     # the work went to the canvas…
+    assert d.isVisible()                               # …and the report is still on screen
+    assert d.result() == 0                             # not accepted/closed
+    assert d.receipt.isEnabled()                       # ready for the next receipt
+
+
+def test_the_window_never_blocks_the_canvas():
+    """Modal would make 'open it and work on it' impossible by construction."""
+    _app()
+    assert MarkDialog(_ctx(session="S"), lambda *a: None).isModal() is False
