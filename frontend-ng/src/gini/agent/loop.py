@@ -75,20 +75,50 @@ def _extract_json_objects(text: str) -> list[dict]:
 _TOOL_TAG_RE = re.compile(r"<\s*(tool_call|tool|json|function_call)\s*>.*?</\s*\1\s*>",
                           re.S | re.I)
 
-# Some small models write tool calls as PROSE (`add_device type_key='host' name='F1'`),
-# which is neither native nor JSON, so it slips past the tag/JSON strippers and leaks into
-# chat. Strip those pseudo-calls: a full build/present tool name, one optional device-ref
-# arg (R1/F1/…), then key=value pairs. We DON'T match bare words as args (so following prose
-# like "… Now that …" is never eaten) and we leave callout/narrate alone (their text is the
-# model teaching). Bare verb aliases (add/connect) are excluded — too common in real prose.
-_PSEUDO_CALL_RE = re.compile(
-    r"\b(?:add_device|connect_devices|set_property|remove_device|spotlight|highlight|"
-    r"animate_packet|trace_path|clear_stage|inspect_device|get_topology|summarize_topology|"
-    r"explain_topology|explain_device|explain_element|list_device_types)\b"
-    r"(?:"
-    r"[ \t]+[A-Za-z]{1,4}\d+(?:[ \t]+\w+=(?:'[^']*'|\"[^\"]*\"|[^\s]+))*"   # ref [+ key=val…]
-    r"|(?:[ \t]+\w+=(?:'[^']*'|\"[^\"]*\"|[^\s]+))+"                        # or one+ key=val
-    r")")     # require args, so a bare mention of a tool name in prose is NOT stripped
+# Some small models write tool calls as PROSE (`add_device type_key='host' name='F1'`), which is
+# neither native nor JSON. Nothing EXECUTES those — `_parse_json_actions` only reads JSON objects
+# with a "tool" key — so removing them is purely about what the student reads: the model tried to
+# act, nothing happened, and showing the raw attempt implies something did.
+#
+# The line is what decides, not the words. A model ATTEMPTING an action puts the call on a line of
+# its own; a model TEACHING one writes it inside a sentence — "for example, you could use
+# `add_device type_key='Machine', name='M1'`". The old rule matched anywhere, so it ate the tutor's
+# own explanation of the API and, because its argument list stopped at a comma, left the wreckage
+# `, name='M1'` behind. Guessing intent from the words cannot work; the layout is the model's own
+# signal and it is unambiguous.
+_TOOL_NAMES = (
+    "add_device|connect_devices|set_property|remove_device|spotlight|highlight|"
+    "animate_packet|trace_path|clear_stage|inspect_device|get_topology|summarize_topology|"
+    "explain_topology|explain_device|explain_element|list_device_types")
+# Args, allowing the comma-separated form as well: a rule that stops mid-call is worse than one
+# that does not fire, because a fragment is unreadable where an unstripped call is merely noise.
+_ARG = r"(?:\w+=(?:'[^']*'|\"[^\"]*\"|[^\s,]+)|[A-Za-z]{1,4}\d+)"
+#: A WHOLE LINE that is nothing but a call. Requires at least one argument, so a bare mention of a
+#: tool name in prose ("the add_device tool places an element") is never touched.
+_PSEUDO_CALL_LINE_RE = re.compile(
+    rf"^[ \t>*-]*(?:{_TOOL_NAMES})\b(?:[ \t,]+{_ARG})+[ \t.,;:]*$", re.M)
+
+
+_FENCE_RE = re.compile(r"```[^\n]*\n?(.*?)```", re.S)
+
+
+def _strip_action_fences(text: str) -> str:
+    """Remove a fenced block only when what is inside it is a tool action.
+
+    Every fence used to be deleted, which meant GINI could not show a student a command — `ping
+    10.0.0.2` in a code block simply vanished, and a networking tutor that cannot write a command
+    down is missing something it needs. But models do wrap their JSON actions in fences, and that
+    IS worth hiding.
+
+    So read the block rather than guessing: a fence whose content carries a tool action goes, and
+    a fence holding a lesson stays, backticks and all.
+    """
+    def keep(m):
+        body = m.group(1)
+        if not body.strip():
+            return ""                        # an empty fence is noise whatever produced it
+        return "" if _strip_tool_objects(body).strip() != body.strip() else m.group(0)
+    return _FENCE_RE.sub(keep, text)
 
 
 def _strip_tool_objects(text: str) -> str:
@@ -141,9 +171,12 @@ def visible_text(raw: str) -> str:
             t = args.get("text") or args.get("line") or args.get("note")
             if t:
                 spoken.append(str(t).strip())
-    prose = _strip_tool_objects(_TOOL_TAG_RE.sub(" ", raw))
-    prose = _PSEUDO_CALL_RE.sub(" ", prose)                  # prose-style tool calls
-    prose = re.sub(r"`{3}.*?`{3}", " ", prose, flags=re.S)   # stray code fences
+    # Fences FIRST, while they still hold what they hold. Stripping the JSON objects first empties
+    # an action fence, and an emptied fence looks exactly like a lesson to the rule below — it was
+    # kept, and the student read a pair of bare backticks.
+    prose = _strip_action_fences(_TOOL_TAG_RE.sub(" ", raw))
+    prose = _strip_tool_objects(prose)
+    prose = _PSEUDO_CALL_LINE_RE.sub("", prose)              # a line that is only a call
     prose = re.sub(r"[ \t]*\n[ \t]*", "\n", prose)
     prose = re.sub(r"[ \t]{2,}", " ", prose).strip()
     parts, seen = [], set()

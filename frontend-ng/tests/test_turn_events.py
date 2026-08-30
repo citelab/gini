@@ -204,11 +204,59 @@ def test_a_bare_json_action_is_suppressed_too(chunk):
 
 
 @pytest.mark.parametrize("chunk", [1, 5, 10_000])
-def test_a_code_fence_is_suppressed(chunk):
+def test_a_code_fence_holding_a_lesson_reaches_the_student(chunk):
+    """It used to be deleted, along with every other fence. A fence is the model saying "read this
+    literally"; a networking tutor that cannot show `ping 10.0.0.2` is missing something it needs.
+    Held until it closes and then judged, because streaming it and only THEN discovering it was a
+    tool action would mean taking it back off the screen."""
     raw = "Run this:\n```\nping 10.0.0.2\n```\nand watch the replies."
     out = _stream(raw, chunk)
-    assert "ping 10.0.0.2" not in out
+    assert "ping 10.0.0.2" in out
     assert "Run this:" in out and "watch the replies." in out
+
+
+@pytest.mark.parametrize("chunk", [1, 5, 10_000])
+def test_a_code_fence_holding_an_action_is_still_suppressed(chunk):
+    raw = 'Adding it.\n```json\n{"tool":"add_device","args":{"t":"Router"}}\n```\nDone.'
+    out = _stream(raw, chunk)
+    assert "add_device" not in out and "{" not in out
+    assert "Adding it." in out and "Done." in out
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 7, 10_000])
+def test_a_call_on_a_line_of_its_own_never_streams(chunk):
+    """It used to stream and then stay, because `_on_answer` persists what was streamed — so the
+    filter, not `visible_text`, is what actually decides what a student reads."""
+    raw = "Right, adding one.\nadd_device type_key='host' name='F1'\nThere it is."
+    out = _stream(raw, chunk)
+    assert "add_device" not in out
+    assert "Right, adding one." in out and "There it is." in out
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 10_000])
+def test_a_call_the_tutor_is_teaching_streams_intact(chunk):
+    raw = "For example, use `add_device type_key='Machine', name='M1'` to make one."
+    assert _stream(raw, chunk) == raw
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 7, 40, 10_000])
+@pytest.mark.parametrize("raw", [
+    "Try this on M1:\n```\nping 10.0.0.2\n```\nYou should see replies.",
+    'Adding it.\n```json\n{"tool":"add_device","args":{"t":"R"}}\n```\nDone.',
+    "Right, adding one.\nadd_device type_key='host' name='F1'\nThere it is.",
+    "For example, use `add_device type_key='Machine', name='M1'` to make one.",
+    "The add_device tool is what places an element.",
+    "Use a mask < /24 when {a, b} is small. A < B, and 3 < 4.",
+    "First line.\nSecond line.\nThird line.",
+])
+def test_the_streamed_answer_and_the_settled_one_never_disagree(raw, chunk):
+    """THE invariant. `_on_answer` appends whatever the finished text has that the stream did not
+    show, so a filter and a `visible_text` that disagree put the difference on screen after the
+    fact — a code block popping in once the answer is over."""
+    import re
+    from gini.agent.loop import visible_text
+    norm = lambda t: re.sub(r"\s+", " ", t).strip()          # noqa: E731
+    assert norm(_stream(raw, chunk)) == norm(visible_text(raw))
 
 
 @pytest.mark.parametrize("chunk", [1, 2, 10_000])
