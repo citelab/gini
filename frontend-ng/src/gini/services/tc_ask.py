@@ -102,3 +102,89 @@ def as_context(answer: Answer, *, limit: int = 4) -> str:
 
 
 __all__ = ["Answer", "ask", "as_context", "Insecure", "Unreachable"]
+
+
+# ---- checking the link, from a terminal --------------------------------------- #
+# `python3 -m gini.services.tc_ask "how do I connect two LANs"`
+#
+# The tutor asks silently and shows nothing — working offline is normal, so a warning on every
+# question would be worse than the problem. That silence makes "is GINI actually reading my
+# course?" unanswerable from inside the app, which is what this is for. It reads gBuilder's OWN
+# settings rather than taking a URL, because a check against hand-typed values proves the server
+# works and not that the app is pointed at it.
+def _cli(argv=None) -> int:                                  # pragma: no cover - a terminal tool
+    import argparse
+    from ..app import paths
+
+    ap = argparse.ArgumentParser(
+        prog="python3 -m gini.services.tc_ask",
+        description="Show what the Teaching Center gives GINI for a question.")
+    ap.add_argument("question", nargs="*", help="what a student would type into Ask GINI")
+    ap.add_argument("--url", default="", help="override the course server in Settings")
+    ap.add_argument("--course", default="", help="override the Course in Settings")
+    ap.add_argument("--json", action="store_true", help="print the raw hits instead")
+    a = ap.parse_args(argv)
+
+    cfg = paths.load_config()
+    url = a.url or cfg.get("tc_url", "") or ""
+    course = a.course or cfg.get("tc_course", "") or ""
+    question = " ".join(a.question).strip()
+
+    # --json prints JSON and nothing else, so it can be piped. A header on stdout would make
+    # every caller strip it first, and one of them would forget.
+    if not a.json:
+        print(f"  server    {url or '(not set)'}")
+        print(f"  course    {course or '(not set)'}")
+        print(f"  question  {question or '(none)'}\n")
+    if not question:
+        print("  Give a question to ask. Nothing is sent without one.")
+        return 2
+
+    answer = ask(url, course, question)
+    if a.json:
+        print(json.dumps({"course": answer.course, "reason": answer.reason,
+                          "error": answer.error, "hits": answer.hits}, indent=2))
+        return 0 if answer.hits else 1
+
+    if answer.reason:
+        # Every one of these is a different fix, so none of them is "it didn't work".
+        print(f"  ✗ {answer.reason}: {answer.error or 'no detail given'}")
+        print({
+            "no_server": "  Set the course server in Settings → Teaching Center.",
+            "no_course": "  Set the Course in Settings → Teaching Center.",
+            "no_such_course": "  The server is up and does not have that course. Check "
+                              "the spelling against the Teaching Center console.",
+            "insecure": "  GINI speaks HTTPS only. The URL must start with https://.",
+            "unreachable": "  The server could not be reached — VPN, or the wrong port.",
+        }.get(answer.reason, "  The server refused the question."))
+        return 1
+
+    if not answer.hits:
+        # The honest list of reasons, because "0 hits" on its own sends people to the network.
+        print("  ✓ reached the course, and it matched nothing.\n")
+        print("  The search reads TITLES and BRIEFS of released activities, and the titles,")
+        print("  filenames and links of materials. It does NOT read inside a PDF. So:")
+        print("    · an activity still in draft is never returned — release it;")
+        print("    · a question whose words appear only inside a handout cannot match;")
+        print("    · try words from the lab's title.")
+        return 1
+
+    print(f"  ✓ {len(answer.hits)} hit(s) from {answer.course}\n")
+    for h in answer.hits:
+        where = h.get("url", "") if h.get("kind") == "material" else h.get("lab", "")
+        print(f"    {h.get('kind', ''):9} {h.get('title', ''):32} "
+              f"score {h.get('score', 0):<4} {where}")
+
+    context = as_context(answer)
+    print("\n  What GINI is given, verbatim:\n")
+    print("  " + "─" * 68)
+    for line in context.splitlines():
+        print("  " + line)
+    print("  " + "─" * 68)
+    print("\n  Titles and briefs only — a material is named and linked, never quoted.")
+    return 0
+
+
+if __name__ == "__main__":                                   # pragma: no cover
+    import sys
+    sys.exit(_cli())

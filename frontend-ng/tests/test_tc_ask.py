@@ -191,3 +191,65 @@ def test_one_course_cannot_answer_for_another(course):
 def test_a_very_long_question_is_truncated_not_refused(course):
     a = tc_ask.ask(course, "comp535", "routing " * 500)
     assert a.reason in ("", None) or a.hits is not None      # answered, not rejected
+
+
+# ---- the terminal check ------------------------------------------------------ #
+# `_course_context` is silent on purpose — working offline is normal, and a warning on every
+# question would be worse than the problem. That silence is also why "is GINI actually reading my
+# course?" had no answer from inside the app, which is what the CLI is for.
+def test_the_check_reads_gbuilders_own_settings(course, tmp_path, monkeypatch, capsys):
+    """The point of not taking a URL. A check against hand-typed values proves the server works;
+    it does not prove the app is pointed at it, which is the thing that is actually wrong."""
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"tc_url": course, "tc_course": "comp535"}), encoding="utf-8")
+    assert tc_ask._cli(["routing"]) == 0
+    out = capsys.readouterr().out
+    assert course in out and "comp535" in out
+
+
+def test_the_check_shows_the_context_verbatim(course, tmp_path, monkeypatch, capsys):
+    """What reaches the model is the only interesting answer. A hit count would let a wrong
+    context — an empty one, one from the wrong course — look like success."""
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"tc_url": course, "tc_course": "comp535"}), encoding="utf-8")
+    tc_ask._cli(["routing"])
+    out = capsys.readouterr().out
+    for line in tc_ask.as_context(tc_ask.ask(course, "comp535", "routing")).splitlines():
+        assert line in out
+
+
+def test_the_check_prints_only_json_when_asked(course, tmp_path, monkeypatch, capsys):
+    """It has to pipe. A header on stdout would make every caller strip it first, and one of
+    them would forget — which is exactly what happened the first time this was used."""
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"tc_url": course, "tc_course": "comp535"}), encoding="utf-8")
+    tc_ask._cli(["--json", "routing"])
+    assert json.loads(capsys.readouterr().out)["course"] == "comp535"
+
+
+def test_the_check_names_the_fix_when_the_course_is_wrong(course, tmp_path, monkeypatch, capsys):
+    """The failure that was actually in the field: the server up, TLS fine, and a course name in
+    Settings that the server has never heard of. 'It did not work' would have sent someone to the
+    network for an afternoon."""
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"tc_url": course, "tc_course": "cs310_typo"}), encoding="utf-8")
+    assert tc_ask._cli(["routing"]) == 1
+    out = capsys.readouterr().out
+    assert "no_such_course" in out and "Settings" in out
+
+
+def test_the_check_distinguishes_an_empty_course_from_a_broken_link(course, tmp_path,
+                                                                   monkeypatch, capsys):
+    """Reached-and-matched-nothing is not the same as could-not-reach, and the difference is the
+    whole diagnosis. Nothing indexed sends you to the console; unreachable sends you to the VPN."""
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"tc_url": course, "tc_course": "comp535"}), encoding="utf-8")
+    assert tc_ask._cli(["supercalifragilistic"]) == 1
+    out = capsys.readouterr().out
+    assert "matched nothing" in out
+    assert "draft" in out and "PDF" in out          # the reasons, not just the count
