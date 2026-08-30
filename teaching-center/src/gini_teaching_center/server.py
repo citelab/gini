@@ -191,6 +191,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "activity": act["id"], "title": act["title"],
                              "brief": act.get("brief", ""),
                              "session_minutes": act["session_minutes"],
+                             "grace_minutes": act.get("grace_minutes") or 0,
                              "valid_until": row["valid_until"]})
             return
 
@@ -360,7 +361,7 @@ class Handler(BaseHTTPRequestHandler):
             # be replayed.
             return self._send(200, [{k: s.get(k) for k in
                                      ("receipt", "activity", "ts", "verdict", "artifact_hash",
-                                      "student_id", "claimed_at")}
+                                      "student_id", "claimed_at", "late")}
                                     for s in _STORE.course_submissions(course)])
 
         if p == "/api/submissions/topology":
@@ -479,12 +480,18 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "Minutes per attempt must be a number."}
         if mins <= 0:
             return {"ok": False, "error": "Minutes per attempt must be more than zero."}
+        try:
+            grace = _number(b.get("grace_minutes"), prev.get("grace_minutes"), 0, int)
+        except ValueError:
+            return {"ok": False, "error": "The grace period must be a number of minutes."}
+        if grace < 0:
+            return {"ok": False, "error": "The grace period cannot be negative."}
         _STORE.activity_put({
             "id": aid, "course": course, "lab": lab,
             "title": b.get("title") or prev.get("title") or lab,
             "brief": b.get("brief", prev.get("brief", "")),
             "status": prev.get("status", "draft"),
-            "vend_until": vend, "session_minutes": mins,
+            "vend_until": vend, "session_minutes": mins, "grace_minutes": grace,
             "created": prev.get("created") or time.time(),
             "released": prev.get("released", 0)})
         return {"ok": True, "activity": aid, "status": prev.get("status", "draft")}

@@ -250,3 +250,160 @@ def test_the_topology_download_needs_a_staff_session(tc):
     topo = a_topology()
     r = tc_submit.submit(tc.url, code, a_chain(code, topo), topo)
     assert _call(tc.url, "/api/submissions/topology?receipt=" + r["receipt"])["error"]
+
+
+# -- when it never made it up --------------------------------------------------- #
+# The failure this exists for: a student finishes, the code lapses before the upload lands, and
+# the proof becomes unacceptable FOR EVER — `expired` is deliberately not settled in the outbox,
+# so gBuilder retries until the end of time something the server will refuse every time. They hold
+# a correct receipt for work the Teaching Center has never heard of. Two ways out, both here: a
+# grace period the server applies on its own, and a member of staff taking the file in by hand.
+def _expire(code):
+    """Backdate the code, the way an evening does."""
+    from gini_teaching_center import activities as ACT
+    from gini_teaching_center import server as S
+    row = dict(S._STORE.code(ACT.normalize(code)))
+    row["valid_until"] = time.time() - HOUR
+    S._STORE.code_put(row)
+    return row
+
+
+def test_a_lapsed_code_is_refused_the_ordinary_way(tc):
+    """The premise. Without this the rest of these tests would pass over a server that never
+    refused anything."""
+    code = tc.code()
+    topo = a_topology()
+    _expire(code)
+    r = tc_submit.submit(tc.url, code, a_chain(code, topo), topo)
+    assert not r["ok"] and r["reason"] == "expired"
+
+
+def test_staff_can_take_in_what_the_server_refused(tc):
+    code = tc.code()
+    topo = a_topology()
+    proof = a_chain(code, topo)
+    _expire(code)
+    r = _call(tc.url, "/api/submissions/accept", {"proof": proof, "topology": topo}, tc.token)
+    assert r["ok"], r
+    assert r["receipt"]
+    rep = tc.staff("/api/receipt?receipt=" + r["receipt"])
+    assert rep["late"] is True
+    assert rep["accepted_by"] == "boss"
+    assert rep["verdict"] == "pass"
+
+
+def test_what_staff_took_in_is_runnable_like_any_other(tc):
+    """Half a recovery would be accepting the proof and losing the work."""
+    from gini.domain.topology import Topology
+    from gini.services import persistence
+    code = tc.code()
+    topo = a_topology(("router", "host", "host"))
+    proof = a_chain(code, topo)
+    _expire(code)
+    r = _call(tc.url, "/api/submissions/accept", {"proof": proof, "topology": topo}, tc.token)
+    req = urllib.request.Request(
+        tc.url + "/api/submissions/topology?receipt=" + r["receipt"],
+        headers={"Authorization": "Bearer " + tc.token})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        data = json.loads(res.read())
+    assert data["format"] == persistence.FORMAT
+    reopened = Topology.from_dict(data["topology"])          # the real loader, not a lookalike
+    assert len(reopened.devices) == 3 and len(reopened.links) == 2
+
+
+def test_a_tampered_proof_is_refused_however_it_arrives(tc):
+    """Staff acceptance waives the clock. It is not a way to launder a bad proof through a
+    kindness, and this is the test that keeps it that way."""
+    code = tc.code()
+    topo = a_topology()
+    proof = a_chain(code, topo)
+    proof["entries"][1]["data"]["name"] = "EDITED"
+    _expire(code)
+    r = _call(tc.url, "/api/submissions/accept", {"proof": proof, "topology": topo}, tc.token)
+    assert not r["ok"] and r["reason"] == "bad_proof"
+
+
+def test_someone_elses_topology_is_refused_however_it_arrives(tc):
+    code = tc.code()
+    proof = a_chain(code, a_topology())
+    _expire(code)
+    r = _call(tc.url, "/api/submissions/accept",
+              {"proof": proof, "topology": a_topology(("router", "host", "host"))}, tc.token)
+    assert not r["ok"]
+
+
+def test_taking_one_in_needs_a_staff_session(tc):
+    """Otherwise the deadline waiver is available to whoever holds the proof — which is the
+    student, which is everybody."""
+    code = tc.code()
+    topo = a_topology()
+    proof = a_chain(code, topo)
+    _expire(code)
+    assert _call(tc.url, "/api/submissions/accept",
+                 {"proof": proof, "topology": topo})["error"]
+
+
+def test_the_same_work_cannot_be_taken_in_twice(tc):
+    code = tc.code()
+    topo = a_topology()
+    proof = a_chain(code, topo)
+    _expire(code)
+    assert _call(tc.url, "/api/submissions/accept",
+                 {"proof": proof, "topology": topo}, tc.token)["ok"]
+    again = _call(tc.url, "/api/submissions/accept",
+                  {"proof": proof, "topology": topo}, tc.token)
+    assert not again["ok"] and again["reason"] in ("duplicate", "already_used")
+
+
+def test_a_proof_for_a_code_this_course_never_issued_is_refused(tc):
+    """Not a late submission — a proof from somewhere else entirely."""
+    from gini.domain import proof as P
+    from gini_teaching_center import activities as ACT
+    chain = P.Chain.start(ACT.normalize("AAAA-AAAA"), assignment="x/y", gini_version="test")
+    chain.append("submit", {"artifact": P.artifact_summary(a_topology())})
+    r = _call(tc.url, "/api/submissions/accept",
+              {"proof": P.build_proof(chain)}, tc.token)
+    assert not r["ok"] and r["reason"] == "unknown_code"
+
+
+def test_a_grace_period_takes_the_ordinary_late_hand_in_without_anybody_asked(tc):
+    """The common case — finished at 23:58, wifi dropped, uploaded at 00:20 — should not need a
+    teacher at all. The proof goes up on its own and arrives tagged."""
+    _call(tc.url, "/api/activities/save",
+          {"course": "comp535", "lab": "lab1", "title": "Multi-LAN", "brief": "Join two LANs.",
+           "vend_until": time.time() + HOUR, "session_minutes": 60, "grace_minutes": 360},
+          tc.token)
+    code = tc.code()
+    topo = a_topology()
+    proof = a_chain(code, topo)
+    _expire(code)                                     # an hour past the deadline, inside grace
+    r = tc_submit.submit(tc.url, code, proof, topo)
+    assert r["ok"], r
+    rep = tc.staff("/api/receipt?receipt=" + r["receipt"])
+    assert rep["late"] is True
+    assert rep["accepted_by"] == "", "nobody waived anything — the server took it on its own"
+
+
+def test_the_arm_reply_tells_gbuilder_about_the_grace_period(tc):
+    _call(tc.url, "/api/activities/save",
+          {"course": "comp535", "lab": "lab1", "title": "Multi-LAN", "brief": "Join two LANs.",
+           "vend_until": time.time() + HOUR, "session_minutes": 60, "grace_minutes": 90},
+          tc.token)
+    assert tc_submit.check_code(tc.url, tc.code())["grace_minutes"] == 90
+
+
+def test_the_submissions_list_shows_which_ones_were_late(tc):
+    """A teacher scanning what arrived must see it without opening each one."""
+    _call(tc.url, "/api/activities/save",
+          {"course": "comp535", "lab": "lab1", "title": "Multi-LAN", "brief": "Join two LANs.",
+           "vend_until": time.time() + HOUR, "session_minutes": 60, "grace_minutes": 360},
+          tc.token)
+    ontime = tc.code()
+    topo = a_topology()
+    tc_submit.submit(tc.url, ontime, a_chain(ontime, topo), topo)
+    late = tc.code()
+    late_proof = a_chain(late, topo)
+    _expire(late)
+    tc_submit.submit(tc.url, late, late_proof, topo)
+    rows = {r["receipt"]: r["late"] for r in tc.staff("/api/submissions?course=comp535")}
+    assert sorted(rows.values()) == [0, 1], rows

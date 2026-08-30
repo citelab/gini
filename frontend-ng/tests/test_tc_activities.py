@@ -42,11 +42,13 @@ def store(tmp_path):
     return Store(str(tmp_path))
 
 
-def an_activity(store, *, released=True, vend_until=NOW + HOUR, session_minutes=60):
+def an_activity(store, *, released=True, vend_until=NOW + HOUR, session_minutes=60,
+                grace_minutes=0):
     rec = {"id": "comp535/lab1", "course": "comp535", "lab": "lab1", "title": "Multi-LAN",
            "brief": "Join two LANs with a router and show they can talk.",
            "status": "released" if released else "draft",
            "vend_until": vend_until, "session_minutes": session_minutes,
+           "grace_minutes": grace_minutes,
            "created": NOW, "released": NOW if released else 0.0}
     store.activity_put(rec)
     return store.activity("comp535/lab1")
@@ -392,3 +394,124 @@ def test_the_teaching_center_holds_no_model_client():
     for py in _TC.glob("*.py"):
         text = py.read_text()
         assert "Ollama" not in text and "ollama" not in text, py.name
+
+
+# -- the grace period --------------------------------------------------------- #
+# The deadline used to be a cliff: a second past `valid_until` and the proof became unacceptable
+# for ever, because `expired` is not a settled outcome in the outbox — gBuilder would retry until
+# the end of time something the server would refuse every time. A grace period turns the cliff
+# into a slope for the ordinary case (finished at 23:58, wifi dropped), and a member of staff
+# taking the work in by hand covers the rest.
+def test_inside_the_grace_period_the_work_is_taken(store):
+    act = an_activity(store, grace_minutes=360)
+    row = ACT.mint_code(act, now=NOW)
+    assert ACT.check_code(row, act, now=row["valid_until"] + 5 * HOUR)[0]
+
+
+def test_past_the_grace_period_it_is_refused_again(store):
+    """A grace period is a longer deadline, not the absence of one."""
+    act = an_activity(store, grace_minutes=360)
+    row = ACT.mint_code(act, now=NOW)
+    assert ACT.check_code(row, act, now=row["valid_until"] + 7 * HOUR)[1] == ACT.EXPIRED
+
+
+def test_no_grace_period_is_still_a_hard_stop(store):
+    """The default must not have moved: an existing course keeps the cutoff it was set up with."""
+    act = an_activity(store)
+    assert ACT.grace_seconds(act) == 0
+    row = ACT.mint_code(act, now=NOW)
+    assert ACT.check_code(row, act, now=row["valid_until"] + 1)[1] == ACT.EXPIRED
+
+
+def test_work_inside_the_grace_period_is_tagged_late(store):
+    """The point of accepting it is not to pretend it was on time."""
+    act = an_activity(store, grace_minutes=360)
+    row = ACT.mint_code(act, now=NOW)
+    store.code_put(row)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act,
+                      now=row["valid_until"] + 2 * HOUR)
+    assert rec["late"] == 1
+    assert ACT.report(rec, act, [], [])["late"] is True
+
+
+def test_work_that_beat_the_deadline_is_not_tagged_late(store):
+    act = an_activity(store, grace_minutes=360)
+    row = ACT.mint_code(act, now=NOW)
+    store.code_put(row)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW + 60)
+    assert rec["late"] == 0
+
+
+def test_a_grace_period_is_measured_from_the_deadline_not_from_arrival(store):
+    """Otherwise every retry would buy another six hours and the deadline would never arrive."""
+    act = an_activity(store, grace_minutes=60)
+    row = ACT.mint_code(act, now=NOW)
+    assert ACT.grace_seconds(act) == 60 * 60
+    assert ACT.check_code(row, act, now=row["valid_until"] + 59 * 60)[0]
+    assert not ACT.check_code(row, act, now=row["valid_until"] + 61 * 60)[0]
+
+
+# -- a member of staff taking one in ------------------------------------------ #
+def test_staff_may_waive_the_deadline(store):
+    """The recovery for work that missed even the grace period. Everything else is still checked
+    — this waives the clock, nothing else."""
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    late = row["valid_until"] + 30 * 24 * HOUR
+    assert not ACT.check_code(row, act, now=late)[0]
+    assert ACT.check_code(row, act, now=late, staff=True)[0]
+
+
+def test_a_waiver_does_not_waive_the_proof_itself(store):
+    """The failure this must not have: staff acceptance becoming a way to launder a tampered
+    proof through a kindness."""
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    proof = a_proof(row["code"])
+    proof["entries"][1]["data"]["name"] = "R2"
+    with pytest.raises(ACT.Rejected) as e:
+        ACT.prepare({"proof": proof}, row, act, now=NOW, accepted_by="prof")
+    assert e.value.reason == ACT.BAD_PROOF
+
+
+def test_a_waiver_does_not_waive_the_binding_to_the_code(store):
+    act = an_activity(store)
+    mine = ACT.mint_code(act, now=NOW)
+    theirs = ACT.mint_code(act, now=NOW)
+    with pytest.raises(ACT.Rejected):
+        ACT.prepare({"proof": a_proof(theirs["code"])}, mine, act, now=NOW, accepted_by="prof")
+
+
+def test_the_report_names_whoever_waived_the_deadline(store):
+    """An override nobody can see is not a record. A teacher opening the work months later must
+    be able to tell it did not arrive on its own."""
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    store.code_put(row)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act,
+                      now=row["valid_until"] + HOUR, accepted_by="prof")
+    r = ACT.report(rec, act, [], [])
+    assert r["accepted_by"] == "prof"
+    assert r["late"] is True
+
+
+def test_an_ordinary_submission_names_nobody(store):
+    act = an_activity(store)
+    row = ACT.mint_code(act, now=NOW)
+    store.code_put(row)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=NOW)
+    assert ACT.report(rec, act, [], [])["accepted_by"] == ""
+
+
+def test_the_late_tag_survives_a_round_trip_through_the_database(store):
+    """The tag is read back from the row, so a column that is written and never selected would
+    show every hand-in as on time."""
+    act = an_activity(store, grace_minutes=360)
+    row = ACT.mint_code(act, now=NOW)
+    store.code_put(row)
+    rec = ACT.prepare({"proof": a_proof(row["code"])}, row, act,
+                      now=row["valid_until"] + HOUR, accepted_by="prof")
+    assert store.submission_put(rec)
+    back = store.submission_by_receipt(rec["receipt"])
+    assert back["late"] == 1
+    assert ACT.report(back, act, [], [])["accepted_by"] == "prof"

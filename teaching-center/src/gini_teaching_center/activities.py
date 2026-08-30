@@ -141,9 +141,30 @@ def check_code(code_row: dict | None, activity: dict | None,
     if int(code_row.get("used") or 0):
         return False, ALREADY_USED
     valid_until = float(code_row.get("valid_until") or 0)
-    if valid_until and t >= valid_until and not staff:
+    if valid_until and not staff and t >= valid_until + grace_seconds(activity):
         return False, EXPIRED
     return True, ""
+
+
+def grace_seconds(activity: dict | None) -> float:
+    """How long after the deadline a submission is still taken, tagged LATE.
+
+    Zero by default, so an activity that says nothing behaves exactly as it always has.
+
+    It does not move the deadline — the work is still recorded as late and the teacher still sees
+    it. What it removes is the cliff: a student who finished at 23:58 and lost their wifi currently
+    holds a proof the server will refuse for ever, and their only route back is a member of staff
+    accepting it by hand. A few hours of grace turns the common case back into something that
+    resolves itself, and leaves `POST /api/submissions/accept` for the ones that do not.
+    """
+    return max(0.0, float((activity or {}).get("grace_minutes") or 0) * 60.0)
+
+
+def is_late(code_row: dict | None, now: float | None = None) -> bool:
+    """Did this arrive after the deadline the code carried?"""
+    t = now if now is not None else time.time()
+    valid_until = float((code_row or {}).get("valid_until") or 0)
+    return bool(valid_until and t >= valid_until)
 
 
 def normalize(code: str) -> str:
@@ -256,6 +277,8 @@ def prepare(payload: dict, code_row: dict, activity: dict,
 
     started, finished = session_seconds(proof)
     return {"code": code_row["code"],
+            # Recorded, never a refusal — the teacher weighs it, as with an overrun session.
+            "late": 1 if is_late(code_row, now=now) else 0,
             "receipt": _proof.receipt_code(proof),
             "activity": activity["id"],
             "artifact_hash": artifact_hash(proof),
@@ -314,6 +337,7 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None)
         # Empty for an ordinary submission; the member of staff who took it, when it came in late
         # by hand. A marker must be able to see that the clock was overridden and by whom.
         "accepted_by": payload.get("accepted_by", ""),
+        "late": bool(row.get("late")),
         "title": (activity or {}).get("title", ""),
         "verdict": row.get("verdict", ""),
         "started": row.get("started", 0), "finished": row.get("finished", 0),

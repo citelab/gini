@@ -153,6 +153,10 @@
         <div class="note">The hard stop. After this no student can start.</div>
         <label>Minutes per attempt</label><input id="a-mins" type="number" value="60">
         <div class="note">From when they enter the code, not from now.</div>
+        <label>Grace period (minutes)</label><input id="a-grace" type="number" value="0">
+        <div class="note">After the deadline, still accepted and tagged LATE. 0 = a hard stop.
+          Without it a student who finished at 23:58 and lost their wifi holds a proof the server
+          refuses for ever, recoverable only by a teacher accepting it by hand.</div>
         <div class="rowb">
           <button class="go" onclick="saveAct()">Save</button>
           <button class="flat" onclick="clearAct()">Clear</button>
@@ -176,6 +180,19 @@
       </div>
       <div id="r-out"></div>
       <table id="sub-list" style="margin-top:26px"></table>
+
+      <div style="margin-top:30px;padding-top:20px;border-top:1px solid #dfe3dd">
+        <h2 style="font-size:16px;margin:0 0 4px">Take one in by hand</h2>
+        <div class="note">For work that never made it up — a code that lapsed before the upload
+          landed, a laptop that was offline at the deadline. Pick the proof file the student still
+          has. It is checked exactly as an upload is, and nothing that fails a check is taken. Only
+          the deadline is waived, the work is tagged LATE, and the report says you waived it.</div>
+        <div class="rowb" style="margin-top:12px">
+          <input type="file" id="ing-file" accept=".json,.gsav,application/json">
+          <button class="go" onclick="ingest()">Accept it</button>
+        </div>
+        <div id="ing-out"></div>
+      </div>
     </div>
   </section>
 
@@ -359,7 +376,7 @@ async function boot(){
   MINE = await api('/api/courses');
   if (!Array.isArray(MINE)) MINE = [];
   if (COURSE && !MINE.some(c => c.id === COURSE)) {
-    COURSE = ''; localStorage.removeItem('gini_tc_course');
+    COURSE = ''; localStorage.removeItem('gini_tc_course'); clearReport();
   }
   show('courses');
 }
@@ -399,8 +416,21 @@ async function archiveCourse(cid){
   loadCourses();
 }
 
+function clearReport(){
+  // A report belongs to ONE course. Left on screen after switching, it sat under a list saying
+  // "Nothing submitted yet" — the console showing a submission and its own absence at the same
+  // time, and the receipt box still holding a code that does not exist in the course now open.
+  $('#r-out').innerHTML = '';
+  $('#r-code').value = '';
+  $('#r-sid').value = '';
+  // The hand-in panel for the same reason: its outcome names a receipt in the course just closed.
+  $('#ing-out').innerHTML = '';
+  $('#ing-file').value = '';
+}
+
 function pick(id){
   COURSE = id; localStorage.setItem('gini_tc_course', id);
+  clearReport();
   $('#acts-sub').textContent = 'Labs in ' + id;
   $('#content-sub').textContent = 'Materials for ' + id;
   show('acts');
@@ -430,7 +460,7 @@ async function loadActs(){
               : `<button class="go" onclick="release('${esc(a.lab)}',true)">Release</button>`}
             <button class="flat" style="margin-left:10px" onclick='editAct(${JSON.stringify(a.lab)
               },${JSON.stringify(a.title||'')},${JSON.stringify(a.brief||'')},${
-              Number(a.vend_until)||0},${Number(a.session_minutes)||60})'>Edit</button>
+              Number(a.vend_until)||0},${Number(a.session_minutes)||60},${Number(a.grace_minutes)||0})'>Edit</button>
             ${a.submitted
               ? `<span class="note" style="margin-left:12px">${a.submitted} submitted — close it,
                  it cannot be deleted</span>`
@@ -455,18 +485,21 @@ function actBody(){
   // value and wipe the saved deadline — and the deadline is the whole late-submission control, so
   // losing it silently turns a closed lab back into an open one.
   const v = $('#a-vend').value, m = $('#a-mins').value.trim();
+  const g = $('#a-grace').value.trim();
   const t = v ? new Date(v).getTime() : NaN;
   return {course:COURSE, lab:$('#a-lab').value.trim(), title:$('#a-title').value.trim(),
           brief:$('#a-brief').value.trim(),
           vend_until: Number.isNaN(t) ? null : t/1000,
-          session_minutes: m === '' ? null : parseInt(m, 10)};
+          session_minutes: m === '' ? null : parseInt(m, 10),
+          grace_minutes: g === '' ? null : parseInt(g, 10)};
 }
 
 // Editing has to be deliberate. The form is otherwise blind: type a lab id that already exists,
 // press Save, and you have overwritten it without ever seeing what was there.
-function editAct(lab, title, brief, vend, mins){
+function editAct(lab, title, brief, vend, mins, grace){
   $('#a-lab').value = lab; $('#a-title').value = title; $('#a-brief').value = brief;
   $('#a-mins').value = mins;
+  $('#a-grace').value = grace || 0;
   // datetime-local wants exactly YYYY-MM-DDTHH:mm in LOCAL time, which toISOString would shift.
   if (vend) {
     const d = new Date(vend*1000 - new Date().getTimezoneOffset()*60000);
@@ -529,10 +562,36 @@ async function loadSubs(){
         <td>${r.student_id ? '<span class="mono">'+esc(r.student_id)+'</span>'
                            : '<span class="tag draft">unclaimed</span>'}
         <td>${when(r.ts)}
+            ${r.late ? `<span class="tag warn" style="margin-left:10px">late</span>` : ''}
             ${seen[r.artifact_hash] > 1
                ? `<span class="tag warn" style="margin-left:10px">shared topology</span>` : ''}
         <td><button class="flat" onclick="openReceipt('${esc(r.receipt)}')">Open</button>`).join('')
     ) : '<tr><td class="empty">Nothing submitted yet.</td></tr>';
+}
+
+// ---- taking one in by hand ---------------------------------------------------
+// The same verification as an upload, minus the deadline. Everything a student sends is in the
+// proof already, so a file is all a teacher needs to ask for.
+async function ingest(){
+  const f = $('#ing-file').files[0];
+  $('#ing-out').innerHTML = '';
+  if (!f) { $('#ing-out').innerHTML = '<div class="err">Choose the proof file first.</div>'; return; }
+  let payload;
+  try { payload = JSON.parse(await f.text()); }
+  catch (e) { $('#ing-out').innerHTML = '<div class="err">That file is not readable JSON.</div>'; return; }
+  // gBuilder saves a bare proof; an outbox entry wraps one. Take either shape rather than making
+  // a teacher know which of the two they were handed.
+  const proof = payload.proof || (payload.ticket ? payload : null);
+  if (!proof) {
+    $('#ing-out').innerHTML = '<div class="err">That file is not a GINI proof.</div>'; return; }
+  const r = await api('/api/submissions/accept',
+                      {proof: proof, topology: payload.topology || null});
+  if (!r.ok) { $('#ing-out').innerHTML = `<div class="err">${esc(r.error||'refused')}</div>`; return; }
+  $('#ing-file').value = '';
+  say(`Taken in — receipt ${r.receipt}.`, true);
+  $('#r-code').value = r.receipt;
+  await loadSubs();
+  openReceipt(r.receipt);
 }
 
 // ---- the report -------------------------------------------------------------
@@ -566,6 +625,8 @@ async function openReceipt(receipt){
         <span class="tag ${r.within_session?'live':'warn'}">
           ${r.minutes} min${r.within_session?'':' · over the window'}</span>
         <span class="tag draft">${r.entries} recorded actions</span>
+        ${r.late ? `<span class="tag warn">LATE — arrived after the deadline</span>` : ''}
+        ${r.accepted_by ? `<span class="tag warn">taken by ${esc(r.accepted_by)}</span>` : ''}
         ${twins ? `<span class="tag warn">same topology as ${twins} other</span>` : ''}
       </div>
       ${(r.contested_by||[]).length ? `<div class="note" style="color:var(--red)">
@@ -682,7 +743,7 @@ async function siteReset(){
         g.staff ? `, ${g.staff} staff account(s)` : ''}. Backup: ${r.backup}`, true);
   ['rs-pw', 'rs-confirm'].forEach(i => $('#' + i).value = '');
   $('#rs-courses').checked = $('#rs-staff').checked = false;
-  COURSE = ''; localStorage.removeItem('gini_tc_course');
+  COURSE = ''; localStorage.removeItem('gini_tc_course'); clearReport();
   loadStaff(); loadSite();
 }
 

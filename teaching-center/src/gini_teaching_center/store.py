@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS activity (
   status          TEXT DEFAULT 'draft',     -- draft | released
   vend_until      REAL DEFAULT 0,
   session_minutes INTEGER DEFAULT 60,
+  grace_minutes   INTEGER DEFAULT 0,       -- after valid_until: still accepted, tagged LATE
   created         REAL DEFAULT 0,
   released        REAL DEFAULT 0
 );
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS activity_submission (
   finished      REAL DEFAULT 0,
   verdict       TEXT DEFAULT '',        -- integrity of the proof, NOT quality of the work
   data          TEXT DEFAULT '',        -- proof + artifact + narration
+  late          INTEGER DEFAULT 0,      -- after the deadline, inside the grace window
   student_id    TEXT DEFAULT '',        -- who CLAIMED it; empty until they do
   claimed_at    REAL DEFAULT 0
 );
@@ -225,7 +227,7 @@ class Store:
                          "title": "TEXT DEFAULT ''", "brief": "TEXT DEFAULT ''",
                          "status": "TEXT DEFAULT 'draft'", "vend_until": "REAL DEFAULT 0",
                          "session_minutes": "INTEGER DEFAULT 60", "created": "REAL DEFAULT 0",
-                         "released": "REAL DEFAULT 0"},
+                         "grace_minutes": "INTEGER DEFAULT 0", "released": "REAL DEFAULT 0"},
             "activity_code": {"activity": "TEXT DEFAULT ''", "issued": "REAL DEFAULT 0",
                               "valid_until": "REAL DEFAULT 0", "used": "INTEGER DEFAULT 0"},
             "activity_submission": {"code": "TEXT DEFAULT ''", "receipt": "TEXT DEFAULT ''",
@@ -234,6 +236,7 @@ class Store:
                                     "started": "REAL DEFAULT 0", "finished": "REAL DEFAULT 0",
                                     "verdict": "TEXT DEFAULT ''", "data": "TEXT DEFAULT ''",
                                     "student_id": "TEXT DEFAULT ''",
+                                    "late": "INTEGER DEFAULT 0",
                                     "claimed_at": "REAL DEFAULT 0"},
             "material": {"course": "TEXT DEFAULT ''", "kind": "TEXT DEFAULT 'file'",
                          "title": "TEXT DEFAULT ''", "filename": "TEXT DEFAULT ''",
@@ -381,7 +384,7 @@ class Store:
     # -- activities ------------------------------------------------------- #
     def activity_put(self, rec: dict) -> None:
         cols = ("id", "course", "lab", "title", "brief", "status", "vend_until",
-                "session_minutes", "created", "released")
+                "session_minutes", "grace_minutes", "created", "released")
         self._run(f"INSERT OR REPLACE INTO activity({','.join(cols)}) "
                   f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
 
@@ -429,7 +432,7 @@ class Store:
         check-then-insert, and the loser must be rejected rather than silently overwriting.
         """
         cols = ("code", "receipt", "activity", "artifact_hash",
-                "ts", "started", "finished", "verdict", "data")
+                "ts", "started", "finished", "verdict", "data", "late")
         try:
             self._run(f"INSERT INTO activity_submission({','.join(cols)}) "
                       f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))

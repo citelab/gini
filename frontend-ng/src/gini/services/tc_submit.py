@@ -121,7 +121,9 @@ def check_code(url: str, code: str) -> dict:
     gBuilder accepts any well-formed code, because the check symbol is self-verifying: a code the
     course never issued still arms, and the student only finds out when they try to hand in.
 
-    Returns `{ok, title, brief, session_minutes, valid_until}` or `{ok: False, error}`.
+    Returns `{ok, title, brief, session_minutes, grace_minutes, valid_until}` or
+    `{ok: False, error}`. `grace_minutes` is how long after `valid_until` the server still takes
+    the work, tagged LATE; zero means the deadline is a hard stop.
     """
     if not url:
         return {"ok": False, "error": "No course server is configured."}
