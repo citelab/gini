@@ -245,8 +245,10 @@ class MainWindow(QMainWindow):
         self.ctx.bus.selection_changed.connect(self._on_selection_source)
         self.ctx.bus.canvas_background_clicked.connect(self._on_canvas_background)
         self.palette.element_selected.connect(self._on_palette_explain)
-        self.assistant.status_changed.connect(self.mode_indicator.set_status)
-        self.mode_indicator.set_status("Chat mode", False)   # initial
+        # `assistant.status_changed` carries (mode, busy) and NOTHING consumes it now: the Mode and
+        # Activity pills are gone, because the Ask GINI panel says both better — the chips name the
+        # mode, and the progress line names the step and how long it has run. The signal stays as
+        # the seam for whatever shows it next, since the state it reports is still real.
         self.mode_indicator.model_clicked.connect(self._open_settings)   # Model pill -> Settings
         self.mode_indicator.user_clicked.connect(self._user_menu)   # User pill -> the user menu
         # Ask GINI messages live in the right-hand pane only; the Console is for
@@ -955,9 +957,18 @@ class MainWindow(QMainWindow):
 
         # assemble: [ left (expand) ] [ centred project chip ] [ right (expand) ]
         self._make_nav_button()
-        tb.addWidget(_cluster(_build_left))
+        left, right = _cluster(_build_left), _cluster(_build_right)
+        tb.addWidget(left)
         tb.addWidget(self._nav_btn)
-        tb.addWidget(_cluster(_build_right))
+        tb.addWidget(right)
+        # Expanding alone does NOT make them equal: Qt shares the SPARE space evenly and each side
+        # keeps its own natural width underneath, so the chip sits off-centre by half the
+        # difference. The left cluster holds four trays and a Run button; the right holds two pills
+        # and a theme picker, and it shed 150px the day two pills were removed. Equal minimums make
+        # the two sides equal whatever either one is carrying.
+        widest = max(left.sizeHint().width(), right.sizeHint().width())
+        left.setMinimumWidth(widest)
+        right.setMinimumWidth(widest)
         self._refresh_icons()
 
     @staticmethod

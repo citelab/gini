@@ -1,21 +1,28 @@
-"""Four toolbar pills for GINI: the current MODE, the AI MODEL, the ACTIVITY, and YOU.
+"""Two toolbar pills for GINI: the AI MODEL and YOU.
 
-  * Mode pill     — which interaction mode is active (Chat / Explain / Wizard / Coach),
-                    coloured per mode.
   * Model pill    — the connected local model's name + status (green = reachable, amber =
                     set but not responding, grey = none). Click it to open Settings → LLM.
-  * Activity pill — a rotating spinner while the assistant is thinking, else a steady Idle.
   * User pill     — your Teaching Center enrolment: who you're signed in as, whether the course
                     server is reachable, and **how many assigned missions are still due** (0 is a
                     perfectly good answer, and worth showing — "nothing due" is information).
                     gBuilder is fully usable signed OUT, so the signed-out state is calm and grey,
                     not an error. Click it to sign in (Settings) or to jump to your assigned work.
 
-One widget paints them all so the toolbar stays tidy; the Model and User pills are click targets.
+One widget paints them both so the toolbar stays tidy; both are click targets.
+
+There were two more — a Mode pill and an Activity pill — and they are gone deliberately. Both said
+what the Ask GINI panel says better and more specifically: the mode chips name the mode, and the
+progress line names the actual step and how long it has been running, against a bare "Thinking…".
+A pill reading "Idle" said nothing at all.
+
+The cost, recorded because it is real and was accepted: the Ask GINI panel is ONE TAB. Switch to
+Inspector, GINI Source or Terminal and the chips and the progress line go with it. Nothing now
+shows, from those tabs, that Explain mode is on — and Explain changes what a click on the canvas
+does. `Assistant.status_changed` still carries (mode, busy) for whatever wants to show it next.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -29,9 +36,6 @@ class ModeIndicator(QWidget):
     def __init__(self, theme, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
-        self._mode = "Chat"
-        self._busy = False
-        self._angle = 0
         self._model_name = ""         # "" = no model connected
         self._model_ok = False        # reachable?
         self._student = ""            # "" = not enrolled in any course
@@ -40,20 +44,8 @@ class ModeIndicator(QWidget):
         self._due = 0                 # assigned missions not yet completed
         self.setFixedHeight(26)
         self.setMouseTracking(True)
-        self._timer = QTimer(self)
-        self._timer.setInterval(55)
-        self._timer.timeout.connect(self._spin)
 
     # -- state from the assistant / main window ----------------------------- #
-    def set_status(self, label: str, busy: bool) -> None:
-        self._mode = (label or "Chat").replace(" mode", "") or "Chat"
-        self._busy = busy
-        if busy and not self._timer.isActive():
-            self._timer.start()
-        elif not busy and self._timer.isActive():
-            self._timer.stop(); self._angle = 0
-        self.updateGeometry(); self.update()
-
     def set_model(self, name: str, connected: bool) -> None:
         """name='' → 'no model'; name + connected → green; name + not connected → amber."""
         self._model_name = name or ""
@@ -107,21 +99,11 @@ class ModeIndicator(QWidget):
             return QColor(t.warning)
         return QColor(t.accent) if self._due else QColor(t.success)
 
-    def _spin(self) -> None:
-        self._angle = (self._angle + 24) % 360
-        self.update()
-
     # -- geometry ----------------------------------------------------------- #
     def _font(self) -> QFont:
         from .theme.manager import sp
         f = QFont(); f.setPointSize(sp(9)); f.setBold(True)
         return f
-
-    def _mode_color(self) -> QColor:
-        t = self.theme.theme
-        return {"Explain": QColor(t.accent), "Wizard": QColor(t.accent2),
-                "Coach": QColor(t.accent2), "Tutor": QColor(t.success)}.get(
-            self._mode, QColor(t.muted))
 
     def _model_color(self) -> QColor:
         t = self.theme.theme
@@ -132,19 +114,14 @@ class ModeIndicator(QWidget):
     def _pills(self):
         """(kind, text, colour, width) for each pill, left to right."""
         fm = QFontMetrics(self._font())
-        t = self.theme.theme
 
         def w(text):
             return 30 + fm.horizontalAdvance(text)
 
         model_txt = self._model_name or "no model"
-        act_txt = "Thinking…" if self._busy else "Idle"
-        act_col = QColor(t.warning) if self._busy else QColor(t.muted)
         user_txt = self._user_text()
         return [
-            ("mode", self._mode, self._mode_color(), w(self._mode)),
             ("model", model_txt, self._model_color(), w(model_txt)),
-            ("activity", act_txt, act_col, w(act_txt)),
             ("user", user_txt, self._user_color(), w(user_txt)),
         ]
 
@@ -179,11 +156,7 @@ class ModeIndicator(QWidget):
         x = 1.5
         for kind, text, col, w in self._pills():
             self._pill_bg(p, x, w, col)
-            if kind == "activity" and self._busy:
-                p.save(); p.translate(x + 13, h / 2.0); p.rotate(self._angle)
-                pen = QPen(col, 2.4); pen.setCapStyle(Qt.RoundCap); p.setPen(pen)
-                p.drawArc(QRectF(-6, -6, 12, 12), 0, 290 * 16); p.restore()
-            elif kind == "user":
+            if kind == "user":
                 self._person(p, x + 13, h / 2.0, col)     # a person, not a status dot
             else:
                 p.setBrush(col); p.setPen(Qt.NoPen)

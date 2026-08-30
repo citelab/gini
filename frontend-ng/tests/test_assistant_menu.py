@@ -38,7 +38,7 @@ def test_model_indicator_and_wizard_fallback_to_chat():
     app, w = _win()
     a = w.assistant
     assert not a._wizard_btn.isEnabled()                       # Wizard needs a model
-    assert w.mode_indicator._pills()[1][1] == "no model"       # shown in the toolbar now
+    assert w.mode_indicator._pills()[0][1] == "no model"       # shown in the toolbar now
 
     class _Loop:
         pass

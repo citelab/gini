@@ -17,24 +17,33 @@ def _app():
 
 
 # --- toolbar indicator ------------------------------------------------------ #
-def test_four_pills_mode_model_activity_user():
+def test_two_pills_model_and_user():
+    """It had four. The Mode and Activity pills said what the Ask GINI panel says better — the
+    chips name the mode, and the progress line names the step and how long it has run against a
+    bare "Thinking…" — and "Idle" said nothing at all."""
     tm = ThemeManager(_app(), "Dark")
-    assert [p[0] for p in ModeIndicator(tm)._pills()] == ["mode", "model", "activity", "user"]
+    assert [p[0] for p in ModeIndicator(tm)._pills()] == ["model", "user"]
+
+
+def test_the_toolbar_never_says_idle_again():
+    """The pill that prompted the change: permanent furniture reporting the absence of news."""
+    tm = ThemeManager(_app(), "Dark")
+    assert not any("Idle" in p[1] or "Thinking" in p[1] for p in ModeIndicator(tm)._pills())
 
 
 def test_model_pill_shows_name_or_none():
     tm = ThemeManager(_app(), "Dark")
     mi = ModeIndicator(tm)
     mi.set_model("", False)
-    assert mi._pills()[1][1] == "no model"
+    assert mi._pills()[0][1] == "no model"
     mi.set_model("llama3.1", True)
-    assert mi._pills()[1][1] == "llama3.1"
+    assert mi._pills()[0][1] == "llama3.1"
 
 
 def test_clicking_the_model_pill_emits_only_there():
     """Hit boxes come from the layout, so no paint is needed for the pills to be clickable."""
     tm = ThemeManager(_app(), "Dark")
-    mi = ModeIndicator(tm); mi.set_status("Chat mode", False); mi.set_model("gemma", True)
+    mi = ModeIndicator(tm); mi.set_model("gemma", True)
     mi.set_enrolment("mahesh", True, 2)
     mi.resize(mi.sizeHint().width(), 26)
     model_fired, user_fired = [], []
@@ -52,7 +61,9 @@ def test_clicking_the_model_pill_emits_only_there():
     assert model_fired == [1] and user_fired == []      # model pill -> Settings
     click(mid("user"))
     assert user_fired == [1] and model_fired == [1]     # user pill -> sign in / my missions
-    click(2.0)                                          # mode pill (far left) -> nothing
+    # There is no longer a non-clickable PILL — both that remain are targets — so the dead spot is
+    # the gap between them. Clicking furniture must still emit nothing.
+    click((mi._ranges()["model"][1] + mi._ranges()["user"][0]) / 2)
     assert model_fired == [1] and user_fired == [1]
 
 

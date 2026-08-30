@@ -249,13 +249,14 @@ class Assistant(QWidget):
         self._mode_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._mode_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._mode_scroll.setFixedHeight(self._mode_bar.sizeHint().height() + 4)
-        lay.addWidget(self._mode_scroll)
+        # NOT added here. The mode row used to sit between the conversation and the box you type
+        # in, pushing them apart with controls that are switched rarely. It is added AFTER the
+        # input row below, so reading flows straight into typing.
 
-        # "thinking" spinner — shown while an LLM answer is in flight
-        self._spinner = QLabel("")
-        self._spinner.setObjectName("Muted")
-        self._spinner.setVisible(False)
-        lay.addWidget(self._spinner)
+        # The live progress line is not a widget any more — it is written into the conversation
+        # itself, as the last thing in it (see `_show_live`). A tutor's answer and the wait for
+        # that answer were rendered in two different places, and they are the same event.
+        self._live_anchor: int | None = None
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(300)
         self._spin_dots = 0
@@ -303,6 +304,7 @@ class Assistant(QWidget):
         row.addWidget(self.input, 1)
         row.addWidget(send)
         lay.addLayout(row)
+        lay.addWidget(self._mode_scroll)          # modes live BELOW what you type — see above
 
         self._post("GINI", "Hi! I can build, explain, and teach on the canvas. Try: "
                             "“add a router”, “connect R1 and S1”, “explain this topology”, "
@@ -479,6 +481,13 @@ class Assistant(QWidget):
 
     def _post(self, role: str, text: str, error: bool = False,
               markdown: bool = False) -> None:
+        # The live line has to stay LAST. A message posted mid-turn — "one question is already
+        # waiting", a mission note, the student's own next question — would otherwise land after
+        # it and strand the anchor in the middle of the log, so the next repaint would rewrite
+        # whatever happened to follow.
+        live = self._live_anchor is not None
+        if live:
+            self._clear_live()
         self._messages.append((role, text, error, markdown))
         # only paint into the log if the GINI conversation is the one on screen; otherwise it's
         # stored and shown when the student switches back (an async reply must not bleed into a
@@ -488,6 +497,8 @@ class Assistant(QWidget):
             if hasattr(self, "_stack"):
                 self._stack.setCurrentWidget(self.log)
         self.ctx.bus.assistant_message.emit(role, text)
+        if live and self._busy:
+            self._paint_progress()      # …and put it back, still at the end
         if role == "GINI":
             self._raise_self()          # surface the Ask GINI tab so replies aren't missed
 
@@ -497,6 +508,9 @@ class Assistant(QWidget):
         if getattr(self, "_convo", "gini") != "gini":
             self._render_convo()                      # a human thread is showing — repaint that
             return
+        # A repaint rebuilds the document from `_messages`, which never contains the live line —
+        # so the anchor it pointed at no longer exists and must not be reused.
+        self._live_anchor = None
         self.log.clear()
         for role, text, error, markdown in self._messages:
             self.log.append(self._msg_html(role, text, error, markdown))
@@ -1885,8 +1899,51 @@ class Assistant(QWidget):
         self._wz_banner_box.setVisible(False)
         self._post("GINI", "Goal cleared — X-ray is back to showing every valid connection.")
 
+    def _show_live(self, text: str) -> None:
+        """Put the live line at the end of the conversation, replacing whatever is there.
+
+        In the conversation rather than beside it, because the wait and the answer are the same
+        event. It used to be a label under the transcript: one line of GINI talking rendered
+        somewhere GINI never talks, while `You:` and `GINI:` sat in a panel above it. Now the
+        answer arrives exactly where the waiting was — the placeholder becomes the reply.
+
+        Always LAST, and that is an invariant `_post` maintains: anything appended while a turn is
+        running removes this first and puts it back afterwards.
+        """
+        t = self.theme.theme
+        cur = self.log.textCursor()
+        if self._live_anchor is None:
+            cur.movePosition(QTextCursor.End)
+            if not self.log.document().isEmpty():
+                cur.insertBlock()
+            lbl = QTextCharFormat()
+            lbl.setForeground(QColor(t.accent))
+            lbl.setFontWeight(QFont.Bold)
+            cur.insertText("GINI: ", lbl)
+            self._live_anchor = cur.position()
+        cur.setPosition(self._live_anchor)
+        cur.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+        cur.removeSelectedText()
+        muted = QTextCharFormat()
+        muted.setForeground(QColor(t.faint))
+        cur.insertText(text, muted)
+        self.log.setTextCursor(cur)
+        self.log.ensureCursorVisible()
+
+    def _clear_live(self, keep_label: bool = False) -> None:
+        """Take the live line out. `keep_label` leaves the "GINI: " it was written under, which is
+        what a streamed answer wants — it carries on writing in the same place."""
+        if self._live_anchor is None:
+            return
+        cur = self.log.textCursor()
+        cur.setPosition(max(0, self._live_anchor - (0 if keep_label else len("GINI: "))))
+        cur.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+        cur.removeSelectedText()
+        if not keep_label:
+            self._live_anchor = None
+
     def _paint_progress(self, reset_to: str | None = None) -> None:
-        """Draw the live indicator. GUARDED, everywhere, on purpose.
+        """Draw the live line. GUARDED, everywhere, on purpose.
 
         This is the least important thing on screen and it sits on the path of every answer. An
         exception here lands in the Qt event loop and costs the student the reply they were
@@ -1898,9 +1955,9 @@ class Assistant(QWidget):
             line = self._progress.line()
             if self._queued is not None:
                 line += f"   ·   next: {self._queued[1]}"
-            self._spinner.setText(line)
+            self._show_live(line)
         except Exception:                                    # noqa: BLE001
-            self._spinner.setText(reset_to or "")
+            pass
 
     @property
     def _busy(self) -> bool:
@@ -1968,14 +2025,12 @@ class Assistant(QWidget):
 
     def _start_spinner(self, what: str = "GINI is thinking") -> None:
         self._paint_progress(reset_to=what)
-        self._spinner.setVisible(True)
         self._spin_timer.start()
         self._emit_status()
 
     def _stop_spinner(self) -> None:
         self._spin_timer.stop()
-        self._spinner.setVisible(False)
-        self._spinner.setText("")
+        self._clear_live()
         self._emit_status()
 
     def _spin_tick(self) -> None:
@@ -2242,22 +2297,34 @@ class Assistant(QWidget):
             # Visual only. The turn is NOT over — the model may still be working through tool
             # round-trips — so the count is untouched and a queued question stays queued.
             self._spin_timer.stop()
-            self._spinner.setVisible(False)
-            self._spinner.setText("")
             self._begin_stream()
             self._streaming = True
         self._stream_buf += delta
         self._stream_insert(delta)
 
     def _begin_stream(self) -> None:
+        """Start typing the answer where the waiting was.
+
+        If a live line is showing, the answer takes its place under the same "GINI:" — the reason
+        the progress line lives in the conversation at all. Nothing jumps, and a student watches
+        one thing become another rather than one thing stop and another start elsewhere.
+        """
         t = self.theme.theme
-        cur = self.log.textCursor()
-        cur.movePosition(QTextCursor.End)
-        if not self.log.document().isEmpty():
-            cur.insertBlock()
-        lbl = QTextCharFormat(); lbl.setForeground(QColor(t.accent)); lbl.setFontWeight(QFont.Bold)
-        cur.insertText("GINI: ", lbl)
-        self._body_fmt = QTextCharFormat(); self._body_fmt.setForeground(QColor(t.text))
+        self._body_fmt = QTextCharFormat()
+        self._body_fmt.setForeground(QColor(t.text))
+        if self._live_anchor is not None:
+            self._clear_live(keep_label=True)
+            cur = self.log.textCursor()
+            cur.movePosition(QTextCursor.End)
+        else:
+            cur = self.log.textCursor()
+            cur.movePosition(QTextCursor.End)
+            if not self.log.document().isEmpty():
+                cur.insertBlock()
+            lbl = QTextCharFormat()
+            lbl.setForeground(QColor(t.accent))
+            lbl.setFontWeight(QFont.Bold)
+            cur.insertText("GINI: ", lbl)
         self.log.setTextCursor(cur)
         self.log.ensureCursorVisible()
 

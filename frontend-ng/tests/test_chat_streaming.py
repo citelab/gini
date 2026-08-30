@@ -70,10 +70,15 @@ def test_the_student_sees_the_answer_as_it_is_written(chat, qtbot):
     assert "Two LANs need a router between them." in chat.log.toPlainText()
 
 
-def test_the_spinner_gives_way_to_the_answer(chat, qtbot):
-    """It used to sit there until the whole turn finished, then the answer appeared at once."""
+def test_the_wait_becomes_the_answer_in_the_same_place(chat, qtbot):
+    """The live line is written INTO the conversation, so the answer replaces it under the same
+    "GINI:" rather than appearing in a different part of the panel. Nothing of the wait survives
+    once the answer is there."""
     _run(chat, qtbot, ["Because ", "they are on ", "different subnets."])
-    assert chat._spinner.isVisible() is False
+    shown = chat.log.toPlainText()
+    assert "Because they are on different subnets." in shown
+    assert "GINI is thinking" not in shown and "Answering" not in shown
+    assert chat._live_anchor is None
     assert chat._busy is False
 
 
@@ -263,7 +268,7 @@ def test_what_is_waiting_is_shown_while_it_waits(chat, qtbot):
     chat._ask_async("first", "")
     qtbot.wait(30)
     chat._ask_async("explain this", "R1")
-    assert "next: R1" in chat._spinner.text()
+    assert "next: R1" in chat.log.toPlainText()
     slow.gate.set()
     qtbot.waitUntil(lambda: not chat._busy, timeout=5000)
 
@@ -323,12 +328,16 @@ def test_a_queued_request_that_fails_does_not_block_the_next_one(chat, qtbot):
     assert any("that went wrong" in m[1] for m in chat._messages)
 
 
-def test_prose_arriving_hides_the_spinner_without_ending_the_turn(chat, qtbot):
+def test_prose_replaces_the_live_line_without_ending_the_turn(chat, qtbot):
     """The model may still be working through tool round-trips after its first words. Treating
     the first token as the end of the turn would let a queued question start alongside it."""
     chat._llm_active = 1
+    chat._paint_progress(reset_to="Answering")
+    assert "Answering" in chat.log.toPlainText()
     chat._on_chunk("Two LANs ")
-    assert chat._spinner.isVisible() is False
+    shown = chat.log.toPlainText()
+    assert "Two LANs" in shown and "Answering" not in shown
+    assert shown.count("GINI:") == chat.log.toPlainText().count("GINI:")   # no second label
     assert chat._busy is True
     chat._streaming = False
 

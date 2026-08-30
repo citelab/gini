@@ -75,7 +75,8 @@ def test_the_pill_is_a_click_target_before_it_is_ever_painted():
     assert x1 > x0
     assert p._hit((x0 + x1) / 2) == "user"
     assert p._hit(p._ranges()["model"][0] + 2) == "model"
-    assert p._hit(2) == ""                   # the Mode pill isn't clickable
+    # Both remaining pills are click targets, so the dead spot is the gap between them.
+    assert p._hit((p._ranges()["model"][1] + p._ranges()["user"][0]) / 2) == ""
 
 
 def test_signing_in_with_no_credentials_sends_you_to_settings():
