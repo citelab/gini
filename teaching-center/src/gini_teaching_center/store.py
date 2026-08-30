@@ -106,6 +106,45 @@ CREATE TABLE IF NOT EXISTS material (
   uploaded REAL DEFAULT 0
 );
 
+-- A REFERENCE work — a book, a spec, an RFC set — indexed once and pointed at by many courses.
+--
+-- Deliberately NOT a material. A material belongs to one course and a teacher owns it; a reference
+-- is the same text for everybody, so modelling it per course would mean holding N copies of one
+-- book and letting one teacher's re-index land in another teacher's course. The join table is what
+-- makes it opt-in: a networking course does not want xv6 sections answering its questions.
+--
+-- `licence` and `attribution` are columns rather than a comment because carrying them is a
+-- CONDITION of using most of this material. The xv6 book is MIT-licensed "provided they include
+-- the original copyright notice and license terms" — so the notice has to live somewhere the
+-- console can show and the citation can carry, not in a source file nobody reads.
+CREATE TABLE IF NOT EXISTS reference (
+  id          TEXT PRIMARY KEY,           -- "xv6-riscv-book"
+  title       TEXT DEFAULT '',
+  source_url  TEXT DEFAULT '',
+  licence     TEXT DEFAULT '',
+  attribution TEXT DEFAULT '',            -- the copyright line, shown and cited verbatim
+  indexed     REAL DEFAULT 0,
+  sections    INTEGER DEFAULT 0
+);
+
+-- One retrievable unit. The book's own authors chunked it into ~1,100-word sections with stable
+-- URLs, so the retrieval unit is theirs, not a guess made by a splitter.
+CREATE TABLE IF NOT EXISTS reference_section (
+  id       TEXT PRIMARY KEY,              -- "<reference>/<number>"
+  ref      TEXT NOT NULL,
+  number   TEXT DEFAULT '',               -- "7.5"
+  title    TEXT DEFAULT '',               -- "Sleep and wakeup"
+  url      TEXT DEFAULT '',               -- where a student reads the whole thing
+  body     TEXT DEFAULT '',
+  ord      INTEGER DEFAULT 0              -- reading order, so neighbours can be offered
+);
+
+CREATE TABLE IF NOT EXISTS course_reference (
+  course TEXT NOT NULL,
+  ref    TEXT NOT NULL,
+  PRIMARY KEY (course, ref)
+);
+
 -- Every attempt to claim a receipt, including the refused ones. Refused attempts are the WHOLE
 -- point: a second claim is turned away, but the teacher must still learn who made it, or "escalate
 -- to the students" is impossible and the refusal is just a dead end for one of them.
@@ -129,6 +168,32 @@ CREATE INDEX IF NOT EXISTS ix_activity_sub_act ON activity_submission(activity);
 CREATE INDEX IF NOT EXISTS ix_activity_sub_artifact ON activity_submission(artifact_hash);
 CREATE INDEX IF NOT EXISTS ix_material_course ON material(course, uploaded);
 CREATE INDEX IF NOT EXISTS ix_claim_receipt ON claim_attempt(receipt, ts);
+CREATE INDEX IF NOT EXISTS ix_ref_section ON reference_section(ref, ord);
+
+-- The full-text index over the sections. FTS5 ships with the sqlite3 in the standard library, and
+-- its BM25 ranking is the whole reason indexing a book's PROSE is worth doing: the term-overlap
+-- scorer in search.py reads a question's words against a TITLE, and "why is my process stuck"
+-- shares no word at all with "Sleep and wakeup". Content indexed on that ranker would be noise.
+--
+-- `content=` makes this an EXTERNAL-CONTENT index: FTS5 stores only the terms and reads the text
+-- back from reference_section, so the prose is not held twice. The triggers below are what an
+-- external-content table requires to stay in step — without them a re-index leaves the old terms
+-- pointing at rows that no longer say that.
+CREATE VIRTUAL TABLE IF NOT EXISTS reference_fts USING fts5(
+  title, body, content='reference_section', content_rowid='rowid', tokenize='porter unicode61');
+
+CREATE TRIGGER IF NOT EXISTS reference_fts_ai AFTER INSERT ON reference_section BEGIN
+  INSERT INTO reference_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS reference_fts_ad AFTER DELETE ON reference_section BEGIN
+  INSERT INTO reference_fts(reference_fts, rowid, title, body)
+    VALUES('delete', old.rowid, old.title, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS reference_fts_au AFTER UPDATE ON reference_section BEGIN
+  INSERT INTO reference_fts(reference_fts, rowid, title, body)
+    VALUES('delete', old.rowid, old.title, old.body);
+  INSERT INTO reference_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+END;
 """
 
 
@@ -242,6 +307,12 @@ class Store:
                          "title": "TEXT DEFAULT ''", "filename": "TEXT DEFAULT ''",
                          "url": "TEXT DEFAULT ''", "size": "INTEGER DEFAULT 0",
                          "uploaded": "REAL DEFAULT 0"},
+            "reference": {"title": "TEXT DEFAULT ''", "source_url": "TEXT DEFAULT ''",
+                          "licence": "TEXT DEFAULT ''", "attribution": "TEXT DEFAULT ''",
+                          "indexed": "REAL DEFAULT 0", "sections": "INTEGER DEFAULT 0"},
+            "reference_section": {"ref": "TEXT DEFAULT ''", "number": "TEXT DEFAULT ''",
+                                  "title": "TEXT DEFAULT ''", "url": "TEXT DEFAULT ''",
+                                  "body": "TEXT DEFAULT ''", "ord": "INTEGER DEFAULT 0"},
         }
         for table, cols in want.items():
             have = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
@@ -513,6 +584,102 @@ class Store:
 
     def material_delete(self, mid: str) -> None:
         self._run("DELETE FROM material WHERE id=?", (mid,))
+
+    # -- references ------------------------------------------------------- #
+    def reference_put(self, rec: dict) -> None:
+        cols = ("id", "title", "source_url", "licence", "attribution", "indexed", "sections")
+        self._run(f"INSERT OR REPLACE INTO reference({','.join(cols)}) "
+                  f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
+
+    def references(self) -> list[dict]:
+        return self._all("SELECT * FROM reference ORDER BY title")
+
+    def reference(self, rid: str) -> dict | None:
+        return self._one("SELECT * FROM reference WHERE id=?", (rid,))
+
+    def sections_put(self, ref: str, rows: list[dict]) -> int:
+        """Replace a reference's sections wholesale — a re-index is a REPLACEMENT, not a merge.
+
+        Deleting first is what keeps the full-text index honest: a section the source dropped would
+        otherwise keep answering questions out of a book that no longer contains it. The triggers
+        carry the deletion into FTS5.
+        """
+        with self.lock:
+            self.db.execute("DELETE FROM reference_section WHERE ref=?", (ref,))
+            cols = ("id", "ref", "number", "title", "url", "body", "ord")
+            self.db.executemany(
+                f"INSERT INTO reference_section({','.join(cols)}) "
+                f"VALUES({','.join('?' * len(cols))})",
+                [tuple(r.get(c, "") for c in cols) for r in rows])
+            self.db.execute("UPDATE reference SET sections=? WHERE id=?", (len(rows), ref))
+            self.db.commit()
+        return len(rows)
+
+    def reference_delete(self, rid: str) -> None:
+        with self.lock:
+            self.db.execute("DELETE FROM reference_section WHERE ref=?", (rid,))
+            self.db.execute("DELETE FROM course_reference WHERE ref=?", (rid,))
+            self.db.execute("DELETE FROM reference WHERE id=?", (rid,))
+            self.db.commit()
+
+    def course_refs(self, course: str) -> list[str]:
+        return [r["ref"] for r in
+                self._all("SELECT ref FROM course_reference WHERE course=?", (course,))]
+
+    def course_ref_set(self, course: str, ref: str, on: bool) -> None:
+        """Attach or detach. Opt-in per course, so a networking course is not answered out of an
+        operating-systems book that happens to share the word 'block'."""
+        if on:
+            self._run("INSERT OR IGNORE INTO course_reference(course, ref) VALUES(?,?)",
+                      (course, ref))
+        else:
+            self._run("DELETE FROM course_reference WHERE course=? AND ref=?", (course, ref))
+
+    #: What separates a match from a coincidence. FTS5 returns EVERY row sharing a single term, so
+    #: a question about processes otherwise drags in every section that uses the word once.
+    #:
+    #: RELATIVE, not an absolute score, because BM25 is relative to the corpus: a term's weight
+    #: comes from how rare it is, so the same match scores differently in a three-section index and
+    #: a ninety-section one, and in a one-section index every term is in every document and the
+    #: whole thing collapses to zero. An absolute floor was tried and rejected everything in a
+    #: freshly re-indexed book. A fraction of the best hit holds whatever the corpus size.
+    TOP_FRACTION = 0.25
+
+    def search_sections(self, query: str, refs: list[str], limit: int = 3) -> list[dict]:
+        """BM25 over the sections of the references a course has attached. Never raises.
+
+        A student's question is not an FTS5 expression — an unbalanced quote or a bare `AND` is a
+        syntax error, and a tutor that returns a database error because someone typed an apostrophe
+        is worse than one that finds nothing. Every term is quoted and OR-ed, which is also what
+        makes BM25 do the work: it weighs how rare each matched term is instead of counting them.
+        """
+        if not query or not refs:
+            return []
+        import re as _re
+        terms = [w for w in _re.findall(r"[A-Za-z0-9_]+", query) if len(w) > 2][:12]
+        if not terms:
+            return []
+        match = " OR ".join(f'"{w}"' for w in terms)
+        holes = ",".join("?" * len(refs))
+        try:
+            with self.lock:
+                rows = self.db.execute(
+                    f"SELECT s.*, bm25(reference_fts, 4.0, 1.0) AS score "
+                    f"  FROM reference_fts f JOIN reference_section s ON s.rowid = f.rowid "
+                    f" WHERE reference_fts MATCH ? AND s.ref IN ({holes}) "
+                    f" ORDER BY score LIMIT ?", (match, *refs, max(1, int(limit)))).fetchall()
+        except sqlite3.Error:
+            return []
+        # bm25() returns a NEGATIVE number, better matches more negative. Flipped here so every
+        # caller sees the same "higher is better" that activities and materials already use.
+        hits = [{**dict(r), "score": -float(r["score"])} for r in rows]
+        if not hits:
+            return []
+        # A term-coverage rule was tried alongside this and removed: counting a query's terms in
+        # the text with plain substring matching disagrees with FTS5, which stems — "waiting" never
+        # matched "wait", so it under-counted and threw away the best hit there was.
+        best = max(h["score"] for h in hits)
+        return [h for h in hits if not (best > 0 and h["score"] < best * self.TOP_FRACTION)]
 
     # -- the site as a whole ---------------------------------------------- #
     def site_stats(self) -> dict:
