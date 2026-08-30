@@ -191,3 +191,37 @@ def test_an_older_database_gains_the_reference_tables(tmp_path):
     st.reference_put(XV6)
     st.sections_put("xv6-riscv-book", SECTIONS)
     assert st.search_sections("page table", ["xv6-riscv-book"])
+
+
+# ---- a question that is not about this book ------------------------------------- #
+# Found against the real 81-section xv6 index: "kubernetes ingress controller" returned three
+# sections of an operating-systems book, every one of them on the strength of "controller" alone.
+# The relative cutoff could not see it — all three were equally bad, so a fraction of the best
+# kept them all. Coverage is the rule that can: how much of the question did this actually answer?
+@pytest.mark.parametrize("nonsense", [
+    "kubernetes ingress controller",
+    "how do I bake a cake",
+    "postgres replication lag",
+])
+def test_a_question_about_something_else_finds_nothing(store, nonsense):
+    assert store.search_sections(nonsense, ["xv6-riscv-book"]) == []
+
+
+def test_coverage_is_counted_on_a_prefix_because_the_index_stems(store):
+    """FTS5 stems and Python does not. An exact substring test says "waiting" is absent from "wait
+    yields", under-counts the best hit there is, and throws it away — which is exactly what an
+    earlier version of this rule did."""
+    hits = store.search_sections("a process waiting on a sleeping channel", ["xv6-riscv-book"])
+    assert _titles(hits) == ["Sleep and wakeup"]
+
+
+def test_a_short_question_is_not_held_to_the_coverage_rule(store):
+    """Two words are all-or-nothing anyway; requiring two of two would only ever restate what FTS
+    already decided."""
+    assert _titles(store.search_sections("page table", ["xv6-riscv-book"])) == ["Paging hardware"]
+
+
+def test_at_most_the_limit_comes_back(store):
+    """Filtering happens after the query, so the query asks for more than it needs — without the
+    final truncation a permissive question would return everything that survived."""
+    assert len(store.search_sections("process page lock", ["xv6-riscv-book"], limit=1)) <= 1

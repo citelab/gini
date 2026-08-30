@@ -644,6 +644,12 @@ class Store:
     #: whole thing collapses to zero. An absolute floor was tried and rejected everything in a
     #: freshly re-indexed book. A fraction of the best hit holds whatever the corpus size.
     TOP_FRACTION = 0.25
+    #: …and a question with several distinct terms must not be answered by a section that matched
+    #: ONE of them. "kubernetes ingress controller" found three sections of an operating-systems
+    #: book, all on the strength of "controller", and the relative cutoff could not see it: every
+    #: hit was equally bad, so a fraction of the best kept them all.
+    MIN_TERMS_COVERED = 2
+    COVERAGE_APPLIES_FROM = 3        # queries shorter than this are all-or-nothing anyway
 
     def search_sections(self, query: str, refs: list[str], limit: int = 3) -> list[dict]:
         """BM25 over the sections of the references a course has attached. Never raises.
@@ -667,7 +673,8 @@ class Store:
                     f"SELECT s.*, bm25(reference_fts, 4.0, 1.0) AS score "
                     f"  FROM reference_fts f JOIN reference_section s ON s.rowid = f.rowid "
                     f" WHERE reference_fts MATCH ? AND s.ref IN ({holes}) "
-                    f" ORDER BY score LIMIT ?", (match, *refs, max(1, int(limit)))).fetchall()
+                    f" ORDER BY score LIMIT ?",
+                    (match, *refs, max(1, int(limit)) * 4)).fetchall()
         except sqlite3.Error:
             return []
         # bm25() returns a NEGATIVE number, better matches more negative. Flipped here so every
@@ -675,11 +682,35 @@ class Store:
         hits = [{**dict(r), "score": -float(r["score"])} for r in rows]
         if not hits:
             return []
-        # A term-coverage rule was tried alongside this and removed: counting a query's terms in
-        # the text with plain substring matching disagrees with FTS5, which stems — "waiting" never
-        # matched "wait", so it under-counted and threw away the best hit there was.
         best = max(h["score"] for h in hits)
-        return [h for h in hits if not (best > 0 and h["score"] < best * self.TOP_FRACTION)]
+        wanted = {w.lower() for w in terms}
+        enough = len(wanted) >= self.COVERAGE_APPLIES_FROM
+        keep = []
+        for h in hits:
+            if best > 0 and h["score"] < best * self.TOP_FRACTION:
+                continue
+            if enough and self._covered(h, wanted) < self.MIN_TERMS_COVERED:
+                continue
+            keep.append(h)
+        return keep[:max(1, int(limit))]
+
+    @staticmethod
+    def _covered(hit: dict, wanted: set) -> int:
+        """How many of the question's terms this section actually contains.
+
+        Compared on the first four characters of each word, on BOTH sides, because FTS5 stems and
+        Python does not. A substring test says "waiting" is absent from "wait yields" and throws
+        away the best hit there is; a five-character prefix says the same thing, because the stem
+        is four. Four characters, matched prefix-to-prefix, reaches "wait" from "waiting" and
+        "process" from "processes" without needing a stemmer of our own.
+
+        A crude approximation is the right tool here: this only ever COUNTS. The ranking stays
+        BM25's, and this decides one thing — whether enough of the question was answered at all.
+        """
+        import re as _re
+        text = (hit.get("title", "") + " " + hit.get("body", "")).lower()
+        stems = {w[:4] for w in _re.findall(r"[a-z0-9]+", text) if len(w) > 2}
+        return sum(1 for w in wanted if w[:4] in stems)
 
     # -- the site as a whole ---------------------------------------------- #
     def site_stats(self) -> dict:
