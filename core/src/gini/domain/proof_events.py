@@ -35,11 +35,12 @@ RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE = (
 COMMAND = "command"
 WITNESS, OBJECTIVE = "witness", "objective"
 LOAD = "load"
+STOPPED, RESUMED = "stopped", "resumed"
 
 CONSTRUCTION = (PLACE, REMOVE, CONNECT, DISCONNECT, CONFIGURE)
 OPERATION = (RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE, COMMAND)
 WITNESSED = (WITNESS, OBJECTIVE)
-PROVENANCE = (LOAD, PREEXISTING, SUBMIT)
+PROVENANCE = (LOAD, PREEXISTING, SUBMIT, STOPPED, RESUMED)
 
 # bus signal -> the kind it becomes. The recorder subscribes to exactly these.
 SIGNAL_KINDS = {
@@ -229,6 +230,36 @@ def preexisting(topo_dict: dict) -> tuple[str, dict]:
                          "links": len(list((topo_dict or {}).get("links", []) or [])),
                          "ids": sorted(str(d.get("id", "")) for d in devices),
                          "names": sorted(clip(d.get("name", ""), 64) for d in devices)}
+
+
+def stopped(topo_dict: dict) -> tuple[str, dict]:
+    """The student stopped recording. Written INTO the chain, as the last thing before it closes.
+
+    A gap in a provenance chain has to be part of the chain, or it is not provenance. Without this
+    entry a student stops, works for an hour unwatched, starts again under the same code, and the
+    chain reads as one continuous session — the elements would show up unaccounted for, but with
+    nothing to say why. This says when the watching stopped and what was on the canvas at that
+    moment, so the same reading holds whether or not anybody ever asks.
+    """
+    devices = list((topo_dict or {}).get("devices", []) or [])
+    return STOPPED, {"devices": len(devices),
+                     "links": len(list((topo_dict or {}).get("links", []) or [])),
+                     "ids": sorted(str(d.get("id", "")) for d in devices)}
+
+
+def resumed(topo_dict: dict, away: float = 0.0) -> tuple[str, dict]:
+    """Recording picked back up under the same code, and how long it was off for.
+
+    The ids are recorded but deliberately NOT counted as `preexisting` by
+    `proof.account_for_artifact`: work that appeared while nobody was watching stays unaccounted
+    for. Treating it as "already there" would turn stop-and-resume into a way to launder an
+    import, which is the exact forgery the chain exists to catch.
+    """
+    devices = list((topo_dict or {}).get("devices", []) or [])
+    return RESUMED, {"devices": len(devices),
+                     "links": len(list((topo_dict or {}).get("links", []) or [])),
+                     "away": round(max(0.0, float(away or 0.0)), 3),
+                     "ids": sorted(str(d.get("id", "")) for d in devices)}
 
 
 def submit(artifact: dict, objectives) -> tuple[str, dict]:

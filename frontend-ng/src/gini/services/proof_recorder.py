@@ -73,10 +73,6 @@ class ProofRecorder:
         self._now = now or time.time
         self._chain: _proof.Chain | None = None
         self._ticket: _ticket.Ticket | None = None
-        # The code we last stopped without finishing. Kept so pausing is reversible: the chain is
-        # already on disk, and this is what lets the UI offer the old code back in one click
-        # instead of asking a student to find the slip of paper again.
-        self._paused: _ticket.Ticket | None = None
         # Not every signal reaches us on the GUI thread. `rider_ran` is emitted from a rider's
         # reader thread, and Qt delivers to a plain (non-QObject) slot directly in the emitting
         # thread — so two appends really can race, and an interleaved append would compute `prev`
@@ -127,11 +123,6 @@ class ProofRecorder:
                 "short": self._ticket.short if self._ticket else "",
                 "count": self.count,
                 "submitted": bool(self._chain and self._chain.has_submitted()),
-                "paused": self._paused.pretty if self._paused else "",
-                "paused_short": self._paused.short if self._paused else "",
-                # Only offer to resume something that is really still there. A chain the student
-                # deleted, or one from another machine, must not be advertised as resumable.
-                "can_resume": self.can_resume,
                 "error": self.last_error}
 
     # -- arming ------------------------------------------------------------- #
@@ -156,47 +147,48 @@ class ProofRecorder:
                 gini_version=gini_version())
             self.store.write_chain(tk.code, chain)
         self._chain, self._ticket = chain, tk
-        self._paused = None                 # whatever we were offering to resume, this replaces it
         self._snapshot()
         if fresh:
             # Say what the canvas already held, at the moment it was armed. A student who builds
             # first and arms afterwards has not cheated, but the chain cannot claim to have
             # watched that work — so it states the truth rather than implying otherwise.
             self._record(ev.preexisting(self._topology_dict()))
+        else:
+            # Picking a code back up joins one session to another with a hole between them, and
+            # the hole belongs in the chain. `away` is measured from the last entry, which is the
+            # `stopped` one when the student cancelled from inside gBuilder.
+            head = chain.head
+            away = max(0.0, self._now() - float(head.t)) if head else 0.0
+            self._record(ev.resumed(self._topology_dict(), away=away))
         self.last_error = ""
         self._changed()
         n = self.count
         return True, (f"Recording under {tk.pretty}." if fresh else
                       f"Resumed recording under {tk.pretty} — {n} event(s) already in the chain.")
 
-    @property
-    def can_resume(self) -> bool:
-        """True when a paused code's chain is still on disk and could be picked back up."""
-        if self._paused is None:
-            return False
-        try:
-            return bool(self.store.exists(self._paused.code))
-        except Exception:                   # noqa: BLE001 — a store that cannot answer offers nothing
-            return False
+    def cancel(self) -> None:
+        """Leave recording mode. The chain stays on disk; entering the same code resumes it.
 
-    def disarm(self) -> None:
-        """Stop recording. The chain stays on disk: re-entering the same code resumes it.
+        Recording used to be a one-way door — nothing disarmed, not even generating a proof — so a
+        student who armed the wrong code had to restart gBuilder. It was then a *pause*, with the
+        code held and offered back on a button, which made leaving the mode only half a departure:
+        the strip still named the code, and gBuilder still behaved as though the session were
+        merely suspended.
 
-        The code is remembered as `paused` rather than forgotten. Recording used to be a one-way
-        door — nothing disarmed, not even generating a proof — so a student who armed the wrong
-        code, or wanted to stop being recorded for a moment, had to restart gBuilder. Pausing is
-        only a safe thing to offer if coming back is one click.
+        Cancel is the whole departure. Nothing is remembered in memory and nothing about the last
+        code is shown afterwards. Nothing is LOST either — the chain is on disk under its code, and
+        typing that code again appends to it — so a student is never trading their morning's work
+        for the ability to stop being recorded.
+
+        The last thing written is that recording stopped, because a gap the chain does not mention
+        is a gap nobody can weigh.
         """
-        self._paused = self._ticket or self._paused
+        if self._chain is not None:
+            self._record(ev.stopped(self._topology_dict()))
         self._chain = None
         self._ticket = None
         self._changed()
 
-    def resume(self) -> tuple[bool, str]:
-        """Pick the paused code back up. Returns (ok, message), like `arm`."""
-        if self._paused is None:
-            return False, "There is nothing to resume."
-        return self.arm(self._paused.code)
 
     def _assignment(self) -> str:
         """What this chain is *for*, when the caller does not say.

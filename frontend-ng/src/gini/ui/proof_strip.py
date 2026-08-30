@@ -2,8 +2,8 @@
 
 States:
 
-  * **unarmed** — a code box, and a *Resume* button when a code was paused rather than finished.
-  * **armed** — a large ``● REC`` block, the code, the event counter, *Generate proof*, *Pause*.
+  * **unarmed** — a code box, and nothing else: no trace of whatever code was last recorded.
+  * **armed** — a large ``● REC`` block, the code, the event counter, *Generate proof*, *Cancel*.
   * **sending** — the same, plus a progress bar while the package goes to the course server.
 
 The recording indicator is the whole reason this lives on the always-visible strip rather than
@@ -12,9 +12,14 @@ recorded, so the state is on screen the entire time and the event counter moves 
 deliberately loud: recording is a mode, and a mode you cannot see is a mode you forget you are in.
 
 Recording used to be a one-way door. Nothing disarmed — not even generating a proof, which left the
-strip saying "recording" for ever — so arming the wrong code meant restarting gBuilder. *Pause*
-stops it and keeps the code; the chain is already on disk, so resuming appends to the same chain
-rather than starting a second one.
+strip saying "recording" for ever — so arming the wrong code meant restarting gBuilder. *Pause* was
+the first fix and only half a departure: it kept the code on screen and offered it back on a
+button, so the mode was left but not really exited. *Cancel* is the whole departure — the strip
+goes back to a bare code box and says nothing about what was being recorded a moment ago.
+
+Nothing is lost by cancelling. The chain lives on disk under its code, and typing that code again
+appends to it, so a student never trades their morning's work for the ability to stop recording.
+That is a property of `services.proof_recorder.arm`, not of this widget.
 
 Work that has not reached the Teaching Center is shown here too, with how long it has been waiting
 and what went wrong. The outbox has always recorded that; none of it ever reached the screen, so a
@@ -88,26 +93,18 @@ class ProofStrip(QWidget):
         self.state.hide()
         row.addWidget(self.state)
 
-        # Offered only when a paused code's chain is still on disk, so it can never advertise
-        # resuming something that is not there.
-        self.resume = QPushButton("Resume")
-        self.resume.setObjectName("ProofResume")
-        self.resume.clicked.connect(self._resume)
-        self.resume.hide()
-        row.addWidget(self.resume)
-
         self.button = QPushButton("Record")
         self.button.setObjectName("ProofButton")
         self.button.clicked.connect(self._clicked)
         row.addWidget(self.button)
 
-        self.pause = QPushButton("Pause")
-        self.pause.setObjectName("ProofPause")
-        self.pause.setToolTip("Stop recording. Your work so far is kept and you can resume "
-                              "under the same code.")
-        self.pause.clicked.connect(self._pause)
-        self.pause.hide()
-        row.addWidget(self.pause)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.setObjectName("ProofCancel")
+        self.cancel.setToolTip("Leave recording mode. Your work so far is kept — enter the same "
+                               "code again to carry on where you left off.")
+        self.cancel.clicked.connect(self._cancel)
+        self.cancel.hide()
+        row.addWidget(self.cancel)
 
         # Shown only while something is actually in flight to the course server. Indeterminate:
         # an HTTP POST gives no usable percentage, and a fake one would be a lie about progress.
@@ -161,23 +158,21 @@ class ProofStrip(QWidget):
         else:
             self._arm()
 
-    def _pause(self) -> None:
-        """Stop recording without finishing. The chain stays on disk and the code is remembered."""
+    def _cancel(self) -> None:
+        """Leave recording mode entirely.
+
+        The message deliberately does NOT name the code that was being recorded. Cancelling is a
+        student saying they are done being watched for now, and a strip that answers by printing
+        the code back at them has not really stopped. They can still carry on — the chain is on
+        disk — but the way back is typing the code, the same as the way in.
+        """
         if self.recorder is None or not self.recorder.armed:
             return
-        pretty = (self.recorder.status() or {}).get("ticket", "")
-        self.recorder.disarm()
-        self._say(f"Paused · {pretty} · your work is kept — press Resume to carry on.")
+        self.recorder.cancel()
+        self.code.clear()
+        self._say("Recording cancelled. Your work so far is kept — enter the same code again to "
+                  "carry on where you left off.")
         self.refresh(keep_hint=True)
-
-    def _resume(self) -> None:
-        if self.recorder is None:
-            return
-        ok, message = self.recorder.resume()
-        self._say(message, bad=not ok)
-        self.refresh(keep_hint=True)
-        if ok:
-            self.flush_outbox()
 
     def _tc_url(self) -> str:
         """Where the Teaching Center is, or "" if this gBuilder is not attached to a course.
@@ -449,9 +444,8 @@ class ProofStrip(QWidget):
         self.style().unpolish(self); self.style().polish(self)
         if armed:
             self.code.hide()
-            self.resume.hide()
             self.state.show()
-            self.pause.show()
+            self.cancel.show()
             # Deliberately loud. Recording is a MODE, and a mode you cannot see is a mode you
             # forget you are in — a student who never notices it is on cannot tell you why their
             # afternoon is in a chain, and one who never notices it is off loses the afternoon.
@@ -465,22 +459,15 @@ class ProofStrip(QWidget):
             if not keep_hint:
                 self._say("Your work is being recorded under this code.")
         else:
+            # Unarmed is unarmed: one code box and the ordinary prompt, whether the student has
+            # never recorded anything or cancelled a session ten seconds ago. Nothing here may
+            # depend on what the last code was — that is the whole difference from pausing.
             self.state.hide()
-            self.pause.hide()
+            self.cancel.hide()
             self.code.show()
             self.button.setText("Record")
-            # Only when the chain is really still there — see recorder.can_resume.
-            if s.get("can_resume"):
-                self.resume.setText(f"Resume {s.get('paused_short', '')}")
-                self.resume.setToolTip(f"Carry on recording under {s.get('paused', '')}. "
-                                       f"Your earlier work is still in that chain.")
-                self.resume.show()
-            else:
-                self.resume.hide()
             if not keep_hint:
-                self._say("Enter your assignment code to record proof of your work."
-                          if not s.get("can_resume") else
-                          f"Paused. Resume {s.get('paused', '')}, or enter a different code.")
+                self._say("Enter your assignment code to record proof of your work.")
         self._refresh_pending()
 
     def _refresh_pending(self) -> None:
@@ -534,12 +521,11 @@ class ProofStrip(QWidget):
             QProgressBar#ProofBar {{ background: {t.bg3}; border: none; border-radius: 2px;
                                      max-width: 120px; }}
             QProgressBar#ProofBar::chunk {{ background: {t.accent}; border-radius: 2px; }}
-            QPushButton#ProofPause, QPushButton#ProofResume, QPushButton#ProofRetry {{
+            QPushButton#ProofCancel, QPushButton#ProofRetry {{
                 background: {t.panel2}; color: {t.text}; border: 1px solid {t.line};
                 border-radius: 5px; padding: 3px 10px; font-size: {sp(11)}px; }}
-            QPushButton#ProofPause:hover, QPushButton#ProofResume:hover,
+            QPushButton#ProofCancel:hover,
             QPushButton#ProofRetry:hover {{ border-color: {t.accent}; }}
-            QPushButton#ProofResume {{ border-color: {t.accent}; }}
             QLineEdit#ProofCode {{ background: {t.bg3}; color: {t.text};
                                    border: 1px solid {t.line}; border-radius: 5px;
                                    padding: 3px 6px; font-size: {sp(12)}px;

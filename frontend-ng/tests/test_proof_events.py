@@ -6,11 +6,14 @@ Docker anywhere near it. The fake bus below is the same shape as `app.context.Ev
 signal is renamed there, these tests keep passing and the recorder silently records less, which is
 why `test_the_recorder_subscribes_to_signals_the_real_bus_has` pins the names against the real one.
 """
+import time
+
 import pytest
 
 from gini.domain import proof as P
 from gini.domain import proof_events as ev
 from gini.domain.objectives import Objective, ObjectiveResult
+from gini.domain import ticket as _ticket
 from gini.domain.ticket import mint
 from gini.domain.topology import Topology
 from gini.services.proof_recorder import ProofRecorder
@@ -209,13 +212,18 @@ def test_the_assignment_defaults_to_the_experiment_name(rec):
 
 
 def test_recording_resumes_across_a_restart(rec, tmp_path):
+    """The same chain, continued — plus one entry saying it was picked back up. gBuilder closing
+    is a gap in the watching exactly as cancelling is, and the chain says so either way."""
     rec.arm(CODE)
     _build_a_lan(rec)
     before = rec.count
 
     later = ProofRecorder(FakeCtx(), store=P.ChainStore(tmp_path))
     ok, message = later.arm(CODE)
-    assert ok and later.count == before and "Resumed" in message
+    assert ok and "Resumed" in message
+    assert later.count == before + 1
+    assert later._chain.entries[-1].kind == ev.RESUMED
+    assert later._chain.kinds().get(ev.PLACE, 0) == 2      # not a second chain
     assert P.verify_entries(later._chain.entries).ok
 
 
@@ -468,67 +476,115 @@ def test_a_failing_ui_callback_does_not_stop_recording(rec):
     assert sum(1 for k in _kinds(rec) if k == ev.PLACE) == 2
 
 
-# ---- pausing, and coming back ------------------------------------------------ #
-def test_pausing_keeps_the_chain_and_offers_the_code_back(rec):
+# ---- cancelling, and coming back --------------------------------------------- #
+def test_cancelling_leaves_the_mode_and_keeps_the_chain(rec):
     """Recording used to be a one-way door: nothing disarmed — not even generating a proof — so a
-    student who armed the wrong code had to restart gBuilder to get out. Pausing is only safe to
-    offer if coming back is one click and loses nothing."""
+    student who armed the wrong code had to restart gBuilder to get out. Then it was a *pause*,
+    which held the code and offered it back on a button: the mode was left but not exited. Cancel
+    is the whole departure, and it is only safe to offer because nothing is lost."""
     rec.arm(CODE)
     _build_a_lan(rec)
     before = rec.count
     assert before > 0
 
-    rec.disarm()
-    assert rec.armed is False                       # really stopped
-    st = rec.status()
-    assert st["can_resume"] is True                 # …and the way back is on offer
-    assert st["paused"] and st["paused_short"]
-
-    ok, message = rec.resume()
+    rec.cancel()
+    assert rec.armed is False
+    ok, message = rec.arm(CODE)                     # the way back is the code, same as the way in
     assert ok and rec.armed is True
-    assert rec.count == before                      # SAME chain, not a second one
-    assert "Resumed" in message and str(before) in message
+    assert "Resumed" in message
+    kinds = rec._chain.kinds()
+    assert kinds.get(ev.PLACE, 0) == 2              # the SAME chain, not a second one
 
 
-def test_nothing_is_recorded_while_paused(rec):
-    """A pause that still recorded would be a lie told in the one place that must not lie."""
+def test_cancelling_shows_nothing_about_the_code_afterwards(rec):
+    """The point of the change. A strip that answers 'stop recording me' by printing the code back
+    has not stopped; the status the widget paints from must carry no trace of it."""
+    rec.arm(CODE)
+    rec.cancel()
+    st = rec.status()
+    assert st["armed"] is False
+    assert st["ticket"] == "" and st["short"] == ""
+    flat = " ".join(str(v) for v in st.values())
+    assert CODE.replace("-", "") not in flat.replace("-", "")
+
+
+def test_nothing_is_recorded_after_cancelling(rec):
+    """A stop that still recorded would be a lie told in the one place that must not lie."""
     rec.arm(CODE)
     _build_a_lan(rec)
-    rec.disarm()
-    at_pause = rec.count                            # 0 while unarmed — nothing is loaded
+    rec.cancel()
     rec.ctx.add_device("router")                    # work done off the record
-    rec.resume()
-    assert rec.count == at_pause or rec.count > 0   # resumed chain, unchanged by the paused work
-    kinds = rec._chain.kinds()
-    assert kinds.get("place", 0) == 2               # the two from _build_a_lan, not three
+    rec.arm(CODE)
+    assert rec._chain.kinds().get(ev.PLACE, 0) == 2   # the two from _build_a_lan, not three
 
 
-def test_arming_a_different_code_replaces_what_would_be_resumed(rec):
-    """'Enter a new code and you are recording again' — the old one must stop being advertised."""
+def test_the_chain_says_where_recording_stopped(rec):
+    """A gap the chain does not mention is a gap nobody can weigh. Written while still armed, so
+    it is inside the hashed chain rather than a note beside it."""
+    rec.arm(CODE)
+    _build_a_lan(rec)
+    rec.cancel()
+    chain = rec.store.load(_ticket.parse(CODE).code)
+    assert chain.entries[-1].kind == ev.STOPPED
+
+
+def test_the_chain_says_where_recording_came_back(rec):
+    rec.arm(CODE)
+    rec.cancel()
+    rec.arm(CODE)
+    kinds = [e.kind for e in rec._chain.entries]
+    assert kinds[-1] == ev.RESUMED
+    assert kinds.count(ev.PREEXISTING) == 1, "resuming is not a fresh start"
+
+
+def test_the_gap_is_recorded_as_a_length_of_time(rec):
+    """An instructor reading 'resumed after 3h' can weigh it; 'resumed' alone cannot be weighed."""
+    rec.arm(CODE)
+    rec.cancel()
+    rec._now = lambda: time.time() + 7200
+    rec.arm(CODE)
+    assert rec._chain.entries[-1].data["away"] >= 7100
+
+
+def test_work_done_while_recording_was_off_stays_unaccounted_for(rec):
+    """The forgery this must not open. If resuming recorded what was on the canvas the way ARMING
+    does, then cancel → import a classmate's file → resume would relabel their work as 'already
+    there' — laundering an import through a pause. It must stay unknown."""
+    from gini.domain import proof as P
+    rec.arm(CODE)
+    rec.cancel()
+    smuggled = rec.ctx.add_device("router")
+    rec.arm(CODE)
+    entries = rec._chain.entries
+    assert entries[-1].kind == ev.RESUMED
+    assert smuggled.id in entries[-1].data["ids"], "the chain still sees what is on the canvas"
+
+    rec._record(ev.submit(P.artifact_summary(rec.ctx.topology.to_dict()), []))
+    acct = P.account_for_artifact(rec._chain.entries)
+    assert smuggled.name in acct.unexplained
+    assert smuggled.name not in acct.preexisting
+
+
+def test_arming_a_different_code_starts_that_codes_own_chain(rec):
+    """Two codes, two chains. Nothing about the first survives into the second."""
     other = mint(lambda n: bytes((i * 7 + 3) % 256 for i in range(n))).pretty
     rec.arm(CODE)
-    rec.disarm()
-    assert rec.status()["can_resume"] is True
+    _build_a_lan(rec)
+    rec.cancel()
     assert rec.arm(other)[0] is True
-    assert rec.status()["can_resume"] is False      # nothing stale left on offer
-    rec.disarm()
-    assert rec.status()["paused"].replace("-", "") == other.replace("-", "")
+    assert rec._chain.ticket == _ticket.parse(other).code
+    assert rec._chain.kinds().get(ev.PLACE, 0) == 0
 
 
-def test_resume_refuses_when_there_is_nothing_to_resume(rec):
-    ok, message = rec.resume()
-    assert ok is False and "nothing to resume" in message.lower()
-
-
-def test_a_paused_code_whose_chain_is_gone_is_not_offered(rec, tmp_path):
-    """`can_resume` asks the store, so a chain deleted underneath us stops being advertised
-    instead of failing when the student presses the button."""
+def test_coming_back_to_a_chain_that_is_gone_starts_a_fresh_one(rec, tmp_path):
+    """A chain deleted underneath us must not make re-arming fail — a student who lost their file
+    should be recording again, not stuck."""
     rec.arm(CODE)
-    rec.disarm()
-    assert rec.status()["can_resume"] is True
+    rec.cancel()
     for f in tmp_path.rglob("*.jsonl"):
         f.unlink()
-    assert rec.status()["can_resume"] is False
+    ok, message = rec.arm(CODE)
+    assert ok and "Recording under" in message
 
 
 def test_generating_a_proof_leaves_the_recording_state_visible(rec):
