@@ -42,7 +42,7 @@ def describe(entry: Entry) -> str:
 
     Everything is past tense and names the student's own elements, because the instructor is
     reading a story about a person, not a log. Anything the chain does not actually know (why a
-    console was opened, what was typed into it) is simply absent rather than guessed at.
+    console was opened) is simply absent rather than guessed at.
     """
     d = entry.data
     k = entry.kind
@@ -87,6 +87,14 @@ def describe(entry: Entry) -> str:
         return "Stopped the lab."
     if k == ev.OPEN_CONSOLE:
         return f"Opened a console on {d.get('name', '?')}."
+    if k == ev.COMMAND:
+        out = d.get("out") or []
+        # The command is the fact; the output is the evidence for it. Indented beneath, so a marker
+        # skimming the left column still reads a clean list of what was run.
+        head = f"On {d.get('on', '?')}: {d.get('cmd', '')}"
+        if not out:
+            return head + "   (no output)"
+        return head + "".join(f"\n            {line}" for line in out)
     if k == ev.MEASURE:
         got = d.get("summary") or ", ".join(f"{a}={b}" for a, b in
                                             sorted(d.get("measurement", {}).items()))
@@ -212,6 +220,7 @@ def narrate(entries, verdict=None) -> str:
                f"{k.get(ev.CONFIGURE, 0)} configured, {k.get(ev.REMOVE, 0)} removed.")
     out.append(f"  Operation — {k.get(ev.RUN, 0)} run(s), "
                f"{k.get(ev.OPEN_CONSOLE, 0)} console(s) opened, "
+               f"{k.get(ev.COMMAND, 0)} command(s) run, "
                f"{k.get(ev.MEASURE, 0)} measurement(s).")
     if s["witness_total"]:
         out.append(f"  Witnessed by GINI on the running network — "

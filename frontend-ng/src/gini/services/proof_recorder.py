@@ -397,6 +397,24 @@ class ProofRecorder:
         self._guard(lambda: self._record(ev.invoke(device_id, result_text)))
 
     # -- Tier 3: witnessed --------------------------------------------------- #
+    def note_command(self, device: str, cmd: str, out=None) -> None:
+        """Record a command run in gBuilder's terminal on a lab element, and what it printed.
+
+        Called from the Terminal panel, which assembles it (services/console_tap). Off the GUI
+        thread is fine — `_guard` takes the lock, like every other entry point here.
+
+        This is the evidence the report used to say was missing: a chain could read "Started the
+        lab" and then "Witnessed on the running network — none" while the student had in fact
+        pinged across their subnets and watched it work.
+        """
+        cmd = (cmd or "").strip()
+        if not cmd:
+            return
+        self._guard(self._note_command, str(device or ""), cmd, list(out or []))
+
+    def _note_command(self, device: str, cmd: str, out: list) -> None:
+        self._record(ev.command(device, cmd, out))
+
     def note_check(self, results, objectives=None) -> None:
         """Record what GINI measured when the student pressed Run / Check.
 

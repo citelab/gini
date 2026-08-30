@@ -58,9 +58,14 @@ class TerminalPanel(QWidget):
     PROBE_MS = 600
     MAX_PROBES = 40                       # ~24s
 
-    def __init__(self, theme, workdir_fn=None, running_fn=None, parent=None) -> None:
+    def __init__(self, theme, workdir_fn=None, running_fn=None, record_fn=None,
+                 parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
+        # (device, cmd, [output lines]) -> None. Injected, like workdir_fn: this panel does not
+        # know what a proof chain is, and must not start importing one to find out.
+        self.record_fn = record_fn
+        self._tap = None
         # () -> the running project's working directory, or "" when nothing is running. Injected
         # so this panel never imports main_window and never talks to Docker itself.
         self.workdir_fn = workdir_fn
@@ -97,6 +102,10 @@ class TerminalPanel(QWidget):
         self._client.closed.connect(self._on_closed)
         self._view.key_bytes.connect(self._client.send_input)
         self._view.size_changed.connect(self._client.send_resize)
+        # Tapped AFTER the real connections, so a fault in recording can never be the thing that
+        # stops a keystroke reaching the shell.
+        self._view.key_bytes.connect(self._tap_key)
+        self._client.output.connect(self._tap_output)
 
         # Subscribe to theme changes ourselves, the SourceBrowser/Dashboard convention —
         # MainWindow._on_theme_changed deliberately pokes nobody.
@@ -150,7 +159,50 @@ class TerminalPanel(QWidget):
             else:
                 self.show_none(name, f"{label or name} does not serve a terminal.")
             return
+        self._start_tap(name)
         self._embed(f"http://127.0.0.1:{entry['port']}/", name, entry.get("cmd", ""))
+
+    # -- recording what was run --------------------------------------------- #
+    def _tap_key(self, data) -> None:
+        self._pump(lambda t: t.key(bytes(data)))
+
+    def _tap_output(self, data) -> None:
+        self._pump(lambda t: t.output(bytes(data)))
+
+    def _pump(self, feed) -> None:
+        """Feed the tap and hand off whatever it finished.
+
+        Wrapped whole: a terminal that stopped working because the proof chain hiccuped would be a
+        far worse bug than a missing entry.
+        """
+        if self.record_fn is None or self._tap is None:
+            return
+        try:
+            feed(self._tap)
+            for rec in self._tap.take():
+                self.record_fn(rec["device"], rec["cmd"], rec["out"])
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    def _start_tap(self, name: str) -> None:
+        """A new element: close whatever the last one left open, and start fresh."""
+        if self.record_fn is None:
+            return
+        from ..services.console_tap import ConsoleTap
+        self._end_tap()
+        self._tap = ConsoleTap(name)
+
+    def _end_tap(self) -> None:
+        if self._tap is None:
+            return
+        try:
+            self._tap.flush()
+            for rec in self._tap.take():
+                if self.record_fn is not None:
+                    self.record_fn(rec["device"], rec["cmd"], rec["out"])
+        except Exception:                                        # noqa: BLE001
+            pass
+        self._tap = None
 
     def show_none(self, what: str = "", why: str = "") -> None:
         """No terminal for this selection. Say why — a blank pane looks broken."""
@@ -167,6 +219,7 @@ class TerminalPanel(QWidget):
     # -- internals ---------------------------------------------------------- #
     def _detach(self) -> None:
         """Close the session and clear the screen. The tmux session in the container survives."""
+        self._end_tap()                    # a command still awaiting its output is closed out
         self._connected_to = ""
         self._client.disconnect_from()
         self._view.reset()

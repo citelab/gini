@@ -540,3 +540,47 @@ def test_generating_a_proof_leaves_the_recording_state_visible(rec):
     assert rec.generate_proof()["ok"] is True
     assert rec.status()["submitted"] is True
     assert rec.armed is True                        # still armed — pausing is how you leave
+
+
+# ---- what they ran on the live lab -------------------------------------------- #
+def test_a_terminal_command_becomes_evidence_in_the_chain(rec):
+    """The gap the report named itself: a chain could say "Started the lab" and then "Witnessed on
+    the running network — none" while the student had pinged across their subnets and watched it
+    work."""
+    rec.arm(CODE)
+    rec.note_command("M3", "ping -c 1 10.0.2.10", ["64 bytes from 10.0.2.10: seq=0 time=0.8 ms"])
+    assert rec._chain.kinds().get("command") == 1
+    entry = rec._chain.entries[-1]
+    assert entry.data["on"] == "M3" and "ping" in entry.data["cmd"]
+    assert entry.data["out"] == ["64 bytes from 10.0.2.10: seq=0 time=0.8 ms"]
+
+
+def test_nothing_is_recorded_from_a_terminal_while_unarmed(rec):
+    """The REC indicator is the student's notice that this is happening. With it off, it is not."""
+    rec.note_command("M3", "ping 10.0.2.10", ["ok"])
+    assert rec._chain is None
+
+
+def test_an_empty_command_is_not_an_entry(rec):
+    rec.arm(CODE)
+    before = rec.count
+    rec.note_command("M3", "   ", ["noise"])
+    assert rec.count == before
+
+
+def test_the_narration_shows_the_command_and_its_output(rec):
+    from gini.domain import narration as N
+    rec.arm(CODE)
+    rec.note_command("M3", "ip route", ["default via 10.0.2.1", "10.0.2.0/24 dev eth0"])
+    said = N.describe(rec._chain.entries[-1])
+    assert "On M3: ip route" in said
+    assert "default via 10.0.2.1" in said and "10.0.2.0/24 dev eth0" in said
+
+
+def test_commands_are_counted_in_the_operation_summary(rec):
+    from gini.domain import narration as N
+    rec.arm(CODE)
+    _build_a_lan(rec)
+    rec.note_command("M1", "ping -c 1 M2", ["1 packets received"])
+    text = N.narrate(rec._chain.entries)
+    assert "command(s) run" in text and "1 command(s) run" in text

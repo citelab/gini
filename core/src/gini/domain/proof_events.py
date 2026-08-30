@@ -32,11 +32,12 @@ PLACE, REMOVE, CONNECT, DISCONNECT, CONFIGURE = (
     "place", "remove", "connect", "disconnect", "configure")
 RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE = (
     "run", "stop", "open_console", "measure", "invoke")
+COMMAND = "command"
 WITNESS, OBJECTIVE = "witness", "objective"
 LOAD = "load"
 
 CONSTRUCTION = (PLACE, REMOVE, CONNECT, DISCONNECT, CONFIGURE)
-OPERATION = (RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE)
+OPERATION = (RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE, COMMAND)
 WITNESSED = (WITNESS, OBJECTIVE)
 PROVENANCE = (LOAD, PREEXISTING, SUBMIT)
 
@@ -144,9 +145,34 @@ def stop(message: str = "") -> tuple[str, dict]:
 
 
 def open_console(device_id: str, name: str) -> tuple[str, dict]:
-    """They went *into* the element. Deliberately not what they typed — a proof of activity is
-    not a keylogger, and the console session is the student's own space."""
+    """They went *into* the element.
+
+    This used to say "deliberately not what they typed — a proof of activity is not a keylogger".
+    That reasoning was about a student's own machine, and it still holds there. It does not reach
+    gBuilder's own terminal into a container gBuilder started, opened as part of the assignment
+    with a loud REC indicator running: see `command`, which records those.
+    """
     return OPEN_CONSOLE, {"id": str(device_id), "name": clip(name, 64)}
+
+
+def command(device: str, cmd: str, output: list[str] | None = None) -> tuple[str, dict]:
+    """A command run in gBuilder's own terminal on a lab element, and what it printed.
+
+    `open_console` records only that they went in, and said so because "a proof of activity is not
+    a keylogger". That reasoning stands for a student's own machine and does not reach here: this
+    is gBuilder's terminal into a container gBuilder started, opened deliberately as part of the
+    assignment, while a loud REC indicator says the session is being recorded.
+
+    It closes the gap the report itself names. A chain could say "Started the lab" and then
+    "Witnessed on the running network — none", when the student had in fact pinged across their
+    subnets and watched it work; the evidence existed and vanished. This is that evidence.
+
+    Output is TRUNCATED, not summarised — the first few lines, verbatim, with a count of what was
+    dropped. `ping` says what a marker needs in its first lines and then repeats itself; guessing
+    which later line mattered would be inventing evidence.
+    """
+    lines = [clip(x, 200) for x in (output or [])]
+    return COMMAND, {"on": clip(device, 64), "cmd": clip(cmd, 200), "out": lines}
 
 
 def measure(name: str, result: dict) -> tuple[str, dict]:
