@@ -334,3 +334,49 @@ def test_a_course_with_nothing_in_it_answers_ok_with_no_hits(course):
     course.post("/api/courses", {"id": "comp999", "title": "Brand new"})
     a = tc_ask.ask(course, "comp999", "anything at all")
     assert a.reason == "" and a.error == "" and a.hits == []
+
+
+# ---- the library reaches the model as words, not as a pointer ------------------- #
+# The "never quoted" rule had an exact reason: the server stored a filename, not the text inside
+# it, so any summary would have been invented. That reason does not hold for a work the server has
+# actually indexed, and quoting real text is the opposite of the failure it guarded against.
+LIB = {"kind": "reference", "title": "7.6 Code: Sleep and wakeup",
+       "book": "xv6: a simple, Unix-like teaching operating system",
+       "url": "https://xv6-guide.github.io/xv6-riscv-book/Ch7.S6.html",
+       "passage": "The basic idea is to have sleep mark the current process as SLEEPING.",
+       "attribution": "Copyright (c) 2006-2024 Russ Cox, Frans Kaashoek, Robert Morris."}
+
+
+def test_a_library_passage_reaches_the_model_verbatim():
+    out = tc_ask.as_context(tc_ask.Answer(course="c", hits=[LIB]))
+    assert LIB["passage"] in out
+    assert "VERBATIM" in out, "the model is not told these are somebody's actual words"
+
+
+def test_a_passage_carries_where_to_read_it():
+    out = tc_ask.as_context(tc_ask.Answer(course="c", hits=[LIB]))
+    assert LIB["url"] in out and "7.6" in out
+
+
+def test_the_notice_sits_with_the_passage_it_belongs_to():
+    """Not gathered at the end: a model given four passages and one trailing notice attaches it to
+    the wrong one, or to none. Carrying it is a condition of use, so it travels per block."""
+    two = tc_ask.as_context(tc_ask.Answer(course="c", hits=[LIB, dict(LIB, title="8.1 Overview")]))
+    assert two.count(LIB["attribution"]) == 2
+
+
+def test_a_material_is_still_only_named():
+    """The old rule holds where its reason still does — the server has a filename and nothing
+    more, so there is nothing honest to quote."""
+    out = tc_ask.as_context(tc_ask.Answer(course="c", hits=[
+        {"kind": "material", "title": "Lab 1 handout", "url": "/m/abc"}]))
+    assert "Lab 1 handout" in out and "VERBATIM" not in out
+
+
+def test_activities_and_books_are_kept_apart():
+    """A lab brief is what the student was set; a book passage is somebody else's prose. Running
+    them together in one list invites the model to quote the teacher and paraphrase the book."""
+    out = tc_ask.as_context(tc_ask.Answer(course="c", hits=[
+        {"kind": "activity", "title": "Lab 3", "brief": "Add a scheduler."}, LIB]))
+    assert out.index("Lab 3") < out.index("VERBATIM")
+    assert "From this course's material:" in out and "From the books" in out

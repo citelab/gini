@@ -86,19 +86,52 @@ def ask(url: str, course: str, question: str, *, timeout: float = TIMEOUT) -> An
 def as_context(answer: Answer, *, limit: int = 4) -> str:
     """The hits as plain text a model can be given, or "" when there is nothing.
 
-    Titles and briefs only. A material is named and linked, never quoted — the server stores a
-    filename, not the text inside it, and inventing a summary of a PDF nobody read is exactly the
-    kind of confident wrongness a tutor must not produce.
+    An ACTIVITY or a MATERIAL is named and linked, never quoted. That was once the rule for
+    everything here, and its reason was exact: the server stored a filename, not the text inside
+    it, so any summary would have been invented.
+
+    A LIBRARY hit is different, and only because the reason changed. The server now holds the
+    book's own words, so it sends them — verbatim, with the section, the link and the copyright
+    line. Quoting real text is the opposite of the failure that rule guarded against; paraphrasing
+    it would BE that failure.
     """
-    lines = []
+    named, quoted = [], []
     for h in (answer.hits or [])[:limit]:
-        if h.get("kind") == "activity":
+        kind = h.get("kind")
+        if kind == "activity":
             brief = (h.get("brief") or "").strip()
-            lines.append(f"- Activity “{h.get('title', '')}”"
-                         + (f": {brief}" if brief else ""))
+            named.append(f"- Activity “{h.get('title', '')}”" + (f": {brief}" if brief else ""))
+        elif kind == "reference":
+            quoted.append(_cite(h))
         else:
-            lines.append(f"- Course material “{h.get('title', '')}” ({h.get('url', '')})")
-    return ("From this course's material:\n" + "\n".join(lines)) if lines else ""
+            named.append(f"- Course material “{h.get('title', '')}” ({h.get('url', '')})")
+    blocks = []
+    if named:
+        blocks.append("From this course's material:\n" + "\n".join(named))
+    if quoted:
+        blocks.append(
+            "From the books this course has linked. These are VERBATIM passages — use them, and "
+            "say which section you took a point from so the student can go and read it. Do not "
+            "present them as your own words, and do not stretch them past what they say:\n\n"
+            + "\n\n".join(quoted))
+    return "\n\n".join(blocks)
+
+
+def _cite(hit: dict) -> str:
+    """One passage, with everything needed to check it and everything the licence requires.
+
+    The attribution is part of the block rather than gathered up at the end, because a model given
+    four passages and one trailing notice will attach the notice to the wrong one — or to none.
+    """
+    book = (hit.get("book") or "").strip()
+    where = " ".join(x for x in (hit.get("title", ""),) if x).strip()
+    head = f"{book} — {where}" if book else where
+    parts = [f"[{head}]", f"  {hit.get('passage', '').strip()}"]
+    if hit.get("url"):
+        parts.append(f"  Read it: {hit['url']}")
+    if hit.get("attribution"):
+        parts.append(f"  {hit['attribution']}")
+    return "\n".join(parts)
 
 
 __all__ = ["Answer", "ask", "as_context", "Insecure", "Unreachable"]
@@ -181,7 +214,10 @@ def _cli(argv=None) -> int:                                  # pragma: no cover 
     for line in context.splitlines():
         print("  " + line)
     print("  " + "─" * 68)
-    print("\n  Titles and briefs only — a material is named and linked, never quoted.")
+    books = sum(1 for h in answer.hits if h.get("kind") == "reference")
+    print(f"\n  {books} passage(s) quoted from the library; activities and materials are named "
+          f"and linked, never quoted." if books else
+          "\n  Titles and briefs only — a material is named and linked, never quoted.")
     return 0
 
 

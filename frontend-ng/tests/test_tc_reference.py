@@ -255,3 +255,35 @@ def test_unlinking_leaves_the_book_on_the_shelf(store):
     assert store.course_refs("comp310") == []
     assert len(store.references()) == 1
     assert store.reference("xv6-riscv-book")["sections"] == len(SECTIONS)
+
+
+# ---- worth having, not worth quoting -------------------------------------------- #
+def test_an_aside_ranks_last_but_is_never_dropped(tmp_path):
+    """BM25 normalises by length, so a textbook's short "Exercises" sections outrank the chapter
+    that explains the thing: two of the three passages sent to answer "why is my process stuck
+    waiting" were lists of homework, which is more questions handed to a model asked a question.
+
+    Ranked last rather than removed, so a student who asks about the exercises still finds them.
+    """
+    Store._instances.clear()
+    st = Store(str(tmp_path))
+    st.reference_put({**XV6, "aside_titles": "Exercises"})
+    st.sections_put("xv6-riscv-book", SECTIONS + [
+        {"id": "xv6/7.11", "ref": "xv6-riscv-book", "number": "7.11", "title": "Exercises",
+         "url": "https://x/Ch7.S11.html", "ord": 4,
+         "body": "Sleep and wakeup: what happens if a process wakes another process that is not "
+                 "sleeping? Modify the sleep channel."}])
+    got = [h["title"] for h in st.search_sections("sleeping process wakeup channel",
+                                                  ["xv6-riscv-book"], limit=5)]
+    assert "Exercises" in got, "an aside must still be findable"
+    assert got.index("Sleep and wakeup") < got.index("Exercises")
+
+
+def test_a_book_that_marks_no_asides_is_unaffected(store):
+    """It is a property of a BOOK, held as data — two general rules were measured against the real
+    index first and neither worked. Interrogative density does not separate exercises from prose
+    (xv6's are imperative, and their median count of question marks is zero while an ordinary
+    section has the highest in the book), and neither does length."""
+    assert store.reference("xv6-riscv-book")["aside_titles"] in ("", None)
+    assert _titles(store.search_sections("page table", ["xv6-riscv-book"])) == ["Paging hardware"]
+

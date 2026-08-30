@@ -149,3 +149,23 @@ def test_cancelling_forgets_which_lab_it_was(tmp_path):
     rec.note_activity("comp535/lab1", "Multi-LAN routing")
     rec.cancel()
     assert C.current_lab_of(rec) == ""
+
+
+# ---- a book is context, never an obligation ------------------------------------ #
+def test_a_library_hit_is_never_must_address():
+    """A book is not what the student is being marked on, and an answer is not wrong for having
+    explained something in its own words rather than the book's. The Twin tracks it; it does not
+    object about it, however well the passage scored."""
+    c, = C.course_concerns([hit(kind="reference", id="xv6/7.6", title="7.6 Sleep and wakeup",
+                                score=9.0)],
+                           current_lab="comp535/lab1")
+    assert c.salience < MUST_ADDRESS
+    assert "library" in c.statement
+
+
+def test_a_library_hit_reads_as_a_book_not_as_a_handout():
+    """Wording matters here: "this course posts …" would describe a teacher's upload, and a book
+    on a shared shelf is not that."""
+    c, = C.course_concerns([hit(kind="reference", id="x", title="7.6 Sleep and wakeup",
+                                score=6.0)])
+    assert "posts" not in c.statement

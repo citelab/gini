@@ -22,6 +22,9 @@ XV6 = {
     "licence": "MIT",
     "attribution": ("Copyright (c) 2006-2024 Russ Cox, Frans Kaashoek, Robert Morris. "
                     "Used under the MIT licence."),
+    # Worth indexing, not worth quoting at a student who asked a question — see the column's
+    # comment in store.py for the two general rules that were measured and did not work.
+    "aside_titles": "Exercises",
 }
 
 
@@ -53,6 +56,9 @@ def _index_reference(argv: list[str]) -> int:
     ap.add_argument("--attach", action="append", default=[], metavar="COURSE",
                     help="attach to this course (repeatable); without it nothing can see it yet")
     ap.add_argument("--data", metavar="DIR", default=os.environ.get("COURSE_ROOT", "./tc-data"))
+    ap.add_argument("--aside-titles", default="", metavar="A,B",
+                    help="section titles to rank last — an 'Exercises' section is worth having "
+                         "and not worth quoting at someone who asked a question")
     ap.add_argument("--max-pages", type=int, default=0)
     a = ap.parse_args(argv)
 
@@ -62,6 +68,7 @@ def _index_reference(argv: list[str]) -> int:
         a.title = a.title or XV6["title"]
         a.licence = a.licence or XV6["licence"]
         a.attribution = a.attribution or XV6["attribution"]
+        a.aside_titles = a.aside_titles or XV6["aside_titles"]
     if not (a.url and a.id):
         print("Give a start URL and --id (or --preset xv6).")
         return 2
@@ -84,6 +91,7 @@ def _index_reference(argv: list[str]) -> int:
     import time as _t
     store.reference_put({"id": a.id, "title": a.title or a.id, "source_url": a.url,
                          "licence": a.licence, "attribution": a.attribution.strip(),
+                         "aside_titles": a.aside_titles,
                          "indexed": _t.time(), "sections": len(rows)})
     store.sections_put(a.id, rows)
     words = sum(len(r["body"].split()) for r in rows)

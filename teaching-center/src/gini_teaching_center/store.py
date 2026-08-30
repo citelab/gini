@@ -124,7 +124,18 @@ CREATE TABLE IF NOT EXISTS reference (
   licence     TEXT DEFAULT '',
   attribution TEXT DEFAULT '',            -- the copyright line, shown and cited verbatim
   indexed     REAL DEFAULT 0,
-  sections    INTEGER DEFAULT 0
+  sections    INTEGER DEFAULT 0,
+  -- Section titles worth having but not worth QUOTING, comma-separated. A textbook's "Exercises"
+  -- is a list of questions; handing three of them to a model asked to answer a question fills the
+  -- context with more questions. They are ranked last rather than dropped, so a student who asks
+  -- about the exercises can still be shown them.
+  --
+  -- Data, not a rule in the ranker, because it is a property of a BOOK. Two general signals were
+  -- measured against the real index first and both failed: interrogative density does not separate
+  -- them (xv6's exercises are imperative — "Modify kalloc.c to…" — and their median count of
+  -- question marks is zero, while an ordinary section has the highest in the book), and neither
+  -- does length.
+  aside_titles TEXT DEFAULT ''
 );
 
 -- One retrievable unit. The book's own authors chunked it into ~1,100-word sections with stable
@@ -309,7 +320,8 @@ class Store:
                          "uploaded": "REAL DEFAULT 0"},
             "reference": {"title": "TEXT DEFAULT ''", "source_url": "TEXT DEFAULT ''",
                           "licence": "TEXT DEFAULT ''", "attribution": "TEXT DEFAULT ''",
-                          "indexed": "REAL DEFAULT 0", "sections": "INTEGER DEFAULT 0"},
+                          "indexed": "REAL DEFAULT 0", "sections": "INTEGER DEFAULT 0",
+                          "aside_titles": "TEXT DEFAULT ''"},
             "reference_section": {"ref": "TEXT DEFAULT ''", "number": "TEXT DEFAULT ''",
                                   "title": "TEXT DEFAULT ''", "url": "TEXT DEFAULT ''",
                                   "body": "TEXT DEFAULT ''", "ord": "INTEGER DEFAULT 0"},
@@ -587,7 +599,8 @@ class Store:
 
     # -- references ------------------------------------------------------- #
     def reference_put(self, rec: dict) -> None:
-        cols = ("id", "title", "source_url", "licence", "attribution", "indexed", "sections")
+        cols = ("id", "title", "source_url", "licence", "attribution", "indexed", "sections",
+                "aside_titles")
         self._run(f"INSERT OR REPLACE INTO reference({','.join(cols)}) "
                   f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
 
@@ -692,7 +705,21 @@ class Store:
             if enough and self._covered(h, wanted) < self.MIN_TERMS_COVERED:
                 continue
             keep.append(h)
+        # An aside ranks LAST, never disappears. BM25 normalises by length, so a book's short
+        # "Exercises" sections outrank the chapter that explains the thing — two of the three
+        # passages sent to answer "why is my process stuck waiting" were lists of homework.
+        aside = self._asides()
+        keep.sort(key=lambda h: (h.get("title", "").strip().lower() in aside.get(h["ref"], set()),
+                                 -h["score"]))
         return keep[:max(1, int(limit))]
+
+    def _asides(self) -> dict:
+        """ref id -> the set of section titles that book marks as not worth quoting."""
+        out: dict = {}
+        for r in self._all("SELECT id, aside_titles FROM reference"):
+            out[r["id"]] = {t.strip().lower() for t in (r["aside_titles"] or "").split(",")
+                            if t.strip()}
+        return out
 
     @staticmethod
     def _covered(hit: dict, wanted: set) -> int:

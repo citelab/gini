@@ -58,6 +58,11 @@ def course_concerns(hits, current_lab: str = "") -> list[Concern]:
             brief = str(h.get("brief") or "").strip()
             statement = (f"this course's activity “{title}” is about exactly this"
                          + (f" — {brief}" if brief else ""))
+        elif kind == "reference":
+            # A book is never must-address, whatever it scores. It is not what the student is
+            # being marked on, and an answer is not wrong for having explained something in its
+            # own words instead of the book's. Salience 1: the Twin tracks it and never objects.
+            statement = f"the course's library covers this in {title}"
         else:
             statement = f"this course posts “{title}” on this"
         concerns.append(Concern(
