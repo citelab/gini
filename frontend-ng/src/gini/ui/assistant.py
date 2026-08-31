@@ -2575,7 +2575,13 @@ class Assistant(QWidget):
                 self._audit_course(concerns, visible_text(raw), emit, prompt)
             # DONE carries the whole answer even when every delta was already streamed, so a turn
             # that streamed and one that did not end the same way and cannot drift apart.
-            self.answer_ready.emit(device or "", visible_text(raw) or "Done.")
+            #
+            # "Done." only when something was actually DONE. A turn that ran a tool and said
+            # nothing is finished and can say so; a turn that answered a question with silence is
+            # not, and "Done." read as a complete reply to "what is the difference between on-disk
+            # and in-memory inodes?" — which is worse than admitting the model produced nothing.
+            self.answer_ready.emit(device or "", visible_text(raw) or self._nothing_said())
+
 
         def guarded():
             """A turn that was stopped BEFORE it produced anything still has to end.
@@ -2589,6 +2595,20 @@ class Assistant(QWidget):
             except Stopped:
                 self.answer_ready.emit(device or "", "")
         threading.Thread(target=guarded, daemon=True).start()
+
+    def _nothing_said(self) -> str:
+        """What to show when the model produced no prose at all.
+
+        Tool calls are in the loop's history, so "did anything happen?" is answerable rather than
+        guessed at.
+        """
+        try:
+            recent = list(getattr(self._loop, "history", []))[-6:]
+            if any(getattr(m, "role", "") == "tool" for m in recent):
+                return "Done."
+        except Exception:                                    # noqa: BLE001
+            pass
+        return "I did not manage an answer to that — try asking it a different way?"
 
     def _on_chunk(self, delta: str) -> None:
         """A streamed token arrived — begin (or continue) typing it into the pane."""
@@ -2651,11 +2671,19 @@ class Assistant(QWidget):
             # is APPENDED — never swapped in over what they watched appear. Retracting a paragraph
             # in front of a reader is the one thing streaming must never do.
             final = self._stream_buf or text
+            # Compared with whitespace COLLAPSED on both sides. `visible_text` squeezes runs of
+            # spaces, so the streamed "*   It marks the process SLEEPING." and the finished
+            # "* It marks the process SLEEPING." are different strings — and every markdown bullet
+            # in every answer failed this check and was appended a second time. The whole list
+            # arrived twice, once formatted and once as a tail of orphan lines.
+            import re as _re
+            seen = _re.sub(r"\s+", " ", final)
             for line in (text or "").splitlines():
                 line = line.strip()
-                if line and line not in final:
+                if line and _re.sub(r"\s+", " ", line) not in seen:
                     self._stream_insert(("\n" if final else "") + line)
                     final += ("\n" if final else "") + line
+                    seen += " " + _re.sub(r"\s+", " ", line)
             # Recorded as Markdown, then repainted once, so a streamed answer ends up formatted
             # exactly like a buffered one. Streaming inserts plain characters — it has to, since
             # `**bold` is not bold until the second `**` arrives — and without this settle step a

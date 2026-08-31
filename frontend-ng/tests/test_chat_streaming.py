@@ -820,3 +820,57 @@ def test_a_queued_question_still_runs_after_a_stop(chat, qtbot):
     chat.stop_turn()
     slow.gate.set()
     qtbot.waitUntil(lambda: len(slow.prompts) == 2, timeout=5000)
+
+
+# ---- what was already read is not read again ----------------------------------- #
+def test_a_markdown_list_is_not_appended_a_second_time(chat, qtbot):
+    """The bug a real answer showed: every list arrived twice, once formatted and once as a tail
+    of orphan lines. `visible_text` squeezes runs of spaces, so the streamed "*   It marks…" and
+    the finished "* It marks…" are different strings, and the containment check that decides "have
+    they already read this?" said no to every bullet in every answer."""
+    chat._loop = _CoveredLoop("When a process calls sleep:\n*   It marks it SLEEPING.\n"
+                              "*   It calls sched to release the CPU.")
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("how does sleep work?", "")
+    qtbot.wait(80)
+    shown = chat.log.toPlainText()
+    assert shown.count("It marks it SLEEPING") == 1, shown
+    assert shown.count("It calls sched") == 1
+
+
+def test_something_the_stream_genuinely_missed_is_still_appended(chat, qtbot):
+    """The reason that check exists at all: `visible_text` surfaces the text of callout/narrate
+    calls, which the prose filter suppresses while they arrive."""
+    chat._loop = _CoveredLoop(
+        'The link is down. <tool_call>{"tool": "narrate", "args": {"text": "Check R1 first."}}'
+        "</tool_call>")
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("why?", "")
+    qtbot.wait(80)
+    shown = chat.log.toPlainText()
+    assert "The link is down." in shown and "Check R1 first." in shown
+
+
+# ---- "Done." is an answer to an action, not to a question ---------------------- #
+def test_a_question_the_model_did_not_answer_says_so(chat, qtbot):
+    """"Done." read as a complete reply to "what is the difference between on-disk and in-memory
+    inodes?" — worse than admitting the model produced nothing, because it looks like an answer."""
+    chat._loop = _CoveredLoop("")
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("what is the difference?", "")
+    qtbot.wait(80)
+    shown = chat.log.toPlainText()
+    assert "did not manage an answer" in shown and "Done." not in shown
+
+
+def test_a_turn_that_ran_a_tool_and_said_nothing_is_done(chat, qtbot):
+    """The case "Done." was written for, and it still holds: the model acted and had nothing to
+    add. Answered from the loop's history rather than guessed at."""
+    from gini.agent.llm.backend import Message
+    loop = _CoveredLoop("")
+    loop.history = [Message("user", "add a router"), Message("tool", "{}", name="add_device")]
+    chat._loop = loop
+    with qtbot.waitSignal(chat.answer_ready, timeout=5000):
+        chat._ask_async("add a router", "")
+    qtbot.wait(80)
+    assert "Done." in chat.log.toPlainText()
