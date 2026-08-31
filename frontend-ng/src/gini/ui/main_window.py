@@ -267,6 +267,11 @@ class MainWindow(QMainWindow):
             if k in cfg:
                 setattr(s, k, cfg[k])
 
+    def _open_about(self) -> None:
+        """Which build is running, in a form that can be pasted into a bug report."""
+        from .about_dialog import AboutDialog
+        AboutDialog(self, self.theme).exec()
+
     def _open_settings(self) -> None:
         from ..app.paths import PERSISTED_KEYS, save_config
         from .settings_dialog import SettingsDialog
@@ -1802,6 +1807,11 @@ class MainWindow(QMainWindow):
         # and "Quit" into the application menu, where the book's readers don't expect them)
         settings_act = add(filem, "&Settings…", self._open_settings, "Ctrl+,")
         settings_act.setMenuRole(QAction.MenuRole.NoRole)
+        # NoRole for the same reason as its neighbours: macOS would otherwise hoist "About" into
+        # the application menu, and the one question it answers — which build is this? — is asked
+        # by someone who has been told to look in File.
+        about_act = add(filem, "&About GINI", self._open_about)
+        about_act.setMenuRole(QAction.MenuRole.NoRole)
         filem.addSeparator()
         quit_act = add(filem, "&Quit", self.close, "Ctrl+Q")
         quit_act.setMenuRole(QAction.MenuRole.NoRole)
