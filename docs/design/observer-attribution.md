@@ -1,7 +1,6 @@
 # Observer attribution: presume-grey for UART interrupts
 
-**Status: implemented 2026-08-31, in a reduced form — see "What changed on contact
-with the code" at the end. Needs a kernel build to verify.**
+**Status: proposal (Mahesh, 2026-08-30). Not yet implemented.**
 
 ## The problem
 
@@ -145,49 +144,3 @@ structural fix (it also subsumes the TX tagging).
 - [ ] update manual: os-08 limits, os-01 wire format, os-15 known-issues #7 → resolved
 - [ ] classroom check: idle machine shows **zero blue**; typing shows blue console
       traffic (the C13 exercise still works, now cleanly)
-
-
----
-
-## What changed on contact with the code
-
-Three things, found while implementing.
-
-**The TX-drain leak does not exist in this xv6.** The doc calls it "a second, larger leak nobody
-flags today" and spends a bit-ring in `uart.c` on it. But a dump is `printk` → `consputc` →
-`uartputc_sync`, and the source's own comment on that function reads: *"write a byte to the uart
-without using interrupts, for use by kernel printk() ... it spins waiting for the uart's output
-register to be empty."* The interrupt-driven writer is `uartwrite`, used *"only from write() system
-calls"* — a program's own output, correctly blue. **A dump generates no TX interrupts at all**, so
-there is nothing to tag and stage 2 is deleted rather than deferred.
-
-**Presume-grey is wrong for half the interrupts.** `uartintr` wakes the transmitter BEFORE it reads
-any byte, so an interrupt carrying no byte never reaches `consoleintr` and never resolves. Those are
-exactly the write() completions above. Presuming them grey would paint a printing program as
-measurement, permanently, with nothing to correct it. So the rule is narrower than the doc's:
-**presume grey only where the guess gets checked**, which is the RX path. The default is workload;
-observation is confirmed, not assumed.
-
-**The window has to open before `plic_claim`.** The doc's design starts at `devintr`'s UART branch,
-which is after the claim — and the plic edges are the *largest* share of the error, two per
-interrupt (claim and complete) against console's one. That matches the board: `plic 16 · console 8`.
-`plic_complete` also runs after `gini_obs_end()` has already lowered the real flag, so the window
-has to close at the end of the branch rather than at resolution.
-
-Kept from the doc unchanged: the central insight (settle before commit, never un-count), the
-deferred edge buffer, `gini_door_obs` + `BDOOROBS` over suppression, and the judgement that a
-dedicated channel is the right long-term architecture.
-
-The buffer overflows into the OLD behaviour — counted as workload — rather than into a new and
-unfamiliar wrongness, and a dump's own edges are never deferred because the real flag already
-answers for them.
-
-## What is verified, and what is not
-
-Verified here: the patch applies to a real xv6-riscv clone; the hooks land in the right order
-around `plic_claim` and `plic_complete`; the generated C compiles clean under `cc -fsyntax-only
--Wall -Wextra`; the parser reads `BDOOROBS` and a kernel that predates it still reads correctly.
-
-**Not verified: that the kernel builds, or that an idle board goes black.** There is no RISC-V
-toolchain on the machine this was written on. The classroom check at the end of the checklist is
-still owed.
