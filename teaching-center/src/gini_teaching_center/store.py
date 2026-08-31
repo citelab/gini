@@ -675,7 +675,13 @@ class Store:
         if not query or not refs:
             return []
         import re as _re
-        terms = [w for w in _re.findall(r"[A-Za-z0-9_]+", query) if len(w) > 2][:12]
+        from .search import _STOP
+        # The same stop-words the activity ranker has always used. This one only ever filtered on
+        # LENGTH, so "how" went to FTS as a search term — and in a book about one subject that is
+        # ruinous: "how is paging implemented in xv6" matched 74 of 81 sections, and the paging
+        # chapter sat at rank ten among them.
+        terms = [w for w in _re.findall(r"[A-Za-z0-9_]+", query.lower())
+                 if len(w) > 2 and w not in _STOP][:12]
         if not terms:
             return []
         match = " OR ".join(f'"{w}"' for w in terms)

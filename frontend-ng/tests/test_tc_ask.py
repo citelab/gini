@@ -421,3 +421,50 @@ def test_the_check_names_the_fix_for_an_untrusted_certificate(tmp_path, monkeypa
     out = capsys.readouterr().out
     assert "SSL_CERT_FILE" in out and "IS up" in out
     assert "VPN" not in out.split("untrusted")[1].split("SSL_CERT_FILE")[0]
+
+
+# ---- a course that was not consulted says so ----------------------------------- #
+def _panel(qtbot):
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from gini.agent.api import GiniAPI
+    from gini.app import AppContext
+    from gini.ui.assistant import Assistant
+    from gini.ui.theme import ThemeManager
+    ctx = AppContext()
+    a = Assistant(ctx, GiniAPI(ctx), ThemeManager(QApplication.instance(), "Dark"))
+    qtbot.addWidget(a)
+    said = []
+    ctx.log = lambda msg, level="info": said.append((level, msg))
+    return a, said
+
+
+@pytest.mark.parametrize("reason", ["unreachable", "untrusted", "insecure", "no_such_course"])
+def test_a_course_the_tutor_could_not_consult_is_reported(reason, qtbot, monkeypatch):
+    """Only `no_such_course` was ever said. A tutor pointed at a server it could not reach — or
+    whose certificate it did not trust — announced "Asking your course", got nothing, and answered
+    from general knowledge without a word. That looks exactly like a course with nothing in it,
+    which is how a book sitting on the wrong server went unnoticed for an afternoon."""
+    a, said = _panel(qtbot)
+    monkeypatch.setattr(tc_ask, "ask",
+                        lambda *_a, **_k: tc_ask.Answer(course="c", reason=reason, error="because"))
+    a._course_context("anything")
+    assert any(lvl == "warn" and "not consulted" in m for lvl, m in said), said
+
+
+def test_a_course_that_simply_had_nothing_stays_quiet(qtbot, monkeypatch):
+    """Normal, and not something anybody can act on. A warning on every off-topic question would
+    be worse than the problem."""
+    a, said = _panel(qtbot)
+    monkeypatch.setattr(tc_ask, "ask", lambda *_a, **_k: tc_ask.Answer(course="c", hits=[]))
+    a._course_context("anything")
+    assert not [m for lvl, m in said if lvl == "warn"]
+
+
+def test_it_is_said_once_not_on_every_question(qtbot, monkeypatch):
+    a, said = _panel(qtbot)
+    monkeypatch.setattr(tc_ask, "ask",
+                        lambda *_a, **_k: tc_ask.Answer(course="c", reason="untrusted", error="x"))
+    for _ in range(4):
+        a._course_context("anything")
+    assert len([m for lvl, m in said if lvl == "warn"]) == 1

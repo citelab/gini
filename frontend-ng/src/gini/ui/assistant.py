@@ -2253,9 +2253,16 @@ class Assistant(QWidget):
         s = self.ctx.settings
         answer = tc_ask.ask(getattr(s, "tc_url", "") or "", getattr(s, "tc_course", "") or "",
                             question)
-        if answer.reason == "no_such_course" and not getattr(self, "_course_warned", False):
+        # Everything the STUDENT can fix gets said, once. Only `no_such_course` did, so a tutor
+        # pointed at a server it could not reach — or whose certificate it did not trust — announced
+        # "Asking your course", got nothing, and answered from general knowledge without a word.
+        # That is the worst shape a failure can take: it looks like the course simply had nothing.
+        # "Reached it, and it had nothing to say" stays silent, because that is normal and not
+        # something anybody can act on.
+        if answer.reason in ("no_such_course", "unreachable", "untrusted", "insecure") \
+                and not getattr(self, "_course_warned", False):
             self._course_warned = True
-            self.ctx.log(answer.error, "warn")
+            self.ctx.log(f"Your course server was not consulted — {answer.error}", "warn")
         # The hits are now also CONCERNS, not only context. Pasting the course's material into the
         # prompt made the model aware of it; nothing checked that it used any of it. A concern is
         # the same fact with an obligation attached.
