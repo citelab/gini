@@ -90,6 +90,32 @@ def ask(url: str, course: str, question: str, *, timeout: float = TIMEOUT) -> An
     return Answer(course=obj.get("course", course), hits=obj.get("hits"))
 
 
+#: A picture that will not fit in the answer panel is not an illustration.
+MAX_FIGURE_BYTES = 2_000_000
+
+
+def figures(answer: Answer, url: str, *, limit: int = 3) -> list[tuple]:
+    """Download the pictures attached to a course's passages: [(caption, bytes), …].
+
+    Never raises, like everything else here. A tutor whose answer fails because a diagram did not
+    arrive is worse than one that answers without the diagram — and the words are the answer.
+    """
+    out: list[tuple] = []
+    for h in (answer.hits or []):
+        for f in (h.get("figures") or []):
+            if len(out) >= limit:
+                return out
+            try:
+                with urllib.request.urlopen(
+                        url.rstrip("/") + f["url"], timeout=TIMEOUT) as r:
+                    blob = r.read(MAX_FIGURE_BYTES + 1)
+                if blob and len(blob) <= MAX_FIGURE_BYTES:
+                    out.append((f.get("caption", ""), blob))
+            except Exception:                                    # noqa: BLE001
+                continue
+    return out
+
+
 def as_context(answer: Answer, *, limit: int = 4) -> str:
     """The hits as plain text a model can be given, or "" when there is nothing.
 
@@ -134,6 +160,11 @@ def _cite(hit: dict) -> str:
     where = " ".join(x for x in (hit.get("title", ""),) if x).strip()
     head = f"{book} — {where}" if book else where
     parts = [f"[{head}]", f"  {hit.get('passage', '').strip()}"]
+    # A caption, never the picture. A text model cannot see a diagram, and telling it one exists
+    # lets it point the student at "Figure 8.1" without ever implying it looked at it.
+    for f in (hit.get("figures") or []):
+        if f.get("caption"):
+            parts.append(f"  (a diagram accompanies this passage: {f['caption']})")
     if hit.get("url"):
         parts.append(f"  Read it: {hit['url']}")
     if hit.get("attribution"):

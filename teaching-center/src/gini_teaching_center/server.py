@@ -181,7 +181,36 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/m/"):
             self._serve_material(p[3:])
             return True
+        # --- a book's figure. Public for the same reason a material is: gBuilder fetches it to
+        #     draw inline, and a student has no account to authenticate with. ---
+        if p.startswith("/f/"):
+            self._serve_figure(p[3:])
+            return True
         return False
+
+    def _serve_figure(self, rest: str) -> None:
+        """One indexed figure, straight off disk.
+
+        The name is checked against the DATABASE rather than sanitised, which is the difference
+        between "no .. in the path" and "this is a file we put there". A path this server did not
+        write is not served, whatever it looks like.
+        """
+        ref, _, name = rest.partition("/")
+        row = _STORE.figure(ref, name)
+        if not row:
+            return self._send(404, {"error": "no such figure"})
+        f = ROOT / "references" / ref / row["filename"]
+        try:
+            blob = f.read_bytes()
+        except OSError:
+            return self._send(404, {"error": "that figure is not on disk"})
+        ext = f.suffix.lower().lstrip(".")
+        self.send_response(200)
+        self.send_header("Content-Type", f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}")
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(blob)
 
     def _activity_for_code(self) -> None:
         """Two shapes: with a code, what gBuilder needs to arm; without, vend one."""
@@ -268,6 +297,7 @@ class Handler(BaseHTTPRequestHandler):
         sections = _STORE.search_sections(query, _STORE.course_refs(course))
         if sections:
             by_ref = {r["id"]: r for r in _STORE.references()}
+            figures = _STORE.figures_for([s["id"] for s in sections])
             for sec in sections:
                 ref = by_ref.get(sec["ref"], {})
                 hits.append({
@@ -278,6 +308,12 @@ class Handler(BaseHTTPRequestHandler):
                     # licence is carried BY the quote, so there is no path that ships the words
                     # without the notice.
                     "passage": _search.passage(sec["body"], query),
+                    # The pictures that belong to this passage. A CAPTION goes to the model, which
+                    # cannot see a picture and must not be allowed to imply it did; the URL is for
+                    # the panel to draw.
+                    "figures": [{"url": f"/f/{sec['ref']}/{fg['filename']}",
+                                 "caption": fg["caption"]}
+                                for fg in figures.get(sec["id"], [])],
                     "attribution": ref.get("attribution", "")})
         self._send(200, {"ok": True, "course": course, "hits": hits})
 

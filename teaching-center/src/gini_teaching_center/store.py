@@ -150,6 +150,18 @@ CREATE TABLE IF NOT EXISTS reference_section (
   ord      INTEGER DEFAULT 0              -- reading order, so neighbours can be offered
 );
 
+-- A picture the authors drew for one section, downloaded once at index time. The bytes live on
+-- disk beside the course's materials; only the metadata is here, so the database stays small and
+-- the file can be served straight off disk.
+CREATE TABLE IF NOT EXISTS reference_figure (
+  id       TEXT PRIMARY KEY,             -- "<reference>/<n>"
+  ref      TEXT NOT NULL,
+  section  TEXT NOT NULL,                -- reference_section.id
+  filename TEXT DEFAULT '',
+  caption  TEXT DEFAULT '',              -- what a TEXT model can be told about a picture
+  ord      INTEGER DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS course_reference (
   course TEXT NOT NULL,
   ref    TEXT NOT NULL,
@@ -180,6 +192,7 @@ CREATE INDEX IF NOT EXISTS ix_activity_sub_artifact ON activity_submission(artif
 CREATE INDEX IF NOT EXISTS ix_material_course ON material(course, uploaded);
 CREATE INDEX IF NOT EXISTS ix_claim_receipt ON claim_attempt(receipt, ts);
 CREATE INDEX IF NOT EXISTS ix_ref_section ON reference_section(ref, ord);
+CREATE INDEX IF NOT EXISTS ix_ref_figure ON reference_figure(section, ord);
 """
 
 _FTS = """
@@ -338,6 +351,9 @@ class Store:
                           "licence": "TEXT DEFAULT ''", "attribution": "TEXT DEFAULT ''",
                           "indexed": "REAL DEFAULT 0", "sections": "INTEGER DEFAULT 0",
                           "aside_titles": "TEXT DEFAULT ''"},
+            "reference_figure": {"ref": "TEXT DEFAULT ''", "section": "TEXT DEFAULT ''",
+                                 "filename": "TEXT DEFAULT ''", "caption": "TEXT DEFAULT ''",
+                                 "ord": "INTEGER DEFAULT 0"},
             "reference_section": {"ref": "TEXT DEFAULT ''", "number": "TEXT DEFAULT ''",
                                   "title": "TEXT DEFAULT ''", "url": "TEXT DEFAULT ''",
                                   "body": "TEXT DEFAULT ''", "ord": "INTEGER DEFAULT 0"},
@@ -644,8 +660,39 @@ class Store:
             self.db.commit()
         return len(rows)
 
+    def figures_put(self, ref: str, rows: list[dict]) -> int:
+        """Replace a reference's figures — a re-index is a replacement, like its sections."""
+        with self.lock:
+            self.db.execute("DELETE FROM reference_figure WHERE ref=?", (ref,))
+            cols = ("id", "ref", "section", "filename", "caption", "ord")
+            self.db.executemany(
+                f"INSERT INTO reference_figure({','.join(cols)}) "
+                f"VALUES({','.join('?' * len(cols))})",
+                [tuple(r.get(c, "") for c in cols) for r in rows])
+            self.db.commit()
+        return len(rows)
+
+    def figure(self, ref: str, filename: str) -> dict | None:
+        """One figure BY NAME, checked against what was indexed. The lookup is the safety: a path
+        this server did not write is not in the table, so it is never served."""
+        return self._one("SELECT * FROM reference_figure WHERE ref=? AND filename=?",
+                         (ref, filename))
+
+    def figures_for(self, section_ids: list[str]) -> dict:
+        """section id -> its figures, in order. One query for a whole answer's worth of hits,
+        because three round-trips to fetch three pictures is three round-trips."""
+        if not section_ids:
+            return {}
+        holes = ",".join("?" * len(section_ids))
+        out: dict = {}
+        for r in self._all(f"SELECT * FROM reference_figure WHERE section IN ({holes}) "
+                           f"ORDER BY section, ord", tuple(section_ids)):
+            out.setdefault(r["section"], []).append(dict(r))
+        return out
+
     def reference_delete(self, rid: str) -> None:
         with self.lock:
+            self.db.execute("DELETE FROM reference_figure WHERE ref=?", (rid,))
             self.db.execute("DELETE FROM reference_section WHERE ref=?", (rid,))
             self.db.execute("DELETE FROM course_reference WHERE ref=?", (rid,))
             self.db.execute("DELETE FROM reference WHERE id=?", (rid,))

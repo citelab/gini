@@ -184,7 +184,8 @@ def crawl(start_url: str, *, ref: str, fetch=None, max_pages: int = MAX_PAGES,
             order += 1
             rows.append({"id": f"{ref}/{page['number']}", "ref": ref,
                          "number": page["number"], "title": page["title"],
-                         "url": url, "body": page["body"], "ord": order})
+                         "url": url, "body": page["body"], "ord": order,
+                         "figures": page.get("figures") or []})
             if on_page:
                 on_page(page["number"], page["title"])
         url = page["next_url"]
@@ -193,4 +194,54 @@ def crawl(start_url: str, *, ref: str, fetch=None, max_pages: int = MAX_PAGES,
     return rows
 
 
-__all__ = ["crawl", "parse_page", "MAX_PAGES", "TIMEOUT"]
+#: A picture that will not fit on a slide is not an illustration. xv6's run 13-51 KB; this is well
+#: clear of them and still refuses anything that is really a download.
+MAX_FIGURE_BYTES = 2_000_000
+
+
+def fetch_figures(rows: list[dict], into, *, ref: str, get=None, on_figure=None,
+                  pause: float = POLITE_PAUSE) -> list[dict]:
+    """Download each section's pictures into `into`, returning rows for `Store.figures_put`.
+
+    Once, here, rather than when a student asks. The alternative is a tutor that reaches out to a
+    stranger's site mid-answer — slower, breakable by their outage, and rude.
+
+    A figure that will not download is SKIPPED, not fatal: a book with one broken image is still
+    worth having, unlike a book with one broken section, where the chain of `next` links means
+    everything past it is unreachable anyway.
+    """
+    import pathlib as _pl
+    get = get or _get_bytes
+    into = _pl.Path(into)
+    into.mkdir(parents=True, exist_ok=True)
+    out: list[dict] = []
+    n = 0
+    for row in rows:
+        for i, fig in enumerate(row.get("figures") or [], 1):
+            name = _pl.Path(urllib.parse.urlparse(fig["url"]).path).name or f"fig{n}"
+            safe = f"{row['number']}-{name}".replace("/", "-")
+            try:
+                blob = get(fig["url"])
+            except Exception:                  # noqa: BLE001 — one missing picture, not a failure
+                continue
+            if not blob or len(blob) > MAX_FIGURE_BYTES:
+                continue
+            (into / safe).write_bytes(blob)
+            n += 1
+            out.append({"id": f"{ref}/fig{n}", "ref": ref, "section": row["id"],
+                        "filename": safe, "caption": fig.get("caption", ""), "ord": i})
+            if on_figure:
+                on_figure(safe, fig.get("caption", ""))
+            if pause:
+                time.sleep(pause)
+    return out
+
+
+def _get_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "gini-teaching-center/1.0"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        return r.read(MAX_FIGURE_BYTES + 1)
+
+
+__all__ = ["crawl", "parse_page", "figures_in", "fetch_figures", "MAX_PAGES", "TIMEOUT",
+           "MAX_FIGURE_BYTES"]

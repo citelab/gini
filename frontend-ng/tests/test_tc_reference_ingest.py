@@ -127,8 +127,21 @@ def test_a_contents_page_is_walked_through_but_not_indexed():
 
 def test_rows_come_out_ready_for_the_store():
     r = crawl()[0]
-    assert set(r) == {"id", "ref", "number", "title", "url", "body", "ord"}
+    assert set(r) == {"id", "ref", "number", "title", "url", "body", "ord", "figures"}
     assert r["id"] == "xv6/7.5" and r["url"].endswith("Ch7.S5.html")
+
+
+def test_the_figures_ride_along_without_reaching_the_sections_table():
+    """`figures` is on the row for `fetch_figures` to work from, and `sections_put` writes a fixed
+    column list — so the extra key is carried past it rather than into it."""
+    from gini_teaching_center.store import Store
+    import tempfile
+    Store._instances.clear()
+    st = Store(tempfile.mkdtemp())
+    st.reference_put({"id": "xv6", "title": "x", "source_url": "", "licence": "",
+                      "attribution": "a", "aside_titles": ""})
+    st.sections_put("xv6", crawl())          # must not raise on the extra key
+    assert st.reference("xv6")["sections"] == 2
 
 
 def test_a_page_that_cannot_be_fetched_stops_the_walk_rather_than_skipping():

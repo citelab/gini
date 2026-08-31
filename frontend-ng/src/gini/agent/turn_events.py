@@ -27,6 +27,9 @@ here and tested with no widget, no event loop and no model.
 from __future__ import annotations
 
 PHASE, TICK, SAY, DONE = "phase", "tick", "say", "done"
+#: A picture that belongs with the answer. Carried on the same channel as everything else a turn
+#: says about itself, so a consumer that does not draw pictures ignores it like any other kind.
+FIGURE = "figure"
 
 #: How the liveness pulse is drawn. Advanced by TICK, never by a clock.
 PULSE = "·•●•"
@@ -56,6 +59,11 @@ def tick(chars: int) -> tuple[str, dict]:
 def say(text: str) -> tuple[str, dict]:
     """Prose for the student, as it is written."""
     return SAY, {"text": str(text or "")}
+
+
+def figure(caption: str, data: bytes) -> tuple[str, dict]:
+    """One diagram, with the caption the authors wrote for it."""
+    return FIGURE, {"caption": str(caption or ""), "data": data}
 
 
 def done(result) -> tuple[str, dict]:
@@ -353,6 +361,6 @@ class Progress:
         return " ".join(bits)
 
 
-__all__ = ["PHASE", "TICK", "SAY", "DONE", "PULSE", "Progress", "ProseFilter",
+__all__ = ["PHASE", "TICK", "SAY", "DONE", "FIGURE", "PULSE", "Progress", "ProseFilter", "figure",
            "phase", "tick", "say", "done", "asking_course",
            "LOOKING", "CATCHING_UP", "ASKING_COURSE", "ANSWERING", "CHECKING", "RECONSIDERING", "USING_TOOL", "reconsidering"]

@@ -144,7 +144,15 @@ class Assistant(QWidget):
         self.setMinimumWidth(416)
 
         self.log = QTextBrowser()
+        # Links were dead: clicking a "Read it: https://…" citation did nothing at all.
+        #
+        # NOT `setOpenExternalLinks(True)`, which is the obvious fix and the wrong one. While
+        # `openLinks` stays true a QTextBrowser navigates ITSELF to the target — so a click would
+        # try to load the page into the transcript and replace the whole conversation with a
+        # failed fetch. Both are off, and the click is handled explicitly instead.
+        self.log.setOpenLinks(False)
         self.log.setOpenExternalLinks(False)
+        self.log.anchorClicked.connect(self._open_link)
         # empty state = a clickable topic cloud (things to explore/build); it swaps to the
         # conversation once anything is posted. An invitation, not a keyword cage.
         # Mission HUD (objective tracker + clock + lives), shown only while a Mission is active,
@@ -2133,7 +2141,9 @@ class Assistant(QWidget):
         try:
             self._progress.feed(event)
             kind = event[0] if event else ""
-            if kind == te.SAY:
+            if kind == te.FIGURE:
+                self._draw_figure(event[1].get("caption", ""), event[1].get("data", b""))
+            elif kind == te.SAY:
                 self._on_chunk(event[1].get("text", ""))     # prose is the answer, not a status
             elif self._busy and not self._streaming:
                 self._paint_progress()
@@ -2287,6 +2297,7 @@ class Assistant(QWidget):
         # prompt made the model aware of it; nothing checked that it used any of it. A concern is
         # the same fact with an obligation attached.
         lab = current_lab_of(getattr(self.ctx, "proof_recorder", None))
+        self._course_answer = answer          # kept so the figures can be fetched AFTER the words
         return tc_ask.as_context(answer), course_concerns(answer.hits, current_lab=lab)
 
     def _audit_course(self, concerns: list, answer: str, emit, question: str = "") -> None:
@@ -2573,6 +2584,11 @@ class Assistant(QWidget):
             # the opposite of what they pressed.
             if concerns and not (stopped or token.stopped):
                 self._audit_course(concerns, visible_text(raw), emit, prompt)
+            # Diagrams AFTER the answer, deliberately. They are worth waiting for and not worth
+            # waiting for FIRST: the words are the answer, and a student reading them while the
+            # pictures arrive has lost nothing.
+            if not (stopped or token.stopped):
+                self._send_figures(emit)
             # DONE carries the whole answer even when every delta was already streamed, so a turn
             # that streamed and one that did not end the same way and cannot drift apart.
             #
@@ -2595,6 +2611,64 @@ class Assistant(QWidget):
             except Stopped:
                 self.answer_ready.emit(device or "", "")
         threading.Thread(target=guarded, daemon=True).start()
+
+    def _send_figures(self, emit) -> None:
+        """Fetch the pictures that belong to this answer's passages and hand them to the pane.
+
+        On the worker thread, and guarded: a tutor whose answer fails because a diagram did not
+        arrive is worse than one that answers without the diagram.
+        """
+        try:
+            from ..agent import turn_events as te
+            from ..services import tc_ask
+            answer = getattr(self, "_course_answer", None)
+            url = getattr(self.ctx.settings, "tc_url", "") or ""
+            if answer is None or not url:
+                return
+            for caption, blob in tc_ask.figures(answer, url):
+                emit(te.figure(caption, blob))
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def _draw_figure(self, caption: str, data: bytes) -> None:
+        """Put one diagram into the transcript, under the answer it belongs to."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QImage, QTextDocument
+        img = QImage()
+        if not img.loadFromData(data):
+            return
+        # Scaled to the panel rather than shown at native size: these are book figures and the
+        # dock is often dragged narrow, where a full-width diagram would push the conversation
+        # sideways and give the transcript a horizontal scrollbar.
+        width = max(180, min(img.width(), self.log.viewport().width() - 40))
+        if img.width() > width:
+            img = img.scaledToWidth(width, Qt.SmoothTransformation)
+        self._figure_n = getattr(self, "_figure_n", 0) + 1
+        name = f"gini://figure/{self._figure_n}"
+        self.log.document().addResource(QTextDocument.ImageResource, QUrl(name), img)
+        cur = self.log.textCursor()
+        cur.movePosition(QTextCursor.End)
+        cur.insertBlock()
+        cur.insertHtml(f'<img src="{name}">')
+        if caption:
+            t = self.theme.theme
+            cur.insertBlock()
+            cur.insertHtml(f'<span style="color:{t.faint};font-size:11px">{caption}</span>')
+        self.log.ensureCursorVisible()
+
+    def _open_link(self, url) -> None:
+        """A citation clicked in the transcript opens in the student's browser.
+
+        Only http and https. Everything else is refused rather than passed to the desktop —
+        internal schemes carry a figure or a device, and `file:` from model-written text is a way
+        to make a tutor open something on the machine it is running on.
+        """
+        try:
+            from PySide6.QtGui import QDesktopServices
+            if url.scheme().lower() in ("http", "https"):
+                QDesktopServices.openUrl(url)
+        except Exception:                                    # noqa: BLE001
+            pass
 
     def _nothing_said(self) -> str:
         """What to show when the model produced no prose at all.

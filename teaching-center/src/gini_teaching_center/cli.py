@@ -94,8 +94,12 @@ def _index_reference(argv: list[str]) -> int:
                          "aside_titles": a.aside_titles,
                          "indexed": _t.time(), "sections": len(rows)})
     store.sections_put(a.id, rows)
+    figs = references.fetch_figures(
+        rows, root / "references" / a.id, ref=a.id,
+        on_figure=lambda name, cap: print(f"    figure   {cap[:64] or name}"))
+    store.figures_put(a.id, figs)
     words = sum(len(r["body"].split()) for r in rows)
-    print(f"\n  indexed {len(rows)} sections, {words:,} words, into {root}")
+    print(f"\n  indexed {len(rows)} sections, {words:,} words, {len(figs)} figures, into {root}")
     for course in a.attach:
         store.course_ref_set(course, a.id, True)
         print(f"  attached to {course}")

@@ -874,3 +874,109 @@ def test_a_turn_that_ran_a_tool_and_said_nothing_is_done(chat, qtbot):
         chat._ask_async("add a router", "")
     qtbot.wait(80)
     assert "Done." in chat.log.toPlainText()
+
+
+# ---- a citation you can actually follow ---------------------------------------- #
+def test_a_link_in_the_transcript_opens_in_a_browser(chat, qtbot, monkeypatch):
+    """Clicking "Read it: https://…" did nothing at all — every citation the library adds was
+    decoration."""
+    from PySide6.QtCore import QUrl
+    opened = []
+    import PySide6.QtGui as G
+    monkeypatch.setattr(G.QDesktopServices, "openUrl", lambda u: opened.append(u.toString()))
+    chat._open_link(QUrl("https://xv6-guide.github.io/xv6-riscv-book/Ch7.S5.html"))
+    assert opened == ["https://xv6-guide.github.io/xv6-riscv-book/Ch7.S5.html"]
+
+
+def test_the_transcript_is_never_navigated_away_from(chat, qtbot):
+    """`setOpenExternalLinks(True)` is the obvious fix and the wrong one: while `openLinks` stays
+    true a QTextBrowser navigates ITSELF to the target, so one click would replace the whole
+    conversation with a failed page load."""
+    assert chat.log.openLinks() is False
+
+
+@pytest.mark.parametrize("scheme", ["file:///etc/passwd", "gini://fig/1", "javascript:x=1",
+                                    "ftp://host/x"])
+def test_only_web_links_are_handed_to_the_desktop(chat, qtbot, monkeypatch, scheme):
+    """Internal schemes carry a figure or a device, and `file:` from model-written text is a way
+    to make a tutor open something on the machine it is running on."""
+    from PySide6.QtCore import QUrl
+    opened = []
+    import PySide6.QtGui as G
+    monkeypatch.setattr(G.QDesktopServices, "openUrl", lambda u: opened.append(u))
+    chat._open_link(QUrl(scheme))
+    assert opened == []
+
+
+# ---- diagrams in the answer ----------------------------------------------------- #
+# A book whose figures ARE the page-table layout and the file-system regions is half wasted as
+# text. The model cannot see them — it is told the CAPTION, never shown the picture — so they
+# accompany an answer rather than informing it.
+def _png(w=40, h=20):
+    from PySide6.QtCore import QBuffer, QByteArray
+    from PySide6.QtGui import QImage
+    img = QImage(w, h, QImage.Format_RGB32)
+    img.fill(0x336699)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(ba)
+
+
+def test_a_diagram_is_drawn_into_the_transcript(chat, qtbot):
+    from PySide6.QtGui import QTextDocument
+    chat._draw_figure("Figure 8.1: Layers of the xv6 file system.", _png())
+    doc = chat.log.document()
+    found = 0
+    blk = doc.begin()
+    while blk.isValid():
+        it = blk.begin()
+        while not it.atEnd():
+            if it.fragment().charFormat().isImageFormat():
+                found += 1
+            it += 1
+        blk = blk.next()
+    assert found == 1
+    assert "Layers of the xv6 file system" in chat.log.toPlainText()
+
+
+def test_a_broken_image_is_simply_not_drawn(chat, qtbot):
+    """It arrived over a network from a server. It is not allowed to break the answer."""
+    before = chat.log.toPlainText()
+    chat._draw_figure("caption", b"this is not a png")
+    assert chat.log.toPlainText() == before
+
+
+def test_the_model_is_told_the_caption_and_never_shown_the_picture(chat, qtbot):
+    """The honest limit. A text model cannot see a diagram, and must not be able to imply it did
+    — but naming it lets the answer point a student at "Figure 8.1"."""
+    from gini.services import tc_ask
+    hit = {"kind": "reference", "title": "8.1 Overview", "book": "xv6",
+           "passage": "The file system has seven layers.", "url": "https://x/Ch8.S1.html",
+           "attribution": "(c) the authors",
+           "figures": [{"url": "/f/xv6/8.1-x10.png",
+                        "caption": "Figure 8.1: Layers of the xv6 file system."}]}
+    ctx = tc_ask.as_context(tc_ask.Answer(course="c", hits=[hit]))
+    assert "Figure 8.1: Layers of the xv6 file system." in ctx
+    assert "a diagram accompanies this passage" in ctx
+    assert "/f/xv6/8.1-x10.png" not in ctx, "a URL it cannot open is noise in the prompt"
+
+
+def test_a_wide_diagram_is_scaled_to_the_panel(chat, qtbot):
+    """The dock is often dragged narrow, and a full-width book figure would push the conversation
+    sideways and give the transcript a horizontal scrollbar."""
+    chat.log.setFixedWidth(300)
+    chat._draw_figure("wide", _png(2000, 100))
+    doc = chat.log.document()
+    blk = doc.begin()
+    widths = []
+    while blk.isValid():
+        it = blk.begin()
+        while not it.atEnd():
+            f = it.fragment().charFormat()
+            if f.isImageFormat():
+                widths.append(f.toImageFormat().width())
+            it += 1
+        blk = blk.next()
+    assert widths and all(w <= 300 for w in widths), widths
