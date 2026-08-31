@@ -162,3 +162,60 @@ def test_progress_is_reported_as_it_goes():
     seen = []
     crawl(on_page=lambda n, t: seen.append(n))
     assert seen == ["7.5", "7.6"]
+
+
+# ---- the pictures the authors drew --------------------------------------------- #
+# Indexing the words and discarding the diagrams throws away the clearest half of a book whose
+# figures ARE the page-table layout, the address spaces and the file-system regions.
+FIG = ('<div id="bml-main-content">'
+       '<p class="ltx_p">Some prose.</p>'
+       '<figure class="ltx_figure"><img src="x4.png" alt="">'
+       '<figcaption class="ltx_caption">Figure 3.1: <span>RISC-V addresses.</span></figcaption>'
+       '</figure>'
+       '<p class="ltx_p">More prose.</p></div>')
+
+
+def test_a_figure_is_read_with_its_caption():
+    f, = R.figures_in(FIG, BASE + "Ch3.S1.html")
+    assert f["url"] == BASE + "x4.png"
+    assert f["caption"] == "Figure 3.1: RISC-V addresses."
+
+
+def test_reading_figures_does_not_disturb_the_prose():
+    """Threading figure state through the prose parser was tried and reverted: a caption that
+    never closed swallowed the rest of the section, and 3.1 Paging hardware came back as 43 words
+    instead of 1072. The prose parser is the one that was already proven; figures are a small,
+    flat, self-contained thing and are read separately."""
+    p = R.parse_page(FIG, BASE + "Ch3.S1.html")
+    assert p["body"] == "Some prose. More prose."
+    assert len(p["figures"]) == 1
+
+
+def test_navigation_images_are_not_figures():
+    """Only what is inside the main content, and only what is marked as a figure — a book's
+    chrome is full of icons."""
+    noise = ('<img src="logo.png"><div id="bml-main-content">'
+             '<img src="bullet.png"><p class="ltx_p">Prose.</p></div>')
+    assert R.figures_in(noise, BASE) == []
+
+
+def test_a_figure_with_no_caption_is_still_a_figure():
+    m = '<div id="bml-main-content"><figure class="ltx_figure"><img src="x9.png"></figure></div>'
+    f, = R.figures_in(m, BASE)
+    assert f["url"].endswith("x9.png") and f["caption"] == ""
+
+
+def test_the_same_picture_twice_is_carried_once():
+    m = ('<div id="bml-main-content">'
+         '<figure class="ltx_figure"><img src="x4.png"></figure>'
+         '<figure class="ltx_figure"><img src="x4.png"></figure></div>')
+    assert len(R.figures_in(m, BASE)) == 1
+
+
+def test_a_section_with_no_figures_reports_none():
+    assert R.parse_page(page(), BASE)["figures"] == []
+
+
+def test_broken_markup_yields_no_figures_rather_than_an_exception():
+    for junk in ("", "<figure class='ltx_figure'", "<div id='bml-main-content'><figure"):
+        assert isinstance(R.figures_in(junk, BASE), list)

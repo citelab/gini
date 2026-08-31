@@ -30,6 +30,8 @@ from html.parser import HTMLParser
 #: is a change in one place.
 _MAIN_ID = "bml-main-content"
 _PARA_CLASS = "ltx_p"
+_FIG_CLASS = "ltx_figure"
+_CAP_CLASS = "ltx_caption"
 
 #: The book's own separator between "7.5 Sleep and wakeup", its chapter, and the book title.
 _TITLE_SEP = "‣"
@@ -90,6 +92,43 @@ class _Page(HTMLParser):
             self._para.append(data)
 
 
+#: A figure block, and the picture and caption inside it. Matched with a regex rather than woven
+#: into the parser above, and that is a decision made the hard way: threading figure state through
+#: the prose parser meant a caption that never closed swallowed the rest of the section, and 3.1
+#: Paging hardware came back as 43 words. A figure is a small, flat, self-contained thing — the
+#: prose is the part that needs a real parser, and it keeps the one that was already proven.
+_FIGURE_RE = re.compile(r'<(figure|div)[^>]*class="[^"]*ltx_figure[^"]*"[^>]*>(.*?)</\1>',
+                        re.S | re.I)
+_IMG_RE = re.compile(r'<img[^>]*src="([^"]+)"', re.I)
+_CAPTION_RE = re.compile(r'<(figcaption|p)[^>]*class="[^"]*ltx_caption[^"]*"[^>]*>(.*?)</\1>',
+                         re.S | re.I)
+_TAGS_RE = re.compile(r'<[^>]+>')
+
+
+def figures_in(markup: str, url: str = "") -> list[dict]:
+    """The pictures the authors drew for this passage, with their captions.
+
+    Kept because for a book whose diagrams ARE the page-table layout, the address spaces and the
+    file-system regions, indexing the words and discarding the pictures throws away the clearest
+    half. Downloaded once at index time and served from the course server, so nobody fetches from a
+    stranger's site while a student waits.
+    """
+    out, seen = [], set()
+    body = markup.split(f'id="{_MAIN_ID}"', 1)[-1] if _MAIN_ID in markup else markup
+    for _tag, block in _FIGURE_RE.findall(body):
+        m = _IMG_RE.search(block)
+        if not m:
+            continue
+        src = urllib.parse.urljoin(url, _html.unescape(m.group(1)))
+        if src in seen:
+            continue
+        seen.add(src)
+        cap = _CAPTION_RE.search(block)
+        out.append({"url": src,
+                    "caption": _tidy(_TAGS_RE.sub(" ", cap.group(2))) if cap else ""})
+    return out
+
+
 def _tidy(text: str) -> str:
     return re.sub(r"\s+", " ", _html.unescape(text or "")).strip()
 
@@ -111,6 +150,7 @@ def parse_page(markup: str, url: str = "") -> dict:
     return {"number": m.group(1) if m else "",
             "title": (m.group(2) if m else head).strip(),
             "body": " ".join(p.paras).strip(),
+            "figures": figures_in(markup or "", url),
             "next_url": urllib.parse.urljoin(url, p.next_href) if p.next_href else ""}
 
 
