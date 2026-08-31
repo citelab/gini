@@ -18,25 +18,32 @@ search a textbook for them. Entries marked **[xv6]** are xv6-source vocabulary
 that general textbooks may not use. Entries marked **[RISC-V]** are architecture
 terms the SG textbook does not cover (the xv6 book does).
 
-## The doors
+## Kernel entry classes (the board's "doors")
 
-**doors** [GINI] — the three ways control enters the kernel from user mode,
-classified by *agency* (whose idea the entry was). Textbook: the classes of
-**trap** — system calls, exceptions/faults, and interrupts (SG 1.2, 2.3; xv6
-book ch. 4: "three kinds of event which cause the CPU to set aside ordinary
-execution"). Counted per user→kernel crossing in `usertrap`; see
+**The standard terminology — use this in all explanations.** The xv6 book
+(ch. 4) names three kinds of event which cause the CPU to set aside ordinary
+execution: **system call** (a user program executes `ecall`), **exception**
+(an instruction does something it cannot complete — page fault, illegal
+instruction), and **device interrupt** (a device signals it needs attention).
+SG's coarser split is *interrupt* vs *trap/exception* (SG 1.2), with system
+calls folded into traps.
+
+**doors** [GINI — UI label only] — the kernel board's name for the three entry
+classes, chosen to foreground *agency* (whose idea the entry was). The labels
+map one-to-one; say the standard term, show the label:
+
+- board label **asked** = **system call** (ecall, scause 8; strictly, an
+  intentional exception).
+- board label **couldn't** = **exception** — page fault (scause 12/13/15),
+  illegal instruction (2), and every other non-ecall exception.
+- board label **seized** = **device interrupt** (scause bit 63 set; timer or
+  external).
+
+Counted per user→kernel crossing in `usertrap`; see
 [os-kernel-board](os-08-kernel-board.md).
 
-- **asked** [GINI] — the deliberate door: the program executed `ecall`.
-  Textbook: **system call** (via the ecall *exception*, scause 8).
-- **couldn't** [GINI] — the accidental door: the program could not proceed.
-  Textbook: **exception** or **fault** — page fault (scause 12/13/15), illegal
-  instruction (2), and every other non-ecall exception.
-- **seized** [GINI] — the uninvited door: something else wanted attention.
-  Textbook: **interrupt** (scause bit 63 set) — timer or device/external.
-
 **trap** [standard, but overloaded] — GINI and the xv6 book use *trap* as the
-umbrella for all three doors. Beware: some texts (and some architectures' docs)
+umbrella for all three entry classes. Beware: some texts (and some architectures' docs)
 use "trap" narrowly for intentional exceptions only. In GINI it always means
 "any transfer into the kernel via the trap vector."
 

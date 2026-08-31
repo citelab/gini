@@ -71,6 +71,11 @@ _BSUB = re.compile(r"^BSUB (\d+) (\S+) (\d+)\s*$", re.M)
 _BEDGE = re.compile(r"^BEDGE (\d+) (\d+) (\d+)\s*$", re.M)
 _BEOBS = re.compile(r"^BEOBS (\d+) (\d+) (\d+)\s*$", re.M)
 _BDOOR = re.compile(r"^BDOOR (\d+) (\d+) (\d+)\s*$", re.M)
+#: The doors GINI's own polling opened. A separate line rather than three more fields on BDOOR,
+#: so a newer kernel talking to an older frontend still reports the workload's doors correctly —
+#: every reader here matches its own line by name, and an unrecognised one is simply not read.
+#: The trailing space in the pattern above is what keeps `BDOOR ` from matching `BDOOROBS`.
+_BDOOROBS = re.compile(r"^BDOOROBS (\d+) (\d+) (\d+)\s*$", re.M)
 _BUSER = re.compile(r"^BUSER (\d+) (\d+)\s*$", re.M)
 _BSAMP = re.compile(r"^BSAMP (\d+)\s*$", re.M)
 _BTRAIL = re.compile(r"^BTRAIL (\d+)((?: \d+)*)\s*$", re.M)
@@ -91,6 +96,9 @@ class Sample:
     edges: dict = field(default_factory=dict)        # (src, dst) -> calls made by the workload
     edges_obs: dict = field(default_factory=dict)    # ... and calls GINI's own polling provoked
     doors: tuple = (0, 0, 0)
+    #: The same three, for the doors OUR polling opened. Zero from a kernel that predates the
+    #: split, which reads correctly: it never told us, so we never claim any.
+    doors_obs: tuple = (0, 0, 0)
     user_kinstr: int = 0                             # thousands of user-mode instructions
     user_entries: int = 0
     resid_n: int = 0                                 # residency samples behind the numbers above
@@ -162,6 +170,8 @@ def parse(text: str) -> Sample:
             resid[SUBSYSTEMS[i]] = int(m.group(3))
     d = _BDOOR.search(text or "")
     doors = (int(d.group(1)), int(d.group(2)), int(d.group(3))) if d else (0, 0, 0)
+    o = _BDOOROBS.search(text or "")
+    doors_obs = (int(o.group(1)), int(o.group(2)), int(o.group(3))) if o else (0, 0, 0)
     u = _BUSER.search(text or "")
     n = _BSAMP.search(text or "")
     tr = _BTRAIL.search(text or "")
@@ -178,7 +188,7 @@ def parse(text: str) -> Sample:
     )
     return Sample(resid=resid,
                   edges=_edges(text, _BEDGE), edges_obs=_edges(text, _BEOBS),
-                  doors=doors,
+                  doors=doors, doors_obs=doors_obs,
                   user_kinstr=int(u.group(1)) if u else 0,
                   user_entries=int(u.group(2)) if u else 0,
                   resid_n=int(n.group(1)) if n else 0,
@@ -196,6 +206,9 @@ class Frame:
     edges: dict = field(default_factory=dict)        # (src, dst) -> calls in the window
     edges_obs: dict = field(default_factory=dict)    # (src, dst) -> OUR calls in the window
     doors: tuple = (0, 0, 0)
+    #: The same three, for the doors OUR polling opened. Zero from a kernel that predates the
+    #: split, which reads correctly: it never told us, so we never claim any.
+    doors_obs: tuple = (0, 0, 0)
     user_kinstr: int = 0
     user_entries: int = 0
     resid_n: int = 0

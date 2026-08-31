@@ -1766,10 +1766,15 @@ extern uint64   gini_door[3];      // 0 asked (ecall) | 1 couldn't (fault) | 2 s
 extern uint64   gini_uinstr;       // retired user-mode instructions, summed
 extern uint64   gini_uentry;       // kernel entries that contributed to gini_uinstr
 extern int      gini_obs[];        // per-hart: are we inside a GINI dump right now?
+extern int      gini_obs_prov[];   // per-hart: inside a device interrupt of unknown agency
+extern uint64   gini_door_obs[3];  // doors GINI's own polling opened
 extern uchar    gini_trail[];      // recent residency samples, newest at gini_trail_i-1
 extern uint64   gini_trail_i;
 void            gini_obs_begin(void);
 void            gini_obs_end(void);
+void            gini_obs_defer(void);
+void            gini_obs_confirm(void);
+void            gini_obs_resolve(void);
 // SLEEP CHANNELS. `state == SLEEPING` says a process is blocked; it does not say what will wake
 // it. xv6 sleeps on an ADDRESS — sleep(chan, lk) — and wakeup(chan) matches on that address, so
 // the answer to "who is going to wake you?" is sitting in p->chan and is invisible to a student.
@@ -1857,6 +1862,20 @@ regex_once("kernel/trap.c",
 # Timer ticks that arrive while the CPU is already in the kernel. usertrap's sample is taken by
 # gini_doorrec (where the subsystem still reads USER); this is the kernel-side half, and without
 # it every kernel subsystem would show zero residency.
+# The window in which a device interrupt's agency is unknown. Opened before plic_claim — which is
+# itself one of the three misattributed events — and closed on every path out of the external
+# branch, including the one where the irq was zero and nothing ran at all.
+regex_once("kernel/trap.c",
+           r"(    // irq indicates which device interrupted\.\n)",
+           "    gini_obs_defer();  // GINI-xv6: hold this interrupt's events until we know whose\n"
+           r"\1",
+           "GINI-xv6: obs defer")
+
+regex_once("kernel/trap.c",
+           r"(    if \(irq\)\n      plic_complete\(irq\);\n)",
+           r"\1\n    gini_obs_resolve();  // GINI-xv6: file the events under the right column\n",
+           "GINI-xv6: obs resolve")
+
 regex_once("kernel/trap.c",
            r"(uint64 scause = r_scause\(\);)",
            r"\1\n  gini_ktick();  // GINI-xv6: sample which subsystem this hart is in",
@@ -1874,6 +1893,30 @@ uint64 gini_uentry;
 int    gini_sub[NCPU];        // which subsystem each hart is executing in, right now
 uint64 gini_umark[NCPU];      // instret at the moment we last returned to user
 int    gini_obs[NCPU];        // per-hart: inside a GINI dump (see gini_obs_begin)
+uint64 gini_door_obs[3];      // the doors OUR polling opened, split from the workload's
+
+// ---- deferred attribution for device interrupts ---------------------------------------------
+// An interrupt is anonymous at trap time: the PLIC says "UART wants attention", not why. So the
+// whole delivery path — the door, plic_claim, uartintr, plic_complete — used to be committed as
+// workload BEFORE consoleintr could read the byte and discover it was us. On an idle machine that
+// was essentially all the blue on the board, which is the worst possible place for it: the idle
+// board is exactly where the class is told "everything blue is your program".
+//
+// It never needed deciding at trap entry — only before the counters are COMMITTED, and the byte's
+// identity is learned inside the same trap. So the events of one device interrupt are held here
+// and committed together once the agency is known. Nothing is ever un-counted.
+//
+// Presume WORKLOAD and confirm observation, rather than the reverse. A UART interrupt that carries
+// no byte is a transmit completing — `uartintr` wakes the sender before it reads anything — and
+// those come from a program's own write(), so presuming grey would paint a printing program as
+// measurement. Guessing is only safe where the guess is checked, and only the RX path checks.
+#define GINI_DEFER 8          // ~3 edges per interrupt; 8 is slack, not a budget
+struct gini_defer_edge { uchar from, to; };
+struct gini_defer_edge gini_defer_buf[NCPU][GINI_DEFER];
+int    gini_defer_n[NCPU];
+int    gini_obs_prov[NCPU];   // 1 while a device interrupt's agency is still unknown
+int    gini_obs_verdict[NCPU];// 1 once it has turned out to be ours
+int    gini_door_pend[NCPU];  // a seized door waiting to be filed under the right column
 uchar  gini_trail[GINI_TRAIL];
 uint64 gini_trail_i;
 struct gini_hop gini_path[GINI_PATH];
@@ -1902,6 +1945,17 @@ gini_subenter(int s)
   int prev = gini_sub[h];
   gini_sub[h] = s;
   if(prev != s){
+    // Agency not yet known, and not already inside a dump (a dump's own edges have their answer).
+    // Held rather than counted: this is the only window in which a commit would be a guess.
+    if(gini_obs_prov[h] && !gini_obs[h] && gini_defer_n[h] < GINI_DEFER){
+      gini_defer_buf[h][gini_defer_n[h]].from = (uchar)prev;
+      gini_defer_buf[h][gini_defer_n[h]].to = (uchar)s;
+      gini_defer_n[h]++;
+      return prev;
+    }
+    // Past the end of the buffer we fall through and count as workload — which is exactly what
+    // this code did before deferral existed, so an overflow degrades to the old behaviour rather
+    // than to a new and unfamiliar wrongness.
     if(gini_obs[h])
       __sync_fetch_and_add(&gini_edge_obs[prev][s], 1);   // this call is OURS, not the workload's
     else {
@@ -1938,9 +1992,63 @@ gini_path_toggle(void)
 // LIMIT, stated rather than hidden: the UART interrupt that DELIVERS the control character fires
 // before the flag can be raised, so roughly three events per poll (uartintr -> consoleintr) are
 // still counted as real. The dump itself — the overwhelming bulk — is captured.
+// Open a window in which this hart's edges are held rather than counted. Called at the top of a
+// supervisor external interrupt, BEFORE plic_claim — because plic_claim is itself one of the three
+// events being misattributed, and a window that opened after it would leave a third of the error
+// in place.
+void
+gini_obs_defer(void)
+{
+  int h = cpuid();
+  gini_obs_prov[h] = 1;
+  gini_obs_verdict[h] = 0;      // workload until something says otherwise
+  gini_defer_n[h] = 0;
+}
+
+// The byte turned out to be one of ours. Called from gini_obs_begin, which every dump goes
+// through — so every poll is covered.
+//
+// LIMIT, stated rather than hidden: the control-plane bytes that change a quantum or a policy do
+// not dump, so they do not pass through here and their delivery is still counted as workload.
+// They are a student's click, a few per session, against several polls per second — and counting
+// a human's action as the workload is the honest direction to be wrong in.
+void
+gini_obs_confirm(void)
+{
+  gini_obs_verdict[cpuid()] = 1;
+}
+
+// Close the window and file everything under the column that is now known to be right.
+void
+gini_obs_resolve(void)
+{
+  int h = cpuid();
+  int obs = gini_obs_verdict[h];
+  if(!gini_obs_prov[h])
+    return;
+  for(int i = 0; i < gini_defer_n[h]; i++){
+    int a = gini_defer_buf[h][i].from, b = gini_defer_buf[h][i].to;
+    if(obs)
+      __sync_fetch_and_add(&gini_edge_obs[a][b], 1);
+    else
+      __sync_fetch_and_add(&gini_edge[a][b], 1);
+  }
+  gini_defer_n[h] = 0;
+  if(gini_door_pend[h]){
+    if(obs)
+      gini_door_obs[2]++;
+    else
+      gini_door[2]++;
+    gini_door_pend[h] = 0;
+  }
+  gini_obs_prov[h] = 0;
+  gini_obs_verdict[h] = 0;
+}
+
 void
 gini_obs_begin(void)
 {
+  gini_obs_confirm();           // whatever delivered this byte was us, not the workload
   gini_obs[cpuid()] = 1;
   %(P)s("%%c", 30);
 }
@@ -2008,8 +2116,16 @@ gini_doorrec(void)
 
   // The three doors, by AGENCY. A fault is not an interrupt, and students conflate them
   // constantly; this is the same three-way split usertrap itself makes a few lines below.
-  if(c & 0x8000000000000000L)
-    gini_door[2]++;                     // seized: a device or the timer wanted attention
+  if(c & 0x8000000000000000L){
+    // A device interrupt's door cannot be filed yet: we do not know whose it is until the byte is
+    // read, several calls later and inside the same trap. Held, and committed by gini_obs_resolve
+    // to the workload's column or ours. A TIMER interrupt is never the observer, so it commits at
+    // once, exactly as before.
+    if((c & 0xffL) == 9)
+      gini_door_pend[h] = 1;
+    else
+      gini_door[2]++;                   // seized: the timer wanted attention
+  }
   else if(c == 8)
     gini_door[0]++;                     // asked: the program executed ecall
   else
@@ -2089,6 +2205,11 @@ gini_boarddump(void)
         %(P)s("BEOBS %%d %%d %%d\\n", i, j, (int)gini_edge_obs[i][j]);
     }
   %(P)s("BDOOR %%d %%d %%d\\n", (int)gini_door[0], (int)gini_door[1], (int)gini_door[2]);
+  // Our own doors, on their own line. A parser that has never heard of it ignores it — every
+  // reader here matches its line by name — so an older frontend against a newer kernel simply
+  // sees the workload's doors, which is what it always saw.
+  %(P)s("BDOOROBS %%d %%d %%d\\n", (int)gini_door_obs[0], (int)gini_door_obs[1],
+        (int)gini_door_obs[2]);
   // How many residency samples the numbers above rest on. At a ~0.5s tick this is small, and
   // the board says so rather than shading a rectangle as if it knew.
   %(P)s("BSAMP %%d\\n", (int)gini_resid_n);

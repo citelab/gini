@@ -201,7 +201,8 @@ BSUB <i> <name> <ticks>                             timer-sampled residency; ids
                                                     user trap syscall proc memory file pipe inode log bcache disk console plic other
 BEDGE <i> <j> <n>                                   exact calls crossing i→j (workload)
 BEOBS <i> <j> <n>                                   …provoked by GINI's own polling
-BDOOR <asked> <couldnt> <seized>                    the three doors (see os-kernel-board)
+BDOOR <syscalls> <exceptions> <interrupts>          kernel entries by class (xv6 book ch. 4);
+                                                    board labels: asked / couldn't / seized
 BSAMP <n>                                           residency samples behind the numbers
 BTRAIL <n> <s0> <s1> …                              last ≤64 REAL positions, oldest first
 BARM <0|1>                                          path trace armed?

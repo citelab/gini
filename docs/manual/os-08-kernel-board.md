@@ -1,6 +1,6 @@
 ---
 id: os-kernel-board
-title: Kernel Board / OS HUD — residency, edges, the three doors
+title: Kernel Board / OS HUD — residency, edges, the three kernel entry classes
 subsystem: kernel-board
 layer: [kernel-patch, agent, domain, ui]
 kernel_files: [kernel/trap.c, kernel/riscv.h, kernel/start.c, kernel/console.c]
@@ -8,7 +8,7 @@ endpoints: [/board, /sc, /faults, /traps, /source]
 keywords: [kernel board, OS HUD, three doors, asked, couldn't, seized, residency, edges, call matrix, instructions per kernel entry, instret, direct path, observer effect, path trace, Ctrl-Q, X-ray, swimlanes, timeline scrub]
 ---
 
-# Kernel Board / OS HUD — residency, edges, the three doors
+# Kernel Board / OS HUD — residency, edges, the three kernel entry classes
 
 ## What is on the screen
 
@@ -20,7 +20,8 @@ Lab). Two readings of the same ~10 s window:
   floor" / disk·console·plic outlined as drivers). No auto-layout, ever:
   "spatial memory is how a structure is learned, and a block that moves between
   frames cannot be learned at all." Above: a "your program" strip with instr/s
-  and the **three doors by agency** (asked / couldn't / seized). Right: the
+  and the three kernel entry classes — system call / exception / device
+interrupt, shown under the board's labels *asked / couldn't / seized*. Right: the
   permanent wide **direct lane** ("no kernel runs · the MMU checks every address
   in hardware") and a **blue dashed** kernel→lane line meaning *configuration,
   not a call*. Below: the machine cut in half (kernel-only devices vs
@@ -56,22 +57,27 @@ is almost never running**. The headline `instructions-per-kernel-entry` is user
 instructions retired between kernel entries — enormous for CPU-bound work,
 collapsing to a handful while typing.
 
-### The three doors — exact criteria
+### The three kernel entry classes — exact criteria
 
-`gini_doorrec()` runs at the very top of `usertrap()` on **every user→kernel
-crossing** and decodes raw `scause`, in this priority order:
+The board counts the three kinds of event that cause the CPU to set aside
+ordinary execution (xv6 book ch. 4): **system call**, **exception**, and
+**device interrupt**. On screen these carry the board's labels *asked*,
+*couldn't*, and *seized* — labels only; in every explanation use the xv6-book
+terms. `gini_doorrec()` runs at the very top of `usertrap()` on **every
+user→kernel crossing** and decodes raw `scause`, in this priority order:
 
 ```c
-if (c & 0x8000000000000000L) door[2]++;   // SEIZED — any interrupt (bit 63)
-else if (c == 8)             door[0]++;   // ASKED  — ecall from U-mode
-else                         door[1]++;   // COULDN'T — every other exception
-                                          //   (page faults 12/13/15, illegal 2, …)
+if (c & 0x8000000000000000L) door[2]++;   // INTERRUPT   (label "seized") — scause bit 63
+else if (c == 8)             door[0]++;   // SYSTEM CALL (label "asked")  — ecall from U-mode
+else                         door[1]++;   // EXCEPTION   (label "couldn't") — everything else:
+                                          //   page faults 12/13/15, illegal instruction 2, …
 ```
 
-By **agency**: asked = your idea; couldn't = nobody's, but your doing; seized =
-nothing to do with you. Traps landing while already in the kernel go to
-`kerneltrap`, which only samples residency — **doors count entries, not trap
-events**, which is what keeps instr-per-entry honest.
+Strictly, a system call is itself an exception (the `ecall` instruction traps);
+the board splits it out because it is the one *intentional* entry — which is
+the pedagogical point the labels carry. Traps landing while already in the
+kernel go to `kerneltrap`, which only samples residency — **the counters count
+kernel entries, not trap events**, which is what keeps instr-per-entry honest.
 
 ### The other measurements
 

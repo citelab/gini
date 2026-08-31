@@ -60,9 +60,10 @@ Classification (`gini_kind`, mirrors `usertrap`'s own dispatch):
 - **Trap-catch** is the gdb path: `tbreak usertrap` conditioned on scause
   (syscall→8, pagefault→12|13|15, illegal→2, timer/device→interrupt codes), then
   prints scause/sepc/stval + pid + trapframe registers, and always detaches.
-- The **three-doors** counting on the kernel board is a separate, simpler
-  classifier in `gini_doorrec()` — see [os-kernel-board](os-08-kernel-board.md);
-  the taxonomy here is the six-bucket refinement of the same scause decode.
+- The kernel board's entry-class counting (system call / exception / device
+  interrupt) is a separate, simpler classifier in `gini_doorrec()` — see
+  [os-kernel-board](os-08-kernel-board.md); the taxonomy here is the six-bucket
+  refinement of the same scause decode.
 
 ## Wire format
 

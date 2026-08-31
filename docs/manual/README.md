@@ -22,6 +22,17 @@ Every subsystem page uses these headings, in this order:
 5. **Limits and honesty** — sampling limits, observer effects, known caveats.
 6. **Cross-references** — related pages by `id`.
 
+## Terminology policy
+
+**Explanations follow established textbook terminology — the xv6 book first,
+SG where xv6 is silent.** The kernel entry classes are *system call*,
+*exception*, and *device interrupt* (xv6 book ch. 4). GINI's on-screen words
+(the board's door labels "asked / couldn't / seized") are **UI labels, not
+vocabulary**: every page introduces them once, as labels for the standard
+terms, and then explains in the standard terms. The same rule applies to any
+GINI coinage — say the textbook term, show the label. The glossary
+([os-16-glossary.md](os-16-glossary.md)) is the bridge table.
+
 ## Ground rules that hold everywhere
 
 - **Nothing is simulated in live mode.** Every number is read from the running
@@ -47,7 +58,7 @@ Every subsystem page uses these headings, in this order:
 | os-storage | [os-05-storage.md](os-05-storage.md) | superblock, buffer cache, block allocator, write-ahead log |
 | os-traps | [os-06-traps.md](os-06-traps.md) | taxonomy ring, TC/TR, trap-catch, sigalarm strip |
 | os-syscalls | [os-07-syscalls.md](os-07-syscalls.md) | histogram, strace ring, custom syscall numbering |
-| os-kernel-board | [os-08-kernel-board.md](os-08-kernel-board.md) | residency, edges, three doors, instr/entry, trail, path trace |
+| os-kernel-board | [os-08-kernel-board.md](os-08-kernel-board.md) | residency, edges, the three kernel entry classes, instr/entry, trail, path trace |
 | os-locks | [os-09-locks.md](os-09-locks.md) | contention telemetry, acquires vs spins |
 | os-cpu | [os-10-cpu-journey.md](os-10-cpu-journey.md) | CPU & Registers face, mode bar, CSRs, CPU Journey |
 | os-fingerprints | [os-11-fingerprints.md](os-11-fingerprints.md) | radar/scatter, accumulator, classifier vs grader |
@@ -55,7 +66,7 @@ Every subsystem page uses these headings, in this order:
 | os-shadows | [os-13-shadows.md](os-13-shadows.md) | all 7 shadows, dispatch, validators, wedge detection, rebuild loop |
 | os-programs | [os-14-programs.md](os-14-programs.md) | the launchable workloads and what each exercises |
 | os-known-issues | [os-15-known-issues.md](os-15-known-issues.md) | verified bugs and stale comments, as of 2026-08-30 |
-| os-glossary | [os-16-glossary.md](os-16-glossary.md) | every GINI-coined term mapped to its textbook term ("doors" → trap classes, "shadow" → pluggable policy, …) |
+| os-glossary | [os-16-glossary.md](os-16-glossary.md) | every GINI label mapped to its textbook term ("asked/couldn't/seized" → system call/exception/device interrupt, "shadow" → pluggable policy, …) |
 
 ## Source-of-truth map
 

@@ -74,6 +74,11 @@ removal.
 - `machine_lab.py` documents the shared-serial dump-corruption hazard
   (~41–45) — still true; kept here so it isn't re-discovered.
 
+> **Proposed fix for #7 and the related delivery/TX leaks:**
+> `docs/design/observer-attribution.md` — presume UART interrupts are
+> observation, resolve to workload in the same trap when the byte is a
+> keystroke; tag TX bytes by provenance. (Mahesh, 2026-08-30.)
+
 ## 7. Doors carry a small observer inflation
 
 `gini_door` has no `_obs` twin, so a GINI poll's UART interrupt that lands
