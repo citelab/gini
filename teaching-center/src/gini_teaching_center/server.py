@@ -150,7 +150,14 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if p == "/auth/whoami" and self.command == "GET":
             me = self._who()
-            self._send(200, me) if me else self._send(401, {"error": "not signed in"})
+            # The RUNNING code's version, so the page can tell whether it is talking to the server
+            # it shipped with. `_page` reads console.html off disk on every request, so upgrading
+            # the package swaps the UI instantly while the process keeps the old Python in memory
+            # — a Library tab that renders perfectly above "No endpoint at /api/references", and
+            # nothing anywhere saying the answer is "restart the service".
+            from .version import __version__
+            self._send(200, {**me, "server": __version__}) if me \
+                else self._send(401, {"error": "not signed in"})
             return True
         if p == "/auth/logout" and self.command == "POST":
             _ACCTS.logout(_bearer(self))

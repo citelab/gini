@@ -172,3 +172,26 @@ def test_linking_needs_a_course_and_says_so():
     js = scripts("console.html")
     assert "pick a course" in js.lower()
     assert "'/api/references/link'" in js
+
+
+# --------------------------------------------------------------------------- #
+# an upgrade without a restart
+# --------------------------------------------------------------------------- #
+def test_the_console_notices_it_is_newer_than_its_server():
+    """`_page` reads console.html off disk on EVERY request, so upgrading the package swaps the UI
+    the moment it lands while the running process keeps the old Python in memory. The result was a
+    Library tab rendering perfectly above "No endpoint at /api/references for GET", with nothing
+    anywhere saying the answer is to restart the service."""
+    js = scripts("console.html")
+    assert "BUILT_FOR" in js and "checkServerVersion" in js
+    assert "boot()" in js or "async function boot" in js
+    body = js.split("function checkServerVersion", 1)[1].split("\n}", 1)[0]
+    assert "ME.server" in body, "it must compare against what the SERVER reports"
+    assert "estart" in body, "the message has to say what to do about it"
+
+
+def test_the_version_check_runs_before_anything_asks_for_an_endpoint():
+    """After the tabs have loaded is too late — the failure it explains has already happened."""
+    js = scripts("console.html")
+    boot = js.split("async function boot()", 1)[1].split("\n}", 1)[0]
+    assert "checkServerVersion()" in boot

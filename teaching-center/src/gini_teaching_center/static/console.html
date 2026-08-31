@@ -380,6 +380,7 @@ function show(t){
 }
 
 async function boot(){
+  checkServerVersion();
   $('#who').innerHTML = esc(ME.who) + `<span class="role ${ME.role==='admin'?'admin':''}">`
                       + esc(ME.role) + '</span>';
   const admin = ME.role === 'admin';
@@ -615,6 +616,22 @@ async function ingest(){
 // Global shelf, per-course link. One copy of a book serves every course that links it, which is
 // what stops five operating-systems courses holding five copies of one index — and the link is a
 // teacher's decision about which vocabulary their class is taught in.
+// What this page was built to talk to, compared against the version the SERVER reports. The two
+// can differ: `_page` reads this file off disk on EVERY request, so upgrading the package swaps
+// the UI the moment it lands while the running process keeps the old Python in memory. That
+// produced a Library tab rendering perfectly above "No endpoint at /api/references for GET", with
+// nothing anywhere saying the answer was to restart the service.
+const BUILT_FOR = '6.4';
+
+function checkServerVersion(){
+  const running = String((ME && ME.server) || '');
+  const short = v => v.split('.').slice(0, 2).join('.');
+  if (!running || short(running) === BUILT_FOR) return;
+  say(`This page came from version ${BUILT_FOR}; the server running is ${esc(running)}. `
+    + `The package was upgraded without restarting the service, so parts of this console will ask `
+    + `for endpoints that are not there yet. Restart the Teaching Center.`);
+}
+
 async function loadLibrary(){
   $('#lib-sub').textContent = COURSE ? 'Linking into ' + COURSE
                                      : 'Pick a course first to link a work into it.';
