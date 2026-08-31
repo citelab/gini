@@ -2239,6 +2239,11 @@ class Assistant(QWidget):
             return ""
 
     # --- async LLM plumbing: one shared conversation, off the UI thread ----- #
+    #: How long to leave a course server alone after it failed to answer at all. Long enough that
+    #: a broken setup is not re-paid on every question, short enough that a VPN reconnecting is
+    #: noticed without anyone restarting anything.
+    COURSE_RETRY_AFTER = 120.0
+
     def _course_context(self, question: str) -> tuple[str, list]:
         """Ask the Teaching Center what this course says, scoped by the Course in Settings.
 
@@ -2248,11 +2253,26 @@ class Assistant(QWidget):
         tutor never seems to have heard of their labs. Said once per session, then dropped: a
         warning on every question would be worse than the problem.
         """
+        import time as _time
         from ..services import tc_ask
         from ..agent.twin.course import course_concerns, current_lab_of
         s = self.ctx.settings
-        answer = tc_ask.ask(getattr(s, "tc_url", "") or "", getattr(s, "tc_course", "") or "",
-                            question)
+        url = getattr(s, "tc_url", "") or ""
+        # A course server that cannot be reached costs the FULL timeout — eight seconds of dead
+        # wait before the model starts — and it costs it again on every question. Measured off the
+        # VPN: 8023 ms, 8003 ms, 8003 ms, one after another, and before this it said nothing.
+        #
+        # So a transport failure is remembered and the call skipped for a while. Not for ever, and
+        # not tied to the settings changing: a VPN comes back, and a student should not have to
+        # restart gBuilder to be believed. It retries on its own, once a cooldown has passed.
+        down_until, down_url = getattr(self, "_course_down", (0.0, ""))
+        if url == down_url and _time.monotonic() < down_until:
+            return "", []
+        answer = tc_ask.ask(url, getattr(s, "tc_course", "") or "", question)
+        if answer.reason in ("unreachable", "untrusted", "insecure"):
+            self._course_down = (_time.monotonic() + self.COURSE_RETRY_AFTER, url)
+        elif url == down_url:
+            self._course_down = (0.0, "")          # it came back
         # Everything the STUDENT can fix gets said, once. Only `no_such_course` did, so a tutor
         # pointed at a server it could not reach — or whose certificate it did not trust — announced
         # "Asking your course", got nothing, and answered from general knowledge without a word.

@@ -468,3 +468,53 @@ def test_it_is_said_once_not_on_every_question(qtbot, monkeypatch):
     for _ in range(4):
         a._course_context("anything")
     assert len([m for lvl, m in said if lvl == "warn"]) == 1
+
+
+def test_a_dead_course_server_is_not_re_asked_on_every_question(qtbot, monkeypatch):
+    """Measured off the VPN: 8023 ms, 8003 ms, 8003 ms — the full timeout, paid before the model
+    starts, on every single question. One student question should cost that at most once."""
+    a, said = _panel(qtbot)
+    calls = []
+    monkeypatch.setattr(tc_ask, "ask", lambda *_a, **_k: (
+        calls.append(1), tc_ask.Answer(course="c", reason="unreachable", error="timed out"))[1])
+    for _ in range(5):
+        a._course_context("anything")
+    assert len(calls) == 1
+
+
+def test_it_tries_again_once_the_cooldown_passes(qtbot, monkeypatch):
+    """A VPN comes back. A student should not have to restart gBuilder to be believed."""
+    import time
+    a, said = _panel(qtbot)
+    calls = []
+    monkeypatch.setattr(tc_ask, "ask", lambda *_a, **_k: (
+        calls.append(1), tc_ask.Answer(course="c", reason="unreachable", error="x"))[1])
+    a._course_context("q")
+    monkeypatch.setattr(a, "COURSE_RETRY_AFTER", 0.0, raising=False)
+    a._course_down = (time.monotonic() - 1, a.ctx.settings.tc_url or "")
+    a._course_context("q")
+    assert len(calls) == 2
+
+
+def test_a_server_that_comes_back_is_trusted_again(qtbot, monkeypatch):
+    a, said = _panel(qtbot)
+    monkeypatch.setattr(tc_ask, "ask",
+                        lambda *_a, **_k: tc_ask.Answer(course="c", reason="unreachable", error="x"))
+    a._course_context("q")
+    assert a._course_down[0] > 0
+    a._course_down = (0.0, "")
+    monkeypatch.setattr(tc_ask, "ask", lambda *_a, **_k: tc_ask.Answer(course="c", hits=[]))
+    a._course_context("q")
+    assert a._course_down == (0.0, "")
+
+
+def test_a_course_that_answered_with_nothing_is_asked_again(qtbot, monkeypatch):
+    """Only a TRANSPORT failure earns the cooldown. A course that answered and had nothing to say
+    is working perfectly, and the next question may well match."""
+    a, said = _panel(qtbot)
+    calls = []
+    monkeypatch.setattr(tc_ask, "ask", lambda *_a, **_k: (
+        calls.append(1), tc_ask.Answer(course="c", hits=[]))[1])
+    for _ in range(3):
+        a._course_context("anything")
+    assert len(calls) == 3
