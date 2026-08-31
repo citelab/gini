@@ -1,10 +1,12 @@
 """About GINI — the version question, answered from inside the app.
 
 There was no way to tell which build was running without leaving gBuilder, which is the first thing
-any bug report needs. One number would not have been enough: `gini` is a namespace package shared
-by THREE separately-installed distributions, and a toolkit newer than its core fails at import —
-that is not hypothetical, it produced `ModuleNotFoundError: No module named 'gini.services'` in a
-teacher's marking window.
+any bug report needs.
+
+An earlier draft of this listed all three distributions and warned when gini-toolkit and gini-core
+disagreed. That was machinery for a failure `pyproject.toml` already prevents — the toolkit
+declares `gini-core>=<release>` as a floor, with a comment saying exactly why — so it asked a user
+to check something pip cannot get wrong.
 """
 from __future__ import annotations
 
@@ -14,9 +16,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication, QLabel                 # noqa: E402
 
-from gini.ui.about_dialog import (                                 # noqa: E402
-    DISTRIBUTIONS, TAGLINE, AboutDialog, mismatch, versions, where,
-)
+from gini.ui.about_dialog import HOME, TAGLINE, AboutDialog, where  # noqa: E402
 
 
 def _app():
@@ -47,33 +47,17 @@ def test_it_reports_a_version(about):
     assert gini_version() in _text(about)
 
 
-def test_it_reports_every_distribution_separately(about):
-    """One number would hide the failure that matters: they are installed separately and can
-    disagree."""
+def test_it_names_where_it_comes_from(about):
+    """A student should know whose lab built the thing they are learning on, and "GINI" alone is
+    a name nobody can look up."""
+    assert "McGill" in _text(about)
+
+
+def test_it_reports_one_version_not_a_dependency_audit(about):
+    """gini-core is a managed dependency with a declared floor. Listing it invited a user to check
+    something pip cannot resolve wrongly."""
     shown = _text(about)
-    for dist in DISTRIBUTIONS:
-        assert dist in shown
-
-
-def test_a_missing_teaching_center_is_missing_not_broken():
-    """It is legitimately absent on a student's machine."""
-    v = dict.fromkeys(DISTRIBUTIONS, "6.4.0")
-    v["gini-teaching-center"] = ""
-    assert mismatch(v) == "", "an absent server is not a mismatch"
-
-
-def test_a_toolkit_out_of_step_with_its_core_is_called_out():
-    """They share the `gini` namespace, so this fails at IMPORT — in front of whoever is using it,
-    which is how it was found the first time."""
-    warn = mismatch({"gini-toolkit": "6.5.0", "gini-core": "6.4.0", "gini-teaching-center": ""})
-    assert "gini-toolkit 6.5.0" in warn and "gini-core 6.4.0" in warn
-    assert "Upgrade both" in warn
-
-
-def test_a_lagging_teaching_center_is_not_called_out():
-    """It is a separate server on a separate machine and may lag freely."""
-    assert mismatch({"gini-toolkit": "6.4.0", "gini-core": "6.4.0",
-                     "gini-teaching-center": "6.1.0"}) == ""
+    assert "gini-core" not in shown and "gini-teaching-center" not in shown
 
 
 def test_it_says_where_the_package_is_loaded_from(about):
@@ -83,20 +67,19 @@ def test_it_says_where_the_package_is_loaded_from(about):
     assert loc and loc in _text(about)
 
 
-def test_the_versions_can_be_selected_and_pasted(about):
-    """It exists to be copied into a bug report."""
+def test_the_version_can_be_selected_and_pasted(about):
+    """It exists to be copied into a bug report, not transcribed from a screen."""
     from PySide6.QtCore import Qt
-    rows = [w for w in about.findChildren(QLabel) if w.text().startswith("gini-")]
+    rows = [w for w in about.findChildren(QLabel) if w.text().startswith("version ")]
     assert rows
     assert all(w.textInteractionFlags() & Qt.TextSelectableByMouse for w in rows)
 
 
-def test_versions_never_raises_on_a_broken_install():
-    """It runs while someone is trying to work out why things are broken. It is the last thing
-    that should throw."""
-    v = versions()
-    assert set(v) == set(DISTRIBUTIONS)
-    assert all(isinstance(x, str) for x in v.values())
+def test_it_opens_on_a_source_checkout_with_no_installed_metadata(about):
+    """It runs while someone is working out why things are broken. It is the last thing that
+    should throw."""
+    assert HOME in _text(about)
+    assert where()
 
 
 def test_the_menu_item_is_wired(qtbot):
