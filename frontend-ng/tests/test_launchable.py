@@ -64,17 +64,42 @@ def test_the_three_new_programs_are_present():
         assert name in _list_literal(LAB, "_LAUNCHABLE"), f"{name} is not in the launcher"
 
 
-def test_the_hint_text_describes_what_the_menu_offers():
-    """The hint under the dropdown is the only in-app documentation of these programs. A program
-    offered but undescribed is a program nobody picks."""
-    # Anchor inside _build_launcher: several other panels have their own `hint = QLabel(...)`,
-    # and the first one in the file belongs to the scheduler description.
+def test_every_program_the_menu_offers_is_described():
+    """A program offered but undescribed is a program nobody picks — the invariant this has always
+    protected.
+
+    It used to read the hint LABEL, because that was where the descriptions lived: one
+    non-wrapping line of prose beside the dropdown, 521 characters long. A QLabel in a horizontal
+    layout hands its full single-line width to the layout as a minimum, so it asked for 3033 px on
+    its own and dragged the Process Scheduler panel past the width of the screen. The descriptions
+    moved to `_WHAT_IT_DOES` and are shown as the dropdown's own tooltips, which is where you want
+    them anyway: this is text you read while CHOOSING a program.
+    """
     src = LAB.read_text()
-    body = src[src.index("def _build_launcher"):]
-    body = body[:body.index("\n    def ")]
-    hint = body[body.index("hint = QLabel("):]
+    described = src[src.index("_WHAT_IT_DOES = {"):]
+    described = described[:described.index("\n}")]
     for name in _list_literal(LAB, "_LAUNCHABLE"):
-        assert name in hint, f"{name} is offered in the menu but not described in the hint"
+        assert f'"{name}"' in described, f"{name} is offered in the menu but never described"
+
+
+def test_the_launcher_bar_carries_no_prose_of_its_own():
+    """The failure that started this, guarded where it can recur.
+
+    Length was never the invariant — a tooltip may be as long as it likes. What cannot happen is
+    a long string inside `_build_launcher`, because a QLabel in that horizontal layout hands its
+    full single-line width to the layout as a MINIMUM, and one 521-character sentence asked for
+    3033 px and took the whole panel past the width of the screen. Read from the source so it
+    holds with no Qt and no display.
+    """
+    import ast
+    src = LAB.read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_build_launcher")
+    long = [s.value for s in ast.walk(fn)
+            if isinstance(s, ast.Constant) and isinstance(s.value, str)
+            and len(s.value) > 120 and " " in s.value.strip()]
+    assert not long, f"prose back in the launcher bar: {long[0][:70]!r}"
 
 
 def test_no_uprog_uses_percent_escaping():

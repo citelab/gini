@@ -50,6 +50,24 @@ _POLICIES = ["round-robin", "priority", "lottery"]
 _LAUNCHABLE = ["spin", "busy", "walker", "toucher", "alloc", "writer", "sgrind", "mgrind",
                "grind", "forktest"]
 
+# What each one does, shown as the DROPDOWN's own tooltips rather than as a line of prose beside
+# it. Every word here used to sit in a single non-wrapping QLabel in the launcher's horizontal bar,
+# which asked for 3033 px on its own and dragged the whole Process Scheduler panel past the width
+# of the screen. Nothing is lost by moving it: this is text you want while CHOOSING a program, and
+# the dropdown is where you choose one.
+_WHAT_IT_DOES = {
+    "spin": "A CPU loop — the PC parks on one instruction.",
+    "busy": "Varied CPU work; the PC moves.",
+    "walker": "The PC itself walks a corridor of NOPs, one page at a time, slowly enough to watch.",
+    "toucher": "Touches N pages TWICE. The second pass faults zero times.",
+    "alloc": "Grows memory lazily.",
+    "writer": "File writes.",
+    "sgrind": "Reads K blocks round and round. The buffer cache holds 30.",
+    "mgrind": "Hammers the page allocator and fork.",
+    "grind": "A heavy KERNEL-mode syscall mix.",
+    "forktest": "Fills the process table, then exits.",
+}
+
 # Programs whose argument carries the lesson, and what to show in the argument box for each. A
 # program absent from this map takes no argument, and its box is disabled rather than ignored —
 # a box that accepts text it then discards is worse than no box.
@@ -741,6 +759,8 @@ class MachineLab(QDialog):
         lay.addWidget(lbl)
         self._prog_combo = QComboBox()
         self._prog_combo.addItems(_LAUNCHABLE)
+        for i, name in enumerate(_LAUNCHABLE):
+            self._prog_combo.setItemData(i, _WHAT_IT_DOES.get(name, ""), Qt.ToolTipRole)
         self._prog_combo.setStyleSheet(
             f"QComboBox{{color:{t.text};background:{t.panel};border:1px solid {t.line};"
             "border-radius:6px;padding:3px 8px;}")
@@ -762,19 +782,16 @@ class MachineLab(QDialog):
         launch.setStyleSheet(self._btn_css())
         launch.clicked.connect(self._launch)
         lay.addWidget(launch)
-        hint = QLabel("spin = CPU loop (PC parks on one instruction) · busy = varied CPU work "
-                      "(PC moves) · walker = the PC itself walks a corridor of NOPs, one page "
-                      "at a time, slowly enough to watch · "
-                      "toucher = touches N pages TWICE, second pass faults zero times · "
-                      "alloc = grows memory lazily · writer = file writes · "
-                      "sgrind = reads K blocks round and round (cache holds 30) · "
-                      "mgrind = hammers the page allocator and fork · "
-                      "grind = heavy KERNEL-mode syscall mix · "
-                      "forktest = fills the process table, then exits. "
-                      "Use ✕ in the table to kill one.")
-        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
-        lay.addWidget(hint); lay.addStretch(1)
+        lay.addStretch(1)
         root.addWidget(bar)
+        # One short line, WRAPPED, and on its own row rather than in the bar above. A label in a
+        # horizontal layout hands its full single-line width to the layout as a minimum, so any
+        # sentence long enough to be worth reading sets the panel's width — which is how a
+        # dropdown, a text box and a button ended up needing three thousand pixels.
+        hint = QLabel("Hover a program to see what it does. ✕ in the table kills one.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;padding:2px 12px;"))
+        root.addWidget(hint)
         # Refusals land here rather than nowhere. Hidden until something actually fails.
         self._launch_msg = QLabel(); self._launch_msg.setWordWrap(True)
         self._launch_msg.setStyleSheet(
