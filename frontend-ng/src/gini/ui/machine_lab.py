@@ -772,9 +772,21 @@ class MachineLab(QDialog):
                       "grind = heavy KERNEL-mode syscall mix · "
                       "forktest = fills the process table, then exits. "
                       "Use ✕ in the table to kill one.")
-        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
-        lay.addWidget(hint); lay.addStretch(1)
+        # WRAPPED, and on its own row beneath the launcher rather than inside it. Every word of
+        # the text above is kept — it is the only in-app description of these programs — but a
+        # QLabel in a HORIZONTAL layout hands its full single-line width to that layout as a
+        # MINIMUM, and this one measures 2856 px. That alone put the Process Scheduler panel's
+        # minimum at 3325 px, wider than the screen, dragging the dropdown, the argument box, the
+        # pid setters and the shadow bar off the edge with it. Below the bar it folds to whatever
+        # width the panel has, and the panel is free to be narrow: 943 px.
+        #
+        # Fixed once before by moving the descriptions into dropdown tooltips. That is a defensible
+        # design and it was not what was asked for — from outside it is text that vanished.
+        hint.setWordWrap(True)
+        hint.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;padding:2px 12px;"))
+        lay.addStretch(1)
         root.addWidget(bar)
+        root.addWidget(hint)
         # Refusals land here rather than nowhere. Hidden until something actually fails.
         self._launch_msg = QLabel(); self._launch_msg.setWordWrap(True)
         self._launch_msg.setStyleSheet(
