@@ -287,3 +287,22 @@ def test_a_book_that_marks_no_asides_is_unaffected(store):
     assert store.reference("xv6-riscv-book")["aside_titles"] in ("", None)
     assert _titles(store.search_sections("page table", ["xv6-riscv-book"])) == ["Paging hardware"]
 
+
+
+def test_a_sqlite_without_fts5_still_runs_the_server(tmp_path, monkeypatch):
+    """FTS5 is compiled into almost every sqlite3 the standard library ships, and "almost" is not
+    a thing to bet a department's server on. Created in one executescript with the ordinary
+    indexes, a build without it would take the whole Teaching Center down at startup, on a machine
+    nobody can attach a debugger to. Losing library search is a missing feature; losing the server
+    is a lost afternoon for a class."""
+    import gini_teaching_center.store as S
+    # The script is pointed at a module that certainly does not exist, which produces exactly the
+    # error a build without FTS5 raises — `sqlite3.Connection` is an immutable type, so its methods
+    # cannot be patched, and faking it at that level would test the mock rather than the fallback.
+    monkeypatch.setattr(S, "_FTS", "CREATE VIRTUAL TABLE nope USING fts_not_compiled_in(x);")
+    S.Store._instances.clear()
+    st = S.Store(str(tmp_path))                     # must not raise
+    assert st.has_fts is False
+    st.put_course({"id": "comp310", "title": "OS"})  # the rest of the server is unaffected
+    assert [c["id"] for c in st.courses()] == ["comp310"]
+    assert st.search_sections("anything", ["xv6-riscv-book"]) == []

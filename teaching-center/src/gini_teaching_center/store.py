@@ -180,7 +180,9 @@ CREATE INDEX IF NOT EXISTS ix_activity_sub_artifact ON activity_submission(artif
 CREATE INDEX IF NOT EXISTS ix_material_course ON material(course, uploaded);
 CREATE INDEX IF NOT EXISTS ix_claim_receipt ON claim_attempt(receipt, ts);
 CREATE INDEX IF NOT EXISTS ix_ref_section ON reference_section(ref, ord);
+"""
 
+_FTS = """
 -- The full-text index over the sections. FTS5 ships with the sqlite3 in the standard library, and
 -- its BM25 ranking is the whole reason indexing a book's PROSE is worth doing: the term-overlap
 -- scorer in search.py reads a question's words against a TITLE, and "why is my process stuck"
@@ -206,6 +208,7 @@ CREATE TRIGGER IF NOT EXISTS reference_fts_au AFTER UPDATE ON reference_section 
   INSERT INTO reference_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
 END;
 """
+
 
 
 def _canonical_ddl(table: str) -> str:
@@ -278,6 +281,19 @@ class Store:
         self.db.executescript(_SCHEMA)     # tables first...
         self._migrate()                    # ...then reconcile an older database's columns...
         self.db.executescript(_INDEXES)    # ...and only then index them
+        # The full-text index is created SEPARATELY and allowed to fail. FTS5 is compiled into
+        # almost every sqlite3 the standard library ships with, but "almost" is not a thing to bet
+        # a department's server on: in one `executescript` with the ordinary indexes, a build
+        # without FTS5 would take the whole Teaching Center down at startup, on a machine nobody
+        # can attach a debugger to. Losing library search is a missing feature; losing the server
+        # is a lost afternoon for a class.
+        try:
+            self.db.executescript(_FTS)
+            self.has_fts = True
+        except sqlite3.Error as e:
+            self.has_fts = False
+            print(f"  library search is OFF — this SQLite has no FTS5 ({e}). Everything else "
+                  f"works; books will index but will not be searchable.")
         self.db.commit()
 
     def _migrate(self) -> None:
@@ -672,7 +688,7 @@ class Store:
         is worse than one that finds nothing. Every term is quoted and OR-ed, which is also what
         makes BM25 do the work: it weighs how rare each matched term is instead of counting them.
         """
-        if not query or not refs:
+        if not query or not refs or not getattr(self, "has_fts", True):
             return []
         import re as _re
         from .search import _STOP
