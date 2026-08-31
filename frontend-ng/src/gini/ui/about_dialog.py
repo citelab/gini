@@ -23,9 +23,17 @@ from PySide6.QtWidgets import (
 #: The name is a joke with a point, and it is the first thing anyone asks about it.
 TAGLINE = "GINI Is Not Internet"
 
-#: Where it comes from. Stated because a student should know whose lab built the thing they are
-#: learning on, and because "GINI" on its own is a name nobody can look up.
-HOME = "Developed at McGill University"
+#: Where it comes from, and on what terms. Stated because a student should know whose lab built
+#: the thing they are learning on, and because "GINI" on its own is a name nobody can look up.
+#:
+#: No copyright line: nothing requires the notice to appear in the UI. MIT's own condition is that
+#: it ship WITH the software, which the LICENSE file does.
+#:
+#: MIT is the stated intent. The packaging metadata does not yet agree with it — the three
+#: pyproject files declare GPL-3.0-or-later — and reconciling that is its own piece of work, not
+#: something to settle from a dialog box. If you are here to change this string, that is the thing
+#: to check first.
+HOME = "Developed at McGill University   ·   MIT Licensed"
 
 
 def where() -> str:

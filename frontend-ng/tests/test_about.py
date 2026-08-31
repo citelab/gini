@@ -95,3 +95,12 @@ def test_the_menu_item_is_wired(qtbot):
     assert acts[0].menuRole() == QAction.MenuRole.NoRole
     assert hasattr(w, "_open_about")
     w.close()
+
+
+def test_it_states_the_licence(about):
+    """MIT is the intent, and the About box is where someone looks for it. No copyright line —
+    nothing requires the notice in the UI; MIT's condition is that it ship with the software,
+    which the LICENSE file does."""
+    shown = _text(about)
+    assert "MIT" in shown
+    assert "Copyright" not in shown
