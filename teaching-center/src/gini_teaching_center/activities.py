@@ -105,8 +105,14 @@ def mint_code(activity: dict, now: float | None = None) -> dict:
     digit, and gBuilder's `ticket.parse` refuses anything else with "That code has a typo in it" —
     so a locally-invented code would be issued happily and then rejected at arming, with the student
     blamed for a typo they did not make.
+
+    The code CARRIES whether this lab asks questions. gBuilder arms offline when the course server
+    cannot be reached, and this is the only way it can know it is missing something — otherwise a
+    student works the whole lab, hands in, and nobody finds out until a marker sees two blanks
+    caused by hotel wifi. Decided here from the same activity row the caller passes to
+    `pick_questions` in the same request, so the flag and the questions cannot disagree.
     """
-    return {"code": _ticket.mint().code,
+    return {"code": _ticket.mint(questions=int(activity.get("show_n") or 0) > 0).code,
             "activity": activity["id"],
             "issued": now if now is not None else time.time(),
             "valid_until": valid_until_for(activity),

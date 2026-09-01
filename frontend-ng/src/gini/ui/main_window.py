@@ -267,6 +267,80 @@ class MainWindow(QMainWindow):
             if k in cfg:
                 setattr(s, k, cfg[k])
 
+    # ---- lab questions ---------------------------------------------------- #
+    def _refresh_questions(self) -> None:
+        """Render the Ask Questions tab from the recorder, and put the outstanding count on the tab.
+
+        Everything comes from the recorder: the chain is the state, so a panel that kept its own
+        copy would be a second answer to "what has been answered" that could disagree with the one
+        being submitted.
+        """
+        r = self.proof_recorder
+        if r is None or not hasattr(self, "questions_panel"):
+            return
+        from ..domain import lab_questions as _lq
+        from .questions_panel import announce
+        qs, answers = r.questions, r.answers()
+        submitted = bool(r.armed and r._chain and r._chain.has_submitted())
+        tk = r.ticket
+        self.questions_panel.show_state(
+            armed=r.armed, submitted=submitted, questions=qs, answers=answers,
+            expects_questions=bool(tk and tk.questions))
+        # Live only while recording is in progress — before arming there is no lab, and after
+        # handing in an answer would land past the `submit` entry in a chain nobody reads again.
+        self.questions_panel.set_live(r.armed and not submitted)
+        want = announce(qs, answers) if (r.armed and not submitted) else "Ask Questions"
+        if _lq.missing_because_offline(bool(tk and tk.questions), qs) and r.armed:
+            want = "Ask Questions (!)"
+        if self._questions_dock.windowTitle() != want:
+            self._questions_dock.setWindowTitle(want)
+
+    def _on_questions_arrived(self) -> None:
+        """A lab's questions just landed. Say so ONCE, audibly and visibly.
+
+        Raising the tab outright was the other option and is the wrong one: it would take the pane
+        away from whatever the student was reading, at the exact moment they had just armed a code
+        and were looking at the canvas. A bell and a count on the tab tell them without taking the
+        wheel.
+        """
+        self._refresh_questions()
+        if not self.proof_recorder.questions:
+            return
+        from .questions_panel import beep
+        beep()
+        n = len(self.proof_recorder.questions)
+        self.ctx.bus.log.emit(
+            "info", f"This lab asks {n} question{'' if n == 1 else 's'} — "
+                    f"see the Ask Questions tab, on the right beside Terminal.")
+
+    def _raise_questions(self) -> None:
+        """Bring the tab forward — the one time this panel takes the pane.
+
+        It does not do this when the questions ARRIVE, because a student who has just armed a code
+        is looking at the canvas and it would snatch the pane away from whatever they were reading.
+        Here they have asked for it: they pressed "Answer them first" and would otherwise have to
+        go and find the tab themselves.
+        """
+        self._questions_dock.show()
+        self._questions_dock.raise_()
+
+    def _record_answer(self, question_id: str, text: str) -> None:
+        prompt = next((q.prompt for q in self.proof_recorder.questions if q.id == question_id), "")
+        if self.proof_recorder.note_answer(question_id, prompt, text):
+            self.ctx.bus.log.emit("ok", "Answer recorded in the proof chain.")
+        else:
+            self.ctx.bus.log.emit(
+                "error", "That answer was not recorded — this work is already handed in.")
+        self._refresh_questions()
+
+    def _fetch_questions(self) -> None:
+        """Ask the course server for this code's questions again.
+
+        Needed twice over: a code armed with no server in reach never received them, and the arm
+        reply is not persisted, so a gBuilder restarted mid-lab has none either. Same button.
+        """
+        self.proof_strip.fetch_questions()
+
     def _open_about(self) -> None:
         """Which build is running, in a form that can be pasted into a bug report."""
         from .about_dialog import AboutDialog
@@ -1721,6 +1795,20 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, termd)
         self.tabifyDockWidget(srcd, termd)
         self._terminal_dock = termd
+
+        # Ask Questions — the lab's own questions, answered where the work is. Last in the stack,
+        # after Terminal, because it is the only tab that is empty most of the time: it has
+        # something to say only while a code with questions on it is being recorded.
+        from .questions_panel import QuestionsPanel
+        self.questions_panel = QuestionsPanel(self.theme)
+        self.questions_panel.answered.connect(self._record_answer)
+        self.questions_panel.refetch.connect(self._fetch_questions)
+        qd = QDockWidget("Ask Questions", self)
+        qd.setObjectName("dock_questions")
+        qd.setWidget(self.questions_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, qd)
+        self.tabifyDockWidget(termd, qd)
+        self._questions_dock = qd
         # selection_changed is Signal(object) — the device id ALONE. The panel needs the topology
         # to resolve it, so it goes through an adapter rather than being connected directly.
         # (TerminalPanel subscribes to theme.themeChanged itself, as SourceBrowser does.)
@@ -1752,6 +1840,13 @@ class MainWindow(QMainWindow):
         # the window opening, and it runs on a worker thread from there — the usual recovery for
         # a student whose wifi died mid-submission is simply reopening gBuilder on campus.
         _QTimer.singleShot(2000, self.proof_strip.flush_outbox)
+        # The strip re-emits the recorder's own change callback, so this one connection covers
+        # arming, answering, resuming, cancelling and handing in — every transition the panel
+        # renders. It is made here rather than beside the dock because the strip is built later.
+        self.proof_strip.changed.connect(self._refresh_questions)
+        self.proof_strip.questionsArrived.connect(self._on_questions_arrived)
+        self.proof_strip.answerFirst.connect(self._raise_questions)
+        self._refresh_questions()
         _dash = self.dashboard.layout()
         _dash.insertWidget(max(0, _dash.count() - 1), self.proof_strip)
         dash = QDockWidget("Dashboard", self)

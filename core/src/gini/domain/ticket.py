@@ -25,7 +25,13 @@ GROUP = 4                                       # printed as XXXX-XXXX-XXXX
 
 # Domain separation: the check symbol must not collide with any other hash we take of a code
 # (the proof MAC also hashes the ticket), so the two can never be mistaken for one another.
-_CHECK_SALT = b"gini-assignment-code/1"
+#
+# TWO of them, and which one validates is one bit of payload carried for free: does the lab this
+# code was issued for ask the student questions? The bit does not live in the eleven identity
+# symbols — those stay fully random, at 55 bits — it lives in WHICH salt reproduces the check
+# symbol. See `Ticket.questions` for why a code has to be able to say this on its own.
+_CHECK_SALT = b"gini-assignment-code/1"        # a lab that asks nothing
+_CHECK_SALT_Q = b"gini-assignment-code/2"      # a lab with questions in it
 
 # What a hand-typed character was almost certainly meant to be. Only these three: they are the
 # pairs the Crockford alphabet was designed around.
@@ -47,7 +53,7 @@ def normalize(code: str) -> str:
     return "".join(_CONFUSABLE.get(ch, ch) for ch in (code or "").upper() if ch.isalnum())
 
 
-def check_symbol(payload: str) -> str:
+def check_symbol(payload: str, *, questions: bool = False) -> str:
     """The 12th character: a hash-derived check symbol over the first 11.
 
     A weighted-sum check digit is the usual choice, but it is only as good as its weights modulo
@@ -55,8 +61,14 @@ def check_symbol(payload: str) -> str:
     instance, swapping two characters exactly 16 apart in the alphabet is invisible. A hash has no
     such structure: *any* typo, of any shape, is caught with probability 31/32. That is both
     stronger and far easier to reason about than a table of weights.
+
+    `questions` picks the salt, which is how the code carries that fact. It costs one thirty-second
+    of the typo detection — a mistyped code now gets two chances to validate by accident, so 31/32
+    becomes 30/32 — and nothing else. A code that slips through offline is still refused by the
+    course server the moment one is reachable.
     """
-    digest = hashlib.sha256(_CHECK_SALT + payload.encode("ascii")).digest()
+    salt = _CHECK_SALT_Q if questions else _CHECK_SALT
+    digest = hashlib.sha256(salt + payload.encode("ascii")).digest()
     return ALPHABET[digest[0] % len(ALPHABET)]   # 256 = 8 x 32, so the symbol is unbiased
 
 
@@ -64,6 +76,22 @@ def check_symbol(payload: str) -> str:
 class Ticket:
     """A validated assignment code. `code` is always the normalised 12 symbols."""
     code: str
+
+    #: Does the lab this code was issued for ask the student questions?
+    #:
+    #: Read from the code ITSELF, so it is known before any network call and survives having none.
+    #: That is the whole reason it is here: gBuilder arms offline when the course server cannot be
+    #: reached, and without this a student would work a whole lab, hand in, and only afterwards
+    #: would anyone discover they were never shown the questions. It is not something the panel can
+    #: fetch and then act on — by the time you could fetch it you would not need it.
+    #:
+    #: The server decides it at MINT time from the same activity row it uses to choose the
+    #: questions, in the same request, so the two cannot disagree for a given code even if the lab
+    #: is edited afterwards.
+    #:
+    #: A code minted before this existed validates under the first salt and reads False, which is
+    #: true of it: there were no questions to ask.
+    questions: bool = False
 
     @property
     def pretty(self) -> str:
@@ -98,10 +126,18 @@ def parse(code: str) -> Ticket:
     if len(raw) != LENGTH:
         raise TicketError(
             f"An assignment code has {LENGTH} characters; this one has {len(raw)}.")
-    if raw[-1] != check_symbol(raw[:PAYLOAD_LEN]):
-        raise TicketError(
-            "That code has a typo in it — check each character against the printout.")
-    return Ticket(raw)
+    # The QUESTIONS salt first. A correctly-typed code validates under exactly one of the two —
+    # `mint` refuses to issue one that does not — so the order does not decide anything for a code
+    # this system issued. It decides for a MISTYPED one, where either salt may match by luck, and
+    # the safe way to be wrong is to say a lab has questions when it has none: the student is told
+    # to connect, connects, and is told otherwise. The other way round is the silent failure this
+    # bit exists to prevent.
+    payload = raw[:PAYLOAD_LEN]
+    for asks in (True, False):
+        if raw[-1] == check_symbol(payload, questions=asks):
+            return Ticket(raw, questions=asks)
+    raise TicketError(
+        "That code has a typo in it — check each character against the printout.")
 
 
 def valid(code: str) -> bool:
@@ -122,13 +158,25 @@ def error_for(code: str) -> str:
         return str(e)
 
 
-def mint(rand=None) -> Ticket:
+def mint(rand=None, *, questions: bool = False) -> Ticket:
     """Issue a fresh code. `rand(n)` returns n random bytes (defaults to `secrets.token_bytes`,
     injectable so tests can mint deterministically).
 
     11 symbols is 55 bits of identity, so an instructor can hand out a term's worth of codes
     without a collision worth thinking about — and, more to the point, a student cannot guess a
-    classmate's."""
+    classmate's. `questions` does not spend any of them: it selects the salt (see `check_symbol`).
+
+    AMBIGUITY IS REFUSED. One payload in thirty-two produces the same check symbol under both
+    salts, and such a code would read as "has questions" to `parse` no matter which lab it was
+    issued for. Drawing again is one retry in thirty-two and buys an absolute property: no code
+    this system issues can be read two ways.
+    """
     rnd = rand or secrets.token_bytes
-    payload = "".join(ALPHABET[b % len(ALPHABET)] for b in rnd(PAYLOAD_LEN))
-    return Ticket(payload + check_symbol(payload))
+    for _ in range(64):
+        payload = "".join(ALPHABET[b % len(ALPHABET)] for b in rnd(PAYLOAD_LEN))
+        check = check_symbol(payload, questions=questions)
+        if check != check_symbol(payload, questions=not questions):
+            return Ticket(payload + check, questions=questions)
+    # 64 ambiguous draws running is (1/32)**64. A caller passing a fixed `rand` for a test can
+    # reach it, though, and silently returning an ambiguous code would be the worse answer.
+    raise TicketError("Could not mint an unambiguous code.")

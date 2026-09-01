@@ -78,6 +78,8 @@ class ProofRecorder:
         # the tutor know which of a course's activities the student is actually being marked on.
         self._activity = ""
         self._activity_title = ""
+        # The lab's questions, as the arm reply carried them. In memory only — see note_questions.
+        self._questions: list = []
         # Not every signal reaches us on the GUI thread. `rider_ran` is emitted from a rider's
         # reader thread, and Qt delivers to a plain (non-QObject) slot directly in the emitting
         # thread — so two appends really can race, and an interleaved append would compute `prev`
@@ -183,6 +185,33 @@ class ProofRecorder:
         self._activity = str(activity or "")
         self._activity_title = str(title or "")
 
+    def note_questions(self, questions) -> None:
+        """The lab's questions, from the same arm reply. Held in memory, NOT written to the chain.
+
+        Set from outside for the same reason as `note_activity` — the recorder never talks to the
+        network. Not persisted, either: the chain is a record of what the student DID, and a list
+        of questions nobody has answered yet is not that. The cost is that a restart while armed
+        loses them until the next arm, which the panel handles by offering to fetch — the same path
+        it already needs for a code armed with no server in reach.
+
+        The ANSWERS are a different matter entirely, and those do go in the chain: see
+        `note_answer`.
+        """
+        self._questions = list(questions or [])
+
+    @property
+    def questions(self) -> list:
+        return list(getattr(self, "_questions", []))
+
+    def answers(self) -> dict:
+        """What has been answered so far, read back out of the chain.
+
+        The chain is the state. Anything held beside it is a second copy that can disagree with the
+        one that gets submitted and marked.
+        """
+        from gini.domain import lab_questions as _q
+        return _q.answers_in(self._chain.entries if self._chain else [])
+
     def cancel(self) -> None:
         """Leave recording mode. The chain stays on disk; entering the same code resumes it.
 
@@ -205,6 +234,10 @@ class ProofRecorder:
         self._chain = None
         self._ticket = None
         self._activity = self._activity_title = ""
+        # Cancel is the whole departure, so the questions go with it. A student who cancels and
+        # arms a DIFFERENT code must not be shown the last lab's questions with a fresh chain
+        # underneath them.
+        self._questions = []
         self._changed()
 
 
@@ -424,6 +457,29 @@ class ProofRecorder:
 
     def _note_command(self, device: str, cmd: str, out: list) -> None:
         self._record(ev.command(device, cmd, out))
+
+    def note_answer(self, question_id: str, prompt: str, text: str) -> bool:
+        """Record the student's answer to one of the lab's questions.
+
+        Returns whether it went in, so the panel can say so rather than guess. It does NOT go in
+        when nothing is being recorded, or when the work has already been handed in — an answer
+        appended after the `submit` entry is not in the proof that was sent, so accepting it would
+        let a student type into a box that no marker will ever read.
+
+        The prompt travels WITH the answer rather than being looked up later: a teacher may edit or
+        retire a question between the lab and the marking, and an answer whose question changed
+        underneath it is worse than no answer at all.
+
+        Answering twice appends twice, deliberately. The chain is append-only, a student may think
+        again, and the report shows the last pass and says how many there were.
+        """
+        if not self.armed or (self._chain and self._chain.has_submitted()):
+            return False
+        self._guard(self._note_answer, str(question_id or ""), str(prompt or ""), str(text or ""))
+        return True
+
+    def _note_answer(self, question_id: str, prompt: str, text: str) -> None:
+        self._record(ev.answer(question_id, prompt, text))
 
     def note_check(self, results, objectives=None) -> None:
         """Record what GINI measured when the student pressed Run / Check.

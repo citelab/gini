@@ -66,6 +66,9 @@ class ProofStrip(QWidget):
     armChecked = Signal(str, dict)          # typed code, server's answer ({} == unreachable)
     handedIn = Signal(dict, dict)           # generate_proof result, server's answer
     flushed = Signal(dict)                  # outbox.flush summary
+    questionsArrived = Signal()             # this lab's questions just landed from the server
+    questionsFetched = Signal(dict)         # a re-ask came back ({} == still unreachable)
+    answerFirst = Signal()                  # they chose to answer before handing in
 
     def __init__(self, theme, recorder, parent=None) -> None:
         super().__init__(parent)
@@ -146,6 +149,8 @@ class ProofStrip(QWidget):
         self.armChecked.connect(self._on_arm_checked)
         self.handedIn.connect(self._on_handed_in)
         self.flushed.connect(self._on_flushed)
+        # Emitted from the worker thread, handled here — the same crossing armChecked already makes.
+        self.questionsFetched.connect(self._on_questions_fetched)
         if recorder is not None and hasattr(recorder, "set_on_change"):
             recorder.set_on_change(self.changed.emit)
         self._restyle()
@@ -240,6 +245,58 @@ class ProofStrip(QWidget):
         if self._arm_locally(typed, keep_hint=True):
             self._announce(answer)
 
+    def fetch_questions(self) -> None:
+        """Ask the course server for the armed code's questions again.
+
+        Two situations need it and they are the same situation: a code armed while the server was
+        unreachable never received them, and the arm reply is not persisted, so a gBuilder
+        restarted mid-lab has none either. Both are "we know there are questions and we do not
+        have them", and both are fixed by asking again.
+
+        On a WORKER thread, like arming — this is a network call with a twenty-second timeout and
+        the canvas must not freeze behind it.
+        """
+        tk = self.recorder.ticket if self.recorder is not None else None
+        url = self._tc_url()
+        if tk is None:
+            self._say("Nothing is being recorded.", bad=True)
+            return
+        if not url:
+            self._say("No course server is configured — check Settings.", bad=True)
+            return
+        self._say("Asking your course for this lab's questions…", bad=False)
+
+        def work():
+            try:
+                answer = tc_submit.check_code(url, tk.code)
+            except (tc_submit.Insecure, tc_submit.Untrusted) as e:
+                answer = {"ok": False, "error": str(e)}
+            except tc_submit.Unreachable:
+                answer = {}
+            self.questionsFetched.emit(answer)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_questions_fetched(self, answer: dict) -> None:
+        if not answer:
+            self._say("Still could not reach the course server.", bad=True)
+            return
+        if not answer.get("ok"):
+            self._say(answer.get("error", "The course server refused that code."), bad=True)
+            return
+        from ..domain import lab_questions as _lq
+        qs = _lq.questions_from(answer)
+        if self.recorder is not None and hasattr(self.recorder, "note_questions"):
+            self.recorder.note_questions(qs)
+        if qs:
+            self._say(f"Got {len(qs)} question(s) — see the Ask Questions tab.", bad=False)
+            self.questionsArrived.emit()
+        else:
+            # A real answer, and the answer is none. Worth saying: the student was told to expect
+            # some, and silence would leave them pressing the button again.
+            self._say("Your course says this lab has no questions after all.", bad=False)
+        self.changed.emit()
+
     def _announce(self, answer: dict) -> None:
         """Say WHICH activity is now being recorded, and whose course it belongs to.
 
@@ -259,6 +316,15 @@ class ProofStrip(QWidget):
         # this somewhere" from "this is the lab you are being marked on".
         if self.recorder is not None and hasattr(self.recorder, "note_activity"):
             self.recorder.note_activity(activity, title)
+        # The lab's questions ride in on the same reply — prompts only; the server strips the key.
+        # Kept on the recorder rather than emitted onward, so the panel reads one source of truth
+        # and a restart or a resumed code finds the same place to look.
+        if self.recorder is not None and hasattr(self.recorder, "note_questions"):
+            from ..domain import lab_questions as _lq
+            qs = _lq.questions_from(answer)
+            self.recorder.note_questions(qs)
+            if qs:
+                self.questionsArrived.emit()
         what = " · ".join([b for b in (f"<b>{activity}</b>" if activity else "",
                                        f"“{title}”" if title else "") if b]) or "this code"
         course = activity.split("/")[0] if "/" in activity else ""
@@ -285,6 +351,8 @@ class ProofStrip(QWidget):
     def _generate(self) -> None:
         if self.recorder is None:
             return
+        if not self._questions_checked():
+            return
         result = self.recorder.generate_proof()
         if not result.get("ok"):
             self._say(result.get("message", "Could not generate a proof."), bad=True)
@@ -294,6 +362,47 @@ class ProofStrip(QWidget):
         self._say(f"Proof generated · receipt <b>{receipt}</b>", bad=False)
         self.refresh(keep_hint=True)
         self._hand_in(result, receipt)
+
+    def _questions_checked(self) -> bool:
+        """Ask once about unanswered questions. Returns whether to go ahead.
+
+        A WARNING and never a refusal — a student who ran out of time still hands in the work they
+        did, and a blank is a fact about the attempt the marker gets to see. This exists for the
+        student who never noticed the tab, which is the only failure here worth interrupting for,
+        and it is a modal precisely because it is the last moment anything can be done about it.
+
+        The dialog is skipped entirely when everything is answered, so the ordinary case is
+        unchanged: press Generate, get a proof.
+        """
+        from ..domain import lab_questions as _lq
+        r = self.recorder
+        qs = getattr(r, "questions", [])
+        tk = r.ticket
+        if _lq.missing_because_offline(bool(tk and tk.questions), qs):
+            # We KNOW there are questions and never got them. Worse than an unanswered one, because
+            # the student was never given the chance, so it is said plainly and separately.
+            ask = ("This lab has questions and gBuilder never managed to fetch them, so none of "
+                   "them have been answered.\n\nYou can hand in anyway — your instructor will "
+                   "see that they were not answered — or connect to your course, fetch them in "
+                   "the Ask Questions tab, and answer first.")
+        else:
+            said = _lq.nudge(qs, _lq.answers_in(r._chain.entries if r._chain else []))
+            if not said:
+                return True
+            ask = (said + "\n\nYou can hand in anyway — an unanswered question does not stop "
+                          "you, and your instructor will see it was left blank.")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Questions not answered")
+        box.setText(ask)
+        go = box.addButton("Hand in anyway", QMessageBox.AcceptRole)
+        box.addButton("Answer them first", QMessageBox.RejectRole)
+        box.setDefaultButton(go)     # the default is to PROCEED: this warns, it does not obstruct
+        box.exec()
+        if box.clickedButton() is not go:
+            self.answerFirst.emit()
+            return False
+        return True
 
     def _hand_in(self, result: dict, receipt: str) -> None:
         """Queue the work, then try to send it.
