@@ -213,3 +213,112 @@ def test_an_admin_password_still_beats_a_lost_token(portal, monkeypatch):
     monkeypatch.setenv("ADMIN_PASSWORD", GOOD)
     assert portal.ensure_admin() is None          # no token — the password settled it
     assert portal.login("boss", GOOD)["ok"]
+
+
+# -- recovery: the admin un-claims an account so it can be claimed again -------- #
+# The whole of password recovery, and deliberately the whole of it. This server has no address to
+# send mail from and no second factor, so a "forgot my password" link would be a way in for whoever
+# reads the mailbox rather than a recovery. The admin knows their teachers.
+def _claimed(portal, who="ada"):
+    made = portal.add_staff(who)
+    return portal.claim(who, made["claim_token"], GOOD)
+
+
+def test_a_reset_account_can_be_claimed_again_with_a_new_password(portal):
+    """The point of the feature, start to finish."""
+    _claimed(portal)
+    r = portal.reset_staff("ada", by="boss")
+    assert r["ok"] and r["claim_token"]
+    again = portal.claim("ada", r["claim_token"], "a-different-one")
+    assert again["ok"]
+    assert portal.login("ada", "a-different-one")["ok"]
+
+
+def test_the_old_password_stops_working(portal):
+    _claimed(portal)
+    portal.reset_staff("ada", by="boss")
+    assert not portal.login("ada", GOOD)["ok"]
+
+
+def test_the_old_claim_token_stops_working_too(portal):
+    """A fresh token, not the old one re-offered. The reason to reset may be that the first token
+    went astray, and re-issuing it would recover nothing."""
+    made = portal.add_staff("ada")
+    portal.claim("ada", made["claim_token"], GOOD)
+    r = portal.reset_staff("ada", by="boss")
+    assert r["claim_token"] != made["claim_token"]
+    assert not portal.claim("ada", made["claim_token"], "another-one")["ok"]
+
+
+def test_a_reset_ends_every_session_the_account_had(portal):
+    """A session is a bearer token good for a working day. Leaving them alive would mean a reset
+    that changed nothing for the person you reset it because of."""
+    first = _claimed(portal)
+    second = portal.login("ada", GOOD)
+    assert portal.whoami(first["session"]) and portal.whoami(second["session"])
+    r = portal.reset_staff("ada", by="boss")
+    assert r["sessions_ended"] == 2
+    assert portal.whoami(first["session"]) is None
+    assert portal.whoami(second["session"]) is None
+
+
+def test_a_reset_keeps_the_role(portal):
+    """A forgotten password is not a demotion. An admin who came back as a teacher would need
+    another admin to put them back, which is the situation this is meant to get out of."""
+    made = portal.add_staff("ada", role=A.ADMIN)
+    portal.claim("ada", made["claim_token"], GOOD)
+    r = portal.reset_staff("ada", by="boss")
+    assert r["role"] == A.ADMIN
+    assert portal.claim("ada", r["claim_token"], "a-new-one")["role"] == A.ADMIN
+
+
+def test_a_reset_keeps_the_courses_they_staff(portal):
+    """`remove_staff` drops course_staff rows and `reset_staff` must not — the difference between
+    someone leaving and someone forgetting a password."""
+    _claimed(portal)
+    portal.store.put_course({"id": "comp535", "title": "Networks"})
+    portal.store.add_staff("comp535", "ada")
+    portal.reset_staff("ada", by="boss")
+    assert "ada" in portal.store.course_staff("comp535")
+
+
+def test_you_cannot_reset_your_own_account(portal):
+    """It is never the recovery path — you have to be signed in to press it, so you have not
+    forgotten anything — and all it can do is sign you out holding a token you must not lose. For
+    the last admin that is a locked-out portal."""
+    _claimed(portal)
+    r = portal.reset_staff("ada", by="ada")
+    assert not r["ok"] and "your own" in r["error"]
+    assert portal.login("ada", GOOD)["ok"], "the refusal must not half-apply"
+
+
+def test_resetting_an_account_that_does_not_exist_says_so(portal):
+    assert not portal.reset_staff("nobody", by="boss")["ok"]
+
+
+def test_an_unclaimed_account_can_be_given_a_fresh_token(portal):
+    """The same button, for the other half of "it never arrived" — a token handed over and lost
+    before it was ever used."""
+    made = portal.add_staff("ada")
+    r = portal.reset_staff("ada", by="boss")
+    assert r["ok"] and r["claim_token"] != made["claim_token"]
+    assert portal.claim("ada", r["claim_token"], GOOD)["ok"]
+
+
+def test_the_new_token_is_visible_to_the_admin_afterwards(portal):
+    """The staff list shows it for as long as the account is unclaimed. An admin who closed the
+    page has not lost the only copy — the same reasoning as reprinting the admin's own token."""
+    _claimed(portal)
+    r = portal.reset_staff("ada", by="boss")
+    row = next(s for s in portal.staff() if s["username"] == "ada")
+    assert row["claimed"] is False and row["claim_token"] == r["claim_token"]
+
+
+def test_a_claimed_account_shows_no_token_to_anybody(portal):
+    """The other half: it is deleted on use, so the row goes quiet again."""
+    _claimed(portal)
+    portal.reset_staff("ada", by="boss")
+    r = portal.reset_staff("ada", by="boss")
+    portal.claim("ada", r["claim_token"], "a-new-one")
+    row = next(s for s in portal.staff() if s["username"] == "ada")
+    assert row["claimed"] is True and not row["claim_token"]

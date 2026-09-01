@@ -12,6 +12,11 @@ The rule for staff is that accounts are CREATED by the admin and CLAIMED by the 
        spent.
     3. Thereafter = username + password → a session token.
 
+A forgotten password is recovered the same way it was set: the admin RESETS the account, which
+puts it back to step 1 with a fresh token. There is no self-service reset — this server has no
+address to send mail from and no second factor, so an emailed link would be a way in for whoever
+controls the mailbox rather than a recovery.
+
 Why the claim token matters: without it, first-password-wins means whoever reaches the portal first
 claims the account. Usernames are guessable, so a stranger could become a teacher — and a teacher
 can vend codes and read submissions.
@@ -138,6 +143,41 @@ class Accounts:
         self.store.delete_account(username)
         self.store.kv_delete(f"claim:{username}")
         return {"ok": True}
+
+    def reset_staff(self, username: str, *, by: str = "") -> dict:
+        """Un-claim an account so its holder can set a new password.
+
+        This is the whole of password recovery, and it is deliberately the whole of it. There is no
+        "forgot my password" link, because a Teaching Center has no address it can send mail from
+        and no second factor to fall back on — a self-service reset over email would be a way in
+        for whoever controls the mailbox, not a recovery. The admin knows their teachers; handing
+        over a fresh claim token in person or over a channel they already trust is a stronger check
+        than any this server could make on its own.
+
+        What it does: clears the password, mints a NEW claim token (so a lost one stops working),
+        and ends every live session for the account. The role and the courses they staff are kept —
+        this is a forgotten password, not a departure.
+
+        Not yourself. If you have forgotten your own password you cannot be signed in to press it,
+        so self-reset is never the recovery path; all it can do is sign you out and hand you a
+        token you must not lose. For the last admin that is a locked-out portal, and the honest
+        route back is another admin, or ADMIN_PASSWORD on the next boot (see `ensure_admin`).
+        """
+        rec = self.store.account(username)
+        if rec is None:
+            return {"ok": False, "error": "No such account."}
+        if by and by == username:
+            return {"ok": False,
+                    "error": "You cannot reset your own account — it would sign you out and leave "
+                             "you holding a token you must not lose. Ask another admin, or set "
+                             "ADMIN_PASSWORD and restart the server."}
+        self.store.put_account(username, role=rec["role"], salt=None, hash=None,
+                               n=None, r=None, p=None, claimed_at=None)
+        token = secrets.token_urlsafe(9)
+        self.store.kv_put(f"claim:{username}", {"token": token})
+        ended = self.store.drop_sessions_for(username)
+        return {"ok": True, "username": username, "role": rec["role"], "claim_token": token,
+                "sessions_ended": ended}
 
     def set_role(self, username: str, role: str) -> dict:
         rec = self.store.account(username)

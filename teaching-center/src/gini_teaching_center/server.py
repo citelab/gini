@@ -481,6 +481,12 @@ class Handler(BaseHTTPRequestHandler):
                                                         b.get("role", "teacher")))
             if p == "/api/staff/delete":
                 return self._send(200, _ACCTS.remove_staff(b.get("username", "")))
+            if p == "/api/staff/reset":
+                # `by` is taken from the SESSION, never from the body — it decides whether this is
+                # a self-reset, which is refused, and a caller must not get to answer that.
+                me = self._who() or {}
+                return self._send(200, _ACCTS.reset_staff(b.get("username", ""),
+                                                          by=me.get("who", "")))
             if p == "/api/staff/role":
                 return self._send(200, _ACCTS.set_role(b.get("username", ""),
                                                        b.get("role", "teacher")))

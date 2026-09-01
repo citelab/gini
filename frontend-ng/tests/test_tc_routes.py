@@ -142,6 +142,41 @@ def test_a_teacher_cannot_reach_the_staff_routes(tc):
     assert tc.call("/api/courses", {"id": "x"}, token=claimed["session"])[0] == 403
 
 
+def test_only_an_admin_can_reset_a_password(tc):
+    """A reset ends every session and hands out a token that claims the account. A teacher who
+    could press it on another teacher would have a way to take over their colleague's courses."""
+    tc.signin("boss", "correct-horse")
+    _, added = tc.call("/api/staff", {"username": "ada", "role": "teacher"})
+    _, ada = tc.call("/auth/claim", {"id": "ada", "claim_token": added["claim_token"],
+                                     "password": "a-good-password"})
+    tc.call("/api/staff", {"username": "bob", "role": "teacher"})
+    assert tc.call("/api/staff/reset", {"username": "bob"}, token=ada["session"])[0] == 403
+    assert tc.call("/api/staff/reset", {"username": "bob"}, token="")[0] == 401
+
+
+def test_a_reset_signs_the_account_out_of_the_console(tc):
+    """Not just "the password no longer works" — the session they are holding right now stops
+    working on the next request, which is what a reset has to mean."""
+    tc.signin("boss", "correct-horse")
+    _, added = tc.call("/api/staff", {"username": "ada", "role": "teacher"})
+    _, ada = tc.call("/auth/claim", {"id": "ada", "claim_token": added["claim_token"],
+                                     "password": "a-good-password"})
+    assert tc.call("/auth/whoami", token=ada["session"])[0] == 200
+    _, r = tc.call("/api/staff/reset", {"username": "ada"})
+    assert r["ok"] and r["sessions_ended"] == 1
+    assert tc.call("/auth/whoami", token=ada["session"])[0] == 401
+
+
+def test_the_server_decides_whose_account_this_is_not_the_caller(tc):
+    """Self-reset is refused, and `by` therefore has to come from the SESSION. Taking it from the
+    body would let an admin send somebody else's name and reset themselves anyway — or, worse,
+    send their own and be refused a reset they were entitled to make."""
+    tc.signin("boss", "correct-horse")
+    _, r = tc.call("/api/staff/reset", {"username": "boss", "by": "somebody_else"})
+    assert not r["ok"] and "your own" in r["error"]
+    assert tc.call("/auth/whoami")[0] == 200        # still signed in; nothing half-applied
+
+
 def test_an_account_cannot_be_claimed_without_its_token(tc):
     """Usernames are guessable; without this, whoever reaches the portal first becomes a teacher."""
     tc.signin("boss", "correct-horse")

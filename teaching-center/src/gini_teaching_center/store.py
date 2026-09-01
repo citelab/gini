@@ -497,6 +497,18 @@ class Store:
     def drop_session(self, token: str) -> None:
         self._run("DELETE FROM session WHERE token=?", (token,))
 
+    def drop_sessions_for(self, username: str) -> int:
+        """Every live session belonging to one account.
+
+        Resetting a password that leaves the old sessions working has not reset anything: a session
+        is a bearer token good for a working day, and the account may be being reset precisely
+        because someone else has one.
+        """
+        with self.lock:
+            cur = self.db.execute("DELETE FROM session WHERE who=?", (username,))
+            self.db.commit()
+        return cur.rowcount or 0
+
     # -- courses ---------------------------------------------------------- #
     def put_course(self, rec: dict) -> None:
         self._run("INSERT OR REPLACE INTO course(id,title,created,archived) VALUES(?,?,?,?)",

@@ -258,7 +258,9 @@
   <!-- STAFF (admin) ---------------------------------------------------- -->
   <section id="staff" hidden>
     <h2>Staff</h2>
-    <div class="sub">Teachers you add get a one-time claim token. They choose their own password.</div>
+    <div class="sub">Teachers you add get a one-time claim token. They choose their own password.
+      Forgotten one? <b>Reset password</b> puts that account back to a fresh token — role and
+      courses kept, every session ended.</div>
     <div class="grid g2">
       <div class="card">
         <h2 style="font-size:21px">Add a teacher</h2>
@@ -272,6 +274,12 @@
       </div>
       <div class="card"><table id="s-list"></table></div>
     </div>
+
+    <div class="note" style="margin-top:14px">There is no &ldquo;forgot my password&rdquo; link,
+      and no way to reset your own account — this server has no address to send mail from, so a
+      self-service link would be a way in for whoever reads the mailbox rather than a recovery. If
+      you are the only admin and you are locked out, set <span class="mono">ADMIN_PASSWORD</span>
+      and restart the server: it is authoritative on every boot.</div>
 
     <!-- Deliberately at the BOTTOM, in its own red-edged card, well away from the everyday
          controls. This is the one action here that destroys student work. -->
@@ -866,6 +874,9 @@ async function loadStaff(){
       <td><button class="flat" onclick="setRole('${esc(s.username)}','${
              s.role === 'admin' ? 'teacher' : 'admin'}')">Make ${
              s.role === 'admin' ? 'teacher' : 'admin'}</button>
+          ${s.username === (ME && ME.who) ? '' : `<button class="flat" style="margin-left:10px"
+                  onclick="resetStaff('${esc(s.username)}')">${
+                  s.claimed ? 'Reset password' : 'New token'}</button>`}
           <button class="danger" style="margin-left:10px"
                   onclick="delStaff('${esc(s.username)}')">Remove</button>`).join('');
 }
@@ -914,12 +925,34 @@ async function setRole(u, role){
 async function addStaff(){
   const r = await api('/api/staff', {username:$('#s-user').value.trim(), role:$('#s-role').value});
   $('#s-err').textContent = r.ok ? '' : r.error;
-  // The token is shown ONCE, here, because it is not stored in a recoverable form afterwards.
+  // Shown here on creation, and again in the staff row for as long as the account is unclaimed.
+  // Deliberately: a token that could only be read on the boot or click that minted it made it a
+  // one-time SIGHTING as well as a one-time secret, and missing the line locked out the person it
+  // was for. The moment it is claimed it is deleted, so reprinting gives up nothing.
   $('#s-token').innerHTML = r.ok
     ? `<div class="ok">Give <b>${esc(r.username)}</b> this claim token:</div>
        <div class="code" style="margin-top:10px">${esc(r.claim_token)}</div>` : '';
   if (r.ok) { $('#s-user').value=''; loadStaff(); }
 }
+// The whole of password recovery. There is no "forgot my password" link because this server has
+// no address to send mail from and no second factor — an emailed link would be a way in for
+// whoever controls the mailbox. The admin knows their teachers, and hands over a fresh token.
+async function resetStaff(u){
+  if (!confirm(`Reset ${u}?\n\nTheir password is cleared and they are signed out everywhere. `
+             + `They sign in again with a new claim token, which appears in this list. `
+             + `Their role and courses are kept.`)) return;
+  const r = await api('/api/staff/reset', {username: u});
+  $('#s-err').textContent = r.ok ? '' : r.error;
+  // Shown where the Add token is shown, and it also stays in the row below until claimed — an
+  // admin who closes this page has not lost the only copy.
+  $('#s-token').innerHTML = r.ok
+    ? `<div class="ok">${esc(r.username)} was reset${r.sessions_ended
+         ? ` and signed out of ${r.sessions_ended} session${r.sessions_ended === 1 ? '' : 's'}`
+         : ''}. Give them this claim token:</div>
+       <div class="code" style="margin-top:10px">${esc(r.claim_token)}</div>` : '';
+  loadStaff();
+}
+
 async function delStaff(u){
   const r = await api('/api/staff/delete', {username:u});
   $('#s-err').textContent = r.ok ? '' : r.error;
