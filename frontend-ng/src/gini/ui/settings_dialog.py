@@ -106,6 +106,23 @@ class SettingsDialog(QDialog):
                               "to; shorter makes the playhead easier to aim, because every tick "
                               "on the timeline marks a moment something actually changed."))
 
+        # The kernel board's type was hard-coded at 7pt and 8pt — smaller than anything else in
+        # gBuilder and unreachable from any setting, which is the complaint this answers. The
+        # PANEL does not change size: the board is hand-laid-out at 640 x 560 and stays there,
+        # and the boxes that hold text measure themselves against it instead.
+        self.os_scale = QComboBox()
+        self.os_scale.addItem("Match text size", 0)
+        for _pct in (100, 110, 125, 150, 175):
+            self.os_scale.addItem(f"{_pct}%", _pct)
+        _cur_scale = int(getattr(settings, "os_hud_scale", 0) or 0)
+        _m = self.os_scale.findData(_cur_scale)
+        self.os_scale.setCurrentIndex(_m if _m >= 0 else 0)
+        appf.addRow("OS HUD text", self.os_scale)
+        appf.addRow("", _note("How big the type on the kernel board is. The panel stays the same "
+                              "size — the labels grow inside it and the boxes that hold them give "
+                              "way. 175% is the ceiling: past that the legend and the door counts "
+                              "no longer fit the board at any arrangement."))
+
         # --- Networking --------------------------------------------------- #
         netf = _page(tabs, "Networking")
         self.auto_internet = QCheckBox("Containers get internet automatically (default eth)")
@@ -271,6 +288,9 @@ class SettingsDialog(QDialog):
             "flow_hud_window_s": int(self.flow_window.currentData() or 60),
             "os_hud_window_s": int(self.os_window.currentData() or 10),
             "os_hud_scrub_s": int(self.os_scrub.currentData() or 120),
+            # `currentData()` is already an int, and 0 IS a value here ("match text size"),
+            # not a missing one.
+            "os_hud_scale": int(self.os_scale.currentData() or 0),
             "auto_internet": self.auto_internet.isChecked(),
             "autobuild_images": self.autobuild.isChecked(),
             "llm_enabled": self.llm_enabled.isChecked(),

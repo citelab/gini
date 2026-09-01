@@ -79,6 +79,14 @@ class Settings:
     # How far back the OS HUD's scrub timeline reaches. Separate from the window above: the
     # window is how much is ON SCREEN, this is how much is RECORDED and can be scrubbed back to.
     os_hud_scrub_s: int = 120
+    # How big the type on the OS HUD's kernel board is, as a percentage of its base sizes.
+    # 0 means follow Settings → Text size, like the rest of gBuilder.
+    #
+    # The PANEL does not change size. The board is hand-laid-out at 640 x 560 and stays there; what
+    # gives way is the boxes inside it, which measure themselves against the strings they hold
+    # (see `os_hud._wide`). 175% is as far as that goes before the legend and the door counts stop
+    # fitting the board at any arrangement, which is why the dialog offers no more.
+    os_hud_scale: int = 0
     autosave: bool = False
     server: str = "localhost"
     remote_port: int = 10000

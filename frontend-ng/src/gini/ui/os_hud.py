@@ -36,7 +36,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from ..domain.kernel_board import (
@@ -47,6 +47,7 @@ from ..domain.os_events import (
 )
 from .glass import apply_glass, paint_glass_panel
 from .hud import HudController, HudHistory, live_rect, paint_timeline, timeline_rect
+from .theme.manager import ui_scale
 
 LANE_ACCENT = {"syscall": "blue", "proc": "green", "memory": "purple",
                "fs": "cyan", "trap": "amber"}
@@ -80,6 +81,10 @@ BLOCK_LABEL = {"syscall": "syscall dispatch", "bcache": "block cache"}
 #                 under BOTH lanes, and is drawn wider than the kernel-only half to say so.
 MACHINE_KERNEL = ("kernel only", "disk · console · timer")
 MACHINE_DIRECT = ("direct", "CPU · MMU + TLB · RAM")
+# The direct lane's caption, hoisted out of the paint loop so `_lane_w` can measure it. Kept to
+# ~15 characters a line by hand; the LANE is what grows when the type does, not the wrapping.
+DIRECT_LINES = ("no kernel runs", "the MMU checks", "every address", "in hardware",
+                "", "rules installed", "by the kernel")
 
 PANEL_W = 640
 PANEL_H = 560                        # board + swimlanes + scrub
@@ -91,6 +96,19 @@ GUTTER = 20                          # between the kernel column and the direct 
 LANE_W = 150                         # only as wide as its text: the kernel column needs the room
 TRAIL_DOTS = 12                      # recent CPU samples drawn; the newest is the marker
 
+# Type. Two sizes, and they were 8 and 7 — smaller than anything else in gBuilder, hard-coded at
+# twelve call sites, and immune to Settings → Text size. Both facts were the complaint.
+#
+# They are BASE sizes now: `_pt` scales them by Settings → OS HUD text, and the board's geometry
+# does not move with them. That is the constraint this file has to respect — the layout is
+# hand-authored, so making type bigger inside boxes measured for smaller type is how a label ends
+# up outside its box. Where a string could not survive it, the string's own box was widened or the
+# string was allowed to wrap; nothing was shortened or dropped. If you raise these, re-run
+# `test_os_hud_text.py`, which measures every string against the box it is drawn in.
+FONT_BODY = 9                        # block labels, numbers, the strips
+FONT_SMALL = 8                       # captions, the legend, swimlane labels, trace step numbers
+GAP = 12                             # least space between a chip's label and its value
+
 
 class OsHud(QWidget):
     """Pure rendering over a board Frame + an event list. No I/O here."""
@@ -99,9 +117,13 @@ class OsHud(QWidget):
     # widget knows nothing about where the kernel tree lives — that is the app's business.
     open_source = Signal(str, list)          # (block name, [kernel/foo.c, ...])
 
-    def __init__(self, parent, theme) -> None:
+    def __init__(self, parent, theme, scale_fn=None) -> None:
         super().__init__(parent)
         self.theme = theme
+        # () -> int percent of the base type sizes; 0 = follow Settings → Text size. Injected
+        # rather than read from settings here, like every other knob: OsHud renders and knows
+        # nothing about the app.
+        self.scale_fn = scale_fn or (lambda: 0)
         self._frame: Frame = Frame()
         self._events: list = []
         self._hart_sub: str = "user"      # where the CPU marker sits
@@ -166,6 +188,60 @@ class OsHud(QWidget):
             bits.append(files)
         return f"{name} — " + "; ".join(bits)
 
+    # -- type ---------------------------------------------------------------- #
+    def _font_scale(self) -> float:
+        """Settings → OS HUD text, or the app's own text size when that is set to follow it."""
+        try:
+            want = int(self.scale_fn() or 0)
+        except Exception:                            # noqa: BLE001 — a bad setting is not a crash
+            want = 0
+        return max(0.5, want / 100.0) if want > 0 else ui_scale()
+
+    def _font(self, base: int, bold: bool = False) -> QFont:
+        f = QFont(self.font().family(), max(5, round(base * self._font_scale())))
+        if bold:
+            f.setBold(True)
+        return f
+
+    @staticmethod
+    def _fit(font: QFont, text: str, room: float, floor: float = 6.0) -> QFont:
+        """`font`, reduced until `text` fits `room` — or as small as it is allowed to go.
+
+        A LOOP, not one proportional step. Font metrics are not linear in point size (integer
+        pixel sizes, hinting, kerning), so scaling by `room / need` lands short of fitting often
+        enough to matter: at 175% the machine bar's label and value still overlapped after the
+        single step that was supposed to separate them.
+        """
+        if room <= 0 or not text:
+            return font
+        f = QFont(font)
+        pt = f.pointSizeF()
+        while pt > floor and QFontMetricsF(f).horizontalAdvance(text) > room:
+            pt -= 0.5
+            f.setPointSizeF(pt)
+        return f
+
+    def _wide(self, base: int, *texts: str) -> float:
+        """How wide the widest of `texts` actually is at that size.
+
+        The whole reason the type can grow at all. This board is hand-laid-out at a fixed 640 x
+        560, so every box that holds a string has to be measured against the string rather than
+        assumed to fit — `LANE_W = 150` was chosen when the caption was 7pt, and at 13pt "the MMU
+        checks" is 122px in a 110px box. Boxes that hold text are derived from this; the ones that
+        hold only numbers are not, because a count is three characters at any size.
+        """
+        fm = QFontMetricsF(self._font(base))
+        return max((fm.horizontalAdvance(t) for t in texts if t), default=0.0)
+
+    def _lane_w(self) -> float:
+        """The direct lane's width: its authored 150, or whatever its caption needs.
+
+        It grows rightward INTO the kernel column, which is the right way round — the blocks hold
+        a short label and a count and have slack, and the caption is prose that cannot be
+        compressed without rewriting it.
+        """
+        return max(LANE_W, self._wide(FONT_SMALL, *DIRECT_LINES) + 44)
+
     def _resize_to_lanes(self) -> None:
         self.resize(PANEL_W, PANEL_H if self._lanes.get("xray") else PANEL_H_BOARD)
 
@@ -192,10 +268,18 @@ class OsHud(QWidget):
         head = f"OS  ·  KERNEL BOARD  ·  last {int(self.window_s)} s"
         paint_glass_panel(p, self.rect(), self.theme, head)
         if ipe:
-            p.setFont(QFont(self.font().family(), 8))
+            p.setFont(self._font(FONT_BODY))
             p.setPen(QColor(t.accent_for("orange")))
-            p.drawText(self.width() - 320 - PAD, 8, 320, 18, Qt.AlignRight | Qt.AlignVCenter,
-                       f"{ipe:,.0f} instructions per kernel entry")
+            # Right-aligned in the title bar, so it grows LEFTWARD — towards the panel title,
+            # which is why it is bounded by the room actually left beside it rather than by 320.
+            note = f"{ipe:,.0f} instructions per kernel entry"
+            nw = max(0.0, self.width() - 2 * PAD - self._wide(FONT_BODY, head) - 12)
+            # Shares the title bar with the panel's own heading, so when the two together are
+            # wider than the panel this one gives way rather than being cut off mid-word.
+            p.setFont(self._fit(p.font(), note, nw))
+            p.drawText(int(self.width() - nw - PAD), 8, int(nw),
+                       int(max(18.0, QFontMetricsF(p.font()).height())),
+                       Qt.AlignRight | Qt.AlignVCenter, note)
 
         if self.stale:
             p.setPen(QColor(t.faint))
@@ -220,7 +304,7 @@ class OsHud(QWidget):
         except Exception as e:                      # noqa: BLE001 - a HUD must never take the app down
             self.paint_error = f"{type(e).__name__}: {e}"
             p.setPen(QColor(t.danger))
-            p.setFont(QFont(self.font().family(), 8))
+            p.setFont(self._font(FONT_BODY))
             p.drawText(PAD, self.height() - 74, self.width() - 2 * PAD, 28,
                        Qt.AlignLeft | Qt.TextWordWrap, f"board paint failed — {self.paint_error}")
         finally:
@@ -229,7 +313,7 @@ class OsHud(QWidget):
     # -- the board --------------------------------------------------------- #
     def _kernel_col(self) -> tuple:
         left = PAD
-        width = self.width() - 2 * PAD - GUTTER - LANE_W
+        width = self.width() - 2 * PAD - GUTTER - self._lane_w()
         return left, width
 
     def _paint_board(self, p: QPainter, y: int) -> int:
@@ -241,7 +325,7 @@ class OsHud(QWidget):
         kleft, kwidth = self._kernel_col()
         full = self.width() - 2 * PAD
 
-        small = QFont(self.font().family(), 8)
+        small = self._font(FONT_BODY)
         p.setFont(small)
 
         # -- your program: the top strip, and the widest number on the board --------------
@@ -313,8 +397,12 @@ class OsHud(QWidget):
                        outline=amber if name in DEVICE_BLOCKS else None, opaque=True,
                        selected=self._focus == name)
         p.setPen(QColor(t.accent_for("amber")))
-        p.setFont(QFont(self.font().family(), 7))
-        p.drawText(int(kleft + 8), int(boundary_y), 200, 12, Qt.AlignLeft, "device boundary")
+        p.setFont(self._font(FONT_SMALL))
+        # Its own height, or at large type the caption's descenders run into the device row it
+        # labels — it is placed just above that row, with nothing between them.
+        bh = max(12.0, QFontMetricsF(p.font()).height())
+        p.drawText(int(kleft + 8), int(boundary_y - (bh - 12)), 200, int(bh),
+                   Qt.AlignLeft, "device boundary")
         p.setFont(small)
 
         # -- doors feed the kernel ------------------------------------------------------
@@ -324,8 +412,9 @@ class OsHud(QWidget):
             p.drawLine(x, int(doors_y + ROW_H), x, int(ktop))
 
         # -- the direct lane: permanent, and the widest path on the board ---------------
-        lane_x = self.width() - PAD - LANE_W
-        lane = QRectF(lane_x, doors_y, LANE_W, kbox.bottom() - doors_y)
+        lane_w = self._lane_w()
+        lane_x = self.width() - PAD - lane_w
+        lane = QRectF(lane_x, doors_y, lane_w, kbox.bottom() - doors_y)
         p.setPen(QPen(green, 1))
         p.setBrush(QColor(green.red(), green.green(), green.blue(), 12))
         p.drawRoundedRect(lane, 10, 10)
@@ -341,19 +430,21 @@ class OsHud(QWidget):
         p.drawPolygon(arrow)
 
         tx = lane_x + 32
-        tw = LANE_W - 40
+        tw = lane_w - 40
         ty = lane.top() + 10
         p.setPen(QColor(t.text))
-        p.drawText(int(tx), int(ty), int(tw), 14, Qt.AlignLeft, "direct path")
+        p.drawText(int(tx), int(ty), int(tw),
+                   int(max(14.0, QFontMetricsF(p.font()).height())), Qt.AlignLeft, "direct path")
         p.setPen(QColor(t.muted))
-        p.setFont(QFont(self.font().family(), 7))
-        # Kept to ~15 characters a line: the lane is now only as wide as it needs to be, and the
-        # space it gave back went to the kernel blocks, which were clipping their numbers.
-        for line in ("no kernel runs", "the MMU checks", "every address",
-                     "in hardware", "", "rules installed", "by the kernel"):
-            ty += 13
+        p.setFont(self._font(FONT_SMALL))
+        # Kept to ~15 characters a line: the lane is only as wide as it needs to be, and the space
+        # it gives back goes to the kernel blocks, which were clipping their numbers. The line
+        # PITCH follows the type, or bigger text would overlap the line beneath it.
+        pitch = max(13.0, QFontMetricsF(self._font(FONT_SMALL)).height() + 2)
+        for line in DIRECT_LINES:
+            ty += pitch
             if line:
-                p.drawText(int(tx), int(ty), int(tw), 12, Qt.AlignLeft, line)
+                p.drawText(int(tx), int(ty), int(tw), int(pitch), Qt.AlignLeft, line)
         p.setFont(small)
 
         # -- configuration, NOT a call ---------------------------------------------------
@@ -407,13 +498,13 @@ class OsHud(QWidget):
             p.drawEllipse(pt, 6 if newest else 3, 6 if newest else 3)
             if newest:
                 p.setPen(QColor(orange))
-                p.setFont(QFont(self.font().family(), 7))
+                p.setFont(self._font(FONT_SMALL))
                 p.drawText(int(pt.x()) + 12, int(pt.y()) - 6, 140, 12, Qt.AlignLeft,
                            "hart 0, last sample")
                 p.setFont(small)
 
         p.setPen(QColor(t.faint))
-        p.setFont(QFont(self.font().family(), 7))
+        p.setFont(self._font(FONT_SMALL))
         legend = ("arrow = calls   ·   shade = CPU time   ·   grey dashed = GINI observing   ·   "
                   "blue dashed = configuration")
         if not f.resid_trustworthy:
@@ -427,9 +518,15 @@ class OsHud(QWidget):
         elif f.armed:
             p.setPen(QColor(t.accent_for("orange")))
             legend = "TRACE ARMED — run a command; Ctrl-Q in the console disarms"
-        p.drawText(PAD, int(y), full, 12, Qt.AlignLeft, legend)
+        # One line if it fits, two if it does not. At 13pt the full legend is 728px on a 608px
+        # board — and it is the key to every visual encoding above it, so wrapping is the only
+        # move: shortening it would take away the thing that makes the board readable at all.
+        # There are ~54px of slack above the scrub timeline, which is four of these lines.
+        lh = max(12.0, QFontMetricsF(p.font()).height())
+        rows = 1 if self._wide(FONT_SMALL, legend) <= full else 2
+        p.drawText(QRectF(PAD, y, full, lh * rows), Qt.AlignLeft | Qt.TextWordWrap, legend)
         p.setFont(small)
-        return int(y) + 14
+        return int(y + lh * rows + 2)
 
     @staticmethod
     def _num(n: int) -> str:
@@ -486,13 +583,29 @@ class OsHud(QWidget):
         p.setBrush(QColor(col.red(), col.green(), col.blue(), int(255 * alpha)))
         p.drawRoundedRect(r, 5, 5)
         p.setPen(QColor(t.text))
-        if centre:
-            p.drawText(r, Qt.AlignCenter, f"{label}  ·  {note}" if note else label)
-            return
-        p.drawText(r.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, label)
+        # A label on the left and a value on the right, in ONE rect. Each can fit on its own and
+        # still land on top of the other, which is what a width check per string cannot see — so
+        # the pair is measured together and the type gives way when they will not both fit.
+        # Shrinking beats every alternative here: dropping the value loses the number the block
+        # exists to report, and eliding the label loses which block it is.
+        was = p.font()
+        both = f"{label}  ·  {note}" if note else label
         if note:
-            p.setPen(QColor(t.muted))
-            p.drawText(r.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignRight, note)
+            # The pair, measured TOGETHER. Each of them fits the rect on its own — one is drawn
+            # left and one right — so a per-string width check sees nothing wrong while they sit
+            # on top of each other. What has to fit is their combined ink plus a gap.
+            room = r.width() - (2 if centre else 16) - (0 if centre else GAP)
+            p.setFont(self._fit(was, both if centre else label + note, room))
+        try:
+            if centre:
+                p.drawText(r, Qt.AlignCenter, both)
+                return
+            p.drawText(r.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, label)
+            if note:
+                p.setPen(QColor(t.muted))
+                p.drawText(r.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignRight, note)
+        finally:
+            p.setFont(was)
 
     @staticmethod
     def _exit_point(r: QRectF, toward) -> QPointF:
@@ -573,7 +686,7 @@ class OsHud(QWidget):
             self._arrowhead(p, p0, p1, hot, 2.6)
         # Number the stops: the order is the whole content of a trace, and an unnumbered path
         # through a layered board is ambiguous the moment it doubles back.
-        p.setFont(QFont(self.font().family(), 7, QFont.Bold))
+        p.setFont(self._font(FONT_SMALL, bold=True))
         for i, name in enumerate(steps):
             r = centres.get(name)
             if r is None:
@@ -617,14 +730,23 @@ class OsHud(QWidget):
                           else "  ·  all processes")
         if self._focus:
             head += f"  ·  from {self._focus}"
-        p.setFont(QFont(self.font().family(), 7))
+        p.setFont(self._font(FONT_SMALL))
         p.setPen(QColor(t.accent if self._focus else t.faint))
-        self._xray_head = QRectF(PAD, y, 400, 12)
-        p.drawText(self._xray_head, Qt.AlignLeft | Qt.AlignVCenter,
-                   f"{head}  ·  {len(evs_all)} events  ·  click to collapse")
-        y += 14
+        caption = f"{head}  ·  {len(evs_all)} events  ·  click to collapse"
+        # This rect is the CLICK TARGET as well as the text box (see mousePressEvent), so a fixed
+        # 400 x 12 would not merely clip the caption at large type — it would leave the tail of
+        # "click to collapse" visible and dead, which is worse than clipping.
+        hh = max(12.0, QFontMetricsF(p.font()).height())
+        self._xray_head = QRectF(PAD, y, min(self._wide(FONT_SMALL, caption) + 4,
+                                             self.width() - 2 * PAD), hh)
+        p.drawText(self._xray_head, Qt.AlignLeft | Qt.AlignVCenter, caption)
+        y += int(hh) + 2
 
-        left, width = PAD + 56, self.width() - PAD - 70
+        # The label column is as wide as the longest lane name at whatever size it is drawn, and
+        # the rails start after it. Fixed at 56 it was fine at 8pt and clipped "memory" at 13pt.
+        lab_w = max(56.0, self._wide(FONT_BODY, *LANES) + 8)
+        left, width = PAD - 10 + lab_w + 6, 0.0
+        width = self.width() - 14 - left
         # The rails are drawn even with nothing on them. An empty window and a missing feature
         # look identical if the lanes disappear, and the student needs to know the lanes are
         # there and that scrubbing back may fill them.
@@ -635,9 +757,10 @@ class OsHud(QWidget):
             evs = [e for e in evs_all if e.lane == lane]
             if show is not None and lane not in show:
                 evs = []                                  # excluded by the board selection
-            p.setFont(QFont(self.font().family(), 8))
+            p.setFont(self._font(FONT_BODY))
             p.setPen(QColor(t.text if evs else t.faint))
-            p.drawText(PAD - 10, y, 60, ROW_H, Qt.AlignVCenter | Qt.AlignRight, lane)
+            p.drawText(int(PAD - 10), y, int(lab_w), ROW_H,
+                       Qt.AlignVCenter | Qt.AlignRight, lane)
             p.setPen(QPen(QColor(t.line), 1))
             p.drawLine(int(left), int(y + ROW_H / 2), int(left + width), int(y + ROW_H / 2))
             col = QColor(t.accent_for(LANE_ACCENT.get(lane, "slate")))
@@ -653,23 +776,35 @@ class OsHud(QWidget):
                     p.setBrush(col)
                     p.setPen(Qt.NoPen)
                     p.drawEllipse(QRectF(x - 4, y + ROW_H / 2 - 4, 8, 8))
-            p.setFont(QFont(self.font().family(), 7))
+            p.setFont(self._font(FONT_SMALL))
             p.setPen(QColor(t.muted))
             if dense:
                 p.drawText(int(left + width) - 54, int(y), 54, ROW_H,
                            Qt.AlignVCenter | Qt.AlignRight, f"{len(evs)}")
             elif evs and len(evs) <= 6:
+                # Centred on the dot and sized to the word. A fixed 52 x 11 box clipped "page
+                # fault" even at 9pt, and these float over the rail — a wider box costs nothing.
+                elh = max(11.0, QFontMetricsF(p.font()).height())
                 for e in evs:
                     x = left + (e.seq - lo) / span * width
-                    p.drawText(int(x) - 26, int(y), 52, 11, Qt.AlignCenter, e.kind[:10])
+                    txt = e.kind[:10]
+                    ew = self._wide(FONT_SMALL, txt) + 8
+                    # Kept inside the rail. The first and last events sit exactly on its ends, so
+                    # a label merely centred on the dot runs left into the lane's own name and
+                    # right off the edge of the panel — visible even at the old 7pt, and glaring
+                    # once the type grows. The dot still marks the true position; only the caption
+                    # is nudged, which is the right way round.
+                    ex = max(left, min(x - ew / 2, left + width - ew))
+                    p.drawText(int(ex), int(y), int(ew), int(elh), Qt.AlignCenter, txt)
             y += ROW_H
 
         if not evs_all:
             # The rails above are drawn empty on purpose; this says why, and points at the one
             # control that can fill them.
-            p.setFont(QFont(self.font().family(), 7))
+            p.setFont(self._font(FONT_SMALL))
             p.setPen(QColor(t.faint))
-            p.drawText(PAD + 56, y + 4, self.width() - 2 * PAD - 56, 12, Qt.AlignLeft,
+            lh_note = QFontMetricsF(p.font()).height()
+            p.drawText(int(left), y + 4, int(width), int(max(12.0, lh_note)), Qt.AlignLeft,
                        f"no events in the last {int(self.window_s)} s — "
                        "launch a program, or scrub back.")
 
@@ -770,9 +905,11 @@ class OsHudController(HudController):
     SCRUBBACK_S = 120.0
 
     def __init__(self, parent, theme, agent_of, window_getter=None, on_source=None,
-                 scrub_getter=None, interval_ms: int = 900) -> None:
+                 scrub_getter=None, scale_getter=None, interval_ms: int = 900) -> None:
         super().__init__(parent, interval_ms=interval_ms, retain_s=self.SCRUBBACK_S)
-        self.hud = OsHud(parent, theme)
+        # A getter, not a value, like the two windows above: Settings → OS HUD text is applied on
+        # the next poll rather than the next launch.
+        self.hud = OsHud(parent, theme, scale_fn=scale_getter)
         self.hud.set_history(self.history)
         self._agent_of = agent_of
         self._window_getter = window_getter or (lambda: 10)

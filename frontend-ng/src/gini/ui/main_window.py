@@ -1673,6 +1673,8 @@ class MainWindow(QMainWindow):
                         on_source=self._open_kernel_source,
                         window_getter=lambda: int(
                             getattr(self.ctx.settings, "os_hud_window_s", 10) or 10),
+                        scale_getter=lambda: int(
+                            getattr(self.ctx.settings, "os_hud_scale", 0) or 0),
                         scrub_getter=lambda: int(
                             getattr(self.ctx.settings, "os_hud_scrub_s", 120) or 120))
                 self._oshud.show_topright()
