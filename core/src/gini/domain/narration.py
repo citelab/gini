@@ -116,6 +116,10 @@ def describe(entry: Entry) -> str:
     if k == ev.OBJECTIVE:
         return (f"Objective \"{d.get('say') or d.get('id')}\" went "
                 f"{d.get('from', '?')} → {d.get('to', '?')}.")
+    if k == ev.ANSWER:
+        # The question is quoted with it. A marker reading the transcript top to bottom should not
+        # have to hold three prompts in their head to know which one this replies to.
+        return f"Q: {d.get('prompt', '?')}\n            A: {d.get('text', '') or '(left blank)'}"
     if k == SUBMIT:
         art = d.get("artifact", {}) or {}
         met = sum(1 for r in d.get("objectives", []) if r.get("status") == "met")

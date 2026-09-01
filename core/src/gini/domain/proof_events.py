@@ -34,12 +34,17 @@ RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE = (
     "run", "stop", "open_console", "measure", "invoke")
 COMMAND = "command"
 WITNESS, OBJECTIVE = "witness", "objective"
+ANSWER = "answer"
 LOAD = "load"
 STOPPED, RESUMED = "stopped", "resumed"
 
 CONSTRUCTION = (PLACE, REMOVE, CONNECT, DISCONNECT, CONFIGURE)
 OPERATION = (RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE, COMMAND)
 WITNESSED = (WITNESS, OBJECTIVE)
+#: A student's own words, and the weakest tier there is — deliberately NOT folded in with
+#: `witnessed`, because a witness is something GINI measured and an answer is something a person
+#: typed. Nothing here checks it against the teacher's key; that is a person's job.
+ANSWERED = (ANSWER,)
 PROVENANCE = (LOAD, PREEXISTING, SUBMIT, STOPPED, RESUMED)
 
 # bus signal -> the kind it becomes. The recorder subscribes to exactly these.
@@ -201,6 +206,23 @@ def witness(probe: str, verdict: str) -> tuple[str, dict]:
 def objective(objective_id: str, say: str, before: str, after: str) -> tuple[str, dict]:
     return OBJECTIVE, {"id": clip(objective_id, 64), "say": clip(say),
                        "from": str(before or ""), "to": str(after or "")}
+
+
+# -- answered ---------------------------------------------------------------- #
+def answer(question_id: str, prompt: str, text: str) -> tuple[str, dict]:
+    """What a student wrote in reply to one of the lab's questions.
+
+    The PROMPT rides along with the answer rather than being looked up when the report is read.
+    A chain entry has to stay readable on its own — a teacher may edit or retire a question
+    between the lab and the marking, and an answer whose question has changed underneath it is
+    worse than no answer at all.
+
+    Answering twice appends twice. The chain is append-only and a student may think again; the
+    report shows the last one and says how many there were, so a marker can see them change their
+    mind rather than have the earlier attempt quietly disappear.
+    """
+    return ANSWER, {"id": clip(question_id, 64), "prompt": clip(prompt, 400),
+                    "text": clip(text, 2000)}
 
 
 # -- provenance -------------------------------------------------------------- #

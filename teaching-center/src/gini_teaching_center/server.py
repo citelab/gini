@@ -228,6 +228,11 @@ class Handler(BaseHTTPRequestHandler):
                              "brief": act.get("brief", ""),
                              "session_minutes": act["session_minutes"],
                              "grace_minutes": act.get("grace_minutes") or 0,
+                             # PROMPTS ONLY. `answer` is the marker's key and never leaves
+                             # this server — stripped HERE rather than trusted not to be read,
+                             # because this is the one reply a student's machine receives.
+                             "questions": [{"id": q["id"], "prompt": q["prompt"]}
+                                           for q in _STORE.questions_for_code(row["code"])],
                              "valid_until": row["valid_until"]})
             return
 
@@ -239,6 +244,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         issued = _act.mint_code(act)
         _STORE.code_put(issued)
+        # Chosen HERE, once, and recorded against the code. Re-arming resumes the same chain, so
+        # the questions a student sees must be fixed the moment their code exists.
+        _STORE.pick_questions(issued["code"], act["id"], act.get("show_n") or 0)
         from gini.domain.ticket import Ticket
         self._send(200, {"ok": True, "activity": act["id"], "title": act["title"],
                          "brief": act.get("brief", ""),
@@ -422,7 +430,11 @@ class Handler(BaseHTTPRequestHandler):
                 out = []
                 for a in _STORE.activities(course):
                     out.append({**a, "vended": len(_STORE.codes_for(a["id"])),
-                                "submitted": len(_STORE.activity_submissions(a["id"]))})
+                                "submitted": len(_STORE.activity_submissions(a["id"])),
+                                # Staff-only route (the auth gate is just above) and the
+                                # console needs these to fill the editor. Keys included:
+                                # this is the one place a teacher edits them.
+                                "questions": _STORE.questions(a["id"])})
                 return self._send(200, out)
             if p == "/api/materials":
                 return self._send(200, _STORE.materials(course))
@@ -443,8 +455,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self._may(act.get("course", "")):
                 return self._send(403, {"error": "That is not your course."})
             twins = _STORE.artifact_twins(row.get("artifact_hash", ""), exclude_code=row["code"])
-            return self._send(200, _act.report(row, act, twins,
-                                              _STORE.claim_attempts(row["receipt"])))
+            return self._send(200, _act.report(
+                row, act, twins, _STORE.claim_attempts(row["receipt"]),
+                # A staff-only route, so the key travels: a marker reading a transcript wants the
+                # expected answer beside the given one. Nothing compares them.
+                questions=_STORE.questions_for_code(row["code"])))
 
         self._send(404, {"error": f"No endpoint at {p} for {self.command}."})
 
@@ -560,14 +575,27 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "The grace period must be a number of minutes."}
         if grace < 0:
             return {"ok": False, "error": "The grace period cannot be negative."}
+        try:
+            show_n = _number(b.get("show_n"), prev.get("show_n"), 0, int)
+        except ValueError:
+            return {"ok": False, "error": "How many questions to ask must be a number."}
+        questions = [q for q in (b.get("questions") or [])
+                     if isinstance(q, dict) and str(q.get("prompt", "")).strip()]
+        if show_n < 0:
+            return {"ok": False, "error": "How many questions to ask cannot be negative."}
+        if show_n > len(questions):
+            return {"ok": False,
+                    "error": f"You asked to show {show_n} questions but wrote "
+                             f"{len(questions)}."}
         _STORE.activity_put({
-            "id": aid, "course": course, "lab": lab,
+            "id": aid, "course": course, "lab": lab, "show_n": show_n,
             "title": b.get("title") or prev.get("title") or lab,
             "brief": b.get("brief", prev.get("brief", "")),
             "status": prev.get("status", "draft"),
             "vend_until": vend, "session_minutes": mins, "grace_minutes": grace,
             "created": prev.get("created") or time.time(),
             "released": prev.get("released", 0)})
+        _STORE.questions_put(aid, questions)
         return {"ok": True, "activity": aid, "status": prev.get("status", "draft")}
 
     def _set_released(self, course: str, b: dict, on: bool) -> dict:

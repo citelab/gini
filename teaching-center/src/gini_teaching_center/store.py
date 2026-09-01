@@ -65,8 +65,39 @@ CREATE TABLE IF NOT EXISTS activity (
   vend_until      REAL DEFAULT 0,
   session_minutes INTEGER DEFAULT 60,
   grace_minutes   INTEGER DEFAULT 0,       -- after valid_until: still accepted, tagged LATE
+  show_n          INTEGER DEFAULT 0,       -- how many of this lab's questions each student gets
   created         REAL DEFAULT 0,
   released        REAL DEFAULT 0
+);
+
+-- Short questions a teacher writes with the lab, and the answer they expect. A student sees SOME
+-- of them (activity.show_n of however many exist), chosen when their code is vended.
+--
+-- `answer` is the marker's key and NEVER leaves this server: the arm-time reply carries prompts
+-- only. It is stored so a teaching assistant reading a transcript has the expected answer beside
+-- the given one — not so anything can compare them. Short free text is precisely where automatic
+-- marking produces confidently wrong grades on real work.
+--
+-- `retired` rather than DELETE, for the same reason a lab holding submissions cannot be deleted:
+-- codes already vended name their questions by id, and removing one would leave a report unable to
+-- say what was asked.
+CREATE TABLE IF NOT EXISTS activity_question (
+  id       TEXT PRIMARY KEY,          -- "<activity>#<n>"
+  activity TEXT NOT NULL,
+  ord      INTEGER DEFAULT 0,
+  prompt   TEXT DEFAULT '',
+  answer   TEXT DEFAULT '',           -- the key. Staff-only, always.
+  retired  INTEGER DEFAULT 0
+);
+
+-- Which questions THIS code was given. Recorded at vend time rather than chosen in gBuilder: a
+-- client-side choice could be re-rolled, would differ after a restart, and the code's chain is
+-- resumed on re-arm — so the pair a student sees must be fixed the moment the code exists.
+CREATE TABLE IF NOT EXISTS code_question (
+  code     TEXT NOT NULL,
+  question TEXT NOT NULL,
+  ord      INTEGER DEFAULT 0,
+  PRIMARY KEY (code, question)
 );
 
 CREATE TABLE IF NOT EXISTS activity_code (
@@ -332,7 +363,12 @@ class Store:
                          "title": "TEXT DEFAULT ''", "brief": "TEXT DEFAULT ''",
                          "status": "TEXT DEFAULT 'draft'", "vend_until": "REAL DEFAULT 0",
                          "session_minutes": "INTEGER DEFAULT 60", "created": "REAL DEFAULT 0",
-                         "grace_minutes": "INTEGER DEFAULT 0", "released": "REAL DEFAULT 0"},
+                         "grace_minutes": "INTEGER DEFAULT 0", "show_n": "INTEGER DEFAULT 0",
+                         "released": "REAL DEFAULT 0"},
+            "activity_question": {"activity": "TEXT DEFAULT ''", "ord": "INTEGER DEFAULT 0",
+                                  "prompt": "TEXT DEFAULT ''", "answer": "TEXT DEFAULT ''",
+                                  "retired": "INTEGER DEFAULT 0"},
+            "code_question": {"question": "TEXT DEFAULT ''", "ord": "INTEGER DEFAULT 0"},
             "activity_code": {"activity": "TEXT DEFAULT ''", "issued": "REAL DEFAULT 0",
                               "valid_until": "REAL DEFAULT 0", "used": "INTEGER DEFAULT 0"},
             "activity_submission": {"code": "TEXT DEFAULT ''", "receipt": "TEXT DEFAULT ''",
@@ -499,7 +535,7 @@ class Store:
     # -- activities ------------------------------------------------------- #
     def activity_put(self, rec: dict) -> None:
         cols = ("id", "course", "lab", "title", "brief", "status", "vend_until",
-                "session_minutes", "grace_minutes", "created", "released")
+                "session_minutes", "grace_minutes", "show_n", "created", "released")
         self._run(f"INSERT OR REPLACE INTO activity({','.join(cols)}) "
                   f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
 
@@ -613,6 +649,88 @@ class Store:
         return self._all(
             "SELECT code,receipt,activity,ts FROM activity_submission "
             "WHERE artifact_hash=? AND code<>? ORDER BY ts", (artifact_hash, exclude_code))
+
+    # -- lab questions ----------------------------------------------------- #
+    def questions_put(self, activity: str, rows: list[dict]) -> int:
+        """Replace a lab's question set.
+
+        A question that has already been VENDED is retired, never removed: codes name their
+        questions by id, and deleting one would leave a report unable to say what was asked. The
+        same rule a lab holding submissions lives by.
+        """
+        with self.lock:
+            self.db.execute(
+                "UPDATE activity_question SET retired=1 WHERE activity=? AND retired=0",
+                (activity,))
+            for i, r in enumerate(rows, 1):
+                # A row that arrives WITH an id is an edit of that question, and keeps it. Only a
+                # new row is given one, so fixing a typo does not retire a question and mint a
+                # replacement — which would leave an issued code naming something withdrawn.
+                qid = r.get("id") or self._new_question_id(activity)
+                self.db.execute(
+                    "INSERT OR REPLACE INTO activity_question"
+                    "(id,activity,ord,prompt,answer,retired) VALUES(?,?,?,?,?,0)",
+                    (qid, activity, i, str(r.get("prompt", "")), str(r.get("answer", ""))))
+            # A retired question nobody was ever asked is genuinely gone; one that was vended
+            # stays, so an old report can still say what it asked.
+            #
+            # A SUBQUERY, not a list of ids bound in. The list form was written first and was
+            # silently wrong when it was empty — `id NOT IN ()` has no SQL spelling, `NOT IN
+            # (NULL)` is unknown rather than true, and a lab whose questions had never been vended
+            # therefore cleaned up nothing at all while appearing to work.
+            self.db.execute(
+                "DELETE FROM activity_question WHERE activity=? AND retired=1 "
+                "AND id NOT IN (SELECT question FROM code_question)", (activity,))
+            self.db.commit()
+        return len(rows)
+
+    def _new_question_id(self, activity: str) -> str:
+        """An id no question in this lab has held, including retired ones.
+
+        Numbering by position would reuse the id of a question that was deleted, and a code issued
+        against the old one would report the new question's text as what it asked.
+        """
+        n = self._one("SELECT MAX(CAST(substr(id, ?) AS INTEGER)) AS hi "
+                      "FROM activity_question WHERE activity=?",
+                      (len(activity) + 2, activity)) or {}
+        return f"{activity}#{int(n.get('hi') or 0) + 1}"
+
+    def questions(self, activity: str, include_retired: bool = False) -> list[dict]:
+        where = "" if include_retired else " AND retired=0"
+        return self._all(f"SELECT * FROM activity_question WHERE activity=?{where} ORDER BY ord",
+                         (activity,))
+
+    def pick_questions(self, code: str, activity: str, show_n: int) -> list[dict]:
+        """Choose this code's questions and record the choice. Idempotent per code.
+
+        At VEND time, so the pair is fixed the moment the code exists: a client-side choice could
+        be re-rolled, would differ after a restart, and re-arming a code RESUMES its chain — so the
+        questions a student sees must not change under them.
+        """
+        already = self.questions_for_code(code)
+        if already:
+            return already
+        pool = self.questions(activity)
+        n = max(0, min(int(show_n or 0), len(pool)))
+        if not n:
+            return []
+        import random
+        chosen = random.sample(pool, n)
+        with self.lock:
+            for i, q in enumerate(chosen, 1):
+                self.db.execute(
+                    "INSERT OR IGNORE INTO code_question(code,question,ord) VALUES(?,?,?)",
+                    (code, q["id"], i))
+            self.db.commit()
+        return self.questions_for_code(code)
+
+    def questions_for_code(self, code: str) -> list[dict]:
+        """What this code was asked, in the order asked — ANSWERS INCLUDED. A caller talking to a
+        student must strip `answer`; only the report is allowed to see it."""
+        return self._all(
+            "SELECT q.*, cq.ord AS asked_ord FROM code_question cq "
+            "JOIN activity_question q ON q.id = cq.question "
+            "WHERE cq.code=? ORDER BY cq.ord", (code,))
 
     # -- materials -------------------------------------------------------- #
     def material_put(self, rec: dict) -> None:

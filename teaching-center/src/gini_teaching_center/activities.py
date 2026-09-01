@@ -31,6 +31,7 @@ import json
 import time
 
 from gini.domain import proof as _proof
+from gini.domain import proof_events as _ev
 from gini.domain import ticket as _ticket
 
 #: Why a code was refused. Each maps to a sentence a student can act on — none of them leak whether
@@ -322,7 +323,47 @@ def narrate(proof: dict) -> str:
         return f"(could not narrate this chain: {e})"
 
 
-def report(row: dict, activity: dict, twins: list, attempts: list | None = None) -> dict:
+def answered(proof: dict, questions: list[dict] | None) -> list[dict]:
+    """Pair what the lab asked with what the student wrote, for one marker to read.
+
+    Nothing is compared. `key` travels beside `given` and they are left side by side, because
+    deciding whether "it uses a lock" answers "how does sleep avoid a lost wakeup?" is the whole
+    of the marking and is not a string comparison.
+
+    An unanswered question is REPORTED, not hidden — a blank is a fact about the attempt. And the
+    prompt shown is the one recorded in the chain when it differs from the one on file, so a
+    question edited after the lab cannot make an answer look like a reply to something it never
+    replied to.
+    """
+    said: dict[str, list[dict]] = {}
+    for e in proof.get("entries") or []:
+        if (e or {}).get("kind") != _ev.ANSWER:
+            continue
+        d = e.get("data") or {}
+        said.setdefault(str(d.get("id", "")), []).append(d)
+    out = []
+    for q in questions or []:
+        turns = said.get(q["id"], [])
+        last = turns[-1] if turns else {}
+        out.append({
+            "id": q["id"],
+            "prompt": q.get("prompt", ""),
+            # Only when it moved. A marker should be told about an edit, not made to compare two
+            # identical strings on every row.
+            "asked_as": (last.get("prompt", "") if last.get("prompt", q.get("prompt", ""))
+                         != q.get("prompt", "") else ""),
+            "given": last.get("text", ""),
+            "answered": bool(turns),
+            # They may think again; the chain keeps every pass. The count is here so a marker can
+            # see that happened without the report reprinting all of them.
+            "revisions": max(0, len(turns) - 1),
+            "key": q.get("answer", ""),
+        })
+    return out
+
+
+def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
+           questions: list[dict] | None = None) -> dict:
     """Everything a teacher sees for one receipt.
 
     Integrity, the account of what happened, whether it fit the session window, the duplicate flags,
@@ -344,6 +385,9 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None)
         "minutes": round(((row.get("finished") or 0) - (row.get("started") or 0)) / 60.0, 1),
         "within_session": within_session(row, activity or {}),
         "narration": narrate(proof),
+        # Prompt, what the student wrote, and the teacher's key — side by side and unjudged.
+        # There is no mark here and no auto-comparison: a person reads these.
+        "questions": answered(proof, questions),
         "entries": len(proof.get("entries") or []),
         "artifact": payload.get("artifact"),
         # Whether the teacher can actually OPEN this, or only read about it. An older gBuilder

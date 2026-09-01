@@ -57,6 +57,17 @@
   button.danger{background:#fff;border:2px solid #eccdc9;color:var(--red);border-radius:11px;
         padding:9px 15px;font-weight:800;cursor:pointer}
   .rowb{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:18px}
+  /* prompt, key, remove — on one line, so a set of questions reads as a set. */
+  .qrow{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .qrow input{margin:0}
+  .qrow .q-prompt{flex:3}
+  .qrow .q-answer{flex:2}
+  .qrow .q-del{flex:none;padding:8px 12px}
+  .qcard{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-top:10px}
+  .q-ask{font-weight:700}
+  .q-said{margin-top:6px;white-space:pre-wrap}
+  /* An unanswered question is shown, never hidden — a blank is a fact about the attempt. */
+  .q-said.blank{color:var(--dim);font-style:italic}
 
   table{width:100%;border-collapse:collapse}
   th{text-align:left;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;
@@ -158,6 +169,21 @@
         <div class="note">After the deadline, still accepted and tagged LATE. 0 = a hard stop.
           Without it a student who finished at 23:58 and lost their wifi holds a proof the server
           refuses for ever, recoverable only by a teacher accepting it by hand.</div>
+        <label style="margin-top:16px">Questions</label>
+        <div class="note">Short answers, in the student's own words. Write a few; each student is
+          asked a random selection of them, fixed when their code is issued. The answers you give
+          are the marker's key — they are never sent to a student's machine, and nothing here is
+          marked automatically.</div>
+        <div id="a-qs"></div>
+        <div class="rowb" style="margin-top:6px">
+          <button class="flat" onclick="addQ()">Add a question</button>
+          <span class="note" style="display:inline">Ask
+            <input id="a-shown" type="number" min="0" value="0"
+                   style="max-width:64px;display:inline-block;margin:0 4px">
+            of them</span>
+        </div>
+        <div class="note">0 asks nobody anything. Leaving a question unanswered never blocks a
+          student — a blank is recorded as a blank and the marker sees it.</div>
         <div class="rowb">
           <button class="go" onclick="saveAct()">Save</button>
           <button class="flat" onclick="clearAct()">Clear</button>
@@ -476,9 +502,8 @@ async function loadActs(){
               ? `<button class="flat" onclick="release('${esc(a.lab)}',false)">Close</button>
                  <a href="${link(a)}" target="_blank" style="margin-left:10px">student link</a>`
               : `<button class="go" onclick="release('${esc(a.lab)}',true)">Release</button>`}
-            <button class="flat" style="margin-left:10px" onclick='editAct(${JSON.stringify(a.lab)
-              },${JSON.stringify(a.title||'')},${JSON.stringify(a.brief||'')},${
-              Number(a.vend_until)||0},${Number(a.session_minutes)||60},${Number(a.grace_minutes)||0})'>Edit</button>
+            <button class="flat" style="margin-left:10px"
+                    onclick='editAct(${JSON.stringify(JSON.stringify(a))})'>Edit</button>
             ${a.submitted
               ? `<span class="note" style="margin-left:12px">${a.submitted} submitted — close it,
                  it cannot be deleted</span>`
@@ -509,22 +534,63 @@ function actBody(){
           brief:$('#a-brief').value.trim(),
           vend_until: Number.isNaN(t) ? null : t/1000,
           session_minutes: m === '' ? null : parseInt(m, 10),
-          grace_minutes: g === '' ? null : parseInt(g, 10)};
+          grace_minutes: g === '' ? null : parseInt(g, 10),
+          questions: readQs(),
+          show_n: parseInt($('#a-shown').value, 10) || 0};
 }
 
 // Editing has to be deliberate. The form is otherwise blind: type a lab id that already exists,
 // press Save, and you have overwritten it without ever seeing what was there.
-function editAct(lab, title, brief, vend, mins, grace){
-  $('#a-lab').value = lab; $('#a-title').value = title; $('#a-brief').value = brief;
-  $('#a-mins').value = mins;
-  $('#a-grace').value = grace || 0;
+//
+// The whole row is handed over rather than a list of positional arguments — it had grown to six and
+// the next field to arrive would have landed in the wrong slot sooner or later.
+function editAct(json){
+  const a = typeof json === 'string' ? JSON.parse(json) : json;
+  $('#a-lab').value = a.lab; $('#a-title').value = a.title || '';
+  $('#a-brief').value = a.brief || '';
+  $('#a-mins').value = Number(a.session_minutes) || 60;
+  $('#a-grace').value = Number(a.grace_minutes) || 0;
   // datetime-local wants exactly YYYY-MM-DDTHH:mm in LOCAL time, which toISOString would shift.
-  if (vend) {
-    const d = new Date(vend*1000 - new Date().getTimezoneOffset()*60000);
+  if (a.vend_until) {
+    const d = new Date(a.vend_until*1000 - new Date().getTimezoneOffset()*60000);
     $('#a-vend').value = d.toISOString().slice(0,16);
   } else $('#a-vend').value = '';
-  $('#a-heading').textContent = 'Editing ' + lab;
+  drawQs(a.questions || []);
+  $('#a-shown').value = Number(a.show_n) || 0;
+  $('#a-heading').textContent = 'Editing ' + a.lab;
   $('#a-lab').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+// ---- questions ------------------------------------------------------------------ //
+// Held in the DOM rather than in a parallel array: the rows ARE the state, so there is nothing to
+// keep in step with them, and a question can be edited, added or dropped without an index.
+function drawQs(qs){
+  $('#a-qs').innerHTML = '';
+  (qs || []).forEach(q => addQ(q));
+}
+function addQ(q){
+  q = (q && q.prompt !== undefined) ? q : {};
+  const row = document.createElement('div');
+  row.className = 'qrow';
+  row.dataset.id = q.id || '';
+  row.innerHTML =
+    `<input class="q-prompt" placeholder="What IP did you give M1?">
+     <input class="q-answer" placeholder="the answer you expect">
+     <button class="flat q-del" title="Remove this question">✕</button>`;
+  row.querySelector('.q-prompt').value = q.prompt || '';
+  row.querySelector('.q-answer').value = q.answer || '';
+  row.querySelector('.q-del').onclick = () => row.remove();
+  $('#a-qs').appendChild(row);
+}
+function readQs(){
+  // The id rides along so an edit stays the SAME question. Without it, re-saving would retire every
+  // question and mint new ones, leaving a report on an already-issued code naming questions that no
+  // longer exist.
+  return [...document.querySelectorAll('#a-qs .qrow')].map(r => ({
+    id: r.dataset.id || '',
+    prompt: r.querySelector('.q-prompt').value.trim(),
+    answer: r.querySelector('.q-answer').value.trim()
+  })).filter(q => q.prompt);
 }
 async function saveAct(){
   if (!$('#a-lab').value.trim()) { say('Give the lab an id, like lab1.'); return; }
@@ -537,6 +603,7 @@ async function saveAct(){
 function clearAct(){
   ['a-lab','a-title','a-brief','a-vend'].forEach(i=>$('#'+i).value='');
   $('#a-mins').value = '60';
+  $('#a-qs').innerHTML = ''; $('#a-shown').value = '0';
   $('#a-heading').textContent = 'New lab';
 }
 
@@ -710,8 +777,32 @@ async function openReceipt(receipt){
           : `<span class="note" style="margin:0">No runnable copy came with this submission; it was
              sent by a gBuilder that only uploaded the proof.</span>`}
       </div>
+      ${qBlock(r.questions)}
       <pre>${esc(r.narration)}</pre>
     </div>`;
+}
+
+// What the lab asked, what they wrote, and the key — laid out for a person to read and judge.
+// NOTHING here is scored: no tick, no cross, no percentage, and the two answers carry equal visual
+// weight on purpose. A wrong-looking answer to "why did the first ping fail?" is often a right
+// answer phrased differently, and telling those apart is exactly the marker's job.
+function qBlock(qs){
+  if (!qs || !qs.length) return '';
+  return `<div style="margin-top:20px">
+    <div class="big" style="font-size:17px">Questions</div>
+    <div class="note">Not marked. The expected answer is shown beside the student's, to compare.</div>
+    ${qs.map(q => `<div class="qcard">
+      <div class="q-ask">${esc(q.prompt)}</div>
+      ${q.asked_as ? `<div class="note" style="color:var(--red)">Asked at the time as
+        &ldquo;${esc(q.asked_as)}&rdquo; — the question was edited afterwards.</div>` : ''}
+      <div class="q-said ${q.answered ? '' : 'blank'}">${
+        q.answered ? (esc(q.given) || '(they submitted an empty answer)')
+                   : 'Not answered.'}</div>
+      ${q.revisions ? `<div class="note">Changed ${q.revisions}
+        time${q.revisions === 1 ? '' : 's'}; the chain has every pass.</div>` : ''}
+      ${q.key ? `<div class="note"><b>Expected:</b> ${esc(q.key)}</div>` : ''}
+    </div>`).join('')}
+  </div>`;
 }
 
 async function getTopology(receipt){
