@@ -1258,29 +1258,89 @@ class Orchestrator:
         except Exception:                                # noqa: BLE001 — no config = not enabled
             return False
 
+    @staticmethod
+    def _image_present(name: str, tries: int = 3, pause: float = 1.5) -> bool:
+        """Whether Docker holds this image — asked more than once, and that is the whole point.
+
+        Docker Desktop's Resource Saver pauses the VM when the machine goes idle. The first command
+        after it wakes reaches a daemon that ANSWERS — so this is not a connection failure and no
+        "is Docker running?" check catches it — out of an image store that has not finished
+        loading, and `docker image inspect gini-grouter` comes back "No such image" for an image
+        that is sitting right there. Seconds later the same command succeeds.
+
+        Concluding absence from one answer turned a two-second wake into "the gRouter image isn't
+        built yet", followed by a `docker build` command pointing into a `backend/` that a wheel
+        does not contain — so the advice was impossible to follow as well as wrong. Intermittently,
+        which is the worst way for it to be wrong.
+        """
+        for attempt in range(max(1, tries)):
+            r = subprocess.run(["docker", "image", "inspect", name],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+            if r.returncode == 0:
+                return True
+            if attempt + 1 < tries:
+                time.sleep(pause)
+        return False
+
+    @staticmethod
+    def _no_image_advice(image: str, build_cmd: str, have_backend: bool) -> str:
+        """What to actually do about a missing image, which depends on how GINI was installed.
+
+        From a wheel (pip or pipx) there is no `backend/` and never was, so telling someone to cd
+        into one is advice they cannot take. `gini-setup` is the answer there: it pulls the
+        published images and tags them under the plain names the runtime resolves.
+        """
+        if have_backend:
+            return (f"The image '{image}' isn't built yet.\n"
+                    f"Build it once (takes a couple of minutes):\n  {build_cmd}\n"
+                    f"…then press Run again.\n"
+                    f"(Or tick Settings → Networking → \"Build missing lab images "
+                    f"automatically\" and press Run — GINI will build it for you.)")
+        return (f"The image '{image}' is not on this machine.\n"
+                f"Fetch the lab images once:\n  gini-setup\n"
+                f"…then press Run again.")
+
+    def _docker_not_ready(self) -> str:
+        """"" when Docker can serve a lab, otherwise what is wrong with it.
+
+        Checked only on the failure path, and only to tell two different problems apart: a daemon
+        that is down needs starting, and a missing image needs fetching. The same distinction
+        `setup/runtime.docker_state` already draws, for the same reason — telling somebody who has
+        Docker to install Docker sends them off to fix the wrong thing.
+        """
+        try:
+            from ..setup.runtime import docker_state
+            state = docker_state()
+        except Exception:                                # noqa: BLE001
+            return ""
+        if state == "missing":
+            return "docker not found — is Docker installed?"
+        if state == "stopped":
+            return ("Docker is installed but its engine is not answering.\n"
+                    "Start Docker Desktop (or `colima start`), give it a moment, and press Run "
+                    "again.")
+        return ""
+
     def _ensure_grouter_image(self) -> tuple[bool, str]:
         """The real gRouter runs from a locally-built image. Check it exists and, if we
         can find the backend, offer to build it — otherwise return the exact command."""
         if shutil.which("docker") is None:
             return False, "docker not found — is Docker installed and running?"
-        present = subprocess.run(["docker", "image", "inspect", GROUTER_IMAGE],
-                                 capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if present.returncode == 0:
+        if self._image_present(GROUTER_IMAGE):
             return True, "image present"
         # locate the backend (repo_root/backend) relative to this file
         backend = Path(__file__).resolve().parents[4] / "backend"
         dockerfile = backend / "grouter-build" / "Dockerfile"
         build_cmd = (f"cd {backend} && docker build -f grouter-build/Dockerfile "
                      f"-t {GROUTER_IMAGE} .")
-        if not dockerfile.exists():
-            return False, (f"The real gRouter image '{GROUTER_IMAGE}' isn't built yet, and "
-                           f"I can't find the backend to build it.\nBuild it once:\n  {build_cmd}")
-        if not self._autobuild_enabled("GROUTER"):
-            return False, (f"The real gRouter image '{GROUTER_IMAGE}' isn't built yet.\n"
-                           f"Build it once (takes a couple of minutes):\n  {build_cmd}\n"
-                           f"…then press Run again.\n"
-                           f"(Or tick Settings → Networking → \"Build missing lab images "
-                           f"automatically\" and press Run — GINI will build it for you.)")
+        # Asked only now that the image looks absent, because a daemon that cannot answer looks
+        # exactly like one that has nothing — and the two need opposite advice.
+        down = self._docker_not_ready()
+        if down:
+            return False, down
+        if not dockerfile.exists() or not self._autobuild_enabled("GROUTER"):
+            return False, self._no_image_advice(GROUTER_IMAGE, build_cmd, dockerfile.exists())
         # opt-in auto-build
         b = subprocess.run(["docker", "build", "-f", "grouter-build/Dockerfile",
                             "-t", GROUTER_IMAGE, "."], cwd=str(backend),
@@ -1293,20 +1353,15 @@ class Orchestrator:
         """The SDN controller runs from a locally-built POX image."""
         if shutil.which("docker") is None:
             return False, "docker not found — is Docker installed and running?"
-        present = subprocess.run(["docker", "image", "inspect", POX_IMAGE],
-                                 capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if present.returncode == 0:
+        if self._image_present(POX_IMAGE):
             return True, "image present"
         sdn = Path(__file__).resolve().parents[4] / "backend" / "sdn"
         build_cmd = f"cd {sdn} && docker build -t {POX_IMAGE} ."
-        if not (sdn / "Dockerfile").exists():
-            return False, (f"The POX image '{POX_IMAGE}' isn't built yet, and I can't find "
-                           f"backend/sdn to build it.\nBuild it once:\n  {build_cmd}")
-        if not self._autobuild_enabled("POX"):
-            return False, (f"The SDN controller image '{POX_IMAGE}' isn't built yet.\n"
-                           f"Build it once:\n  {build_cmd}\n…then press Run again.\n"
-                           f"(Or tick Settings → Networking → \"Build missing lab images "
-                           f"automatically\" and press Run — GINI will build it for you.)")
+        down = self._docker_not_ready()
+        if down:
+            return False, down
+        if not (sdn / "Dockerfile").exists() or not self._autobuild_enabled("POX"):
+            return False, self._no_image_advice(POX_IMAGE, build_cmd, (sdn / "Dockerfile").exists())
         b = subprocess.run(["docker", "build", "-t", POX_IMAGE, "."], cwd=str(sdn),
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
         if b.returncode != 0:
