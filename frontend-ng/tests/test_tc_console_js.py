@@ -183,11 +183,27 @@ def test_the_console_notices_it_is_newer_than_its_server():
     Library tab rendering perfectly above "No endpoint at /api/references for GET", with nothing
     anywhere saying the answer is to restart the service."""
     js = scripts("console.html")
-    assert "BUILT_FOR" in js and "checkServerVersion" in js
+    assert "checkServerVersion" in js
     assert "boot()" in js or "async function boot" in js
     body = js.split("function checkServerVersion", 1)[1].split("\n}", 1)[0]
-    assert "ME.server" in body, "it must compare against what the SERVER reports"
+    assert "restart_needed" in body, "the SERVER decides; the page renders"
     assert "estart" in body, "the message has to say what to do about it"
+
+
+def test_the_page_does_not_carry_a_version_of_its_own():
+    """THE regression, and it shipped. The check used to compare against `BUILT_FOR = '6.4'`, a
+    literal typed into this file that every release had to remember to bump. 6.5.0 went out without
+    it, so the banner told every healthy server it was mid-upgrade, told its admin to restart, and
+    did not go away when they did — because nothing was wrong.
+
+    A version a human has to keep in sync is not a version check. There are two real versions and
+    only the server can see both, so the comparison lives there."""
+    js = scripts("console.html")
+    code = "\n".join(ln for ln in js.split("\n") if not ln.strip().startswith("//"))
+    assert "BUILT_FOR" not in code
+    import re
+    assert not re.search(r"""=\s*['"]\d+\.\d+""", code), \
+        "a version literal is back in the console"
 
 
 def test_the_version_check_runs_before_anything_asks_for_an_endpoint():

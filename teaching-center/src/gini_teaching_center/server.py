@@ -150,13 +150,24 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if p == "/auth/whoami" and self.command == "GET":
             me = self._who()
-            # The RUNNING code's version, so the page can tell whether it is talking to the server
-            # it shipped with. `_page` reads console.html off disk on every request, so upgrading
-            # the package swaps the UI instantly while the process keeps the old Python in memory
-            # — a Library tab that renders perfectly above "No endpoint at /api/references", and
+            # BOTH versions, and the whole point is that they can differ. `_page` reads
+            # console.html off disk on every request, so `pip install --upgrade` swaps the UI the
+            # instant it lands while this process keeps the old Python in `sys.modules` — a Library
+            # tab that renders perfectly above "No endpoint at /api/references for GET", with
             # nothing anywhere saying the answer is "restart the service".
-            from .version import __version__
-            self._send(200, {**me, "server": __version__}) if me \
+            #
+            # The comparison is made HERE rather than in the page. It used to be a literal typed
+            # into console.html (`BUILT_FOR = '6.4'`), which meant every release had to remember to
+            # bump it — and when 6.5.0 shipped and nobody had, the banner accused every healthy
+            # server of being mid-upgrade, told its admin to restart, and did not go away when they
+            # did. A number a human has to keep in sync is not a version check.
+            from .version import __version__, on_disk
+            disk = on_disk()
+            self._send(200, {**me, "server": __version__,
+                             # "" when it cannot be told — a source checkout has no `_version.py`.
+                             # No opinion is not a mismatch; that conflation was the bug.
+                             "on_disk": disk,
+                             "restart_needed": bool(disk) and disk != __version__}) if me \
                 else self._send(401, {"error": "not signed in"})
             return True
         if p == "/auth/logout" and self.command == "POST":

@@ -691,20 +691,20 @@ async function ingest(){
 // Global shelf, per-course link. One copy of a book serves every course that links it, which is
 // what stops five operating-systems courses holding five copies of one index — and the link is a
 // teacher's decision about which vocabulary their class is taught in.
-// What this page was built to talk to, compared against the version the SERVER reports. The two
-// can differ: `_page` reads this file off disk on EVERY request, so upgrading the package swaps
-// the UI the moment it lands while the running process keeps the old Python in memory. That
-// produced a Library tab rendering perfectly above "No endpoint at /api/references for GET", with
-// nothing anywhere saying the answer was to restart the service.
-const BUILT_FOR = '6.4';
-
+// Is this page newer than the Python serving it? `_page` reads this file off disk on EVERY
+// request, so upgrading the package swaps the UI the moment it lands while the running process
+// keeps the old Python in memory — a Library tab rendering perfectly above "No endpoint at
+// /api/references for GET", with nothing anywhere saying the answer was to restart the service.
+//
+// The SERVER decides, because only the server can see both facts: the version on disk and the
+// version it is running. This was a literal typed in here — `BUILT_FOR = '6.4'` — which every
+// release had to remember to bump. 6.5.0 shipped without it, so the banner told every healthy
+// server it was mid-upgrade, told its admin to restart, and did not go away when they did.
 function checkServerVersion(){
-  const running = String((ME && ME.server) || '');
-  const short = v => v.split('.').slice(0, 2).join('.');
-  if (!running || short(running) === BUILT_FOR) return;
-  say(`This page came from version ${BUILT_FOR}; the server running is ${esc(running)}. `
-    + `The package was upgraded without restarting the service, so parts of this console will ask `
-    + `for endpoints that are not there yet. Restart the Teaching Center.`);
+  if (!ME || !ME.restart_needed) return;
+  say(`This console came from version ${esc(ME.on_disk)}; the service is still running `
+    + `${esc(ME.server)}. The package was upgraded without restarting, so parts of this page will `
+    + `ask for endpoints that are not there yet. Restart the Teaching Center.`);
 }
 
 async function loadLibrary(){
