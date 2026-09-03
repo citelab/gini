@@ -778,6 +778,22 @@ def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str |
     return work
 
 
+def _yamlish(text: str) -> str:
+    """A value safe to drop inside SINGLE quotes in the generated compose file.
+
+    Two characters can leave that string, and both became reachable the moment the controller's
+    App turned into a box somebody types into:
+
+      '   ends the scalar. YAML's own escape for it inside single quotes is to double it.
+      $   is substituted by Compose BEFORE the YAML is parsed, so `--pass=$x` silently becomes
+          `--pass=` with a warning nobody reads. `$$` is the documented literal.
+
+    Neither appears in a plausible POX argument, which is exactly why it would have gone
+    unnoticed until the one student who typed one.
+    """
+    return str(text).replace("$", "$$").replace("'", "''")
+
+
 def _hostpath(p) -> str:
     """A host path for use inside the compose file: always forward slashes.
 
@@ -916,7 +932,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             "    networks: [gini]",
             "    ports:", term,
             "    environment:",
-            f"      POX_APP: '{c['app']}'",
+            f"      POX_APP: '{_yamlish(c['app'])}'",
             f"      POX_PORT: '{c['port']}'",
             *_term_env(c["name"]),
         ]
@@ -1455,7 +1471,11 @@ class Orchestrator:
             if line.startswith("  ") and line.rstrip().endswith(":") and not line.startswith("   "):
                 in_block = (line.strip().rstrip(":") == service)
             if in_block and line.strip().startswith("POX_APP:"):
-                out.append(f"      POX_APP: '{app}'")
+                # Same escaping as when the file was generated. This path rewrites the compose
+                # file in place for a live app switch, so an App typed in the Inspector reaches
+                # YAML here too — by a different route, which is how one of two writers ends up
+                # forgotten.
+                out.append(f"      POX_APP: '{_yamlish(app)}'")
                 replaced = True
                 continue
             out.append(line)

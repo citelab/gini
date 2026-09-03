@@ -11,8 +11,8 @@ import threading
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QScrollArea, QSlider, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton,
+    QScrollArea, QSlider, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..agent.api import GiniAPI
@@ -313,7 +313,44 @@ class Inspector(QWidget):
             if (dt.key, key) in (("load_generator", "QPS"), ("pod", "Replicas"),
                                  ("instance_group", "TargetCPU"), ("function", "Code")):
                 continue                               # shown as a slider / code editor below
-            if key in choices:                         # render a dropdown for enum props
+            if key in getattr(dt, "open_properties", ()):
+                # A TEXT FIELD with a picker beside it, not an editable dropdown.
+                #
+                # An editable QComboBox was tried and crashed on the first keystroke. Its
+                # `currentTextChanged` fires per CHARACTER, and every commit emits
+                # device_changed, which rebuilds this form — deleting the widget being typed
+                # into. `_on_changed` already defers the rebuild to survive a discrete change
+                # (see its comment about segfaults); nothing survives being rebuilt on every
+                # letter. And with a lab running it restarted the POX container per character.
+                #
+                # So this matches every other text property here: commit on `editingFinished`,
+                # once, when the field is left. The picker is a separate control that WRITES
+                # into the field, which also makes it visible — an editable combo's arrow is
+                # nearly invisible on macOS, so the presets became hard to reach at exactly the
+                # moment they became worth reading.
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(6)
+                edit = QLineEdit(str(value))
+                edit.editingFinished.connect(
+                    lambda e=edit, k=key: self._commit(k, e.text()))
+                row.addWidget(edit, 1)
+
+                pick = QToolButton()
+                pick.setText("▾")
+                pick.setToolTip(f"Choose a {key} to start from, then edit it")
+                pick.setPopupMode(QToolButton.InstantPopup)
+                menu = QMenu(pick)
+                for opt in choices[key]:
+                    # The menu sizes to its entries, so a long POX command line is readable in
+                    # full here — where a dropdown constrained to the form's column would elide
+                    # exactly the parameters the entry exists to show.
+                    menu.addAction(opt, lambda o=opt, e=edit, k=key: (e.setText(o),
+                                                                     self._commit(k, o)))
+                pick.setMenu(menu)
+                row.addWidget(pick, 0)
+                self.props_form.addRow(key, row)
+            elif key in choices:                       # render a dropdown for enum props
                 combo = QComboBox()
                 opts = list(choices[key])
                 if str(value) and str(value) not in opts:

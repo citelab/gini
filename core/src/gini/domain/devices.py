@@ -84,6 +84,14 @@ class DeviceType:
     # not editable, because the value is observed from the real world (e.g. a GINI32
     # board's radio channel, which APSTA forces to match the uplink).
     readonly_properties: tuple[str, ...] = ()
+    # Properties whose dropdown is a STARTING POINT rather than the whole set — the inspector
+    # renders these editable, so the listed values can be picked and then changed.
+    #
+    # Named per property because most choices really are closed: typing "maybe" into Persist
+    # (true|false) or "semi-public" into Tier means nothing, and an editable box there would
+    # accept it silently. The one place it IS right is a value the element passes THROUGH to
+    # something with its own grammar — the controller's App, which becomes a POX command line.
+    open_properties: tuple[str, ...] = ()
     max_links: int | None = None             # None = unlimited
     hidden: bool = False                     # kept in the registry but off the palette
     # Is this a CLOUD element (a managed service you rent) rather than a networking primitive you
@@ -305,16 +313,40 @@ _DEVICES: list[DeviceType] = [
         # converges; on a looped topology that is a few seconds of noise, not a failure.
         # Keeping both variants is deliberate -- running the one WITHOUT spanning_tree
         # on a looped topology is how a student sees the problem before seeing the fix.
-        property_choices={"App": ("gini.samples.switch", "gini.samples.packet_loss",
-                                  "gini.samples.port_knock", "gini.samples.l4_lb",
-                                  "gini.samples.ids", "gini.samples.redirect",
-                                  "openflow.discovery forwarding.l2_multi",
-                                  "openflow.discovery openflow.spanning_tree"
-                                  " forwarding.l2_multi",
-                                  "log.level --DEBUG openflow.discovery"
-                                  " forwarding.l2_multi",
-                                  "forwarding.l2_learning", "forwarding.hub",
-                                  "misc.of_tutorial")},
+        # Each GINI app is listed WITH its parameters at their own defaults, which is why the
+        # entries are long. That is the point: `gini.samples.ids` on its own told a student
+        # nothing about a threshold they could change, and there was no way to type one anyway.
+        # Written out, the dropdown is the documentation — pick the nearest line and edit the
+        # numbers.
+        #
+        # Writing a default explicitly is EXACTLY equivalent to omitting it. POX only runs values
+        # through `ast.literal_eval` for a launch decorated with `_pox_eval_args`, and none of
+        # these are — so every value arrives as the plain string the signature already defaults
+        # to. That matters most for `--sequence=1111,2222,3333`, which IS valid Python for a
+        # tuple: under eval_args it would reach `sequence.split(",")` as one and crash.
+        property_choices={"App": (
+            "gini.samples.switch",
+            "gini.samples.packet_loss --loss=0.3",
+            "gini.samples.port_knock --server=10.0.1.10 --port=23"
+            " --sequence=1111,2222,3333",
+            "gini.samples.l4_lb --vip=10.0.1.100"
+            " --backends=10.0.1.11,10.0.1.12",
+            "gini.samples.ids --threshold=10 --block=false",
+            "gini.samples.redirect --server=10.0.1.10 --port=80 --vnf=10.0.1.20",
+            "openflow.discovery forwarding.l2_multi",
+            "openflow.discovery openflow.spanning_tree forwarding.l2_multi",
+            "log.level --DEBUG openflow.discovery forwarding.l2_multi",
+            "forwarding.l2_learning", "forwarding.hub",
+            "misc.of_tutorial")},
+        # An App is a POX command line, not a value out of a fixed set: several modules separated
+        # by spaces, each optionally carrying its own --flags, which is what `run-pox.sh`
+        # word-splits it for. So the list above is where you START and the box stays typeable.
+        #
+        # No validation on this side, deliberately. POX already refuses an unknown flag by name
+        # and prints the module's real parameters with their defaults and current values, which is
+        # a better error than anything restated here could be — and one that cannot drift from the
+        # app it describes.
+        open_properties=("App",),
     ),
 
     # ---- Containers & Kubernetes --------------------------------------------
