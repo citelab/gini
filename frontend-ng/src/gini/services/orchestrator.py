@@ -1288,48 +1288,19 @@ class Orchestrator:
     def _retag_if_orphaned(name: str) -> bool:
         """Repair a name Docker has lost track of, and say whether the image is really here.
 
-        Docker's name index can stop resolving a tag that the image itself still claims. Observed
-        on Docker Desktop 27.4.0 right after `docker pull` + `docker tag` of an image that was
-        already present under another tag — which is exactly what `gini-setup` does on every
-        upgrade:
+        The work is in `setup.images.repair_tag`, because the SAME defect strikes twice from two
+        directions: Run refuses to start a topology, and `missing_locally` decides the images are
+        gone and re-downloads all four on every launch. One repair, one place, one explanation.
 
-            docker images gini-grouter        -> gini-grouter latest 57b66b555d00 154MB
-            docker image inspect gini-grouter -> No such image: gini-grouter
-            docker image inspect 57b66b555d00 -> RepoTags: [gini-grouter:latest, ...]
-
-        Three answers about one image, and only the middle one is wrong. Retrying does not help
-        because nothing is waking up; the index is simply stale.
-
-        This matters beyond the check: compose resolves `image: gini-grouter` by the same index, so
-        a run that got past a laxer check would fail deeper in with something far less legible. The
-        tag has to be REPAIRED, not worked around — and re-asserting a tag GINI itself created is
-        the same operation `setup.images.pull_images` already performs.
+        It matters here beyond the check: compose resolves `image: gini-grouter` through the same
+        index, so a run waved past a laxer test would fail deeper in with a far less legible
+        message.
         """
-        want = name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
         try:
-            listed = subprocess.run(
-                ["docker", "images", "--no-trunc", "--format", "{{.ID}} {{.Repository}}:{{.Tag}}"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-            if listed.returncode != 0:
-                return False
-            for line in (listed.stdout or "").splitlines():
-                image_id, _, ref = line.strip().partition(" ")
-                if ref != want or not image_id:
-                    continue
-                tagged = subprocess.run(["docker", "tag", image_id, want],
-                                        capture_output=True, text=True, encoding="utf-8",
-                                        errors="replace", timeout=60)
-                if tagged.returncode != 0:
-                    return False
-                # Confirmed, never assumed: a repair that did not take must read as absent, or the
-                # run proceeds and fails somewhere harder to read.
-                again = subprocess.run(["docker", "image", "inspect", want],
-                                       capture_output=True, text=True, encoding="utf-8",
-                                       errors="replace", timeout=60)
-                return again.returncode == 0
-        except Exception:                                # noqa: BLE001 — a repair must not raise
+            from ..setup.images import repair_tag
+            return repair_tag(name)
+        except Exception:                            # noqa: BLE001 — a repair must not raise
             return False
-        return False
 
     @staticmethod
     def _no_image_advice(image: str, build_cmd: str, have_backend: bool) -> str:

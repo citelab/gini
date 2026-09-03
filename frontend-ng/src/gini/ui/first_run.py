@@ -29,6 +29,9 @@ class FirstRunDialog(QDialog):
     """Explains what is missing, does it on request, and stays out of the way otherwise."""
 
     stepped = Signal(str)
+    #: (fraction 0..1, caption). Emitted from the pull's worker thread; Qt marshals it to the GUI
+    #: thread, which is the only place a widget may be touched.
+    progressed = Signal(float, str)
     finished_setup = Signal(dict)
 
     def __init__(self, plan: dict, parent=None, on_tour=None) -> None:
@@ -71,7 +74,12 @@ class FirstRunDialog(QDialog):
         root.addWidget(self.detail)
 
         self.bar = QProgressBar()
-        self.bar.setRange(0, 0)           # indeterminate: docker gives us no usable percentage
+        # Determinate, in per-mille. `docker pull` into a pipe gives no byte counts — the
+        # "Downloading [===> ] 12MB/50MB" redraws are a TTY affectation and never arrive here —
+        # but it does announce every layer and report each one finishing, which is a real count.
+        # The bar moves in layer-sized steps across the whole job, images finished included.
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(0)
         self.bar.hide()
         root.addWidget(self.bar)
 
@@ -96,6 +104,7 @@ class FirstRunDialog(QDialog):
         root.addLayout(row)
 
         self.stepped.connect(self._on_step)
+        self.progressed.connect(self._on_progress)
         self.finished_setup.connect(self._on_done)
 
     # -- text ---------------------------------------------------------------- #
@@ -125,13 +134,30 @@ class FirstRunDialog(QDialog):
         self.detail.setText("Starting…")
 
         def work():
-            result = bootstrap.execute(self.plan, on_step=self.stepped.emit)
+            result = bootstrap.execute(self.plan, on_step=self.stepped.emit,
+                                       on_progress=lambda f, t: self.progressed.emit(f, t))
             self.finished_setup.emit(result)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _on_step(self, text: str) -> None:
         self.detail.setText(text)
+
+    def _on_progress(self, fraction: float, text: str) -> None:
+        """Both the bar and the line under it, from the worker thread via a signal.
+
+        The line matters as much as the bar: "which image" was already printed to the console,
+        where it got buried under everything else launching. Here it sits next to the thing that
+        is moving.
+        """
+        # Clamped as a FLOAT before it becomes an int: `int(inf * 1000)` raises OverflowError,
+        # and this arrives from a worker thread's signal — an exception here would kill the pull's
+        # only sign of life while the download carried on invisibly behind it.
+        f = float(fraction)
+        f = 0.0 if f != f else max(0.0, min(1.0, f))          # f != f catches NaN
+        self.bar.setValue(int(f * self.bar.maximum()))
+        if text:
+            self.detail.setText(text)
 
     def _on_done(self, result: dict) -> None:
         self.bar.hide()

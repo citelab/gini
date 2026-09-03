@@ -383,3 +383,113 @@ def test_release_refuses_a_dirty_tree_and_a_reused_version():
     assert "git status --porcelain" in sh          # dirty tree
     assert "already exists" in sh                  # tag reuse
     assert "pytest" in sh                          # tests before tagging
+
+
+# --------------------------------------------------------------------------- #
+# progress during a download
+# --------------------------------------------------------------------------- #
+# The panel's bar was indeterminate, on the reasoning that "docker gives us no usable percentage".
+# Half right. `docker pull` into a PIPE emits no byte counts at all — the "Downloading [===>  ]
+# 12MB/50MB" redraws are a TTY affectation, and a 20 MB image with seven layers produced none of
+# them — but it announces every layer and reports each one finishing, which is a real count.
+#
+# The other half of the complaint was that the image name "sometimes gets buried": it was going to
+# the console, under everything else a launch prints. It goes next to the bar now.
+REAL_PULL = """alpine: Pulling from library/nginx
+9c1b6dd6c1e6: Pulling fs layer
+2c2b3e5e0b7a: Pulling fs layer
+4f4fb700ef54: Already exists
+9c1b6dd6c1e6: Verifying Checksum
+9c1b6dd6c1e6: Download complete
+9c1b6dd6c1e6: Pull complete
+2c2b3e5e0b7a: Waiting
+2c2b3e5e0b7a: Pull complete
+Digest: sha256:deadbeef
+Status: Downloaded newer image for nginx:alpine
+docker.io/library/nginx:alpine"""
+
+
+def test_layer_lines_are_read_as_progress():
+    """Against output captured from a real non-TTY `docker pull`, not an invented shape."""
+    from gini.setup.images import PullProgress
+    p = PullProgress()
+    moved = [(p.done, p.total) for line in REAL_PULL.splitlines() if p.feed(line)]
+    assert moved, "nothing in a real pull was recognised as progress"
+    assert (p.done, p.total) == (3, 3)
+    assert p.fraction == 1.0, "a finished pull must read as finished"
+
+
+def test_a_shared_layer_counts_on_both_sides():
+    """"Already exists" is a layer this machine has from another image. Counting it only in the
+    denominator would leave a mostly-cached pull stuck short of the end for ever."""
+    from gini.setup.images import PullProgress
+    p = PullProgress()
+    for line in ("aaaaaaaaaaaa: Already exists", "bbbbbbbbbbbb: Pulling fs layer"):
+        p.feed(line)
+    assert (p.done, p.total) == (1, 2)
+
+
+def test_noise_is_not_progress():
+    from gini.setup.images import PullProgress
+    p = PullProgress()
+    for line in ("Digest: sha256:deadbeef", "Status: Image is up to date for x", "", "   ",
+                 "docker.io/library/nginx:alpine", "6.5.2: Pulling from gini-toolkit/gini-xv6"):
+        assert p.feed(line) is False
+    assert p.total == 0 and p.fraction == 0.0
+
+
+def test_the_fraction_never_exceeds_one():
+    """Docker can report a layer complete more than once. A bar past its own end looks broken."""
+    from gini.setup.images import PullProgress
+    p = PullProgress()
+    p.feed("aaaaaaaaaaaa: Pulling fs layer")
+    p.feed("aaaaaaaaaaaa: Pull complete")
+    p.feed("aaaaaaaaaaaa: Pull complete")
+    assert p.fraction == 1.0
+
+
+def test_progress_runs_across_the_whole_job_not_each_image(monkeypatch, tmp_path):
+    """Four images are ONE download to the person watching. A bar that restarted at each of them
+    would look like four downloads, and would reach 100% three times before finishing."""
+    import gini.services.bootstrap as B
+    seen = []
+
+    def fake_pull(refs, run=None, on_progress=None):
+        if on_progress:
+            on_progress(1, 2)                       # half of this image
+            on_progress(2, 2)
+        return [(refs[0], True)]
+
+    monkeypatch.setattr(B.images, "pull_images", fake_pull)
+    monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
+    plan = {"state": B.PULL, "refs": ["r/a:1", "r/b:1"], "app_version": "1", "image_tag": "1",
+            "arch": "arm64"}
+    B.execute(plan, on_progress=lambda f, t: seen.append(round(f, 3)))
+    assert seen == [0.25, 0.5, 0.75, 1.0], f"the bar jumped: {seen}"
+
+
+def test_the_caption_names_the_image_being_downloaded(monkeypatch):
+    """The half of the complaint the bar alone does not answer."""
+    import gini.services.bootstrap as B
+    captions = []
+    monkeypatch.setattr(B.images, "pull_images",
+                        lambda refs, run=None, on_progress=None:
+                        (on_progress and on_progress(1, 4), [(refs[0], True)])[1])
+    monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
+    B.execute({"state": B.PULL, "refs": ["ghcr.io/x/gini-xv6:6.5.2"], "app_version": "1"},
+              on_progress=lambda f, t: captions.append(t))
+    assert any("gini-xv6:6.5.2" in c for c in captions)
+    assert any("layer 1 of 4" in c for c in captions)
+
+
+def test_no_progress_callback_keeps_the_waited_pull(monkeypatch):
+    """Every existing test of this path drives a fake `run` that never spawns anything. Passing a
+    progress callback is what switches `pull_one` to streaming, so omitting it must not."""
+    import gini.services.bootstrap as B
+    got = {}
+    monkeypatch.setattr(B.images, "pull_images",
+                        lambda refs, run=None, on_progress=None:
+                        (got.setdefault("cb", on_progress), [(refs[0], True)])[1])
+    monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
+    B.execute({"state": B.PULL, "refs": ["r/a:1"], "app_version": "1"})
+    assert got["cb"] is None

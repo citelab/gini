@@ -113,18 +113,24 @@ def plan(app_version: str | None, *, run=subprocess.run, backend_hint: str | Non
     }
 
 
-def execute(p: dict, *, on_step=None, run=subprocess.run) -> dict:
+def execute(p: dict, *, on_step=None, on_progress=None, run=subprocess.run) -> dict:
     """Carry out a plan. Returns `{ok, done, failed, message}`.
 
-    `on_step(text)` is called before each image so a UI can show progress. This blocks — the caller
-    runs it on a worker thread; a pull is minutes long and freezing the window for it would be a
-    worse first impression than the missing images.
+    `on_step(text)` is called before each image and `on_progress(fraction, text)` as it downloads,
+    so a UI can show where it has got to. This blocks — the caller runs it on a worker thread; a
+    pull is minutes long and freezing the window for it would be a worse first impression than the
+    missing images.
+
+    `on_progress` is what turns the panel's bar from indeterminate into a real one. It is optional
+    because passing it switches the pull from waited to STREAMED, and every test of this path
+    drives a fake `run` that never spawns anything — see `images.pull_one`.
     """
     state = p.get("state")
     if state in (READY, NEEDS_RUNTIME):
         return {"ok": state == READY, "done": [], "failed": [], "message": p.get("why", "")}
 
     say = on_step or (lambda _t: None)
+    tell = on_progress or (lambda _f, _t: None)
 
     if state == BUILD:
         backend = Path(p["source"])
@@ -134,9 +140,21 @@ def execute(p: dict, *, on_step=None, run=subprocess.run) -> dict:
             results += images.build_images(backend, names=[name], run=run)
     else:
         results = []
-        for ref in p["refs"]:
-            say(f"Downloading {ref.rsplit('/', 1)[-1]}…")
-            results += images.pull_images([ref], run=run)
+        refs = list(p["refs"])
+        for i, ref in enumerate(refs):
+            short = ref.rsplit("/", 1)[-1]
+            say(f"Downloading {short}…   ({i + 1} of {len(refs)})")
+
+            def each(done, total, _i=i, _s=short, _n=len(refs)):
+                # Overall, not per-image: the images finished already count, and the one in flight
+                # contributes its own layer fraction. A bar that restarted at every image would
+                # look like four downloads rather than one job with four parts.
+                whole = (_i + (done / total if total else 0.0)) / _n
+                tell(whole, f"Downloading {_s}…   layer {done} of {total}"
+                            if total else f"Downloading {_s}…")
+
+            results += images.pull_images([ref], run=run,
+                                          on_progress=each if on_progress else None)
 
     done = [n for n, ok in results if ok]
     failed = [n for n, ok in results if not ok]

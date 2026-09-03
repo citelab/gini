@@ -64,7 +64,11 @@ def _no_sleep(monkeypatch):
 
 
 def _present(monkeypatch, docker):
+    """Both modules, because the work spans both on purpose: the retry is in the orchestrator and
+    the tag repair is in `setup.images`, shared with `missing_locally` — the same defect strikes
+    Run and setup from two directions and is fixed in one place."""
     monkeypatch.setattr("gini.services.orchestrator.subprocess.run", docker)
+    monkeypatch.setattr("gini.setup.images.subprocess.run", docker)
     return Orchestrator._image_present("gini-grouter")
 
 
@@ -134,6 +138,7 @@ def test_an_untagged_name_is_matched_as_latest(monkeypatch):
     tag in full — so the name has to be normalised before comparing, or the repair never matches."""
     d = _Docker(listed=LISTED, resolvable=False)
     monkeypatch.setattr("gini.services.orchestrator.subprocess.run", d)
+    monkeypatch.setattr("gini.setup.images.subprocess.run", d)
     assert Orchestrator._image_present("gini-grouter") is True
 
 
@@ -143,6 +148,7 @@ def test_a_broken_listing_does_not_raise(monkeypatch):
             raise OSError("docker went away")
         return subprocess.CompletedProcess(argv, 1, "", MISS)
     monkeypatch.setattr("gini.services.orchestrator.subprocess.run", boom)
+    monkeypatch.setattr("gini.setup.images.subprocess.run", boom)
     assert Orchestrator._image_present("gini-grouter") is False
 
 

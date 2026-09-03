@@ -84,3 +84,32 @@ def test_offer_returns_nothing_when_the_machine_is_ready():
     _app()
     assert offer(_plan(bootstrap.READY)) is None
     assert offer(None) is None
+
+
+# --------------------------------------------------------------------------- #
+# the bar actually moves
+# --------------------------------------------------------------------------- #
+def test_the_bar_is_determinate(qtbot):
+    """It was `setRange(0, 0)` — a barber's pole that says only "something is happening", for a
+    wait that can run to minutes."""
+    p = FirstRunDialog(_plan())
+    qtbot.addWidget(p)
+    assert p.bar.maximum() > 0
+
+
+def test_progress_moves_the_bar_and_names_the_image(qtbot):
+    """The complaint had two halves: no bar, and the image name buried in the console. Both are
+    answered in the same place, next to each other."""
+    p = FirstRunDialog(_plan())
+    qtbot.addWidget(p)
+    p._on_progress(0.5, "Downloading gini-xv6:6.5.2…   layer 3 of 7")
+    assert p.bar.value() == p.bar.maximum() // 2
+    assert "gini-xv6:6.5.2" in p.detail.text()
+
+
+def test_a_fraction_outside_the_range_cannot_break_the_bar(qtbot):
+    p = FirstRunDialog(_plan())
+    qtbot.addWidget(p)
+    for f in (-1.0, 0.0, 1.0, 2.5, float("inf")):
+        p._on_progress(f, "")
+        assert p.bar.minimum() <= p.bar.value() <= p.bar.maximum()

@@ -149,3 +149,77 @@ def test_cli_check_reports_without_side_effects(tmp_path, monkeypatch, capsys):
     rc = setup_main(["--check"])
     out = capsys.readouterr().out
     assert rc == 0 and "runtime: NOT found" in out and "not run yet" in out
+
+
+# --------------------------------------------------------------------------- #
+# a tag Docker has lost track of
+# --------------------------------------------------------------------------- #
+# The user-visible complaint was two-headed: gBuilder "goes into pulling the images even when I
+# don't expect it to find anything new", and Run refused to start a topology saying the gRouter
+# image was not built. One cause. Docker's name index can stop resolving a tag the image itself
+# still claims — seen on Docker Desktop 27.4.0 right after `pull` + `tag` of an image already
+# present under another tag, which is exactly what `pull_images` does on every upgrade.
+#
+# `missing_locally` asks `docker image inspect <name>`, gets "No such image", and concludes all
+# four are gone. So every launch re-downloaded them, the pull re-tagged, the tag did not stick,
+# and the next launch did it again.
+LISTING = "\n".join(("sha256:aaaaaaaaaaaa gini-xv6:latest",
+                     "sha256:bbbbbbbbbbbb gini-oszoo:latest",
+                     "sha256:cccccccccccc <none>:<none>"))
+
+
+def _docker(resolvable: set, listing: str = LISTING):
+    """A docker whose LISTING and whose INSPECT disagree — which is the whole bug."""
+    seen = {"tagged": []}
+
+    def run(argv, **kw):
+        import subprocess as sp
+        if argv[:2] == ["docker", "images"]:
+            return sp.CompletedProcess(argv, 0, listing, "")
+        if argv[:2] == ["docker", "tag"]:
+            seen["tagged"].append(argv[3])
+            resolvable.add(argv[3])
+            return sp.CompletedProcess(argv, 0, "", "")
+        # docker image inspect --format {{.Id}} NAME…  — the names start after the format value
+        names = list(argv[5:])
+        ok = all(n in resolvable for n in names)
+        return sp.CompletedProcess(argv, 0 if ok else 1, "", "")
+    run.seen = seen
+    return run
+
+
+def test_a_lost_tag_does_not_look_like_a_missing_image():
+    """THE fix for "it keeps downloading the images". The tag is repaired and nothing is reported
+    missing, so no download is proposed."""
+    refs = [f"{REGISTRY}/gini-xv6:6.5.2", f"{REGISTRY}/gini-oszoo:6.5.2"]
+    run = _docker(resolvable=set())
+    assert images.missing_locally(refs, run=run) == []
+    assert run.seen["tagged"] == ["gini-xv6:latest", "gini-oszoo:latest"]
+
+
+def test_an_image_that_is_really_gone_is_still_reported():
+    """The repair must not make setup blind. Nothing in the listing carries that name."""
+    refs = [f"{REGISTRY}/gini-grouter:6.5.2"]
+    run = _docker(resolvable=set())
+    assert images.missing_locally(refs, run=run) == refs
+    assert run.seen["tagged"] == []
+
+
+def test_the_common_case_still_costs_one_call():
+    """When everything resolves, nothing else is asked — this runs on every launch."""
+    calls = []
+
+    def run(argv, **kw):
+        import subprocess as sp
+        calls.append(argv[:3])
+        return sp.CompletedProcess(argv, 0, "", "")
+    assert images.missing_locally([f"{REGISTRY}/gini-xv6:6.5.2"], run=run) == []
+    assert len(calls) == 1, "the healthy path must not list or tag anything"
+
+
+def test_repair_tag_uses_the_run_it_is_given():
+    """`run=subprocess.run` as a DEFAULT ARGUMENT binds at import, so patching this module's
+    `subprocess` would be ignored and the real daemon reached instead. That is not hypothetical:
+    it is what these tests did until the binding moved into the body."""
+    import inspect as _inspect
+    assert _inspect.signature(images.repair_tag).parameters["run"].default is None
