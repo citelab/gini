@@ -93,6 +93,47 @@ The confusion matrix and score live in the session object only
 (`diagnose.py`); closing the window loses the run. Relevant to the Fall 2026
 plan to use graded decks as logged C-lab instruments — needs a capture path.
 
+## 9. The trap ring is unsynchronised across harts
+
+`gini_traprec()` writes into one shared ring, and neither the slot index nor the
+per-kind counters are atomic:
+
+```c
+gini_trapcount[kind]++;                                   // read-modify-write
+struct gini_trap *e = &gini_traps[gini_traps_i % GINI_RING];
+...
+gini_traps_i++;                                           // read-modify-write
+```
+
+`gini_stamp()` **is** atomic (`__sync_fetch_and_add`), so `seq` is sound; the
+ring around it is not. On two or more harts two traps can take the same slot and
+one is overwritten, and a `TC` count can lose an increment. At `XV6_CPUS=1`
+(sizes S and M) it cannot happen; at L (2) and XL (4) it can.
+
+**Accepted, not fixed.** The cost of a fix is a lock or a CAS on the hottest path
+in the kernel — every trap on every hart — which would distort the very timing
+the board measures. The board is a teaching instrument, not an audit log, and a
+lost sample in a 64-entry ring changes no lesson.
+
+What it means when reading the panels: on a multi-core machine, trap counts are
+a **lower bound** and the history may have gaps. The `h<hart>` field on `TR`
+(see [wire protocol](os-01-wire-protocol.md)) makes the interleaving visible, so
+two adjacent rows from different cores are a normal sight rather than a symptom.
+
+## 10. A losing hart still records a trap
+
+`gini_traprec()` runs at the top of `usertrap`/`kerneltrap`, **before**
+`devintr()` — and therefore before `plic_claim()`. A PLIC external interrupt is
+asserted to every enabled hart, so on two cores both trap and both record, while
+only the claim winner services the device. The loser's record is real (it did
+take a trap) but it is not evidence of device activity, and external-interrupt
+counts are inflated up to the core count.
+
+Visible now that `TR` carries the hart: the same interrupt appears on two cores
+one `seq` apart. Fixing it means either recording after the claim — which loses
+the record for traps `devintr` does not handle — or stamping the claim result,
+which is the better shape and is not yet done.
+
 ## Cross-references
 
 [os-wire-protocol](os-01-wire-protocol.md) · [os-kernel-board](os-08-kernel-board.md) ·

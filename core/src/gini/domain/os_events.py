@@ -53,9 +53,15 @@ class OsEvent:
 # while the existing per-ring views keep working exactly as before.
 _TRACE_RE = re.compile(r"^TRACE (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)(?: (\d+))?\s*$", re.M)
 _FLT_RE = re.compile(r"^FLT (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)(?: (\d+))?\s*$", re.M)
+# ANCHORED, and that matters: this pattern ends in `\s*$`, so a field appended to the wire
+# format does not merely go unread — the whole line stops matching and the X-ray's trap lane goes
+# quietly empty. `h<n>` (the hart) was added to `TR` and is accepted here for exactly that reason;
+# the sibling parser in `xv6.py` is unanchored and would have kept working, so this panel would
+# have been the only casualty and the one nobody was looking at.
 _TR_RE = re.compile(
     r"^TR (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)"
-    r"(?: (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+))?(?: (\d+))?\s*$", re.M)
+    r"(?: (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+))?(?: (\d+))?"
+    r"(?: h(\d+))?\s*$", re.M)
 
 
 def syscall_events(text: str, names: dict | None = None) -> list:

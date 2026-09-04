@@ -96,7 +96,7 @@ WAIT <pid> <chanAddr> <chanName>                    every proc with p->chan != 0
 SCHED policy <n> quantum <n>                        the kernel's actual knobs
 POLICY <id> <name>                                  data-driven roster (round-robin, priority, lottery)
 MODETIME user <u> kernel <k> idle <i>               cumulative ticks by privilege source
-CSR sstatus <p> sie <p> sip <p> stvec <p> scause <p> sepc <p>
+CSR sstatus <p> sie <p> sip <p> stvec <p> scause <p> sepc <p> hart <n>
 CPU <ci> pid <pid>                                  per busy hart
 REGS cpu <ci> pid <pid> pc sp ra s0 a0 a7 satp sz   live trapframe registers per hart
 ```
@@ -166,13 +166,36 @@ Builder-added syscalls from 23 via the `extra` map).
 
 ```
 TC <kind> <name> <count>                            all 6 kinds: syscall pagefault timer device illegal other
-TR <pid> <kind> <cause> <epc> <tval> <sstatus> <sie> <sip> <seq>
+TR <pid> <kind> <cause> <epc> <tval> <sstatus> <sie> <sip> <seq> h<hart>
 ```
 CSRs are captured **at trap time** (a poll-time read could only describe the
 console interrupt the dump caused). Recorded from both `usertrap` and
 `kerneltrap` — without the kernel-side hook the device bucket stays empty.
+`h<hart>` is which CORE took the trap, and it is **labelled** where everything
+before it is positional. `seq` and the hart are both bare decimals, so appended
+one after the other they would be told apart only by their order — and a parser
+that got that wrong would attribute traps to the wrong core in silence.
+
+It matters because a PLIC external interrupt is asserted to **every** enabled
+hart (`plicinithart()` enables UART and virtio on each, threshold 0) and only
+the one that wins `plic_claim()` services it. The others trap, find `irq == 0`,
+and return — so on two cores the ring holds a record from a core that did
+nothing, and without the hart nothing can tell the two apart.
+
+`<pid>` is the process that was **interrupted**, not the one the interrupt
+concerns. It is `myproc()` at trap time, i.e. whoever was on that core; a disk
+completion for process A is stamped with process B. The owner is resolved later,
+by `wakeup()` on a channel. `0` is not a process (xv6 numbers from 1) — it means
+`c->proc` was NULL, so the core was idle in the scheduler.
+
+TWO PARSERS read `TR`, and they differ in a way that matters when this line
+changes: `xv6.py::_TR_RE` is unanchored and ignores a field it does not know,
+while `os_events.py::_TR_RE` ends in `\s*$` — so an unrecognised trailing field
+does not go unread there, it stops the line matching and the X-ray's trap lane
+goes quietly empty. Change both.
+
 Parsers: `parse_trapcounts`, `_TR_RE` (CSR triple optional for older images),
-`TrapEvent.came_from` decodes sstatus.SPP.
+`TrapEvent.came_from` decodes sstatus.SPP, `TrapEvent.core` renders the hart.
 
 ### /locks (Ctrl-L)
 

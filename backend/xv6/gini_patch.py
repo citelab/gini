@@ -434,6 +434,14 @@ gini_traprec(void)
   gini_trapcount[kind]++;
   struct proc *p = myproc();
   struct gini_trap *e = &gini_traps[gini_traps_i % GINI_RING];
+  // WHICH CORE took this trap. On one hart it is always 0 and says nothing; on two it is the
+  // whole story, because a PLIC external interrupt is asserted to EVERY enabled hart and only
+  // the one that wins plic_claim() services it. Without this the ring cannot tell the core that
+  // did the work from the one that trapped and found irq == 0.
+  e->hart = cpuid();
+  // The process that was INTERRUPTED — not the one the interrupt concerns. A disk completion for
+  // process A is stamped with whoever was on this core, because that is all the kernel knows at
+  // trap time; the real owner is resolved later, by wakeup() on a channel.
   e->pid = p ? p->pid : 0;
   e->kind = kind;
   e->cause = c;
@@ -458,9 +466,13 @@ gini_trapdump(void)
   uint64 start = total > GINI_RING ? total - GINI_RING : 0;
   for(uint64 k = start; k < total; k++){
     struct gini_trap *e = &gini_traps[k % GINI_RING];
-    PRINTF("TR %d %d %p %p %p %p %p %p %d\\n", e->pid, e->kind,
+    // `h%d` is LABELLED, unlike every positional field before it. Two bare decimals in a row
+    // — seq then hart — would be told apart only by their order, and a reader or a regex that
+    // got that wrong would attribute traps to the wrong core in silence. One character of
+    // prefix makes the field self-identifying wherever it turns up.
+    PRINTF("TR %d %d %p %p %p %p %p %p %d h%d\\n", e->pid, e->kind,
            (void*)e->cause, (void*)e->epc, (void*)e->tval,
-           (void*)e->sstatus, (void*)e->sie, (void*)e->sip, (int)e->seq);
+           (void*)e->sstatus, (void*)e->sie, (void*)e->sip, (int)e->seq, e->hart);
   }
 }
 '''
@@ -1005,7 +1017,7 @@ void            gini_trapdump(void);     // print per-kind counters + the trap r
 // sstatus/sie/sip are captured AT TRAP TIME: the live CSR dump can only ever describe the console
 // interrupt that the dump itself caused, so honest interrupt state has to be recorded here.
 struct gini_trap { int pid; int kind; uint64 cause; uint64 epc; uint64 tval;
-                   uint64 sstatus; uint64 sie; uint64 sip; uint64 seq; };
+                   uint64 sstatus; uint64 sie; uint64 sip; uint64 seq; int hart; };
 extern uint64   gini_vmf_ok, gini_vmf_fail;   // vm shadow: handled vs. fell-through
 extern uint64   gini_trapcount[6];
 extern struct gini_trap gini_traps[GINI_RING];
@@ -1385,9 +1397,13 @@ gini_dump(void)
   // sources) for the honest interrupt state, not the momentary global bit.
   { extern uint64 gini_ut, gini_kt, gini_it;
     PRINTF("MODETIME user %d kernel %d idle %d\\n", (int)gini_ut, (int)gini_kt, (int)gini_it); }
-  PRINTF("CSR sstatus %p sie %p sip %p stvec %p scause %p sepc %p\\n",
+  // WHOSE CSRs these are. The dump runs inside consoleintr, on whichever hart won
+  // plic_claim() for GINI's own poll — so it is hart 0 on one poll and hart 1 on the next,
+  // and the panel could not say which. Naming it turns "(this hart)" from an unanswerable
+  // label into a fact.
+  PRINTF("CSR sstatus %p sie %p sip %p stvec %p scause %p sepc %p hart %d\\n",
          (void*)r_sstatus(), (void*)r_sie(), (void*)r_sip(),
-         (void*)r_stvec(), (void*)r_scause(), (void*)r_sepc());
+         (void*)r_stvec(), (void*)r_scause(), (void*)r_sepc(), cpuid());
   // per-CPU: which pid each core runs (Gantt strips) + that proc's live registers (from its
   // trapframe) — so every CPU has its own register/memory view, not just one.
   for(int ci = 0; ci < NCPU; ci++){

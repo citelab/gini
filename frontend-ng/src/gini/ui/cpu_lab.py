@@ -126,8 +126,12 @@ class CpuLab(QWidget):
         self._csr_lay.setSpacing(6)
         self._csr_note = QLabel()
         self._csr_note.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
-        root.addWidget(self._panel("Traps & interrupts  ·  control CSRs (this hart)",
-                                   self._csr_box, self._csr_note))
+        # The title is rewritten per poll once the dump says which hart it read — see
+        # `_render_csr`. "(this hart)" was honest and unanswerable: the dump runs on whichever
+        # core won plic_claim() for our poll, so it is hart 0 one second and hart 1 the next.
+        self._csr_panel = self._panel("Traps & interrupts  ·  control CSRs (this hart)",
+                                      self._csr_box, self._csr_note)
+        root.addWidget(self._csr_panel)
 
         # 3) trap history — CSR state recorded AT TRAP TIME (the honest interrupt state; the strip
         #    above can only ever describe the console interrupt our own poll caused)
@@ -166,6 +170,9 @@ class CpuLab(QWidget):
         v = QVBoxLayout(f); v.setContentsMargins(12, 9, 12, 11); v.setSpacing(7)
         h = QLabel(title)
         h.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
+        # Kept on the frame so a panel whose heading states a FACT — "hart 1" — can restate it when
+        # the fact changes. Only the CSR panel does this; the rest are fixed captions.
+        f.title_label = h
         v.addWidget(h)
         for inner in inners:
             inner.setStyleSheet((inner.styleSheet() or "") + "border:none;")
@@ -286,6 +293,13 @@ class CpuLab(QWidget):
                 src["name"], t.accent_for("purple"),
                 filled=src["enabled"], dot=src["pending"]))
         self._csr_lay.addSpacing(8)
+        # Say WHOSE registers these are, now that the kernel reports it.
+        hart = csr.get("hart")
+        lbl = getattr(self._csr_panel, "title_label", None)
+        if lbl is not None:
+            lbl.setText(f"Traps & interrupts  ·  control CSRs  ·  hart {hart}"
+                        if hart is not None else
+                        "Traps & interrupts  ·  control CSRs (this hart)")
         flags = sstatus_flags(csr.get("sstatus", 0))
         came = "user" if flags["SPP"] == "U" else "kernel"
         self._csr_lay.addWidget(self._chip(
@@ -323,8 +337,14 @@ class CpuLab(QWidget):
                 cause = scause_str(int(e.cause, 16))
             except ValueError:
                 cause = e.cause
+            # "interrupted pid 6", not "pid 6". The pid on a trap record is whoever was on that
+            # core when it landed — a BYSTANDER. A disk completion for process A is stamped with
+            # process B, because the owner is not known until wakeup() resolves it later. The old
+            # wording read as "pid 6 caused this" and taught the misconception.
+            who = f"interrupted pid {e.pid}" if e.pid else "interrupted no process (idle core)"
+            bits = [b for b in (e.core, who, kind, cause, f"from {e.came_from}") if b]
             self._traps_lay.addWidget(self._chip(
-                f"pid {e.pid}  ·  {kind}  ·  {cause}  ·  interrupted {e.came_from}",
+                "  ·  ".join(bits),
                 t.accent_for("amber" if kind == "pagefault" else "teal"), filled=False))
         self._traps_note.setText(
             "each entry is one REAL trap, with the interrupt state as it was at that moment — "

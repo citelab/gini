@@ -231,7 +231,8 @@ def parse_waits(text: str) -> dict:
 _MODETIME_RE = re.compile(r"MODETIME\s+user\s+(\d+)\s+kernel\s+(\d+)\s+idle\s+(\d+)")
 _CSR_RE = re.compile(
     r"CSR\s+sstatus\s+(0x[0-9a-fA-F]+)\s+sie\s+(0x[0-9a-fA-F]+)\s+sip\s+(0x[0-9a-fA-F]+)"
-    r"\s+stvec\s+(0x[0-9a-fA-F]+)\s+scause\s+(0x[0-9a-fA-F]+)\s+sepc\s+(0x[0-9a-fA-F]+)")
+    r"\s+stvec\s+(0x[0-9a-fA-F]+)\s+scause\s+(0x[0-9a-fA-F]+)\s+sepc\s+(0x[0-9a-fA-F]+)"
+    r"(?:\s+hart\s+(\d+))?")
 
 
 def parse_modetime(text: str) -> dict:
@@ -242,13 +243,22 @@ def parse_modetime(text: str) -> dict:
 
 
 def parse_csr(text: str) -> dict:
-    """gini_dump's `CSR sstatus .. sie .. sip .. stvec .. scause .. sepc ..` -> {name: int}. These
-    are the DUMPING hart's control CSRs (read inside the trap handler). {} on an older build."""
+    """gini_dump's `CSR sstatus .. sie .. sip .. stvec .. scause .. sepc .. [hart N]` -> {name: int}.
+
+    These are the DUMPING hart's control CSRs, read inside the trap handler — and WHICH hart that
+    is varies. The dump runs in consoleintr, on whichever core won plic_claim() for GINI's poll,
+    so it can be hart 0 on one poll and hart 1 on the next. `hart` says which; it is absent on a
+    kernel built before that was recorded, and the caller must then say nothing rather than assume
+    zero. {} on an older build with no CSR line at all.
+    """
     m = _CSR_RE.search(text or "")
     if not m:
         return {}
     keys = ("sstatus", "sie", "sip", "stvec", "scause", "sepc")
-    return {k: int(m.group(i + 1), 16) for i, k in enumerate(keys)}
+    out = {k: int(m.group(i + 1), 16) for i, k in enumerate(keys)}
+    if m.group(7) is not None:
+        out["hart"] = int(m.group(7))
+    return out
 
 
 def mode_split(prev: dict | None, cur: dict | None) -> dict:
@@ -573,6 +583,21 @@ class TrapEvent:
     sstatus: str = ""
     sie: str = ""
     sip: str = ""
+    #: Which CORE took this trap. -1 when the line did not carry one.
+    #:
+    #: Appended with a default because six callers build a TrapEvent — two labs, the fingerprint
+    #: view, two games and the domain models behind them — several of them positionally. A field
+    #: inserted anywhere but the end would have silently shifted their arguments.
+    hart: int = -1
+
+    @property
+    def core(self) -> str:
+        """The hart as a label, or "" when the kernel did not say.
+
+        Deliberately not "hart 0" for an unknown: on a one-core machine 0 is the truth and on an
+        older dump it is a guess, and the display must not present the second as the first.
+        """
+        return f"hart {self.hart}" if self.hart >= 0 else ""
 
     @property
     def has_csr(self) -> bool:
@@ -589,11 +614,17 @@ class TrapEvent:
             return "—"
 
 
-# `TR <pid> <kind> <cause> <epc> <tval>` — with three optional trailing CSRs (sstatus sie sip)
-# recorded at trap time by newer kernels. The tail is optional so an older image still parses.
+# `TR <pid> <kind> <cause> <epc> <tval> [sstatus sie sip] [seq] [h<hart>]`.
+#
+# `h<n>` is LABELLED where everything before it is positional, and that is the point: seq and hart
+# are both bare decimals, so appending one after the other would leave them distinguishable only
+# by order — and a parser that got that wrong would attribute traps to the wrong core without a
+# word. The prefix makes the field self-identifying, which also means it can sit after an optional
+# group without becoming ambiguous.
 _TR_RE = re.compile(
     r"TR (\d+) (\d+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)"
-    r"(?: (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+))?")
+    r"(?: (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+))?"
+    r"(?: (\d+))?(?: h(\d+))?")
 
 
 def parse_traptrace(text: str) -> list:
@@ -604,7 +635,8 @@ def parse_traptrace(text: str) -> list:
     for m in _TR_RE.finditer(text or ""):
         out.append(TrapEvent(int(m.group(1)), int(m.group(2)),
                              m.group(3), m.group(4), m.group(5),
-                             m.group(6) or "", m.group(7) or "", m.group(8) or ""))
+                             m.group(6) or "", m.group(7) or "", m.group(8) or "",
+                             int(m.group(10)) if m.group(10) else -1))
     return out
 
 
@@ -833,10 +865,16 @@ class DemoScheduler:
         kinds = [(0, "syscall", n * 4), (1, "pagefault", n // 2), (2, "timer", n * 9),
                  (3, "device", n // 3), (4, "illegal", 0), (5, "other", 0)]
         tc = [f"TC {k} {name} {cnt}" for k, name, cnt in kinds]
-        tr = ["TR 5 2 0x8000000000000005 0x0000000000001050 0x0",       # a timer interrupt
-              "TR 5 1 0x000000000000000f 0x0000000000001080 0x0000000000004000",  # store fault
-              "TR 2 0 0x0000000000000008 0x0000000000001d3c 0x0",       # a syscall (ecall)
-              "TR 5 2 0x8000000000000005 0x0000000000001054 0x0"]
+        # Two harts, deliberately. The demo is what somebody explores before they have a machine
+        # running, so it should show the thing the ring exists to show: a timer tick is per-core
+        # and stays on its own hart, while a DEVICE interrupt can land on either — asserted to
+        # every enabled hart, serviced by whichever wins plic_claim().
+        tr = ["TR 5 2 0x8000000000000005 0x0000000000001050 0x0 0x20 0x222 0x20 1 h0",
+              "TR 5 1 0x000000000000000f 0x0000000000001080 0x0000000000004000"
+              " 0x20 0x222 0x20 2 h0",                                   # store fault
+              "TR 2 0 0x0000000000000008 0x0000000000001d3c 0x0 0x20 0x222 0x20 3 h1",
+              "TR 7 3 0x8000000000000009 0x0000000000001060 0x0 0x20 0x222 0x20 4 h1",
+              "TR 5 2 0x8000000000000005 0x0000000000001054 0x0 0x20 0x222 0x20 5 h0"]
         return "\n".join(tc + tr) + "\n"
 
     def catch_trap(self, kind: str = "any") -> "TrapFrame":

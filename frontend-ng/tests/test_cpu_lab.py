@@ -145,3 +145,77 @@ def test_cpu_lab_demo_bar_animates(app):
     lab = CpuLab(None, _theme(app), _Dev(), ms, live=False)
     assert len(lab._bar._segs) == 3                        # user/kernel/idle all present
     lab.close()
+
+
+# --------------------------------------------------------------------------- #
+# which core, and who was merely interrupted
+# --------------------------------------------------------------------------- #
+# A PLIC external interrupt is asserted to EVERY enabled hart and serviced by whichever wins
+# plic_claim(), so on two cores the ring holds traps from both — and used to say which for neither.
+# The pid it does carry is the process that was RUNNING when the trap landed, not the one the
+# interrupt concerns: a disk completion for process A is stamped with whoever was on that core.
+def _lab_with_traps(app, text):
+    from gini.ui.cpu_lab import CpuLab
+    lab = CpuLab(None, _theme(app), _Dev(), _smp_state(), live=False)
+    lab._traps_text = text
+    lab._render_trap_history(_theme(app).theme)
+    return lab
+
+
+def _rows(lab):
+    from PySide6.QtWidgets import QLabel
+    return [w.text() for w in lab._traps_box.findChildren(QLabel)]
+
+
+def test_the_history_says_which_core_took_each_trap(app):
+    lab = _lab_with_traps(app, "TR 6 3 0x8000000000000009 0x1050 0x0 0x20 0x222 0x20 41 h1\n")
+    assert any("hart 1" in r for r in _rows(lab))
+    lab.close()
+
+
+def test_the_history_says_the_pid_was_interrupted_not_that_it_caused_the_trap(app):
+    """"pid 6 · device · external int" read as "pid 6 caused this". It means "pid 6 was running
+    when this landed" — and teaching the first is teaching a misconception the board then has to
+    undo."""
+    lab = _lab_with_traps(app, "TR 6 3 0x8000000000000009 0x1050 0x0 0x20 0x222 0x20 41 h1\n")
+    row = next(r for r in _rows(lab) if "hart 1" in r)
+    assert "interrupted pid 6" in row
+    lab.close()
+
+
+def test_a_trap_taken_on_an_idle_core_says_so(app):
+    """pid 0 is not a process — xv6 numbers from 1. It means `c->proc` was NULL, i.e. the core was
+    in the scheduler with nothing to run."""
+    lab = _lab_with_traps(app, "TR 0 2 0x8000000000000005 0x80001bb4 0x0 0x120 0x222 0x20 9 h0\n")
+    assert any("idle core" in r for r in _rows(lab))
+    lab.close()
+
+
+def test_a_kernel_without_the_hart_field_shows_no_hart_rather_than_hart_0(app):
+    """"hart 0" is the truth on a one-core machine and a guess on a record that never carried one.
+    The row simply omits it."""
+    lab = _lab_with_traps(app, "TR 6 3 0x8000000000000009 0x1050 0x0 0x20 0x222 0x20 41\n")
+    rows = [r for r in _rows(lab) if "interrupted pid 6" in r]
+    assert rows and not any("hart" in r for r in rows)
+    lab.close()
+
+
+def test_the_csr_panel_names_the_hart_it_read(app):
+    """The dump runs on whichever core won plic_claim() for our poll, so "(this hart)" was honest
+    and unanswerable."""
+    from gini.ui.cpu_lab import CpuLab
+    theme = _theme(app)
+    lab = CpuLab(None, theme, _Dev(), _smp_state(), live=False)
+    snap = lab.state.latest
+    snap.csr["hart"] = 1                       # the kernel now reports which core it read
+    lab._render_csr(snap, theme.theme)
+    assert "hart 1" in lab._csr_panel.title_label.text()
+    lab.close()
+
+
+def test_the_csr_panel_stays_honest_when_the_kernel_does_not_say(app):
+    """A kernel built before the hart was recorded. "hart 0" would be a guess dressed as a fact."""
+    from gini.ui.cpu_lab import CpuLab
+    lab = CpuLab(None, _theme(app), _Dev(), _smp_state(), live=False)   # csr carries no "hart"
+    assert "this hart" in lab._csr_panel.title_label.text()
+    lab.close()

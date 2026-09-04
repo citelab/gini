@@ -134,3 +134,24 @@ def test_device_traps_excluded_by_default():
           "TR 7 4 0x2 0x90 0x0 0x20 0x222 0x20 115\n")                   # illegal = real
     assert [e.kind for e in trap_events(tr)] == ["illegal"]
     assert [e.kind for e in trap_events(tr, include_device=True)] == ["device", "illegal"]
+
+
+def test_the_hart_field_does_not_break_the_anchored_trap_parser():
+    """THE hazard this change had to avoid. There are two TR parsers: the one in `xv6.py` is
+    unanchored and ignores an unknown trailing field, but THIS one ends in `\\s*$` — so a field
+    appended to the wire format does not go unread, it makes the whole line stop matching and the
+    X-ray's trap lane goes quietly empty. The CPU Lab would have looked perfect while a different
+    panel lost a lane."""
+    from gini.domain.os_events import trap_events
+    # kind 4 = illegal instruction. Not device (excluded by default: mostly our own polling),
+    # not timer (excluded: it would bury the lane), and not syscall or page fault — those have
+    # lanes of their own. Illegal is what this lane is actually for.
+    line = "TR 7 4 0x0000000000000002 0x72 0x0 0x20 0x222 0x20 108 h1\n"
+    evs = trap_events(line)
+    assert evs, "a TR line carrying a hart produced no events"
+    assert evs[0].seq == 108
+
+
+def test_a_trap_line_without_a_hart_still_parses():
+    from gini.domain.os_events import trap_events
+    assert trap_events("TR 7 4 0x0000000000000002 0x72 0x0 0x20 0x222 0x20 108\n")

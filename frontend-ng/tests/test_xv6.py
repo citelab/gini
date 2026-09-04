@@ -406,3 +406,54 @@ def test_parse_locks_empty_on_older_kernel():
     assert parse_locks("") == []
     assert parse_lock_cpus("") == 0
     assert parse_lock_cpus(_LOCK_DUMP) == 2
+
+
+# --------------------------------------------------------------------------- #
+# which core took the trap
+# --------------------------------------------------------------------------- #
+# A PLIC external interrupt is asserted to EVERY enabled hart — `plicinithart()` enables UART and
+# virtio for each core with threshold 0 — and only the one that wins `plic_claim()` services it.
+# Without the hart on the record the ring cannot tell the core that did the work from the one that
+# trapped, found irq == 0, and returned. On a two-core machine that is half the story.
+def test_a_trap_record_says_which_core_took_it():
+    from gini.domain.xv6 import parse_traptrace
+    e = parse_traptrace("TR 6 3 0x8000000000000009 0x1050 0x0 0x20 0x222 0x20 41 h1")[0]
+    assert e.hart == 1 and e.core == "hart 1"
+
+
+def test_a_record_without_a_hart_says_nothing_rather_than_zero():
+    """"hart 0" is the truth on a one-core machine and a GUESS on a line that never carried one.
+    The display must not present the second as the first."""
+    from gini.domain.xv6 import parse_traptrace
+    e = parse_traptrace("TR 6 3 0x8000000000000009 0x1050 0x0")[0]
+    assert e.hart == -1 and e.core == ""
+
+
+def test_the_hart_is_labelled_so_it_cannot_be_confused_with_seq():
+    """seq and hart are both bare decimals. Appended positionally they would be told apart only by
+    order, and a parser that got it wrong would attribute traps to the wrong core in silence."""
+    from gini.domain.xv6 import parse_traptrace
+    with_seq_only = parse_traptrace("TR 6 3 0x9 0x1050 0x0 0x20 0x222 0x20 41")[0]
+    assert with_seq_only.hart == -1, "seq must never be read as a hart"
+    both = parse_traptrace("TR 6 3 0x9 0x1050 0x0 0x20 0x222 0x20 41 h1")[0]
+    assert both.hart == 1
+
+
+def test_the_csr_line_says_whose_registers_they_are():
+    """The dump runs in consoleintr, on whichever hart won plic_claim() for GINI's poll — so it is
+    hart 0 on one poll and hart 1 on the next, and the panel could not say which."""
+    from gini.domain.xv6 import parse_csr
+    base = "CSR sstatus 0x22 sie 0x222 sip 0x20 stvec 0x8000 scause 0x9 sepc 0x6"
+    assert "hart" not in parse_csr(base)
+    assert parse_csr(base + " hart 1")["hart"] == 1
+    assert parse_csr(base + " hart 1")["sepc"] == 6      # the existing fields are untouched
+
+
+def test_trap_event_gained_its_field_at_the_END():
+    """Six callers build a TrapEvent — two labs, the fingerprint view, two games and the domain
+    models behind them — several positionally. A field inserted anywhere but last would silently
+    shift their arguments."""
+    from gini.domain.xv6 import TrapEvent
+    e = TrapEvent(5, 1)                                  # the shape test_fingerprint uses
+    assert e.pid == 5 and e.kind == 1 and e.hart == -1
+    assert TrapEvent(pid=4, kind=2, cause="0x8").hart == -1
