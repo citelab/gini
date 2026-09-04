@@ -113,3 +113,25 @@ def test_a_fraction_outside_the_range_cannot_break_the_bar(qtbot):
     for f in (-1.0, 0.0, 1.0, 2.5, float("inf")):
         p._on_progress(f, "")
         assert p.bar.minimum() <= p.bar.value() <= p.bar.maximum()
+
+
+def test_a_crash_in_setup_reports_itself_instead_of_hanging(qtbot, monkeypatch):
+    """The worst report is no report. This one used to leave the panel on "Starting…" for ever.
+
+    `_start` runs `bootstrap.execute` on a bare thread. An exception there killed the thread
+    silently — `finished_setup` never fired, so the panel kept the caption it had set a moment
+    earlier and offered no retry. A student would sit watching "Starting…" with no reason to
+    believe anything was wrong except that nothing ever happened.
+    """
+    dlg = FirstRunDialog(_plan()); qtbot.addWidget(dlg)
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(bootstrap, "execute", boom)
+
+    with qtbot.waitSignal(dlg.finished_setup, timeout=3000):
+        dlg.go.click()
+
+    assert "No space left on device" in dlg.detail.text(), "say what went wrong"
+    assert dlg.detail.text() != "Starting…"
+    assert dlg.go.isEnabled() and dlg.go.text() == "Try again", "and let them have another go"

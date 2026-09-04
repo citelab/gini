@@ -224,33 +224,88 @@ class PullProgress:
         return min(1.0, self.done / self.total) if self.total else 0.0
 
 
-def pull_one(ref: str, on_progress=None, run=None) -> bool:
+def pull_one(ref: str, on_progress=None, run=None, why=None) -> bool:
     """Pull a single ref, reporting layer progress as it goes. True when it landed.
 
     Streamed rather than waited on, because a pull is minutes long and the whole point is to say
     something during it. Falls back to `run` (the plain, waited form) when no progress is wanted,
     which is what keeps `pull_images` testable with a fake that never spawns anything.
+
+    `why(text)` receives the REASON a pull failed. It exists because this function used to end
+    `except Exception: return False`, and that discarded the only evidence there was: a student on
+    an M3 hit "Get images" on three separate versions and each time got "None of the images could
+    be downloaded. If this version was never published for arm64, that is the likely reason." —
+    a guess, and a wrong one, since arm64 was published and pulled fine elsewhere.
+
+    It turned out to be Docker's CREDENTIAL HELPER, which fails like this:
+
+        error getting credentials - err: exec: "docker-credential-desktop": executable file not
+        found in $PATH, out: ``
+
+    Nothing to do with GINI, and it says so plainly the moment anyone can read it — which is the
+    whole point. Note what the old code cost: the machine printed the answer on the first attempt,
+    and three versions were installed chasing a message that named the wrong thing. A reason we
+    cannot interpret is still worth every guess we could compose.
     """
+    tell = why or (lambda _t: None)
     if on_progress is None:
-        return (run or subprocess.run)(["docker", "pull", ref], timeout=1800).returncode == 0
+        try:
+            r = (run or subprocess.run)(["docker", "pull", ref], capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=1800)
+        except Exception as e:                 # noqa: BLE001
+            tell(f"{type(e).__name__}: {e}")
+            return False
+        if r.returncode != 0:
+            tell(_last_line(getattr(r, "stderr", "") or getattr(r, "stdout", "")))
+        return r.returncode == 0
     seen = PullProgress()
     try:
         proc = subprocess.Popen(["docker", "pull", ref], stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                                 errors="replace")
-    except Exception:                          # noqa: BLE001 — no docker, no pull
+    except FileNotFoundError:
+        # The macOS one: a GUI app launched from the Dock inherits /usr/bin:/bin:/usr/sbin:/sbin,
+        # which is not where Docker Desktop puts `docker`. From a terminal the same build works.
+        tell("docker was not found on PATH. If gBuilder was launched from the Dock or Finder, "
+             "macOS gives it a minimal PATH that excludes /opt/homebrew/bin and /usr/local/bin — "
+             "launching it from a terminal is the quickest check.")
         return False
+    except Exception as e:                     # noqa: BLE001
+        tell(f"could not start docker: {type(e).__name__}: {e}")
+        return False
+    tail: list[str] = []
     try:
         for line in proc.stdout:               # universal newlines: CRLF is already \n here
+            tail.append(line.rstrip())
+            del tail[:-6]                      # keep only what a failure would need
             if seen.feed(line):
                 on_progress(seen.done, seen.total)
-        return proc.wait(timeout=1800) == 0
-    except Exception:                          # noqa: BLE001
+        if proc.wait(timeout=1800) == 0:
+            return True
+        tell(_last_line("\n".join(tail)))
+        return False
+    except Exception as e:                     # noqa: BLE001
         proc.kill()
+        tell(f"{type(e).__name__}: {e}")
         return False
 
 
-def pull_images(refs, run=subprocess.run, on_progress=None) -> list[tuple[str, bool]]:
+def _last_line(text: str) -> str:
+    """The most specific line docker printed — its last non-empty one.
+
+    Docker puts the useful part at the end ("denied", "no such host", "no space left on device")
+    after a preamble that says nothing. Truncated, because this lands in a dialog.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    # "" when docker said nothing, NOT a sentence saying so. A reason-shaped non-reason
+    # ("docker failed without saying why") reads as an explanation and, worse, satisfies the
+    # caller's `if reason:` — suppressing the one genuinely useful thing left to offer, which is
+    # the command whose output would be the answer.
+    return lines[-1][:300] if lines else ""
+
+
+def pull_images(refs, run=subprocess.run, on_progress=None, on_error=None
+                ) -> list[tuple[str, bool]]:
     """Pull each ref AND give it the plain local name; return [(ref, ok)].
 
     The tag is not cosmetic, and leaving it out made every pip install unable to Run anything.
@@ -272,10 +327,14 @@ def pull_images(refs, run=subprocess.run, on_progress=None) -> list[tuple[str, b
     for ref in refs:
         try:
             name = local_name(ref)
-            ok = pull_one(ref, on_progress=on_progress, run=run)
+            fail = (lambda text, _r=ref: on_error(_r, text)) if on_error else None
+            ok = pull_one(ref, on_progress=on_progress, run=run, why=fail)
             if ok:
                 t = run(["docker", "tag", ref, name], timeout=60)
                 ok = t.returncode == 0
+                if not ok and fail:
+                    fail("the image downloaded but could not be tagged with the name the "
+                         "runtime resolves")
             if ok:
                 # VERIFIED, not assumed. Two exit codes of 0 were the whole of the evidence here,
                 # and they were not enough: a machine wrote a marker recording four successful
@@ -289,6 +348,9 @@ def pull_images(refs, run=subprocess.run, on_progress=None) -> list[tuple[str, b
                 # the name resolves to costs one call per image at the end of a gigabyte download.
                 want = _image_id(ref, run=run)
                 ok = want is not None and _image_id(name, run=run) == want
+                if not ok and fail:
+                    fail(f"docker reported success but {name} does not resolve to the image "
+                         f"just pulled")
             out.append((ref, ok))
         except Exception:
             out.append((ref, False))

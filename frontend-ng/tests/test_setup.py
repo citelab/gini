@@ -329,3 +329,89 @@ def test_a_tag_that_silently_does_not_move_the_name_is_a_failure():
     d = FakeDocker({"gini-xv6:latest": OLD}, tag_sticks=False)
     d.pullable = {XV6: NEW}
     assert dict(images.pull_images([XV6], run=d))[XV6] is False
+
+
+# --------------------------------------------------------------------------- #
+# when a pull fails, say why
+# --------------------------------------------------------------------------- #
+# A student on an M3 pressed "Get images" on 6.6.0, 6.6.1 and 6.7.0 and each time got:
+#
+#   "None of the images could be downloaded. If this version was never published for arm64,
+#    that is the likely reason."
+#
+# arm64 WAS published and pulled fine elsewhere, so the only message they had pointed away from
+# the cause — and the real one had already been thrown away by `except Exception: return False`
+# inside pull_one. Three versions of guessing, with the evidence deleted at the source each time.
+def test_a_failed_pull_reports_what_docker_said():
+    said = []
+    d = FakeDocker()
+    d.pullable = {}                                   # docker will refuse
+
+    def run(cmd, **kw):
+        import subprocess as sp
+        if cmd[:2] == ["docker", "pull"]:
+            return sp.CompletedProcess(cmd, 1, "", "Error response from daemon: manifest unknown")
+        return d(cmd, **kw)
+
+    images.pull_images([XV6], run=run, on_error=lambda ref, text: said.append((ref, text)))
+    assert said and "manifest unknown" in said[0][1]
+
+
+def test_a_credential_helper_failure_reaches_the_student_verbatim():
+    """The real one, from a student's M3 in September 2026.
+
+    Docker printed the cause on the very first attempt. `pull_one` threw it away and the panel
+    guessed at arm64 instead, so three versions of gBuilder were installed chasing a message that
+    named the wrong thing — while the machine had been saying "credentials" the whole time.
+
+    Note what this test does NOT do: it does not parse the message, classify it, or translate it
+    into advice of our own. GINI cannot fix a broken credential helper and should not pretend to
+    recognise one. Passing it through unedited is the entire feature.
+    """
+    import subprocess as sp
+    cred = ('error getting credentials - err: exec: "docker-credential-desktop": '
+            'executable file not found in $PATH, out: ``')
+    said = {}
+    images.pull_images(
+        [XV6],
+        run=lambda cmd, **kw: sp.CompletedProcess(cmd, 1, "", cred),
+        on_error=lambda ref, text: said.__setitem__(ref, text))
+    assert "docker-credential-desktop" in said.get(XV6, ""), "the word that identifies the fault"
+    assert "arm64" not in said.get(XV6, "")
+
+
+def test_docker_missing_from_PATH_says_so_and_names_the_cause():
+    """The macOS one. A GUI app launched from the Dock inherits /usr/bin:/bin:/usr/sbin:/sbin,
+    which excludes /opt/homebrew/bin — so the same build works from a terminal and not from the
+    Dock, with nothing on screen connecting the two."""
+    said = []
+
+    def boom(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory: 'docker'")
+
+    import gini.setup.images as I
+    real = I.subprocess.Popen
+    I.subprocess.Popen = boom
+    try:
+        ok = I.pull_one(XV6, on_progress=lambda *_a: None, why=said.append)
+    finally:
+        I.subprocess.Popen = real
+    assert ok is False
+    assert said and "PATH" in said[0] and "terminal" in said[0]
+
+
+def test_the_reason_is_the_most_specific_line_docker_printed():
+    """Docker puts the useful part last, after a preamble that says nothing."""
+    from gini.setup.images import _last_line
+    assert _last_line("6.7.0: Pulling from x/y\nerror: no space left on device") \
+        == "error: no space left on device"
+    assert _last_line("") == "", "silence must read as silence, not as an explanation"
+    assert len(_last_line("x" * 900)) <= 300         # it lands in a dialog
+
+
+def test_a_tag_that_fails_after_a_good_pull_is_explained():
+    said = []
+    d = FakeDocker(tag_sticks=False)
+    d.pullable = {XV6: "sha256:new"}
+    images.pull_images([XV6], run=d, on_error=lambda ref, text: said.append(text))
+    assert said and "does not resolve" in said[0]

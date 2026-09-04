@@ -266,19 +266,26 @@ def test_a_clean_pull_says_so_plainly(monkeypatch, with_docker):
     assert marker.read_marker()["version"] == "6.1.0"
 
 
-def test_a_total_failure_names_the_architecture_as_a_likely_cause(monkeypatch, with_docker):
-    """The most probable reason a pull finds nothing is that this arch was never published — say
-    it, rather than leaving someone to guess at a registry error."""
+def test_a_total_failure_does_not_guess_at_the_architecture(monkeypatch, with_docker):
+    """This used to end "If this version was never published for arm64, that is the likely
+    reason." It was a guess dressed as a diagnosis, and a student on an M3 met it on three
+    versions in a row while arm64 was published and pulling fine elsewhere — so the only message
+    they had pointed away from their actual problem.
+
+    The guess is also redundant: an image genuinely missing for an architecture makes docker say
+    "no matching manifest for linux/arm64", which is quoted like any other reason. What is left
+    when docker says nothing at all is the command whose output IS the answer."""
     monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
     monkeypatch.setattr(B.platform, "machine", lambda: "arm64")
 
     def nope(*a, **k):
-        class R:
-            returncode = 1
-        return R()
+        import subprocess as sp
+        return sp.CompletedProcess(a[0] if a else [], 1, "", "")
 
     r = B.execute(B.plan("6.1.0", run=_docker_ok), run=nope)
-    assert not r["ok"] and "arm64" in r["message"]
+    assert not r["ok"]
+    assert "never published" not in r["message"]
+    assert "docker pull" in r["message"], "say what to run when there is no reason to quote"
     assert "keep building and reading topologies" in r["message"]
 
 
@@ -480,7 +487,7 @@ def test_progress_runs_across_the_whole_job_not_each_image(monkeypatch, tmp_path
     import gini.services.bootstrap as B
     seen = []
 
-    def fake_pull(refs, run=None, on_progress=None):
+    def fake_pull(refs, run=None, on_progress=None, on_error=None):
         if on_progress:
             on_progress(1, 2)                       # half of this image
             on_progress(2, 2)
@@ -499,7 +506,7 @@ def test_the_caption_names_the_image_being_downloaded(monkeypatch):
     import gini.services.bootstrap as B
     captions = []
     monkeypatch.setattr(B.images, "pull_images",
-                        lambda refs, run=None, on_progress=None:
+                        lambda refs, run=None, on_progress=None, on_error=None:
                         (on_progress and on_progress(1, 4), [(refs[0], True)])[1])
     monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
     B.execute({"state": B.PULL, "refs": ["ghcr.io/x/gini-xv6:6.5.2"], "app_version": "1"},
@@ -514,8 +521,40 @@ def test_no_progress_callback_keeps_the_waited_pull(monkeypatch):
     import gini.services.bootstrap as B
     got = {}
     monkeypatch.setattr(B.images, "pull_images",
-                        lambda refs, run=None, on_progress=None:
+                        lambda refs, run=None, on_progress=None, on_error=None:
                         (got.setdefault("cb", on_progress), [(refs[0], True)])[1])
     monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
     B.execute({"state": B.PULL, "refs": ["r/a:1"], "app_version": "1"})
     assert got["cb"] is None
+
+
+def test_the_setup_message_quotes_docker_rather_than_guessing(monkeypatch, with_docker):
+    """It used to end with "If this version was never published for arm64, that is the likely
+    reason" — a guess, presented as the likely cause, that sent a student looking at the registry
+    while the actual fault was on their own machine."""
+    import gini.services.bootstrap as B
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
+
+    def fails(refs, run=None, on_progress=None, on_error=None):
+        if on_error:
+            on_error(refs[0], "Error response from daemon: denied")
+        return [(refs[0], False)]
+
+    monkeypatch.setattr(B.images, "pull_images", fails)
+    r = B.execute({"state": B.PULL, "refs": ["r/gini-xv6:1"], "app_version": "1", "arch": "arm64"})
+    assert "denied" in r["message"]
+    assert "never published" not in r["message"]
+    assert r["reasons"]["r/gini-xv6:1"] == "Error response from daemon: denied"
+
+
+def test_a_failure_with_no_reason_says_what_to_run(monkeypatch, with_docker):
+    """Better than a guess: the command whose output IS the answer."""
+    import gini.services.bootstrap as B
+    monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
+    monkeypatch.setattr(B.marker, "write_marker", lambda *_a, **_k: None)
+    monkeypatch.setattr(B.images, "pull_images",
+                        lambda refs, run=None, on_progress=None, on_error=None:
+                        [(refs[0], False)])
+    r = B.execute({"state": B.PULL, "refs": ["r/gini-xv6:1"], "app_version": "1", "arch": "arm64"})
+    assert "docker pull r/gini-xv6:1" in r["message"]

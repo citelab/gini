@@ -134,8 +134,19 @@ class FirstRunDialog(QDialog):
         self.detail.setText("Starting…")
 
         def work():
-            result = bootstrap.execute(self.plan, on_step=self.stepped.emit,
-                                       on_progress=lambda f, t: self.progressed.emit(f, t))
+            # The emit is OUTSIDE the try, and that is the whole point of the try. An exception in
+            # here used to kill this thread silently: no signal, so the panel sat on "Starting…"
+            # for ever with no message and no way to retry — the one failure that reports NOTHING,
+            # on the one screen every new student meets. `execute` is written not to raise, but
+            # "written not to" is not a guarantee; a full disk hitting `write_marker` is enough.
+            try:
+                result = bootstrap.execute(self.plan, on_step=self.stepped.emit,
+                                           on_progress=lambda f, t: self.progressed.emit(f, t))
+            except Exception as e:            # noqa: BLE001 — report it, never swallow it
+                result = {"ok": False, "done": [], "failed": [], "reasons": {},
+                          "message": f"Setup stopped unexpectedly.\n\n{type(e).__name__}: {e}"
+                                     f"\n\nYou can keep building and reading topologies; Run "
+                                     f"will not start until the images are here."}
             self.finished_setup.emit(result)
 
         threading.Thread(target=work, daemon=True).start()

@@ -131,6 +131,7 @@ def execute(p: dict, *, on_step=None, on_progress=None, run=subprocess.run) -> d
 
     say = on_step or (lambda _t: None)
     tell = on_progress or (lambda _f, _t: None)
+    reasons: dict[str, str] = {}          # ref -> what docker actually said
 
     if state == BUILD:
         backend = Path(p["source"])
@@ -153,8 +154,9 @@ def execute(p: dict, *, on_step=None, on_progress=None, run=subprocess.run) -> d
                 tell(whole, f"Downloading {_s}…   layer {done} of {total}"
                             if total else f"Downloading {_s}…")
 
-            results += images.pull_images([ref], run=run,
-                                          on_progress=each if on_progress else None)
+            results += images.pull_images(
+                [ref], run=run, on_progress=each if on_progress else None,
+                on_error=lambda r, text: reasons.setdefault(r, text))
 
     done = [n for n, ok in results if ok]
     failed = [n for n, ok in results if not ok]
@@ -164,20 +166,34 @@ def execute(p: dict, *, on_step=None, on_progress=None, run=subprocess.run) -> d
                              "tag": p.get("image_tag", ""),
                              "arch": p.get("arch", ""),
                              "images": done})
-    return {"ok": not failed, "done": done, "failed": failed,
-            "message": _outcome(state, done, failed, p)}
+    return {"ok": not failed, "done": done, "failed": failed, "reasons": reasons,
+            "message": _outcome(state, done, failed, p, reasons)}
 
 
-def _outcome(state: str, done: list, failed: list, p: dict) -> str:
+def _outcome(state: str, done: list, failed: list, p: dict, reasons: dict | None = None) -> str:
+    """What to tell someone when a setup run ends.
+
+    The failure text used to GUESS: "If this version was never published for arm64, that is the
+    likely reason." A student on an M3 met that on three separate versions while arm64 was
+    published and pulling fine elsewhere. The real cause was Docker's credential helper — printed
+    by docker on the very first attempt, and thrown away inside `pull_one` before anyone saw it.
+
+    Now it quotes docker. A reported reason is worth more than any explanation composed here,
+    because it is the only part of this that cannot be wrong — and, as that case showed, the cause
+    is often not GINI at all, which is precisely what a guess written here can never say.
+    """
     if not failed:
         return (f"{len(done)} image{'' if len(done) == 1 else 's'} ready. GINI can run topologies "
                 f"now.")
+    said = (reasons or {}).get(failed[0], "")
     if not done:
         verb = "build" if state == BUILD else "download"
-        extra = ("" if state == BUILD else
-                 f" If this version was never published for {p.get('arch')}, that is the likely "
-                 f"reason.")
-        return (f"None of the images could be {verb}ed.{extra} You can keep building and reading "
-                f"topologies; Run will not start until they are here.")
+        because = f"\n\n{said}" if said else (
+            "" if state == BUILD else
+            f"\n\nNo reason was reported. Check that Docker is running, then try "
+            f"`docker pull {failed[0]}` in a terminal — whatever that prints is the cause.")
+        return (f"None of the images could be {verb}ed.{because}\n\nYou can keep building and "
+                f"reading topologies; Run will not start until they are here.")
     return (f"{len(done)} ready, {len(failed)} could not be fetched: "
-            f"{', '.join(f.rsplit('/', 1)[-1] for f in failed)}.")
+            f"{', '.join(f.rsplit('/', 1)[-1] for f in failed)}."
+            + (f"\n\n{said}" if said else ""))
