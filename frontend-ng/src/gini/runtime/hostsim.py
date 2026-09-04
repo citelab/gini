@@ -86,5 +86,5 @@ class HostSim:
                 still.append((next_hop, pkt))
         self.pending = still
 
-    def run(self) -> None:
-        run_loop([self.port], self.handle)
+    def run(self, stop=None) -> None:
+        run_loop([self.port], self.handle, stop=stop)

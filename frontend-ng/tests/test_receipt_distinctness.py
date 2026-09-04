@@ -13,8 +13,16 @@ from gini.domain import ticket as T
 
 
 def chain_with(code: str, t0: float = 1000.0) -> P.Chain:
-    """Identical work, recorded under `code`: same events, same timestamps."""
-    c = P.Chain.start(code, assignment="lab1", gini_version="1")
+    """Identical work, recorded under `code`: same events, same timestamps.
+
+    `t=t0` on GENESIS as well, and that is the whole of a flake this file carried for months.
+    `Chain.start` stamps genesis with the real clock unless told otherwise, so two chains built a
+    fraction of a second apart differed in their first entry — every later hash with them. The
+    docstring already promised "same timestamps"; only the events were getting them. Measured at
+    roughly 3 failures in 400, which is about one full-suite run in 130 — often enough to have
+    blocked a release, rare enough never to be reproducible on demand.
+    """
+    c = P.Chain.start(code, assignment="lab1", gini_version="1", t=t0)
     for i, (kind, data) in enumerate([("place", {"n": "M1"}),
                                       ("place", {"n": "M2"}),
                                       ("connect", {"a": "M1", "b": "M2"})]):

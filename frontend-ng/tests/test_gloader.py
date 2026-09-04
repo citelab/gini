@@ -13,13 +13,19 @@ def _runtime_dir() -> Path:
 
 
 def _simulate_or_skip(fn, *args):
-    """Run an in-process sim, skipping if its UDP port is already held. The sims bind a fixed
-    port (:5000) and don't release it between tests; on macOS (strict SO_REUSEADDR) a leaked bind
-    from an earlier sim blocks later ones. Skip rather than fail on that environment quirk."""
+    """A running sim, to be stopped by the caller.
+
+    The note that used to be here — "the sims bind a fixed port (:5000) and don't release it
+    between tests" — described the bug rather than an environment quirk: a node's `run()` is a
+    select loop meant to last as long as its container, so simulating in-process left a thread per
+    node alive for the rest of the pytest session, holding its bind. Worse than the skips, those
+    threads kept selecting on live sockets while later Qt tests tore widgets down, which is where
+    the suite's random segfaults came from. `Sim.stop()` ends them; use it.
+    """
     try:
         return fn(*args)
-    except OSError as e:
-        pytest.skip(f"UDP sim port unavailable (leaked bind / macOS :5000): {e}")
+    except OSError as e:                      # a genuinely occupied port, not one of ours
+        pytest.skip(f"UDP sim port unavailable: {e}")
 
 
 def _one_lan() -> tuple[Topology, str, str]:
@@ -44,9 +50,9 @@ def test_simulate_from_topology_pings():
     t, m1, m2 = _one_lan()
     gl = GLoader(_runtime_dir())
     m2ip = gl.compile(t).machines[1].ifaces[0].ip.split("/")[0]
-    sim = _simulate_or_skip(gl.simulate, t)
-    sim.start()
-    assert sim.ping(m1.lower(), m2ip) is True
+    with _simulate_or_skip(gl.simulate, t) as sim:
+        sim.start()
+        assert sim.ping(m1.lower(), m2ip) is True
 
 
 def test_loads_and_runs_from_gini_spec(tmp_path):
@@ -58,6 +64,6 @@ def test_loads_and_runs_from_gini_spec(tmp_path):
     # gLoader reads the saved .gini spec, compiles it, and brings it up (in-process)
     assert gl.read_spec(spec).name == "demo"
     m2ip = gl.compile(gl.read_spec(spec)).machines[1].ifaces[0].ip.split("/")[0]
-    sim = _simulate_or_skip(gl.simulate, spec)
-    sim.start()
-    assert sim.ping(m1.lower(), m2ip) is True
+    with _simulate_or_skip(gl.simulate, spec) as sim:
+        sim.start()
+        assert sim.ping(m1.lower(), m2ip) is True

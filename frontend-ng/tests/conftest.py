@@ -162,3 +162,45 @@ def unparked(monkeypatch):
                             {k: v for k, v in features.PARKED.items() if k not in names})
         monkeypatch.setattr(features, "LIVE", features.LIVE | frozenset(names))
     return _unpark
+
+
+# --------------------------------------------------------------------------- #
+# a test may not leave a thread running
+# --------------------------------------------------------------------------- #
+# The suite was crashing at random — a bus error or segfault, usually a third of the way in,
+# always inside pytest-qt's event processing and never in the test that appeared to fail. The
+# cause was not there at all: earlier tests started the network runtime in-process and walked
+# away. Thirteen `GBridge.run` loops and two control servers were still selecting on live sockets
+# for the rest of the session, and one of them eventually touched memory while Qt was tearing a
+# widget down.
+#
+# The runtime's `while True:` loops are RIGHT for production — a node is its own container
+# process and ends when the container does — so the bug was never in them. It was tests treating
+# a process-lifetime object as if it were disposable.
+#
+# This makes that a test failure at the moment it happens, naming the test that leaked, instead
+# of a crash somewhere else an hour later. It is deliberately strict: a thread that outlives its
+# test has no owner, and the next person to hit this should be told which line to look at.
+import threading as _threading                                        # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_threads(request):
+    before = {t.ident for t in _threading.enumerate()}
+    yield
+    leaked = [t for t in _threading.enumerate()
+              if t.ident not in before and t.is_alive() and t is not _threading.main_thread()]
+    if not leaked:
+        return
+    # A moment's grace: a thread that is on its way out (a stop() just issued, a socket just
+    # closed) is not a leak, and failing on the race would make this fixture the flaky thing.
+    for t in leaked:
+        t.join(timeout=0.5)
+    still = [t for t in leaked if t.is_alive()]
+    if still:
+        names = ", ".join(sorted({t.name for t in still}))
+        raise AssertionError(
+            f"{request.node.nodeid} left {len(still)} thread(s) running: {names}.\n"
+            f"Something started a runtime loop (GBridge, ControlServer, a node's run()) and did "
+            f"not stop it. Those loops run for the life of a container in production, so they "
+            f"never return on their own — call .stop() in the test, or run it in a subprocess.")

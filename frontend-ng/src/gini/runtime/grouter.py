@@ -208,10 +208,10 @@ class Router:
         for egress, ip_pkt in queued:
             egress.port.send(build_eth(mac, egress.mac, ETH_IP, ip_pkt))
 
-    def run(self) -> None:
+    def run(self, stop=None) -> None:
         nets = ", ".join(str(i.network) for i in self.ifaces)
         print(f"[{self.name}] gRouter up: {nets}", file=sys.stderr)
-        run_loop([itf.port for itf in self.ifaces], self.handle)
+        run_loop([itf.port for itf in self.ifaces], self.handle, stop=stop)
 
 
 def main() -> None:

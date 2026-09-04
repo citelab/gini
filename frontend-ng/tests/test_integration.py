@@ -12,13 +12,21 @@ from gini.services.orchestrator import simulate
 
 
 def _simulate_or_skip(cfg):
-    """Skip when the sim's fixed UDP port (:5000+) is already held — the in-process sims don't
-    release their sockets, so on macOS (strict SO_REUSEADDR) a leaked bind from an earlier sim
-    blocks later ones. Environment quirk, not a logic failure."""
+    """A running sim, stopped when the test ends.
+
+    This used to skip on OSError with the note "the in-process sims don't release their sockets",
+    which was true and was the bug rather than the environment: each node's `run()` is a select
+    loop meant to last as long as its container, so simulating in-process left a thread per node
+    running for the remainder of the pytest session. They kept the fixed UDP binds (hence the
+    skips) and, worse, kept selecting on live sockets while later Qt tests tore widgets down —
+    the cause of the suite's random segfaults, minutes away from anything that named them.
+
+    `Sim` can be stopped now, so the caller closes it and the ports really are free.
+    """
     try:
         return simulate(cfg)
-    except OSError as e:
-        pytest.skip(f"UDP sim port unavailable (leaked bind / macOS :5000): {e}")
+    except OSError as e:                      # a genuinely occupied port, not one of ours
+        pytest.skip(f"UDP sim port unavailable: {e}")
 
 
 def two_subnet_lab() -> Topology:
@@ -55,13 +63,15 @@ def test_compiler_segments_and_addressing():
 
 def test_compiled_topology_actually_runs():
     cfg = RuntimeCompiler().compile(two_subnet_lab())
-    sim = _simulate_or_skip(cfg)
-    # map names -> ips
-    ip = {m.name.lower(): m.ifaces[0].ip.split("/")[0] for m in cfg.machines}
-    # same subnet, through a user-space switch
-    assert sim.ping("m1", ip["m2"]), "M1 -> M2 (L2 switch) failed"
-    # cross subnet, through the user-space gRouter
-    assert sim.ping("m1", ip["m3"]), "M1 -> M3 (routed) failed"
+    # `with`, so the nodes' threads and their UDP binds end with the test rather than with the
+    # pytest process — see `_simulate_or_skip` and `Sim.stop`.
+    with _simulate_or_skip(cfg) as sim:
+        # map names -> ips
+        ip = {m.name.lower(): m.ifaces[0].ip.split("/")[0] for m in cfg.machines}
+        # same subnet, through a user-space switch
+        assert sim.ping("m1", ip["m2"]), "M1 -> M2 (L2 switch) failed"
+        # cross subnet, through the user-space gRouter
+        assert sim.ping("m1", ip["m3"]), "M1 -> M3 (routed) failed"
 
 
 def test_groupings_are_skipped_with_notes():

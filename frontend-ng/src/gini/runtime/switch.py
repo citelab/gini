@@ -56,9 +56,9 @@ class LearningSwitch:
             if p is not inport:
                 p.send(frame)
 
-    def run(self) -> None:
+    def run(self, stop=None) -> None:
         print(f"[{self.name}] learning switch up, {len(self.ports)} ports", file=sys.stderr)
-        run_loop(self.ports, self.handle)
+        run_loop(self.ports, self.handle, stop=stop)
 
 
 class Hub(LearningSwitch):
@@ -89,9 +89,9 @@ class Hub(LearningSwitch):
             return ", ".join(p.name for p in self.ports)
         return f"unknown command: {cmd} (try 'help')"
 
-    def run(self) -> None:
+    def run(self, stop=None) -> None:
         print(f"[{self.name}] hub up (L1 repeater), {len(self.ports)} ports", file=sys.stderr)
-        run_loop(self.ports, self.handle)
+        run_loop(self.ports, self.handle, stop=stop)
 
 
 def make_switch(cfg: dict):

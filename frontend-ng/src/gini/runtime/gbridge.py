@@ -256,6 +256,8 @@ class SeenBoard:
 
 class GBridge:
     def __init__(self, cfg: dict) -> None:
+        import threading as _threading
+        self._stop = _threading.Event()          # see stop(); never set in production
         self.name = cfg.get("name", "gbridge")
         self.listen_port = int(cfg.get("listen_port", 5555))
         # Who we are to a board. A board that has been claimed by a different laptop
@@ -531,6 +533,21 @@ class GBridge:
                   file=sys.stderr, flush=True)
         self._to_board(link, T_FRAME, frame)
 
+    def stop(self) -> None:
+        """Ask `run()` to return at its next turn of the loop.
+
+        Nothing in production calls this: a gbridge IS its container's process and ends when the
+        container does. It exists for tests, which run the relay in a thread inside the pytest
+        process — and `while True` there means the thread outlives the test, keeps selecting on
+        its sockets for the remainder of the session, and eventually crashes an unrelated Qt test
+        with a bus error. Thirteen of them were doing exactly that.
+
+        A server that cannot be shut down is a defect in its own right; this is the smaller half
+        of admitting that. The loop already selects with a 0.5s timeout, so the flag is seen
+        promptly without waking anything.
+        """
+        self._stop.set()
+
     def run(self) -> None:
         import selectors
         print(f"[{self.name}] up on udp/{self.listen_port}, "
@@ -542,7 +559,7 @@ class GBridge:
             sel.register(link.port.sock, selectors.EVENT_READ, link)
         last_report = 0.0
         last_counts: tuple = ()
-        while True:
+        while not self._stop.is_set():
             # Periodic counters, so `docker compose logs gbridge` alone is enough to
             # tell a live link from a dead one. Only prints when something changed.
             now = time.time()

@@ -98,7 +98,25 @@ class SerialLink:
         self._dump_seq = 0                           # bumps each time a dump completes
         self._sock = None
         self._lock = threading.Lock()
+        self._closed = threading.Event()      # see close(); never set in the container
         threading.Thread(target=self._reader, daemon=True).start()
+
+    def close(self):
+        """Stop the reader thread.
+
+        Nothing in the container calls this: the agent is its own process and the link lasts as
+        long as it does. It exists for the test suite, which constructs a SerialLink to feed
+        `_ingest` directly — and a reader that cannot stop kept retrying a connection nobody was
+        listening for, for the rest of the pytest session. Five tests were leaving one behind
+        each.
+        """
+        self._closed.set()
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def _connect(self):
         try:
@@ -130,11 +148,11 @@ class SerialLink:
                 self._console_total += 1
 
     def _reader(self):
-        while True:
+        while not self._closed.is_set():
             if self._sock is None:
                 self._connect()
                 if self._sock is None:
-                    time.sleep(1)
+                    self._closed.wait(1)      # sleep, but wake at once on close()
                     continue
             try:
                 data = self._sock.recv(4096)

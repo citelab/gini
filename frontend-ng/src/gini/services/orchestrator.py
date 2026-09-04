@@ -85,11 +85,56 @@ class Sim:
     def __init__(self) -> None:
         self.machines: dict[str, HostSim] = {}
         self._nodes: list = []
+        self._stop = threading.Event()
+        self._threads: list = []
 
     def start(self) -> None:
         for node in self._nodes:
-            threading.Thread(target=node.run, daemon=True).start()
+            t = threading.Thread(target=node.run, kwargs={"stop": self._stop}, daemon=True)
+            self._threads.append(t)
+            t.start()
         time.sleep(0.25)
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """End every node's loop and wait for its thread.
+
+        A node's `run()` is a select loop meant to last as long as its container, so nothing here
+        ended on its own — and `simulate()` runs those nodes IN-PROCESS. In the test suite that
+        left a thread per node still selecting on live sockets for the rest of the session, which
+        showed up as a segfault inside an unrelated Qt test, minutes later and nowhere near the
+        cause. `test_integration.py` even documented the symptom ("the in-process sims don't
+        release their sockets") and skipped around it.
+
+        Also closes the ports, so the fixed UDP binds are free for the next sim rather than held
+        until the process exits.
+        """
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=timeout)
+        self._threads.clear()
+        for node in self._nodes:
+            for port in getattr(node, "ports", None) or []:
+                try:
+                    port.sock.close()
+                except OSError:
+                    pass
+            for itf in getattr(node, "ifaces", None) or []:
+                try:
+                    itf.port.sock.close()
+                except OSError:
+                    pass
+            port = getattr(node, "port", None)
+            if port is not None:
+                try:
+                    port.sock.close()
+                except OSError:
+                    pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.stop()
 
     def ping(self, src: str, dst_ip: str, timeout: float = 3.0) -> bool:
         host = self.machines[src]

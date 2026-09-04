@@ -55,16 +55,26 @@ class Port:
             return None
 
 
-def run_loop(ports: list[Port], handler, tick=None, tick_interval: float = 0.5) -> None:
+def run_loop(ports: list[Port], handler, tick=None, tick_interval: float = 0.5,
+             stop=None) -> None:
     """Select over all ports; call handler(port, frame) for each frame.
 
     handler receives the Port the frame arrived on, so a node can identify its
     ingress port without any per-frame addressing.
+
+    `stop` is an optional `threading.Event` that ends the loop. In production nothing passes one:
+    a node IS its container's process and the loop is meant to run until the container stops, so
+    the default is exactly the `while True:` this has always been. It exists because the same
+    nodes are also run IN-PROCESS by `orchestrator.simulate()`, where a loop that cannot end
+    outlives whatever started it — and in the test suite that meant threads still selecting on
+    live sockets while a later Qt test tore its widgets down, which is a segfault with no
+    connection to the test that appears to fail. The loop already wakes every `tick_interval`, so
+    checking a flag costs nothing.
     """
     sel = selectors.DefaultSelector()
     for p in ports:
         sel.register(p.sock, selectors.EVENT_READ, p)
-    while True:
+    while not (stop is not None and stop.is_set()):
         events = sel.select(timeout=tick_interval)
         for key, _ in events:
             port: Port = key.data

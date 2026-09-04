@@ -16,6 +16,39 @@ from gini.domain import devices as dev
 from gini.domain import connection_rules as cr
 from gini.domain.topology import Topology
 from gini.runtime import gbridge as gb
+
+
+@pytest.fixture(autouse=True)
+def _stop_relays(monkeypatch):
+    """Stop every relay a test starts, however it started one.
+
+    `GBridge.run` is a `while True:` select loop — correct for production, where a gbridge IS its
+    container's process — so a relay put on a thread here runs for the REST of the pytest session.
+    Thirteen of them were, and they were the cause of the suite's random bus errors: still
+    selecting on live sockets while a later Qt test tore its widgets down.
+
+    Tracking the constructor rather than editing fifteen call sites, so a test added later is
+    covered without anyone having to remember this.
+    """
+    made = []
+    real = gb.GBridge
+
+    def track(*a, **k):
+        r = real(*a, **k)
+        made.append(r)
+        return r
+
+    monkeypatch.setattr(gb, "GBridge", track)
+    yield
+    for r in made:
+        r.stop()
+    for r in made:                       # the loop selects with a 0.5s timeout
+        for _ in range(20):
+            if not any(t.is_alive() for t in threading.enumerate()
+                       if t.name.startswith("Thread-")):
+                break
+            time.sleep(0.05)
+        break
 from gini.services import orchestrator as orch
 from gini.services.compiler import RuntimeCompiler, _valid_cidr
 

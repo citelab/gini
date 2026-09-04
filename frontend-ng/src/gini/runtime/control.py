@@ -19,6 +19,24 @@ class ControlServer(threading.Thread):
         self.path = path
         self.handler = handler
         self.banner = banner
+        self._srv: socket.socket | None = None   # held so stop() can break accept()
+
+    def stop(self) -> None:
+        """End the accept loop.
+
+        Unlike a select loop there is no timeout to check a flag on — `accept()` blocks until a
+        connection arrives — so the listening socket is closed underneath it and the resulting
+        OSError ends the thread. Production never calls this: the server belongs to a node that is
+        its own container process. Tests construct nodes in-process, and a thread that cannot be
+        stopped there outlives its test and runs for the rest of the session.
+        """
+        self._closed = True
+        srv, self._srv = self._srv, None
+        if srv is not None:
+            try:
+                srv.close()
+            except OSError:
+                pass
 
     def run(self) -> None:  # pragma: no cover - exercised via integration/in-process test
         try:
@@ -28,8 +46,12 @@ class ControlServer(threading.Thread):
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(self.path)
         srv.listen()
-        while True:
-            conn, _ = srv.accept()
+        self._srv = srv
+        while not getattr(self, "_closed", False):
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                break                            # stop() closed it underneath us
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
     def _serve(self, conn: socket.socket) -> None:
