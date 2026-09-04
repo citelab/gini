@@ -89,6 +89,17 @@ def missing_locally(refs, run=subprocess.run) -> list[str]:
     A marker is a cache. This is its invalidation: cheap, local, and the same question the
     orchestrator will ask at Run time.
 
+    MISSING MEANS "NOT THE IMAGE THIS VERSION WANTS", not "no image of that name". The two are not
+    the same, and taking them for the same hid a three-week regression: a machine that installed
+    6.0.0 in August still had `gini-xv6:latest` pointing at 6.0.0's kernel, so every check said
+    "present", `needs_update` believed a marker that claimed 6.6.0, and the panel never appeared.
+    Six releases of kernel work never arrived, and the first thing loud enough to notice was the
+    OS HUD reporting "this kernel has no board support" — during a class demo.
+
+    `local_name()` throws the version away by design (the runtime resolves `gini-xv6:latest`, and
+    the compose file names it that way), so the ONLY thing that can tell a current image from a
+    stale one is its id. Compare ids.
+
     An unreachable Docker returns [] rather than "everything is missing": that machine is already
     heading for NEEDS_RUNTIME, and guessing here would put a download in front of somebody whose
     engine is simply stopped.
@@ -97,26 +108,68 @@ def missing_locally(refs, run=subprocess.run) -> list[str]:
     if not names:
         return []
     try:
-        r = run(["docker", "image", "inspect", "--format", "{{.Id}}", *names],
-                capture_output=True, timeout=30)
+        # Both halves in ONE call: what each version wants, then what each plain name resolves to.
+        # The common case — everything current — still answers here, in a single docker invocation
+        # on a path that runs at every launch.
+        r = run(["docker", "image", "inspect", "--format", "{{.Id}}", *refs, *names],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         if r.returncode == 0:
-            return []                      # one call, and the common case answers here
+            ids = (r.stdout or "").split()
+            if len(ids) == len(refs) + len(names) and ids[:len(refs)] == ids[len(refs):]:
+                return []                  # each name resolves to the very image it should
     except Exception:                      # noqa: BLE001 — cannot ask; claim nothing
         return []
     missing = []
-    for ref, name in zip(refs, names):     # only when something IS missing, to say which
+    for ref, name in zip(refs, names):     # only when something is wrong, to say which
         try:
-            one = run(["docker", "image", "inspect", "--format", "{{.Id}}", name],
-                      capture_output=True, timeout=15)
-            # Before believing it is gone, check it is not merely UNNAMED. A tag Docker has lost
-            # track of looks identical to an absent image here, and the difference is a
-            # four-image download on every single launch versus a `docker tag` that takes no time
-            # at all. See `repair_tag`.
-            if one.returncode != 0 and not repair_tag(name, run=run):
-                missing.append(ref)
+            want = _image_id(ref, run=run)
+            have = _image_id(name, run=run)
+            if want and have == want:
+                continue                   # current
+            if have is None and repair_tag(name, run=run):
+                # Not absent, merely UNNAMED — Docker can lose a tag the image itself still
+                # claims. A `docker tag` costs nothing; a needless four-image download costs a
+                # gigabyte and a student's afternoon.
+                if _image_id(name, run=run) == want:
+                    continue
+            if want and _retag_from_local(ref, name, run=run):
+                # The wanted image IS here under its registry name; only the plain name points
+                # somewhere else. That is a rename, not a download — and it is exactly the state
+                # a half-finished upgrade leaves behind.
+                continue
+            missing.append(ref)
         except Exception:                  # noqa: BLE001
             missing.append(ref)
     return missing
+
+
+def _image_id(name: str, run=subprocess.run) -> str | None:
+    """Docker's id for `name`, or None if it does not resolve. Never raises."""
+    try:
+        r = run(["docker", "image", "inspect", "--format", "{{.Id}}", name],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        return (r.stdout or "").strip() or None if r.returncode == 0 else None
+    except Exception:                      # noqa: BLE001
+        return None
+
+
+def _retag_from_local(ref: str, name: str, run=subprocess.run) -> bool:
+    """Point `name` at `ref`, when `ref` is already on this machine. True once it really does.
+
+    The cheap half of "stale": the version's own image was pulled at some point but the plain
+    name was left pointing at an older one. Re-tagging is instant where a re-pull is a gigabyte,
+    and it is CONFIRMED afterwards rather than assumed — a `docker tag` that returns 0 without
+    moving the name would otherwise turn a visible problem into a silent wrong version, which is
+    the failure this whole change exists to end.
+    """
+    try:
+        if run(["docker", "tag", ref, name], capture_output=True, text=True, encoding="utf-8",
+               errors="replace", timeout=60).returncode != 0:
+            return False
+    except Exception:                      # noqa: BLE001
+        return False
+    want = _image_id(ref, run=run)
+    return want is not None and _image_id(name, run=run) == want
 
 
 #: A layer's line in `docker pull` output: "5711127a7748: Pull complete".
@@ -218,10 +271,24 @@ def pull_images(refs, run=subprocess.run, on_progress=None) -> list[tuple[str, b
     out = []
     for ref in refs:
         try:
+            name = local_name(ref)
             ok = pull_one(ref, on_progress=on_progress, run=run)
             if ok:
-                t = run(["docker", "tag", ref, local_name(ref)], timeout=60)
+                t = run(["docker", "tag", ref, name], timeout=60)
                 ok = t.returncode == 0
+            if ok:
+                # VERIFIED, not assumed. Two exit codes of 0 were the whole of the evidence here,
+                # and they were not enough: a machine wrote a marker recording four successful
+                # 6.6.0 pulls while none of the four images were on disk and every plain name
+                # still pointed at August's 6.0.0. Docker had reported success for a pull that
+                # left nothing behind.
+                #
+                # A marker is believed for weeks afterwards — `needs_update` only compares its
+                # version string — so a false success here is not one bad launch, it is every
+                # launch until somebody notices a kernel is three weeks stale. Asking Docker what
+                # the name resolves to costs one call per image at the end of a gigabyte download.
+                want = _image_id(ref, run=run)
+                ok = want is not None and _image_id(name, run=run) == want
             out.append((ref, ok))
         except Exception:
             out.append((ref, False))

@@ -29,10 +29,24 @@ def home(tmp_path, monkeypatch):
 
 class _Ran:
     returncode = 0
+    stdout = ""
+    stderr = ""
 
 
-def _docker_ok(*a, **k):
-    return _Ran()
+def _docker_ok(cmd=(), *a, **k):
+    """A docker where everything works AND every name resolves to the image it should.
+
+    It has to answer `image inspect --format {{.Id}}` with real ids now, not just an exit code:
+    the checks compare a version's own reference against the plain name the runtime resolves, so a
+    fake that reports "present" without an identity would pass a test the product cannot. One id
+    for everything is the honest shape of "this machine is current".
+    """
+    import subprocess as sp
+    cmd = list(cmd)
+    if cmd[:3] == ["docker", "image", "inspect"]:
+        names = cmd[5:] if cmd[3:5] == ["--format", "{{.Id}}"] else cmd[3:]
+        return sp.CompletedProcess(cmd, 0, "\n".join(["sha256:ok"] * len(names)) + "\n", "")
+    return sp.CompletedProcess(cmd, 0, "", "")
 
 
 @pytest.fixture
@@ -217,15 +231,27 @@ def test_a_pull_records_only_what_actually_arrived(monkeypatch, with_docker):
     monkeypatch.setattr(images, "find_backend", lambda hint=None: None)
     refs = images.image_refs("6.1.0")
 
-    def half(cmd, **k):
-        # Two calls per image now — `docker pull <ref>`, then `docker tag <ref> <name>:latest`, so
-        # the pulled image carries the name the runtime resolves. Both must succeed for the image
-        # to count, so key off the REF in either shape rather than the last argument.
-        target = cmd[2] if cmd[1] == "tag" else cmd[-1]
+    # Three steps per image now — pull, tag, then CONFIRM the name really resolves to the pulled
+    # image. The confirmation exists because two exit codes of 0 were once the whole of the
+    # evidence, and a machine recorded four successful pulls with none of the images on disk.
+    store: dict = {}
 
-        class R:
-            returncode = 0 if target == refs[0] else 1
-        return R()
+    def half(cmd, **k):
+        import subprocess as sp
+        if cmd[:2] == ["docker", "pull"]:
+            if cmd[2] != refs[0]:
+                return sp.CompletedProcess(cmd, 1, "", "not published")
+            store[cmd[2]] = "sha256:one"
+            return sp.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["docker", "tag"]:
+            store[cmd[3]] = store.get(cmd[2], "")
+            return sp.CompletedProcess(cmd, 0, "", "")
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            names = cmd[5:] if cmd[3:5] == ["--format", "{{.Id}}"] else cmd[3:]
+            if any(n not in store for n in names):
+                return sp.CompletedProcess(cmd, 1, "", "No such image")
+            return sp.CompletedProcess(cmd, 0, "\n".join(store[n] for n in names), "")
+        return sp.CompletedProcess(cmd, 0, "", "")
 
     r = B.execute(B.plan("6.1.0", run=_docker_ok), run=half)
     assert not r["ok"]

@@ -42,11 +42,55 @@ def test_image_refs_cover_all_custom_images():
     assert all(r.startswith(REGISTRY + "/") for r in refs)
 
 
+# --------------------------------------------------------------------------- #
+# a fake docker that has IDENTITIES, not just names
+# --------------------------------------------------------------------------- #
+# The old fakes answered "does this name exist" with an exit code and no output, which is exactly
+# the question that hid a three-week regression: a machine kept `gini-xv6:latest` pointing at
+# August's 6.0.0 while the marker claimed 6.6.0, and every check said present. So the fake now
+# models what Docker actually is — a map from name to image id — because the code under test now
+# asks which image a name resolves to.
+class FakeDocker:
+    def __init__(self, store: dict | None = None, tag_sticks: bool = True):
+        self.store = dict(store or {})       # name -> image id
+        self.tag_sticks = tag_sticks         # False = `docker tag` returns 0 and changes nothing
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, **kw):
+        import subprocess as sp
+        self.calls.append(list(cmd))
+        if cmd[:2] == ["docker", "pull"]:
+            ref = cmd[2]
+            if ref in self.pullable:
+                self.store[ref] = self.pullable[ref]
+                return sp.CompletedProcess(cmd, 0, "", "")
+            return sp.CompletedProcess(cmd, 1, "", "no such image")
+        if cmd[:2] == ["docker", "tag"]:
+            src, dst = cmd[2], cmd[3]
+            if self.tag_sticks and src in self.store:
+                self.store[dst] = self.store[src]
+            return sp.CompletedProcess(cmd, 0, "", "")
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            names = cmd[5:] if cmd[3:5] == ["--format", "{{.Id}}"] else cmd[3:]
+            if any(n not in self.store for n in names):
+                return sp.CompletedProcess(cmd, 1, "", "No such image")
+            return sp.CompletedProcess(cmd, 0, "\n".join(self.store[n] for n in names) + "\n", "")
+        if cmd[:2] == ["docker", "images"]:
+            rows = "\n".join(f"{i} {n}" for n, i in self.store.items())
+            return sp.CompletedProcess(cmd, 0, rows, "")
+        return sp.CompletedProcess(cmd, 0, "", "")
+
+    pullable: dict = {}
+
+
+XV6 = f"{REGISTRY}/gini-xv6:6.6.0"
+POX = f"{REGISTRY}/gini-pox:6.6.0"
+
+
 def test_pull_images_records_success_and_failure():
-    def fake_run(cmd, **kw):
-        ok = "gini-xv6" in cmd[-1]
-        return types.SimpleNamespace(returncode=0 if ok else 1)
-    res = dict(images.pull_images(["r/gini-xv6:1", "r/gini-oszoo:1"], run=fake_run))
+    d = FakeDocker()
+    d.pullable = {"r/gini-xv6:1": "sha256:aaa"}          # oszoo is not published
+    res = dict(images.pull_images(["r/gini-xv6:1", "r/gini-oszoo:1"], run=d))
     assert res["r/gini-xv6:1"] is True and res["r/gini-oszoo:1"] is False
 
 
@@ -64,16 +108,12 @@ def test_a_pull_also_tags_the_image_under_the_name_the_runtime_looks_for():
     — and the error surfaced later, elsewhere, as "the gRouter image isn't built yet", pointing at
     a backend/ that a wheel does not contain.
     """
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(list(cmd))
-        return types.SimpleNamespace(returncode=0)
-
     ref = f"{REGISTRY}/gini-grouter:6.1.0"
-    assert dict(images.pull_images([ref], run=fake_run))[ref] is True
-    assert ["docker", "pull", ref] in calls
-    assert ["docker", "tag", ref, "gini-grouter:latest"] in calls
+    d = FakeDocker()
+    d.pullable = {ref: "sha256:grouter"}
+    assert dict(images.pull_images([ref], run=d))[ref] is True
+    assert ["docker", "pull", ref] in d.calls
+    assert ["docker", "tag", ref, "gini-grouter:latest"] in d.calls
 
 
 def test_an_image_that_pulls_but_cannot_be_tagged_counts_as_a_failure():
@@ -100,28 +140,20 @@ def test_every_os_says_how_to_START_the_runtime_not_only_how_to_install_it():
         assert runtime.runtime_plan(os_name).get("start"), os_name
 
 
-def test_missing_locally_asks_docker_by_the_name_the_runtime_resolves():
-    """Not by the registry reference — that is the name nothing looks for."""
-    seen = []
-
-    def fake(cmd, **k):
-        seen.append(list(cmd))
-        return types.SimpleNamespace(returncode=0)
-
-    assert images.missing_locally([f"{REGISTRY}/gini-xv6:6.1.1"], run=fake) == []
-    assert "gini-xv6:latest" in seen[0]
-    assert not any(c.startswith("ghcr.io") for c in seen[0])
+def test_missing_locally_asks_about_the_ref_AND_the_name_it_resolves_to():
+    """Both, and that is the fix. The runtime looks up `gini-xv6:latest`, so that name has to be
+    asked about — but asking ONLY about it cannot tell 6.6.0's kernel from August's, because
+    `local_name` has already thrown the version away."""
+    d = FakeDocker({XV6: "sha256:new", "gini-xv6:latest": "sha256:new"})
+    assert images.missing_locally([XV6], run=d) == []
+    first = d.calls[0]
+    assert "gini-xv6:latest" in first, "the name the runtime resolves"
+    assert XV6 in first, "and the version that name is supposed to be"
 
 
 def test_missing_locally_names_exactly_what_is_gone():
-    refs = [f"{REGISTRY}/gini-xv6:6.1.1", f"{REGISTRY}/gini-pox:6.1.1"]
-
-    def fake(cmd, **k):
-        names = [c for c in cmd if c.endswith(":latest")]
-        present = len(names) == 1 and names[0].startswith("gini-pox")   # pox here, xv6 not
-        return types.SimpleNamespace(returncode=0 if present else 1)
-
-    assert images.missing_locally(refs, run=fake) == [f"{REGISTRY}/gini-xv6:6.1.1"]
+    d = FakeDocker({POX: "sha256:pox", "gini-pox:latest": "sha256:pox"})   # pox here, xv6 not
+    assert images.missing_locally([XV6, POX], run=d) == [XV6]
 
 
 def test_an_unreachable_docker_does_not_claim_the_images_are_gone():
@@ -206,15 +238,12 @@ def test_an_image_that_is_really_gone_is_still_reported():
 
 
 def test_the_common_case_still_costs_one_call():
-    """When everything resolves, nothing else is asked — this runs on every launch."""
-    calls = []
-
-    def run(argv, **kw):
-        import subprocess as sp
-        calls.append(argv[:3])
-        return sp.CompletedProcess(argv, 0, "", "")
-    assert images.missing_locally([f"{REGISTRY}/gini-xv6:6.5.2"], run=run) == []
-    assert len(calls) == 1, "the healthy path must not list or tag anything"
+    """When every name resolves to the image its version wants, nothing else is asked — this runs
+    at every launch, so the healthy path must stay a single docker invocation even though it now
+    asks a harder question."""
+    d = FakeDocker({XV6: "sha256:new", "gini-xv6:latest": "sha256:new"})
+    assert images.missing_locally([XV6], run=d) == []
+    assert len(d.calls) == 1, "the healthy path must not inspect twice, list, or tag"
 
 
 def test_repair_tag_uses_the_run_it_is_given():
@@ -223,3 +252,80 @@ def test_repair_tag_uses_the_run_it_is_given():
     it is what these tests did until the binding moved into the body."""
     import inspect as _inspect
     assert _inspect.signature(images.repair_tag).parameters["run"].default is None
+
+
+# --------------------------------------------------------------------------- #
+# a name that resolves to the WRONG image
+# --------------------------------------------------------------------------- #
+# Found on a real machine, three weeks after it happened. Installed 6.0.0 in August; every upgrade
+# since left `gini-xv6:latest` pointing at August's kernel. `local_name()` discards the version by
+# design, so "is gini-xv6 present?" answered yes every time, `needs_update` believed a marker that
+# claimed 6.6.0, and the panel never appeared. Six releases of kernel work never arrived, and the
+# first symptom loud enough to notice was the OS HUD reporting "this kernel has no board support"
+# — in front of a class.
+OLD, NEW = "sha256:august", "sha256:current"
+
+
+def test_a_stale_image_is_missing_even_though_the_name_resolves():
+    """THE bug. The name is there, the image behind it is three weeks old, and every check that
+    asks only about presence says the machine is ready."""
+    d = FakeDocker({"gini-xv6:latest": OLD})          # the 6.6.0 ref was never pulled
+    assert images.missing_locally([XV6], run=d) == [XV6]
+
+
+def test_a_current_image_is_not_reported_missing():
+    d = FakeDocker({XV6: NEW, "gini-xv6:latest": NEW})
+    assert images.missing_locally([XV6], run=d) == []
+
+
+def test_a_stale_name_is_retagged_rather_than_re_downloaded():
+    """The cheap half. When the version's own image IS here and only the plain name points
+    elsewhere — what a half-finished upgrade leaves behind — that is a rename, not a gigabyte."""
+    d = FakeDocker({XV6: NEW, "gini-xv6:latest": OLD})
+    assert images.missing_locally([XV6], run=d) == []
+    assert ["docker", "tag", XV6, "gini-xv6:latest"] in d.calls
+    assert d.store["gini-xv6:latest"] == NEW
+
+
+def test_a_retag_that_does_not_stick_is_not_believed():
+    """`docker tag` returning 0 is not evidence the name moved — this machine has been seen to
+    report exactly that. An unconfirmed repair would turn a visible problem into a silent wrong
+    version, which is the failure this whole change exists to end."""
+    d = FakeDocker({XV6: NEW, "gini-xv6:latest": OLD}, tag_sticks=False)
+    assert images.missing_locally([XV6], run=d) == [XV6]
+
+
+def test_the_check_survives_a_docker_that_answers_nothing():
+    """An unreachable engine must not read as "every image is gone" — that machine is heading for
+    NEEDS_RUNTIME, and a download offered to someone whose Docker is merely stopped is noise."""
+    def dead(cmd, **k):
+        raise OSError("docker not running")
+    assert images.missing_locally([XV6], run=dead) == []
+
+
+# --------------------------------------------------------------------------- #
+# a pull is verified, not assumed
+# --------------------------------------------------------------------------- #
+def test_a_pull_is_confirmed_by_asking_what_the_name_resolves_to():
+    d = FakeDocker()
+    d.pullable = {XV6: NEW}
+    assert dict(images.pull_images([XV6], run=d))[XV6] is True
+    assert d.store["gini-xv6:latest"] == NEW
+
+
+def test_a_pull_that_reports_success_but_leaves_nothing_is_a_failure():
+    """The state a real marker was found in: four 6.6.0 pulls recorded as successful, none of the
+    images on disk, every plain name still on August's. Two exit codes of 0 were the whole of the
+    evidence, and a marker is believed for weeks afterwards — so a false success here is not one
+    bad launch, it is every launch until somebody notices."""
+    d = FakeDocker({"gini-xv6:latest": OLD})
+    d.pullable = {}                                   # `docker pull` will refuse
+    assert dict(images.pull_images([XV6], run=d))[XV6] is False
+
+
+def test_a_tag_that_silently_does_not_move_the_name_is_a_failure():
+    """Pull succeeds, tag returns 0, and the name still points at the old image. Recording that as
+    success is what let a stale kernel run for three weeks."""
+    d = FakeDocker({"gini-xv6:latest": OLD}, tag_sticks=False)
+    d.pullable = {XV6: NEW}
+    assert dict(images.pull_images([XV6], run=d))[XV6] is False
