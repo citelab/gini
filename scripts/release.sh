@@ -85,6 +85,32 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
   exit 1
 fi
 
+# The two halves share a namespace and a release number, and pip will NOT upgrade a dependency that
+# a floor already satisfies. 6.8.0 added `regions_from_leaves` to gini.domain while leaving the
+# floor at >=6.3.2, so every `pipx upgrade` kept a 6.7.0 core beside a 6.8.0 toolkit and the xv6
+# bridge died on "cannot import name regions_from_leaves". Fresh installs resolved to the newest
+# core and worked, which is exactly why nothing caught it before students did.
+#
+# They are always published together by this tag, so the floor is always this version. Checked
+# rather than remembered: "raise it when you add a domain symbol" is not a rule a person can keep.
+for pp in frontend-ng/pyproject.toml teaching-center/pyproject.toml; do
+  have="$(grep -oE 'gini-core>=[0-9]+\.[0-9]+\.[0-9]+' "$pp" | head -1 | sed 's/.*>=//')"
+  if [ "$have" != "$VERSION" ]; then
+    cat >&2 <<MSG
+
+$pp declares gini-core>=${have:-(none)}, but this release is $VERSION.
+
+An older core beside a newer toolkit fails at IMPORT, not at install, and only on upgrade — pip
+leaves a dependency alone when the floor already allows it. Set it to the version being cut:
+
+    sed -i '' 's/gini-core>=${have}/gini-core>=$VERSION/' $pp
+
+then commit and re-run this.
+MSG
+    exit 1
+  fi
+done
+
 # Images are built AFTER a tag (see the note this script prints at the end), so this cannot check
 # the version being cut — the newest thing it CAN check is the last release, and cutting a new one
 # on top of a broken one just buries the problem. Fails soft if the registry cannot be read: a

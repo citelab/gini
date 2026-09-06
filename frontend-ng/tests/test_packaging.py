@@ -356,3 +356,66 @@ def test_both_distributions_pin_a_FLOOR_on_gini_core():
         assert line, f"{name} does not depend on gini-core at all"
         assert re.search(r"gini-core\s*>=\s*\d+\.\d+", line), \
             f"{name} depends on gini-core without a version floor: {line.strip()}"
+
+
+# -- a floor that exists is not the same as a floor that is CURRENT ------------ #
+#
+# `test_both_distributions_pin_a_FLOOR_on_gini_core` above checks that a floor is declared. 6.8.0
+# passed it and shipped broken anyway, because the floor said `>=6.3.2` while the release added
+# `regions_from_leaves` to `gini.domain.xv6_vm`. pip does not upgrade a dependency whose floor is
+# already satisfied, so every `pipx upgrade gini-toolkit` kept a 6.7.0 core beside a 6.8.0 toolkit:
+#
+#     xv6 live bridge unavailable for M1:
+#       cannot import name 'regions_from_leaves' from 'gini.domain.xv6_vm'
+#
+# A FRESH install resolved to the newest core and worked perfectly, which is exactly why nothing
+# caught it before students did. The instruction in the pyproject was "raise it with any new
+# gini.domain use" — not a rule a person can keep. These check it instead.
+
+
+def _core_floor(p: Path) -> tuple:
+    m = re.search(r"gini-core\s*>=\s*(\d+)\.(\d+)\.(\d+)", p.read_text(encoding="utf-8"))
+    assert m, f"{p} declares no three-part gini-core floor"
+    return tuple(int(x) for x in m.groups())
+
+
+def _last_release() -> tuple | None:
+    """The newest vX.Y.Z tag, or None outside a git checkout (a wheel, a tarball)."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "tag", "--list", "v[0-9]*"], cwd=_ROOT,
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    seen = [tuple(int(x) for x in m.groups())
+            for m in (re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", t) for t in (r.stdout or "").split())
+            if m]
+    return max(seen) if seen else None
+
+
+def test_the_core_floor_is_not_older_than_the_last_release():
+    """The check that would have caught 6.8.0 — and been red for five releases before it."""
+    last = _last_release()
+    if last is None:
+        pytest.skip("not a git checkout — no tags to compare against")
+    for p in (TOOLKIT, TC):
+        have = _core_floor(p)
+        assert have >= last, (
+            f"{p.name} declares gini-core>={'.'.join(map(str, have))} but "
+            f"{'.'.join(map(str, last))} is already released. An upgrading user keeps the old "
+            f"core and imports fail; a fresh install works, so this hides. The floor is always "
+            f"the release version — scripts/release.sh refuses to tag otherwise.")
+
+
+def test_both_packages_ask_for_the_same_core():
+    """They are cut by one tag and published together, so two different floors can only be a
+    forgotten edit — and the lower one is the bug."""
+    assert _core_floor(TOOLKIT) == _core_floor(TC)
+
+
+def test_the_release_script_checks_the_floor_before_tagging():
+    """Belt and braces, and the two halves catch different things: this file catches a floor that
+    lags a PUBLISHED release, the script catches one that lags the release being CUT. Losing the
+    script's half leaves a window exactly one release wide, which is all the last one needed."""
+    assert "gini-core>=" in (_ROOT / "scripts" / "release.sh").read_text(encoding="utf-8"), \
+        "release.sh no longer verifies the core floor"

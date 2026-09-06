@@ -19,7 +19,7 @@ authors = [{ name = "GINI Toolkit" }]
 # older core and fail at the first download with `No module named 'gini.domain.project'`. That
 # happened while verifying 6.3.1. All three ship from one tag, so the floor is simply the release
 # that introduced whatever this now needs; raise it whenever a new gini.domain module is used.
-dependencies = ["gini-core>=6.3.2"]
+dependencies = ["gini-core>=6.8.1"]   # always the release version — see scripts/release.sh
 
 [project.urls]
 Homepage = "https://github.com/citelab/gini"

@@ -3758,9 +3758,20 @@ class MainWindow(QMainWindow):
             self._storage = StorageLab(self, self.theme, device=xv6, provider=ms.fs, state=ms)
             self._storage.show(); self._storage.raise_()
             return
-        if not getattr(ms, "live", False) or not hasattr(ms.provider, "console"):
+        # `ms.live` is not an attribute MachineState has ever had — `live` is a WIDGET flag
+        # (MachineLab, CpuLab, LockLab each set their own). So `getattr(ms, "live", False)` was
+        # always False and this returned every single time: double-clicking a Terminal opened
+        # nothing and printed "Start the topology (Run)" at a topology that was already running.
+        # `has_real()` is the question that was meant, and it is the one MachineState answers.
+        if not ms.has_real():
             self.ctx.log(f"Start the topology (Run) so {xv6.name} is booted, then open "
                          f"{dev.name}.", "info")
+            return
+        if not hasattr(ms.provider, "console"):
+            # A kernel IS attached; this Machine is just being viewed in Demo mode, and telling
+            # somebody to Run a topology that is already running sends them to fix the wrong thing.
+            self.ctx.log(f"{xv6.name} is showing Demo data, so there is no console to open. "
+                         f"Switch it to Real in the Machine Lab, then open {dev.name}.", "info")
             return
         from .peripherals import TerminalView
         self._peripheral = TerminalView(self, self.theme, ms.provider, dev)
@@ -3778,7 +3789,10 @@ class MainWindow(QMainWindow):
         try:
             self._retire_lab("_machine_lab")
             self._machine_lab = MachineLab(
-                self, self.theme, dev, state=ms, live=getattr(ms, "live", False),
+                # No `live=`: the parameter exists but MachineLab overrides it from the data
+                # mode two lines into __init__, and the value passed here was the same phantom
+                # `ms.live` that broke the Terminal above. Passing it read as if it did something.
+                self, self.theme, dev, state=ms,
                 on_console=lambda: self._open_terminal(device_id),
                 on_log=lambda lvl, msg: self.ctx.bus.log.emit(lvl, msg))  # mirror to GINI Console
         except Exception as e:

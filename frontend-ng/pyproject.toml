@@ -14,9 +14,21 @@ authors = [{ name = "GINI Toolkit" }]
 # container runtime (Docker/Colima) and images are NOT pip-installable — gBuilder detects what is
 # missing at launch and offers to bring them in (gini/services/bootstrap.py).
 dependencies = [
-    "gini-core>=6.3.2",          # A FLOOR, not a bare name: the two halves share a namespace and
+    "gini-core>=6.8.1",          # A FLOOR, not a bare name: the two halves share a namespace and
     #                              a release number, and an older core beside a newer toolkit fails
-    #                              at import, not at install. Raise it with any new gini.domain use.
+    #                              at import, not at install.
+    #
+    #                              "Raise it with any new gini.domain use" was the rule here and it
+    #                              is not one a person can keep: 6.8.0 added regions_from_leaves to
+    #                              gini.domain.xv6_vm, left this at >=6.3.2, and pip does not
+    #                              upgrade a dependency a floor already satisfies — so every pipx
+    #                              upgrade kept a 6.7.0 core beside a 6.8.0 toolkit and the xv6
+    #                              bridge died on "cannot import name regions_from_leaves". Fresh
+    #                              installs were fine, which is why nothing caught it.
+    #
+    #                              So the rule is now mechanical and checked: the two are always
+    #                              published together by one tag, so this ALWAYS equals the release
+    #                              version, and scripts/release.sh refuses to tag when it does not.
     #                              the shared domain model + proof format. Split out so a headless
     #                              Teaching Center can install it without dragging in Qt, and so
     #                              there is exactly ONE copy of the format both sides must agree on.
