@@ -356,3 +356,47 @@ def test_console_since_streams_delta():
     br = Xv6Bridge(AgentClient("http://x:5000", get=get, post=lambda u: "{}"))
     text, nxt = br.console_since(10)
     assert text == "README cat\n" and nxt == 42
+
+
+# -- B2: `have` is an observation, not a claim --------------------------------- #
+# A full /vm dump: vm-shadow counters, the page-allocator line, then vmprint's leaves.
+FULL_VM = (
+    "VMF handled 3 fellthrough 412\n"
+    "KA free 32000 total 32768 maxrun 30000 shadow 1\n"
+    "page table 0x87f6e000\n"
+    " .. .. ..0: pte 0x1b pa 0x87001000\n"     # text
+    " .. .. ..1: pte 0x17 pa 0x87002000\n"     # data
+    " .. .. ..2: pte 0x07 pa 0x87003000\n"     # guard (U cleared by uvmclear)
+    " .. .. ..3: pte 0x17 pa 0x87004000\n"     # stack
+)
+
+
+class _OneText:
+    def __init__(self, text):
+        self.text = text
+
+    def get_text(self, _url):
+        return self.text
+
+
+def test_have_reflects_what_actually_parsed():
+    """It used to be the literal ("pagetable",) — a claim rather than an observation, and a false
+    one: the KA line in the same dump reached the snapshot while this tuple said it had not."""
+    from gini.runtime.xv6_bridge import _VmReader
+    full = _VmReader(_OneText(FULL_VM)).snapshot()
+    assert set(full.have) == {"pagetable", "phys", "frag", "vmfault", "regions"}
+    assert full.derived == ("regions",), "the region map is worked out, not reported"
+    assert full.phys.total_pages == 32768
+
+
+def test_a_kernel_without_the_allocator_line_does_not_claim_one():
+    from gini.runtime.xv6_bridge import _VmReader
+    no_ka = _VmReader(_OneText("\n".join(FULL_VM.splitlines()[2:]))).snapshot()
+    assert "phys" not in no_ka.have and "frag" not in no_ka.have
+    assert "pagetable" in no_ka.have and no_ka.ok
+
+
+def test_a_read_that_yields_nothing_claims_nothing():
+    from gini.runtime.xv6_bridge import _VmReader
+    dead = _VmReader(_OneText("")).snapshot()
+    assert dead.ok is False and dead.have == () and dead.source == "real"

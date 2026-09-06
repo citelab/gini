@@ -90,7 +90,10 @@ class Region:
 
     @property
     def pages(self) -> int:
-        return max((self.end - self.start) // PGSIZE, 1)
+        # +1 because `end` is the region's LAST BYTE, not one past it (see region_for). Without
+        # it every multi-page region reports one page short — invisible while the only regions
+        # were the demo's single-page ones, wrong the moment they are derived from a real heap.
+        return max((self.end - self.start + 1) // PGSIZE, 1)
 
 
 @dataclass
@@ -163,6 +166,10 @@ class VmSnapshot:
     source: str = "real"
     ok: bool = True
     have: tuple = ("pagetable", "faults")
+    #: Of `have`, which panels GINI worked out rather than the kernel reporting. The distinction
+    #: is the one this course teaches, so the UI says "(derived)" instead of quietly presenting an
+    #: inference as a measurement.
+    derived: tuple = ()
     # vm-shadow telemetry: faults the student's handler took vs. ones that fell through to the
     # shipped implementation. `handled == 0` while their shadow is enabled means it never answers.
     vmf_handled: int = 0
@@ -205,7 +212,14 @@ def parse_vmprint(text: str) -> VmSnapshot:
             # the bits every page-replacement algorithm runs on — live in the same word, and
             # were being dropped here, so nothing downstream could ever show them.
             leaves.append(Pte(va=va, pa=pa, perms=perms(pte), valid=bool(pte & 1), flags=pte))
-    return VmSnapshot(satp=satp, leaves=leaves, **_vmf_counts(text))
+    counts = _vmf_counts(text)
+    # ONE source for both bars. The KA line already fed the fragmentation gauge while `phys` was
+    # left at its zero default, so the same dump drew a working frag bar beside a physical bar
+    # reading "0 used / 0 free of 0 pages" — two panels disagreeing about free memory, which is
+    # exactly the thing a sharp student notices and an instructor cannot explain on the spot.
+    phys = PhysMem(total_pages=counts.get("total_pages", 0),
+                   free_pages=counts.get("free_pages", 0))
+    return VmSnapshot(satp=satp, leaves=leaves, phys=phys, **counts)
 
 
 _VMF_RE = re.compile(r"VMF handled (\d+) fellthrough (\d+)")
@@ -329,6 +343,83 @@ def memory_summary(vm: VmSnapshot) -> str:
     return "\n".join(lines)
 
 
+#: User stack pages — mirrors USERSTACK in the kernel's param.h, which is 1 today. It is a
+#: plausible thing for an assignment to change, which is the argument for having the kernel report
+#: its own layout (one printf, with the next image) rather than keeping a constant in step by hand.
+USERSTACK = 1
+
+
+def _fixed_regions(leaves) -> list:
+    """The two kernel pages every user address space carries, when they are actually mapped."""
+    out = []
+    for name, va in (("trapframe", TRAPFRAME), ("trampoline", TRAMPOLINE)):
+        pte = next((x for x in (leaves or []) if x.va == va), None)
+        if pte is not None:
+            out.append(Region(name, va, va + PGSIZE - 1, pte.perms))
+    return out
+
+
+def regions_from_leaves(leaves, sz: int = 0) -> list:
+    """Work out the address-space regions from the leaf mappings. DERIVED, not reported.
+
+    ANCHORED ON THE GUARD PAGE rather than on arithmetic from `p->sz`, and that is the whole
+    design. exec() lays out `text | data | guard | stack` and leaves sz at the top of the stack —
+    but `growproc` then grows sz UPWARD, so in this xv6 the heap lives ABOVE the stack, not
+    between data and it. Locating the guard as `sz - (USERSTACK+1)*PGSIZE` is therefore right only
+    until the first sbrk: it breaks exactly when a student runs `alloc` and watches the heap grow,
+    which is the one case this panel exists for.
+
+    The guard page identifies itself instead. `uvmalloc` maps with `PTE_R|PTE_U|xperm` and
+    `uvmclear` then clears ONLY `PTE_U`, so the guard is the single leaf below TRAPFRAME that is
+    valid and NOT user — every other user-space page has U set. That signature does not move when
+    sz does.
+
+    `sz` remains an optional refinement: given it, the heap runs to the process's real break;
+    without it, to the last mapped page. The two agree unless a lazy-allocation shadow is
+    deferring work, and in that case the page table on screen already tells the truer story.
+
+    Returns [] when there is nothing to say. A blank strip is better than a confident wrong map.
+    """
+    below = [x for x in (leaves or []) if x.valid and x.va < TRAPFRAME]
+    user = sorted((x for x in below if x.user), key=lambda x: x.va)
+    # "Valid and not user" alone is not the guard: a page table holding only kernel-ish leaves
+    # (a truncated dump, an early exec) would hand one back and this would invent a guard and a
+    # stack out of a single mapping. The guard is defined by its POSITION — uvmclear clears U on
+    # the page directly below the stack — so require at least one user page above it.
+    guard = next((x for x in below if not x.user and any(u.va > x.va for u in user)), None)
+    perms_at = {x.va: x.perms for x in below}
+    out: list = []
+
+    text_end = 0
+    for pte in user:                     # the leading run of executable pages IS the text
+        if "x" not in pte.perms:
+            break
+        text_end = pte.va + PGSIZE
+    if text_end:
+        out.append(Region("text", 0, text_end - 1, perms_at.get(0, "r-x-")))
+
+    top_mapped = (user[-1].va + PGSIZE) if user else 0
+    if guard is None:
+        # No uvmclear signature, so nothing says where a stack begins. Do NOT invent one: name
+        # what is left "data" and let the page table speak for the rest.
+        if top_mapped > text_end:
+            out.append(Region("data", text_end, top_mapped - 1,
+                              perms_at.get(text_end, "rw-u")))
+        return out + _fixed_regions(leaves)
+
+    g = guard.va
+    if g > text_end:
+        out.append(Region("data", text_end, g - 1, perms_at.get(text_end, "rw-u")))
+    out.append(Region("guard", g, g + PGSIZE - 1, guard.perms))
+    stack_top = g + (USERSTACK + 1) * PGSIZE
+    out.append(Region("stack", g + PGSIZE, stack_top - 1,
+                      perms_at.get(g + PGSIZE, "rw-u")))
+    brk = max(int(sz or 0), top_mapped)
+    if brk > stack_top:                  # sbrk has grown the space past the stack
+        out.append(Region("heap", stack_top, brk - 1, perms_at.get(stack_top, "rw-u")))
+    return out + _fixed_regions(leaves)
+
+
 def region_for(va: int, regions) -> str:
     for r in regions:
         if r.start <= va <= r.end:          # end is the region's last byte (inclusive)
@@ -373,9 +464,14 @@ class DemoVm:
         ]
 
     def snapshot(self) -> VmSnapshot:
+        # The allocator counters too, so the fragmentation gauge has something to draw. Without
+        # them the demo told a student to "rebuild the xv6 image" — advice that means nothing in
+        # a mode whose whole point is that there is no image.
         return VmSnapshot(satp=self.satp, leaves=list(self._leaves), regions=self._regions(),
                           phys=self.phys, faults=list(self._fault_log), source="demo",
-                          have=("pagetable", "regions", "phys", "faults"))
+                          free_pages=self.phys.free_pages, total_pages=self.phys.total_pages,
+                          max_free_run=int(self.phys.free_pages * 0.92),
+                          have=("pagetable", "regions", "phys", "frag", "faults"))
 
     def simulate_fault(self) -> VmSnapshot:
         """Grow the stack by one page on a fault (lazy/demand allocation): record the fault,

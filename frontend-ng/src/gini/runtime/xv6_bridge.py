@@ -26,7 +26,9 @@ from ..domain.xv6_fs import (
     FsSnapshot, Superblock, layout, parse_balloc, parse_bcache, parse_logheader,
     parse_superblock,
 )
-from ..domain.xv6_vm import VmSnapshot, parse_faults, parse_vmall, parse_vmprint
+from ..domain.xv6_vm import (
+    VmSnapshot, parse_faults, parse_vmall, parse_vmprint, regions_from_leaves,
+)
 
 # must match gini_pick() in gini_patch.py: 0=round-robin 1=priority 2=lottery. Custom student
 # policies (MLFQ, stride, …) get their own ids when added via the Scheduler Builder.
@@ -81,13 +83,33 @@ class _VmReader:
         self.agent = agent
 
     def snapshot(self):
-        # REAL only: return the live page table, or an explicit no-data VmSnapshot. Never fake.
-        # The region map + physical-allocator bar aren't dumped for real yet, so they're left
-        # empty (not in `have`) rather than borrowed from the demo.
+        """REAL only: the live page table, or an explicit no-data VmSnapshot. Never fake.
+
+        `have` is COMPUTED FROM WHAT PARSED, the same way `_FsReader` does it. It used to be the
+        literal `("pagetable",)`, which was a claim rather than an observation — and a false one:
+        the `KA` line in this very dump carries the physical allocator's free/total counts, they
+        were parsed, and they reached the snapshot. That one hardcoded tuple then told the face
+        they had not, so the fragmentation gauge (which reads the numbers directly) drew real
+        memory next to a physical bar reading "0 used / 0 free of 0 pages".
+        """
         try:
             vm = parse_vmprint(self.agent.get_text("/vm"))
             if vm.leaves:                               # got real mappings
-                vm.source, vm.ok, vm.have = "real", True, ("pagetable",)
+                have, derived = ["pagetable"], []
+                if vm.phys.total_pages:                 # the KA line was present
+                    have += ["phys", "frag"]
+                if vm.vmf_handled or vm.vmf_fell:
+                    have.append("vmfault")
+                regions = regions_from_leaves(vm.leaves)
+                if regions:
+                    # Worked out from the leaves, not dumped by the kernel — so it is declared in
+                    # BOTH tuples and the panel says "(derived)". Hiding the distinction would be
+                    # a poor trade for one word of chrome in a course about address spaces.
+                    vm.regions = regions
+                    have.append("regions")
+                    derived.append("regions")
+                vm.source, vm.ok = "real", True
+                vm.have, vm.derived = tuple(have), tuple(derived)
                 return vm
         except Exception:
             pass

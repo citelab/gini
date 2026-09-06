@@ -1,7 +1,21 @@
 """xv6 virtual-memory model — vmprint parsing, permission decode, and the DemoVm allocator."""
 from gini.domain.xv6_vm import (
-    TRAMPOLINE, DemoVm, accessed, ad_str, classify_faults, dirty, parse_faults, parse_vmall,
-    parse_vmprint, perms, region_for, shared_frames,
+    TRAMPOLINE,
+    TRAPFRAME,
+    DemoVm,
+    Pte,
+    Region,
+    accessed,
+    ad_str,
+    classify_faults,
+    dirty,
+    parse_faults,
+    parse_vmall,
+    parse_vmprint,
+    perms,
+    region_for,
+    regions_from_leaves,
+    shared_frames,
 )
 
 # xv6 vmprint() output: root, three level-2 entries, and leaf mappings at level 0.
@@ -154,3 +168,107 @@ def test_vmf_telemetry_optional():
     assert (with_vmf.vmf_handled, with_vmf.vmf_fell) == (12, 3)
     older = parse_vmprint("page table 0x1")    # kernel built before the vm shadow
     assert (older.vmf_handled, older.vmf_fell) == (0, 0)
+
+
+# -- B1/B4: the numbers the kernel already sent -------------------------------- #
+# A full /vm dump: the vm-shadow counters, the page-allocator line, then vmprint's tree. The
+# leaves are one exec'd process after two sbrk pages — note the heap sits ABOVE the stack, which
+# is what growproc() does in this xv6 and what makes sz-arithmetic the wrong way to find a guard.
+VMDUMP = (
+    "VMF handled 3 fellthrough 412\n"
+    "KA free 32000 total 32768 maxrun 30000 shadow 1\n"
+    "page table 0x87f6e000\n"
+    " .. .. ..0: pte 0x1b pa 0x87001000\n"     # text   r-xu
+    " .. .. ..1: pte 0x17 pa 0x87002000\n"     # data   rw-u
+    " .. .. ..2: pte 0x07 pa 0x87003000\n"     # guard  rw--  <- uvmclear cleared U, only here
+    " .. .. ..3: pte 0x17 pa 0x87004000\n"     # stack  rw-u
+    " .. .. ..4: pte 0x17 pa 0x87005000\n"     # heap   rw-u  (sbrk grew past the stack)
+    " .. .. ..5: pte 0x17 pa 0x87006000\n"
+)
+
+
+def test_the_ka_line_fills_the_physical_bar():
+    """The bug in one assertion: these numbers arrived, were parsed, and were dropped on the
+    floor, so the physical bar read "0 used / 0 free of 0 pages" beside a working frag gauge."""
+    vm = parse_vmprint(VMDUMP)
+    assert vm.phys.total_pages == 32768 and vm.phys.free_pages == 32000
+    assert vm.phys.used_pages == 768
+    # and it must agree with the fragmentation gauge, which reads the same line by another route
+    assert (vm.total_pages, vm.free_pages) == (vm.phys.total_pages, vm.phys.free_pages)
+
+
+def test_a_kernel_without_the_allocator_line_reports_no_physical_data():
+    """Absent, not zero — the caller has to be able to tell "no allocator" from "no memory"."""
+    vm = parse_vmprint("page table 0x87f6e000\n .. .. ..0: pte 0x1b pa 0x87001000\n")
+    assert vm.phys.total_pages == 0 and vm.phys.free_pages == 0
+
+
+def test_the_vm_shadow_counters_survive_to_the_snapshot():
+    vm = parse_vmprint(VMDUMP)
+    assert (vm.vmf_handled, vm.vmf_fell) == (3, 412)
+
+
+# -- B3: regions derived from the leaves --------------------------------------- #
+def test_regions_are_derived_from_the_leaves():
+    vm = parse_vmprint(VMDUMP)
+    regs = {r.name: r for r in regions_from_leaves(vm.leaves)}
+    assert set(regs) == {"text", "data", "guard", "stack", "heap"}
+    assert (regs["text"].start, regs["text"].end) == (0x0, 0x0FFF)
+    assert (regs["data"].start, regs["data"].end) == (0x1000, 0x1FFF)
+    assert (regs["guard"].start, regs["guard"].end) == (0x2000, 0x2FFF)
+    assert (regs["stack"].start, regs["stack"].end) == (0x3000, 0x3FFF)
+
+
+def test_the_heap_is_found_ABOVE_the_stack():
+    """The correction that made this derivation worth writing.
+
+    growproc() grows p->sz upward, so sbrk pages land above the stack — not between data and it,
+    as a conventional Unix layout would put them. A derivation that located the guard at
+    `sz - (USERSTACK+1)*PGSIZE` would be right only until the first sbrk, i.e. it would break
+    exactly when a student runs `alloc` and watches the heap grow, which is the case the panel
+    exists for.
+    """
+    regs = {r.name: r for r in regions_from_leaves(parse_vmprint(VMDUMP).leaves)}
+    assert regs["heap"].start > regs["stack"].end, "the heap grows up, past the stack"
+    assert (regs["heap"].start, regs["heap"].end) == (0x4000, 0x5FFF)
+
+
+def test_the_guard_page_is_found_by_its_cleared_user_bit():
+    """uvmclear clears ONLY PTE_U, so the guard is the one leaf below TRAPFRAME that is valid,
+    writable and not user. Give every page the U bit and there is no guard to find."""
+    leaves = parse_vmprint(VMDUMP.replace("pte 0x07", "pte 0x17")).leaves
+    names = [r.name for r in regions_from_leaves(leaves)]
+    assert "guard" not in names and "stack" not in names
+
+
+def test_a_page_table_with_no_guard_invents_no_stack():
+    """A truncated dump used to be enough to manufacture a guard and a stack out of one leaf.
+    Better a blank strip than a confident wrong map."""
+    assert regions_from_leaves([Pte(va=0, pa=0x87001000, perms=perms(0x0b), flags=0x0b)]) == []
+
+
+def test_the_kernel_pages_are_named_when_they_are_mapped():
+    leaves = [Pte(va=0, pa=0x87001000, perms=perms(0x1b), flags=0x1b),
+              Pte(va=0x1000, pa=0x87002000, perms=perms(0x07), flags=0x07),
+              Pte(va=0x2000, pa=0x87003000, perms=perms(0x17), flags=0x17),
+              Pte(va=TRAPFRAME, pa=0x87f66000, perms=perms(0x07), flags=0x07),
+              Pte(va=TRAMPOLINE, pa=0x87f6f000, perms=perms(0x0b), flags=0x0b)]
+    regs = regions_from_leaves(leaves)
+    assert [r.name for r in regs][-2:] == ["trapframe", "trampoline"]
+    assert region_for(TRAPFRAME, regs) == "trapframe"
+
+
+def test_a_region_spans_an_inclusive_number_of_pages():
+    """`end` is the region's LAST byte, so a two-page region is start .. start+2*PGSIZE-1. The
+    old arithmetic dropped a page from every multi-page region — invisible while the only
+    regions in existence were the demo's single-page ones."""
+    assert Region("heap", 0x4000, 0x5FFF).pages == 2
+    assert Region("text", 0x0, 0x0FFF).pages == 1
+    assert Region("tf", TRAPFRAME, TRAPFRAME).pages == 1        # the demo's zero-width form
+
+
+def test_the_demo_can_draw_its_own_fragmentation_gauge():
+    """A demo that says "rebuild the xv6 image" is giving advice that means nothing in a mode
+    whose whole point is that there is no image."""
+    vm = DemoVm().snapshot()
+    assert "frag" in vm.have and vm.total_pages and vm.max_free_run

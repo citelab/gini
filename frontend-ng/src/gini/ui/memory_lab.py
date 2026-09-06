@@ -16,8 +16,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..domain.xv6_vm import (
-    PGSIZE, DemoVm, ad_str, classify_faults, region_for, shared_frames,
+    DemoVm,
+    ad_str,
+    classify_faults,
+    region_for,
+    shared_frames,
 )
+from .no_data import has_data, paint_placeholder, panel_state, placeholder_for, title_for
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
 
@@ -64,10 +69,12 @@ class RegionStrip(QWidget):
         super().__init__()
         self.theme = theme
         self._regions = []
+        self._note = ""
         self.setMinimumHeight(60)
 
-    def set_regions(self, regions) -> None:
+    def set_regions(self, regions, note: str = "") -> None:
         self._regions = list(regions)
+        self._note = note
         self.update()
 
     def paintEvent(self, _e) -> None:
@@ -75,6 +82,9 @@ class RegionStrip(QWidget):
         t = self.theme.theme
         p.fillRect(self.rect(), QColor(t.panel2))
         if not self._regions:
+            # Was a bare `return`: an empty strip with no explanation, which reads as "this
+            # process has no address space" — not a thing that can be true.
+            paint_placeholder(p, self.rect(), t, self._note)
             return
         floor = 0.07
         raw = [min(max(r.pages, 1), 64) for r in self._regions]   # clamp huge stacks
@@ -101,16 +111,21 @@ class PhysBar(QWidget):
         super().__init__()
         self.theme = theme
         self._frac = 0.0
+        self._note = ""
         self.setMinimumHeight(26)
 
-    def set_frac(self, frac) -> None:
+    def set_frac(self, frac, note: str = "") -> None:
         self._frac = max(0.0, min(1.0, frac))
+        self._note = note
         self.update()
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         t = self.theme.theme
         p.fillRect(self.rect(), QColor(t.panel))
+        if self._note:                     # unknown is not the same picture as empty
+            paint_placeholder(p, self.rect(), t, self._note)
+            return
         p.fillRect(0, 0, int(self.width() * self._frac), self.height(),
                    QColor(t.accent_for("amber")))
 
@@ -129,10 +144,12 @@ class FragBar(QWidget):
         super().__init__()
         self.theme = theme
         self._free = self._total = self._run = 0
+        self._note = ""
         self.setMinimumHeight(34)
 
-    def set_values(self, free, total, max_run) -> None:
+    def set_values(self, free, total, max_run, note: str = "") -> None:
         self._free, self._total, self._run = int(free), int(total), int(max_run)
+        self._note = note
         self.update()
 
     def paintEvent(self, _e) -> None:  # noqa: N802
@@ -141,9 +158,9 @@ class FragBar(QWidget):
         t = self.theme.theme
         p.fillRect(self.rect(), QColor(t.panel))
         if self._total <= 0:
-            p.setPen(QColor(t.faint))
-            p.drawText(self.rect(), Qt.AlignCenter,
-                       "page allocator not reported — rebuild the xv6 image")
+            paint_placeholder(p, self.rect(), t, self._note or
+                              "page allocator not reported by this kernel build — "
+                              "rebuild the xv6 image")
             return
         w, h = self.width(), self.height()
         used_frac = 1.0 - (self._free / self._total)
@@ -176,7 +193,8 @@ class MemoryLab(QDialog):
         self._build_header(root)
 
         self._strip = RegionStrip(theme)
-        root.addWidget(self._panel("Address space  ·  regions (low → high VA)", self._strip))
+        self._strip_panel = self._panel("Address space  ·  regions (low → high VA)", self._strip)
+        root.addWidget(self._strip_panel)
 
         grid = QGridLayout(); grid.setSpacing(10); root.addLayout(grid, 1)
         # A/D = the accessed + dirty bits the hardware maintains. Every page-replacement policy
@@ -229,6 +247,7 @@ class MemoryLab(QDialog):
         h = QLabel(title); h.setStyleSheet(
             _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
         v.addWidget(h)
+        f.title_label = h                  # so _render can mark it "(derived)"
         inner.setStyleSheet((inner.styleSheet() or "") + "border:none;")
         v.addWidget(inner, 1 if fill else 0)
         return f
@@ -268,6 +287,11 @@ class MemoryLab(QDialog):
     def _build_faults_panel(self) -> QFrame:
         t = self.theme.theme
         f, v = self._framed("Page faults  ·  live ring (classified)")
+        # "is my page-fault handler being called at all?" — the first question a student
+        # debugging the vm shadow needs answered, parsed since the counters existed and never
+        # once displayed. handled == 0 with faults falling through is THE failure state, so it
+        # goes amber: legible from across a lab room.
+        self._vmf_lbl = f.note_label
         self._fault_tbl = self._table(["pid", "VA", "cause", "kind"])
         v.addWidget(self._fault_tbl, 1)
         self._live = not hasattr(self.provider, "simulate_fault")   # live reader can't fake a fault
@@ -319,7 +343,13 @@ class MemoryLab(QDialog):
         v = QVBoxLayout(f); v.setContentsMargins(10, 8, 10, 10)
         h = QLabel(title); h.setStyleSheet(
             _scss(f"color:{t.muted};font-size:11px;font-weight:600;border:none;"))
-        v.addWidget(h)
+        # Title left, an optional live note right — the fault panel puts the vm-shadow counters
+        # there, where they sit beside the thing they describe rather than below it.
+        note = QLabel(); note.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;border:none;"))
+        row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(h); row.addStretch(1); row.addWidget(note)
+        v.addLayout(row)
+        f.title_label, f.note_label = h, note
         return f, v
 
     # -- actions ---------------------------------------------------------- #
@@ -394,7 +424,12 @@ class MemoryLab(QDialog):
     def _render(self, snap) -> None:
         t = self.theme.theme
         self._satp.setText(f"satp = {hex(snap.satp)}")
-        self._strip.set_regions(snap.regions)
+        # -- address space ---------------------------------------------------- #
+        rstate = panel_state(snap, "regions")
+        self._strip.set_regions(snap.regions if has_data(snap, "regions") else [],
+                                placeholder_for(rstate, "address-space map"))
+        self._strip_panel.title_label.setText(
+            title_for("Address space  ·  regions (low → high VA)", rstate))
         # page table
         leaves = sorted(snap.leaves, key=lambda p: p.va)
         self._pt_tbl.setRowCount(len(leaves))
@@ -410,25 +445,43 @@ class MemoryLab(QDialog):
                 elif c == 3:                       # touched pages stand out from cold ones
                     it.setForeground(QColor(t.accent_for("amber") if "A" in ad else t.faint))
                 self._pt_tbl.setItem(r, c, it)
-        # physical memory
+        # -- physical memory -------------------------------------------------- #
+        # NEVER a zero here. "0 used / 0 free of 0 pages" is not an empty allocator, it is an
+        # unread one, and it was on screen beside a working fragmentation gauge fed by the very
+        # same KA line — the two panels contradicting each other about free memory.
         ph = snap.phys
-        self._phys_bar.set_frac(ph.used_frac)
-        self._phys_lbl.setText(
-            f"{ph.used_pages:,} used / {ph.free_pages:,} free of {ph.total_pages:,} pages "
-            f"({ph.used_frac * 100:.1f}% used · {ph.free_pages * 4 // 1024} MB free)")
-        # S3: the allocator's own bitmap counters (0 on a kernel without the page bitmap)
+        if has_data(snap, "phys"):
+            self._phys_bar.set_frac(ph.used_frac)
+            self._phys_lbl.setText(
+                f"{ph.used_pages:,} used / {ph.free_pages:,} free of {ph.total_pages:,} pages "
+                f"({ph.used_frac * 100:.1f}% used · {ph.free_pages * 4 // 1024} MB free)")
+        else:
+            why = placeholder_for(panel_state(snap, "phys"), "physical memory")
+            self._phys_bar.set_frac(0.0, why)
+            self._phys_lbl.setText(why)
+        # S3: the allocator's own bitmap counters
         free, total = getattr(snap, "free_pages", 0), getattr(snap, "total_pages", 0)
         run = getattr(snap, "max_free_run", 0)
-        self._frag_bar.set_values(free, total, run)
-        if total:
+        if has_data(snap, "frag") and total:
+            self._frag_bar.set_values(free, total, run)
             frag = 1.0 - (run / free) if free else 0.0
             self._frag_lbl.setText(
                 f"largest contiguous free run: {run:,} pages ({run * 4 // 1024} MB) of "
                 f"{free:,} free — {frag * 100:.0f}% of free memory is NOT in that run"
                 + ("   ·   healthy" if frag < 0.15 else "   ·   fragmented"))
         else:
-            self._frag_lbl.setText(
-                "fragmentation needs the page-allocator bitmap — rebuild the xv6 image")
+            why = placeholder_for(panel_state(snap, "frag"), "page allocator")
+            self._frag_bar.set_values(0, 0, 0, why)
+            self._frag_lbl.setText(why)
+        # -- the vm shadow's own scoreboard ------------------------------------ #
+        if "vmfault" in (getattr(snap, "have", ()) or ()):
+            hd, fell = snap.vmf_handled, snap.vmf_fell
+            self._vmf_lbl.setText(f"your handler: {hd:,} handled  ·  {fell:,} fell through")
+            self._vmf_lbl.setStyleSheet(_scss(
+                f"color:{t.accent_for('amber') if (hd == 0 and fell) else t.muted};"
+                f"font-size:11px;border:none;"))
+        else:
+            self._vmf_lbl.setText("")
         # faults — the live classified ring (or the simulated demo log)
         rows = self._fault_rows(snap)
         self._fault_tbl.setRowCount(len(rows))

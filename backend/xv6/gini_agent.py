@@ -83,6 +83,11 @@ class SerialLink:
     shell commands (launch/kill) AND expose the console — the human console goes through here too,
     since a second raw client would be refused. Reconnects on drop; buffers recent output."""
 
+    #: Class-level default so an instance built by `__new__` (which the serial tests do, to get a
+    #: link with no reader thread) can never reach dump() without it and raise AttributeError.
+    #: False is also the SAFE default: it only ever permits the legacy raw-byte fallback.
+    _ever_framed = False
+
     def __init__(self, addr):
         self.addr = addr
         self.buf = collections.deque(maxlen=20000)   # RAW bytes (all), for the dump fallback
@@ -96,6 +101,9 @@ class SerialLink:
         self._cap = bytearray()
         self._last_dump = b""
         self._dump_seq = 0                           # bumps each time a dump completes
+        # Has this kernel EVER bracketed a dump? Latched, never cleared — see dump(). It decides
+        # whether a timeout may fall back to raw bytes, and only a pre-marker kernel may.
+        self._ever_framed = False
         self._sock = None
         self._lock = threading.Lock()
         self._closed = threading.Event()      # see close(); never set in the container
@@ -138,6 +146,7 @@ class SerialLink:
                     self._last_dump = bytes(self._cap)
                     self._cap = bytearray()
                     self._dump_seq += 1
+                    self._ever_framed = True     # this kernel frames; the fallback is now unsafe
                 else:
                     self._cap.append(b)
             elif b == DUMP_START:
@@ -242,6 +251,21 @@ class SerialLink:
                 time.sleep(poll)
             if self._dump_seq > seq0:                     # our framed dump arrived -> use it
                 return self._last_dump.decode(errors="replace")
+            if self._ever_framed:
+                # This kernel brackets its dumps, so a timeout means the dump did NOT arrive —
+                # not that it arrived unframed. Returning the raw window here hands the caller
+                # the console as if it were kernel data: walker's lap lines, grind's ABAB, and
+                # whatever partial frame was in flight. parse_procdump then finds fewer PROC
+                # lines than there are processes and a row vanishes from the table for one poll
+                # — the "process blinks out" report, exactly.
+                #
+                # And it fires precisely when a student is doing what the lab asked: a CPU-bound
+                # program delays the console interrupt and shares the UART with the dump's ~2 KB,
+                # which is what makes the frame miss its 0.35 s deadline in the first place.
+                #
+                # Say nothing instead. MachineState._ingest refuses an empty process list and
+                # keeps the last good snapshot, so the face holds still rather than lying.
+                return ""
             n = self._total - before                      # pre-marker kernel -> raw window
             if n <= 0:
                 return ""

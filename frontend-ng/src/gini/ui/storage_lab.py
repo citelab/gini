@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..domain.xv6_fs import DemoDisk
+from .no_data import ABSENT, paint_placeholder, panel_state, placeholder_for
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
 
@@ -80,10 +81,12 @@ class CacheGrid(QWidget):
         self._bufs: list = []
         self._prev: dict = {}                 # index -> blockno, to spot a recycle
         self._flash: dict = {}                # index -> monotonic time of the last eviction
+        self._note = ""                       # why there is nothing to draw, when there isn't
         self.setMinimumHeight(96)
 
-    def set_bufs(self, bufs) -> None:
+    def set_bufs(self, bufs, note: str = "") -> None:
         import time
+        self._note = note
         now = time.monotonic()
         for b in bufs:                        # a slot whose block changed was just recycled
             was = self._prev.get(b.index)
@@ -100,9 +103,8 @@ class CacheGrid(QWidget):
         t = self.theme.theme
         p.fillRect(self.rect(), QColor(t.panel))
         if not self._bufs:
-            p.setPen(QColor(t.faint))
-            p.drawText(self.rect(), Qt.AlignCenter,
-                       "buffer cache not reported by this kernel — rebuild the xv6 image")
+            paint_placeholder(p, self.rect(), t, self._note or placeholder_for(
+                ABSENT, "buffer cache"))
             return
         now = time.monotonic()
         n = len(self._bufs)
@@ -147,9 +149,11 @@ class BlockMap(QWidget):
         self.theme = theme
         self._used: list = []
         self._last = 0
+        self._note = ""                       # why there is nothing to draw, when there isn't
         self.setMinimumHeight(70)
 
-    def set_map(self, used, last_alloc=0) -> None:
+    def set_map(self, used, last_alloc=0, note: str = "") -> None:
+        self._note = note
         self._used = list(used or [])
         self._last = int(last_alloc or 0)
         self.update()
@@ -160,9 +164,8 @@ class BlockMap(QWidget):
         p.fillRect(self.rect(), QColor(t.panel))
         n = len(self._used)
         if not n:
-            p.setPen(QColor(t.faint))
-            p.drawText(self.rect(), Qt.AlignCenter,
-                       "block map not reported by this kernel — rebuild the xv6 image")
+            paint_placeholder(p, self.rect(), t, self._note or placeholder_for(
+                ABSENT, "block map"))
             return
         cols = max(1, self.width() // 9)
         rows = max(1, min(6, (n + cols - 1) // cols))
@@ -327,7 +330,8 @@ class StorageLab(QDialog):
             for c, val in enumerate(["", str(d.inum), name]):
                 self._tree_tbl.setItem(r, c, QTableWidgetItem(val))
         # S4: block allocator map + locality score
-        self._block_map.set_map(getattr(snap, "block_used", []), getattr(snap, "last_alloc", 0))
+        self._block_map.set_map(getattr(snap, "block_used", []), getattr(snap, "last_alloc", 0),
+                                placeholder_for(panel_state(snap, "blockmap"), "block map"))
         allocs, gap = getattr(snap, "allocs", 0), getattr(snap, "mean_gap", 0)
         if allocs:
             self._alloc_lbl.setText(
@@ -336,7 +340,10 @@ class StorageLab(QDialog):
         else:
             self._alloc_lbl.setText("no allocations yet — run `writer` to grow a file")
         # buffer cache — the grid shows the policy at work, the table the exact state
-        self._cache_grid.set_bufs(snap.bufs)
+        # A container that is not answering is not a kernel too old to report — the two get
+        # different sentences, so nobody rebuilds an image to fix a stopped machine.
+        self._cache_grid.set_bufs(snap.bufs,
+                                  placeholder_for(panel_state(snap, "bcache"), "buffer cache"))
         self._buf_tbl.setRowCount(len(snap.bufs))
         for r, b in enumerate(snap.bufs):
             for c, val in enumerate([str(b.blockno), str(b.refcnt),

@@ -55,6 +55,7 @@ def make_link(ga, latency=0.01):
     link._in_dump = False
     link._last_dump = b""
     link._dump_seq = 0
+    link._ever_framed = False              # mirrors __init__; the latch dump() reads
     link._lock = threading.Lock()
 
     class Sock:
@@ -123,3 +124,61 @@ def test_lock_is_released_between_dumps(ga):
     assert link.dump(b"\x04", wait=1.0).startswith("BOARDN")
     assert link.dump(b"\x14", wait=1.0).startswith("PROC")
     assert link.dump(b"\x04", wait=1.0).startswith("BOARDN")
+
+
+# -- C1: a timeout must not hand back the console as if it were a dump --------- #
+def _late(link, payload, delay=0.01):
+    """A socket whose reply arrives DURING dump()'s wait — which is where the raw-byte window
+    is measured from, so the bytes have to land after the send, not before it."""
+    class Sock:
+        def sendall(self, _ctrl):
+            def reply():
+                time.sleep(delay)
+                link._ingest(payload)
+            threading.Thread(target=reply, daemon=True).start()
+    return Sock()
+
+
+def test_a_timeout_on_a_framing_kernel_returns_nothing(ga):
+    """The blinking process table, in one test.
+
+    The raw-byte fallback exists for a kernel that predates the 0x1e/0x1f framing. Every kernel
+    this course ships frames its dumps, so on a current image the fallback could only fire when
+    the frame MISSED ITS DEADLINE — and what it then returned was the console: walker's lap
+    lines, grind's output, whatever partial frame was in flight. parse_procdump found fewer PROC
+    lines than there were processes and a row vanished for one poll.
+
+    And it fired precisely when a student was doing what the lab asked, because a CPU-bound
+    program is what delays the console interrupt in the first place.
+    """
+    link = make_link(ga)
+    assert link.dump(b"\x14", wait=0.5), "one good round first"
+    assert link._ever_framed, "this kernel frames its dumps, and the link now knows"
+
+    console = b"walker: lap 3 walked in 2 ticks (expected ~3)\n"
+    link._sock = _late(link, console)              # no frame this time, just program output
+    out = link.dump(b"\x14", wait=0.2)
+    assert out == "", "console text must never be returned as if it were kernel data"
+    assert "walker" not in out
+
+
+def test_a_pre_marker_kernel_still_gets_its_raw_window(ga):
+    """The other half: the fallback is not deleted, it is made conditional. A kernel that has
+    never framed anything is exactly the case it was written for."""
+    link = make_link(ga)
+    link._sock = _late(link, b"PROC 1 init sleep\nPROC 2 sh sleep\n")
+    out = link.dump(b"\x14", wait=0.3)
+    assert "PROC 1 init sleep" in out and not link._ever_framed
+
+
+def test_console_text_around_a_frame_still_splits_correctly(ga):
+    """C3 — a program's line split around a dump. Nothing is lost and the frame stays clean;
+    this is expected behaviour on one hart, and it must keep working."""
+    link = make_link(ga)
+    link._ingest(b"walker: lap 3 wal")
+    link._ingest(bytes([ga.DUMP_START]) + BODIES[0x14] + bytes([ga.DUMP_END]))
+    link._ingest(b"ked in 2 ticks\n")
+    assert link._last_dump == BODIES[0x14]
+    console = bytes(link.console).decode()
+    assert console == "walker: lap 3 walked in 2 ticks\n"
+    assert "PROC" not in console, "dump bytes must never reach the console"
