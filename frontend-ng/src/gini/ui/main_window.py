@@ -3628,6 +3628,11 @@ class MainWindow(QMainWindow):
             return
         setattr(self, attr, None)
         try:
+            # A polling face must be stopped AND JOINED first: deleteLater() while a worker is
+            # still inside a read is the shape that was crashing pytest-qt. See ui/live_poll.
+            stop = getattr(old, "stop_polling", None)
+            if callable(stop):
+                stop()
             old.close()
             old.setParent(None)
             old.deleteLater()
@@ -3747,7 +3752,10 @@ class MainWindow(QMainWindow):
         if dev.type_key == "storage_volume":
             # the disk is the file system — reuse the Storage face against this Machine's FS reader
             from .storage_lab import StorageLab
-            self._storage = StorageLab(self, self.theme, device=xv6, provider=ms.fs)
+            # Retired and given the state like the Machine Lab's own: this face polls now, so a
+            # rebind would leave the old one reading the serial line forever.
+            self._retire_lab("_storage")
+            self._storage = StorageLab(self, self.theme, device=xv6, provider=ms.fs, state=ms)
             self._storage.show(); self._storage.raise_()
             return
         if not getattr(ms, "live", False) or not hasattr(ms.provider, "console"):

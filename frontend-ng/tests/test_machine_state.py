@@ -312,3 +312,90 @@ def test_stall_silent_when_nothing_is_runnable():
     ms.refresh()
     assert ms.stall(1000.0) == ""
     assert ms.stall(1099.0) == ""
+
+
+# -- the VM/FS faces read through here, so they share one lock and one cache --- #
+class _Reader:
+    """A face reader whose next answer can be made to fail."""
+
+    def __init__(self, kind="vm"):
+        self.kind = kind
+        self.mode = "good"                    # good | bad | raise
+        self.reads = 0
+
+    def snapshot(self):
+        from gini.domain.xv6_fs import FsSnapshot, Superblock
+        from gini.domain.xv6_vm import VmSnapshot
+        self.reads += 1
+        if self.mode == "raise":
+            raise RuntimeError("the container is not answering")
+        ok = self.mode == "good"
+        if self.kind == "vm":
+            return VmSnapshot(satp=0x87f6e000, source="real", ok=ok)
+        return FsSnapshot(sb=Superblock(), source="real", ok=ok)
+
+
+def test_a_failed_face_read_keeps_the_last_good_one():
+    """`_ingest` has always refused an empty process list — "init and sh always exist, so an
+    empty read means the read FAILED". The vm and fs readers had no equivalent, and nothing
+    needed one while nothing polled them. Once a face polls, a single timed-out /vm would flip it
+    to "the container is not answering" and back a second later."""
+    vm = _Reader("vm")
+    st = MachineState(DemoScheduler(timeslice=1), vm=vm, fs=_Reader("fs"))
+    good = st.refresh_vm()
+    assert good.ok and st.latest_vm is good
+    for mode in ("bad", "raise"):
+        vm.mode = mode
+        assert st.refresh_vm() is good, f"a {mode} read replaced a good picture"
+
+
+def test_a_failure_with_nothing_cached_is_reported_rather_than_hidden():
+    """Keep-last-good must not become never-say-anything: with no previous reading, the failure
+    IS the news and the face should show its offline placeholder."""
+    vm = _Reader("vm")
+    vm.mode = "bad"
+    st = MachineState(DemoScheduler(timeslice=1), vm=vm, fs=_Reader("fs"))
+    snap = st.refresh_vm()
+    assert snap is not None and snap.ok is False
+
+
+def test_the_fs_face_reads_the_same_way():
+    fs = _Reader("fs")
+    st = MachineState(DemoScheduler(timeslice=1), vm=_Reader("vm"), fs=fs)
+    good = st.refresh_fs()
+    assert good.ok
+    fs.mode = "raise"
+    assert st.refresh_fs() is good
+
+
+def test_a_face_read_takes_the_state_lock():
+    """The reads used to bypass `_lock` entirely. Once a face polls, its worker and the
+    scheduler's can be inside the provider together — and a slower older read landing after a
+    newer one is exactly the defect that lock was added for."""
+    import threading
+    held = []
+
+    class _Watching(_Reader):
+        def snapshot(self):
+            held.append(st._lock.acquire(blocking=False))
+            if held[-1]:
+                st._lock.release()
+            return _Reader.snapshot(self)
+
+    st = MachineState(DemoScheduler(timeslice=1), vm=_Watching("vm"), fs=_Reader("fs"))
+    done = threading.Event()
+
+    def other():
+        with st._lock:
+            done.wait(2)
+    t = threading.Thread(target=other, daemon=True)
+    t.start()
+    import time
+    time.sleep(0.05)
+    reader = threading.Thread(target=st.refresh_vm, daemon=True)
+    reader.start()
+    reader.join(0.2)
+    assert reader.is_alive(), "refresh_vm read while another thread held the state lock"
+    done.set()
+    t.join(1)
+    reader.join(1)

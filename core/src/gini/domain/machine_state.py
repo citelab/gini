@@ -213,6 +213,10 @@ class MachineState:
     mode: str = "real"                            # "real" (live kernel) | "demo" (stand-in). A
     #                                               USER choice — never auto-switched (see set_mode)
     latest: Snapshot | None = None
+    # The last GOOD reading of each face, cached here rather than in the widgets so every reader
+    # — the Memory face, the File System face, the OS HUD, the Ask GINI card — sees one value.
+    latest_vm: object = None
+    latest_fs: object = None
     timeline: SchedTimeline = field(default_factory=SchedTimeline)
     cpu_timelines: dict = field(default_factory=dict)   # cpu_index -> SchedTimeline (SMP)
     watcher: StateWatcher = field(default_factory=StateWatcher)
@@ -352,6 +356,49 @@ class MachineState:
         with self._lock:                          # see _lock: readers must not overlap
             self._ingest(self.provider.snapshot())
             return self.latest
+
+    def refresh_vm(self):
+        """Re-read the virtual-memory face under the same lock, and cache the result.
+
+        Two reasons this exists rather than the faces calling `self.vm.snapshot()` themselves.
+
+        ONE READER AT A TIME. The vm and fs readers used to bypass `_lock` entirely, which was
+        harmless while nothing polled them — but once a face polls, its worker and the scheduler's
+        can be inside the provider together, and a slower older read can land after a newer one.
+        That is the same defect `_lock` was added for, and the same fix.
+
+        KEEP THE LAST GOOD ONE. `_ingest` already refuses an empty process list, on the grounds
+        that init and sh always exist so an empty read means the read FAILED. The same is true
+        here and there was nothing enforcing it: with polling, one timed-out `/vm` would flip the
+        face to "the container is not answering" and back again a second later. A face that
+        flickers between real data and an error is worse than one that holds still.
+        """
+        if self.vm is None:
+            return self.latest_vm
+        with self._lock:
+            try:
+                snap = self.vm.snapshot()
+            except Exception:                     # noqa: BLE001 — a failed read is not a crash
+                return self.latest_vm
+            if snap is not None and getattr(snap, "ok", True):
+                self.latest_vm = snap
+                return snap
+            # Nothing good yet? Then the failure IS the news, and the face should say so.
+            return self.latest_vm if self.latest_vm is not None else snap
+
+    def refresh_fs(self):
+        """The file-system face's half of refresh_vm. Same lock, same keep-last-good rule."""
+        if self.fs is None:
+            return self.latest_fs
+        with self._lock:
+            try:
+                snap = self.fs.snapshot()
+            except Exception:                     # noqa: BLE001
+                return self.latest_fs
+            if snap is not None and getattr(snap, "ok", True):
+                self.latest_fs = snap
+                return snap
+            return self.latest_fs if self.latest_fs is not None else snap
 
     def step(self) -> Snapshot | None:
         if self.provider is None:

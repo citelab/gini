@@ -526,9 +526,38 @@ class MachineLab(QDialog):
             return False
         return True
 
+    def _retire(self, attr: str) -> None:
+        """Close and destroy a previously opened child window before opening another.
+
+        MainWindow has had this since a py-spy session found four live query threads for what
+        should have been one round of two, with two still running after the window was closed.
+        MachineLab never got the equivalent, and did not need one while its children had no
+        timers — but the Memory and File System faces now poll, so ten double-clicks would leave
+        ten pollers on one serial line. These dialogs are parented to MachineLab, so rebinding
+        the attribute does NOT free the old one: Qt keeps every child alive, timers and all.
+
+        stop_polling() FIRST, and it joins: deleteLater() while a worker thread is still inside a
+        read is the shape that was crashing pytest-qt half the time before the runtime stop()
+        work. See live_poll.
+        """
+        old = getattr(self, attr, None)
+        if old is None:
+            return
+        setattr(self, attr, None)
+        try:
+            stop = getattr(old, "stop_polling", None)
+            if callable(stop):
+                stop()
+            old.close()
+            old.setParent(None)
+            old.deleteLater()
+        except RuntimeError:
+            pass                              # already destroyed by Qt; nothing to retire
+
     def _open_syscall_lab(self) -> None:
         if not self._require_data():
             return
+        self._retire("_sclab")
         from .syscall_lab import SyscallLab
         # live /sc over the serial when running; DemoScheduler.sc() offline
         src = getattr(self.state.provider, "sc", None)
@@ -539,6 +568,7 @@ class MachineLab(QDialog):
     def _open_lock_lab(self) -> None:
         """Contention: the one kernel phenomenon nothing else here can show. Needs 2+ harts to be
         meaningful, which is why xv6 now boots multi-core; the panel says so if it is not."""
+        self._retire("_locklab")
         from .lock_lab import LockLab
         self._locklab = LockLab(self, self.theme, device=self.device,
                                 provider=self.state.provider, live=self.live)
@@ -552,6 +582,7 @@ class MachineLab(QDialog):
         src = getattr(self.state.provider, "traps", None)
         catch = getattr(self.state.provider, "catch_trap", None)   # live gdb freeze (Phase 2/4)
         alarms = getattr(self.state.provider, "alarms", None)      # sigalarm-lab strip (Phase 3)
+        self._retire("_traplab")
         self._traplab = TrapLab(self, self.theme, device=self.device,
                                 traps_source=src if callable(src) else None,
                                 catch_source=catch if callable(catch) else None,
@@ -565,11 +596,13 @@ class MachineLab(QDialog):
         # one; otherwise fall back to the running proc's registers at the dispatch stage.
         from .cpu_journey import CpuJourney
         cpu = self.state.latest.cpu if (self.state.latest and self.state.latest.cpu) else None
+        self._retire("_journey")
         self._journey = CpuJourney(self, self.theme, device=self.device, cpu=cpu, frame=frame)
         self._journey.show(); self._journey.raise_()
 
     def _open_games(self) -> None:
         from .games_lab import GamesLab
+        self._retire("_games")
         self._games = GamesLab(self, self.theme, self.device, self.state, live=self.live)
         self._games.show()
         self._games.raise_()
@@ -582,6 +615,7 @@ class MachineLab(QDialog):
         # Cross-cutting behavioral view (syscalls + traps + scheduling). Not gated on live data:
         # in Demo it uses canned fingerprints so the panel + classify game work offline.
         from .fingerprint_lab import FingerprintLab
+        self._retire("_fplab")
         self._fplab = FingerprintLab(self, self.theme, self.device, self.state, live=self.live)
         self._fplab.show()
         self._fplab.raise_()
@@ -591,6 +625,7 @@ class MachineLab(QDialog):
         # Process Scheduler (which process runs) — this is the registers the CPU runs *with*.
         if not self._require_data():
             return
+        self._retire("_cpulab")
         from .cpu_lab import CpuLab
         self._cpulab = CpuLab(self, self.theme, self.device, self.state, live=self.live)
         self._cpulab.show()
@@ -599,11 +634,12 @@ class MachineLab(QDialog):
     def _open_memory_lab(self) -> None:
         if not self._require_data():
             return
+        self._retire("_memory")
         from .memory_lab import MemoryLab
         # render from the shared MachineState's VM reader (demo stand-in or the Mac GDB bridge),
         # so the Memory face and the Ask GINI card see one source.
         self._memory = MemoryLab(self, self.theme, device=self.device, provider=self.state.vm,
-                                 on_play=self._play_game,
+                                 state=self.state, on_play=self._play_game,
                                  play_games=[("diagnose thrashing", "thrash-diagnose"),
                                              ("translate an address", "addr-translate")])
         self._memory.show()
@@ -612,12 +648,15 @@ class MachineLab(QDialog):
     def _open_storage_lab(self) -> None:
         if not self._require_data():
             return
+        self._retire("_storage")
         from .storage_lab import StorageLab
-        self._storage = StorageLab(self, self.theme, device=self.device, provider=self.state.fs)
+        self._storage = StorageLab(self, self.theme, device=self.device, provider=self.state.fs,
+                                   state=self.state)
         self._storage.show()
         self._storage.raise_()
 
     def _open_syscall_builder(self) -> None:
+        self._retire("_syscalls")
         from .syscall_builder import SyscallBuilder
         # If the live provider knows how to write+recompile (Mac-side), let Apply drive it;
         # offline the builder still generates and previews the exact code.

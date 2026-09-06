@@ -8,7 +8,7 @@ new mapping appears. Renders from an injected provider (offline DemoVm here; GDB
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget,
@@ -22,9 +22,16 @@ from ..domain.xv6_vm import (
     region_for,
     shared_frames,
 )
+from .live_poll import LivePollMixin
 from .no_data import has_data, paint_placeholder, panel_state, placeholder_for, title_for
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+
+#: How often the live face re-reads. One round is three dumps (/vm, /vmall, /faults) and the
+#: serial line is the scarce resource, not the CPU — below the ~0.5 s tick so a student sees
+#: motion, above the point where the wire saturates. A constant, so a term of use can tune it
+#: from one place.
+MEMORY_POLL_MS = 1500
 
 _REGION_ACCENT = {"text": "blue", "data": "green", "heap": "cyan", "guard": "slate",
                   "stack": "amber", "trapframe": "purple", "trampoline": "red"}
@@ -175,13 +182,22 @@ class FragBar(QWidget):
         p.drawRect(x + 1, 6, max(2, int(w * run_frac) - 2), h - 12)
 
 
-class MemoryLab(QDialog):
+class MemoryLab(LivePollMixin, QDialog):
+    #: Carries (payload, ok) from the poll worker to the GUI thread. See live_poll.
+    snap_ready = Signal(object)
+
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
-                 on_play=None, play_games=None) -> None:
+                 on_play=None, play_games=None, state=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.provider = provider or DemoVm()
+        # The MachineState, when the lab has one. Reads go through it so every face, the OS HUD
+        # and the Ask GINI card share one cache and one lock — see MachineState.refresh_vm.
+        self.state = state
+        # Decided here rather than in _build_faults_panel, because the header and the poll both
+        # need it before that runs. A live reader cannot fake a fault; a demo one can.
+        self._live = not hasattr(self.provider, "simulate_fault")
         self._on_play = on_play             # callable(game_id) opening a game; may be None
         self._play_games = play_games or []  # [(label, game_id)]
 
@@ -209,8 +225,11 @@ class MemoryLab(QDialog):
         # the COW / sharing view + per-process resident-vs-virtual meters (uses all_procs())
         root.addWidget(self._build_sharing_panel())
 
-        self._render(self.provider.snapshot())
+        # One synchronous read at open — a window appearing is when a user expects a pause, and
+        # every later read is off the GUI thread.
+        self._render(self._snapshot())
         self._render_sharing()
+        self._init_poll(MEMORY_POLL_MS, live=self._live)
 
     # -- header/panels ---------------------------------------------------- #
     def _build_header(self, root) -> None:
@@ -232,6 +251,16 @@ class MemoryLab(QDialog):
         self._satp = QLabel(); self._satp.setStyleSheet(
             _scss(f"color:{t.muted};font-family:monospace;font-size:11px;"))
         head.addWidget(self._satp)
+        # Live mode gets a rate chip and a Pause. Pause is pedagogical rather than a nicety: a
+        # student reading a page table wants it to hold still while they read it.
+        self._chip = QLabel("live")
+        self._chip.setStyleSheet(_scss(f"color:{t.accent_for('green')};font-size:11px;"))
+        self._pause = QPushButton("Pause"); self._pause.setCheckable(True)
+        self._pause.setStyleSheet(self._btn_css())
+        self._pause.toggled.connect(self._on_pause)
+        for w in (self._chip, self._pause):
+            w.setVisible(self._live)
+            head.addWidget(w)
         root.addLayout(head)
         hint = QLabel("The process address space, its leaf page-table mappings (VA→PA with "
                       "R/W/X/U), and the physical allocator. Simulate a fault to watch demand "
@@ -294,13 +323,14 @@ class MemoryLab(QDialog):
         self._vmf_lbl = f.note_label
         self._fault_tbl = self._table(["pid", "VA", "cause", "kind"])
         v.addWidget(self._fault_tbl, 1)
-        self._live = not hasattr(self.provider, "simulate_fault")   # live reader can't fake a fault
-        btn = QPushButton("  Refresh" if self._live else "  Simulate page fault")
+        btn = QPushButton("  Refresh now" if self._live else "  Simulate page fault")
         btn.setToolTip("Re-read the live fault ring + page tables (launch `alloc` from the "
                        "scheduler window to make real faults)" if self._live else
                        "Grow the stack by one page via a simulated demand fault")
         btn.setIcon(icons.icon("send", t.accent_for("amber"), 14))
-        btn.clicked.connect(self._on_fault)
+        # Live: kick the poll, which reads OFF the GUI thread. The old wiring ran the whole
+        # three-dump round inline and froze the window for it.
+        btn.clicked.connect((lambda: self._tick()) if self._live else self._on_fault)
         btn.setStyleSheet(self._btn_css())
         v.addWidget(btn)
         return f
@@ -355,15 +385,49 @@ class MemoryLab(QDialog):
     # -- actions ---------------------------------------------------------- #
     def _on_fault(self) -> None:
         fn = getattr(self.provider, "simulate_fault", None)
-        self._render(fn() if callable(fn) else self.provider.snapshot())
+        self._render(fn() if callable(fn) else self._snapshot())
         self._render_sharing()
 
     def _on_cow(self) -> None:
         fn = getattr(self.provider, "simulate_cow_write", None)
         if callable(fn):
             fn()
-        self._render(self.provider.snapshot())
+        self._render(self._snapshot())
         self._render_sharing()
+
+    def _on_pause(self, on: bool) -> None:
+        self.set_paused(on)
+        self._pause.setText("Resume" if on else "Pause")
+        self._chip.setText(self.poll_caption())
+
+    def _snapshot(self):
+        """One read of the VM face, through MachineState when there is one (shared cache + lock)."""
+        if self.state is not None:
+            return self.state.refresh_vm()
+        return self.provider.snapshot()
+
+    def _read(self):
+        """OFF the GUI thread — one coalesced round: page table, all-procs, fault ring.
+
+        These three used to be fetched from INSIDE _render and _render_sharing, i.e. on the GUI
+        thread, each one a dump over the serial. Moving them here is the whole point of the poll;
+        leaving one behind would defeat it.
+        """
+        snap = self._snapshot()
+        if snap is None:
+            return None
+        return (snap, self._all_procs(), self._all_procs_faults())
+
+    def _render_live(self, payload, fresh: bool) -> None:
+        if payload is None:                       # nothing good has ever arrived
+            self._chip.setText("no reading yet")
+            return
+        snap, procs, faults = payload
+        self._render(snap, procs, faults)
+        self._render_sharing(procs)
+        # "stale" says the picture is real but old. A failed read must never blank a good one —
+        # a face that flickers between data and an error is worse than one that holds still.
+        self._chip.setText(self.poll_caption() + ("" if fresh else "  ·  stale"))
 
     def _all_procs(self) -> dict:
         fn = getattr(self.provider, "all_procs", None)
@@ -372,11 +436,17 @@ class MemoryLab(QDialog):
         except Exception:
             return {}
 
-    def _fault_rows(self, snap):
-        """(pid, va, cause, kind) rows. Live: the classified fault RING; demo: the simulated log."""
+    def _fault_rows(self, snap, procs=None, faults=None):
+        """(pid, va, cause, kind) rows. Live: the classified fault RING; demo: the simulated log.
+
+        `procs`/`faults` arrive pre-read from the poll worker. None means "fetch them here",
+        which is the button and demo path — and on the GUI thread, which is why the poll passes
+        them in rather than letting this reach for the wire.
+        """
         if self._live:
-            faults = classify_faults(self._all_procs_faults(), self._all_procs())
-            return [(f.pid, f.va, f.cause, f.kind) for f in faults]
+            procs = self._all_procs() if procs is None else procs
+            faults = self._all_procs_faults() if faults is None else faults
+            return [(f.pid, f.va, f.cause, f.kind) for f in classify_faults(faults, procs)]
         return [(getattr(f, "pid", None), f.va, f.cause, "") for f in snap.faults]
 
     def _all_procs_faults(self):
@@ -386,9 +456,9 @@ class MemoryLab(QDialog):
         except Exception:
             return []
 
-    def _render_sharing(self) -> None:
+    def _render_sharing(self, procs=None) -> None:
         t = self.theme.theme
-        procs = self._all_procs()
+        procs = self._all_procs() if procs is None else procs
         # per-process resident-vs-virtual meters (rebuild)
         while self._proc_box.count():
             w = self._proc_box.takeAt(0).widget()
@@ -421,7 +491,7 @@ class MemoryLab(QDialog):
                     it.setForeground(QColor(t.accent_for("purple")))
                 self._share_tbl.setItem(r, c, it)
 
-    def _render(self, snap) -> None:
+    def _render(self, snap, procs=None, faults=None) -> None:
         t = self.theme.theme
         self._satp.setText(f"satp = {hex(snap.satp)}")
         # -- address space ---------------------------------------------------- #
@@ -483,7 +553,7 @@ class MemoryLab(QDialog):
         else:
             self._vmf_lbl.setText("")
         # faults — the live classified ring (or the simulated demo log)
-        rows = self._fault_rows(snap)
+        rows = self._fault_rows(snap, procs, faults)
         self._fault_tbl.setRowCount(len(rows))
         for r, (pid, va, cause, kind) in enumerate(rows):
             cells = ["" if pid is None else str(pid), hex(va), cause, kind]
