@@ -218,14 +218,14 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QAbstractScrollArea {{ background: transparent; }}
 QTabWidget::pane {{ background: {t.panel}; border: none; border-top: 1px solid {t.line}; }}
 QTabWidget > QWidget {{ background: {t.panel}; }}
-QTabBar::tab {{ background: transparent; color: {t.muted}; padding: 4px 10px;
-    border: none; border-bottom: 2px solid transparent; font-size: {small}px; }}
+QTabBar::tab {{ background: transparent; color: {t.muted}; padding: 7px 12px;
+    border: none; border-bottom: 2px solid transparent; }}
 QTabBar::tab:selected {{ color: {t.text}; border-bottom-color: {t.accent}; }}
 QTabBar::tab:hover {{ color: {t.text}; }}
 
 QDockWidget {{ titlebar-close-icon: none; titlebar-normal-icon: none; }}
 QDockWidget::title {{ background: {t.panel}; color: {t.faint};
-    padding: 4px 8px; border-bottom: 1px solid {t.line}; font-size: {small}px; }}
+    padding: 8px 12px; border-bottom: 1px solid {t.line}; }}
 
 QMenuBar {{ background: {t.panel}; border-bottom: 1px solid {t.line}; padding: 3px 6px; }}
 QMenuBar::item {{ background: transparent; padding: 5px 10px; border-radius: 6px; color: {t.muted}; }}
