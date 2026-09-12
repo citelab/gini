@@ -331,6 +331,40 @@ journeys (see `CPU_JOURNEY_CORRECTIONS.md`):
 
 **Read this before adding a background read to any face.**
 
+**CLOSED (2026-09-12) — the guarantee now lives at the destroy site, not in each face.** Both
+death modes are covered for every face, present and future:
+
+- *Destroyed on the worker thread* — `run_off_gui` (`ui/worker_host.py`) pins the owner in a
+  GUI-thread registry for the call, so the widget's last reference never dies on a worker.
+- *Destroyed under an in-flight `emit()`* — `join_owner()` waits for that owner's workers, and the
+  **two places that actually destroy a face** call it: `MainWindow._retire_lab` and
+  `MachineLab._retire`. Everything else in `ui/` that calls `deleteLater()` is clearing child
+  widgets out of a layout, not retiring a face that runs workers.
+
+Putting the join at the destroy site rather than in seventeen `stop_polling` methods is the point.
+"Remember to give your new face a stop_polling" is not a rule anyone keeps — it is the same trap as
+the `gini-core` floor in `scripts/release.sh`, which is checked rather than remembered. A face
+added next year inherits this without knowing it exists. The three faces on `LivePollMixin`
+(Traps, Memory, File System) keep their own joined `stop_polling`, which still runs first; the
+join at the destroy site is what covers the rest.
+
+Order is load-bearing and matches the mixin's: `stop_polling()` if present, then `close()` (which
+sets `_closed`, so no worker may BEGIN an emit), then `join_owner()` (which waits out the one
+already in flight), and only then `setParent(None)` + `deleteLater()`.
+
+The join is **bounded** (`JOIN_TIMEOUT`, 2s). An unbounded one would hang the window on any wedged
+read. A straggler that outlives the bound is not left dangerous: by then it holds no strong
+reference to the owner, and the owner's `_closed` guard stops it emitting.
+
+**Measured, because a race does not reproduce on demand and "it did not crash" proves nothing.**
+Driving the real `MachineLab._retire` against a genuinely in-flight read: **0.00s before the fix
+(it did not wait at all), 0.51s after** for a 0.5s worker, zero threads leaked. Pinned by
+`tests/test_worker_outlives_dialog.py` — that retire waits, that the bound is honoured and reports
+its straggler, and that a worker is joinable from the instant it starts rather than after a gap.
+
+The rest of this entry is the original write-up, kept because the mechanism is still what anyone
+adding a background read needs to understand.
+
 **Scope, measured rather than assumed (2026-09-09).** Of the instances checked so far, exactly one
 was ever a PRODUCTION crash — the Traps face, where `_retire()` destroyed a dialog with a catch in
 flight, and which is fixed. The others found since are **test-harness artifacts**, and the

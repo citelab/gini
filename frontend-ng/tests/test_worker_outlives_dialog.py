@@ -89,3 +89,103 @@ def test_every_worker_emit_goes_through_the_guard(app):
         if m and "_emit(" not in line:
             raw.append(f"{i}: {line.strip()}")
     assert not raw, "raw signal emits from worker threads:\n  " + "\n  ".join(raw)
+
+
+# -- the OTHER death mode: deleteLater() under an in-flight emit -------------------------------- #
+# Pinning the owner (run_off_gui) stops Python destroying a widget on a worker thread. It cannot
+# stop `deleteLater()` destroying the C++ object under an emit already in flight, because C++
+# teardown does not consult Python references. Only waiting does. These pin that wait.
+#
+# The reason this is tested rather than clicked: it is a race. It does not reproduce on demand, so
+# "the app did not crash" is not evidence. What IS evidence is that retire demonstrably BLOCKS for
+# the duration of a worker that is still running.
+import threading
+import time
+
+
+def _slow_worker(owner, seconds, started):
+    from gini.ui.worker_host import run_off_gui
+
+    def work():
+        started.set()
+        time.sleep(seconds)
+    run_off_gui(owner, work)
+
+
+def test_join_owner_waits_for_a_worker_that_is_still_running(app):
+    from gini.ui.worker_host import join_owner, owner_thread_count
+    w = QtWidgets.QWidget()
+    started = threading.Event()
+    _slow_worker(w, 0.4, started)
+    assert started.wait(2.0), "the worker never started"
+    assert owner_thread_count(w) == 1                 # registered while in flight
+
+    t0 = time.monotonic()
+    left = join_owner(w, timeout=3.0)
+    waited = time.monotonic() - t0
+
+    assert left == 0, "join returned with a worker still running"
+    assert waited >= 0.3, f"join did not actually wait (returned in {waited:.2f}s)"
+    assert owner_thread_count(w) == 0                 # and it stops advertising them
+    w.deleteLater()
+
+
+def test_join_owner_is_bounded_so_a_wedged_read_cannot_freeze_the_ui(app):
+    """An unbounded join would hang the window on any stuck read. The bound is the trade."""
+    from gini.ui.worker_host import join_owner
+    w = QtWidgets.QWidget()
+    started = threading.Event()
+    _slow_worker(w, 0.6, started)
+    assert started.wait(2.0)
+    t0 = time.monotonic()
+    left = join_owner(w, timeout=0.1)                 # far shorter than the work
+    waited = time.monotonic() - t0
+    assert waited < 0.4, f"join ignored its bound ({waited:.2f}s)"
+    assert left == 1, "a straggler must be reported, not silently claimed as joined"
+    # Reap it before the test returns — conftest's _no_leaked_threads fails any test that leaves a
+    # thread running, and it is right to: that guard is what makes the rest of this file mean
+    # anything. The straggler is the POINT of the test, so it is waited out here rather than left.
+    join_owner(w, timeout=3.0)
+    w.deleteLater()
+
+
+def test_a_worker_is_joinable_from_the_instant_it_is_started(app):
+    """Registered BEFORE start(): a retire landing in the gap would see nothing to wait for and
+    destroy the owner under a worker that had already begun."""
+    from gini.ui.worker_host import join_owner, owner_thread_count, run_off_gui
+    w = QtWidgets.QWidget()
+    seen = []
+    run_off_gui(w, lambda: seen.append(owner_thread_count(w)))
+    join_owner(w, timeout=2.0)
+    assert seen == [1], f"worker could not see itself as joinable: {seen}"
+    w.deleteLater()
+
+
+def test_join_owner_on_an_owner_with_no_workers_is_a_no_op(app):
+    from gini.ui.worker_host import join_owner
+    w = QtWidgets.QWidget()
+    assert join_owner(w) == 0
+    w.deleteLater()
+
+
+def test_retiring_a_lab_waits_for_its_in_flight_read(app):
+    """THE production path, end to end: MainWindow._retire_lab must not reach deleteLater() while
+    a worker is still inside a read. Driven through the real helper rather than a copy of it."""
+    from gini.ui.worker_host import join_owner
+    holder = QtWidgets.QWidget()
+    lab = QtWidgets.QWidget(holder)
+    started = threading.Event()
+    _slow_worker(lab, 0.4, started)
+    assert started.wait(2.0)
+
+    # exactly _retire_lab's order: stop, close, JOIN, then destroy
+    t0 = time.monotonic()
+    lab.close()
+    left = join_owner(lab)
+    waited = time.monotonic() - t0
+    lab.setParent(None)
+    lab.deleteLater()
+    app.processEvents()
+
+    assert left == 0 and waited >= 0.3, (
+        f"retire reached deleteLater() with a worker still running (waited {waited:.2f}s)")

@@ -23,7 +23,7 @@ from .canvas import NODE_H, NODE_W, CanvasView
 from .inspector import Inspector
 from .palette import Palette
 from .theme import ThemeManager, icons
-from .worker_host import run_off_gui
+from .worker_host import join_owner, run_off_gui
 
 
 def _theme_swatch(theme, size: int = 18):
@@ -3651,7 +3651,13 @@ class MainWindow(QMainWindow):
             stop = getattr(old, "stop_polling", None)
             if callable(stop):
                 stop()
-            old.close()
+            old.close()                       # sets _closed: no worker may start an emit after this
+            # …and THEN wait out the emit already in flight. `stop_polling` covers a face that has
+            # one (the three on LivePollMixin); this covers every OTHER face, and every future one,
+            # without each having to remember to grow a stop_polling of its own. That "remember to"
+            # is not a rule anyone keeps — it is the same trap as the gini-core floor — so the
+            # guarantee belongs at the ONE place that destroys a face rather than in seventeen.
+            join_owner(old)
             old.setParent(None)
             old.deleteLater()
         except RuntimeError:

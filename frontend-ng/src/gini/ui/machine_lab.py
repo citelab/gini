@@ -27,7 +27,7 @@ from ..domain.machine_state import MachineState
 from ..domain.xv6 import DemoScheduler, policy_name, ready_queue, short_pid
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
-from .worker_host import run_off_gui
+from .worker_host import join_owner, run_off_gui
 
 # scheduler policies the selector offers (must match domain POLICY_NAMES / kernel gini_pick)
 _POLICIES = ["round-robin", "priority", "lottery"]
@@ -576,7 +576,10 @@ class MachineLab(QDialog):
             stop = getattr(old, "stop_polling", None)
             if callable(stop):
                 stop()
-            old.close()
+            old.close()                       # sets _closed: no worker may begin an emit after this
+            # …then wait out the one already in flight, for the faces that have no stop_polling of
+            # their own. See MainWindow._retire_lab for why the join lives at the destroy site.
+            join_owner(old)
             old.setParent(None)
             old.deleteLater()
         except RuntimeError:

@@ -146,8 +146,48 @@ class WorkerHost:
 # --------------------------------------------------------------------------------------------- #
 
 _HELD: dict[int, object] = {}          # token -> owner, kept alive while its worker runs
+#: id(owner) -> {threads still running for it}. The SECOND death mode needs this: pinning the
+#: owner stops Python destroying it on a worker thread, but it cannot stop `deleteLater()`
+#: destroying the C++ object under an in-flight `emit()`, because C++ teardown does not consult
+#: Python references. Only waiting does. See `join_owner`.
+_BY_OWNER: dict[int, set] = {}
 _HELD_LOCK = threading.Lock()
 _TOKENS = itertools.count()
+
+#: How long a retire may wait for one face's workers. Long enough for a docker exec or an HTTP
+#: read to return, short enough that closing a window never feels stuck. Mirrors live_poll's.
+JOIN_TIMEOUT = 2.0
+
+
+def join_owner(owner: object, timeout: float = JOIN_TIMEOUT) -> int:
+    """Wait for every `run_off_gui` worker this owner started. Returns how many were STILL running.
+
+    Call it after the owner has been told to stop (so no further emit can be issued) and BEFORE
+    `deleteLater()`. That order is the whole point: the flag stops new emits, and this waits out
+    the one already in flight, so nothing is mid-`emit()` when Qt frees the receiver.
+
+    Bounded on purpose. A worker that outlives the bound is not left dangerous — it still holds no
+    strong reference to the owner by then (see `guarded`), and the owner's own `_closed` guard
+    stops it emitting — so the bound trades a vanishingly rare race for a window that never
+    freezes. An unbounded join would hang the GUI on any wedged read.
+    """
+    with _HELD_LOCK:
+        threads = list(_BY_OWNER.get(id(owner), ()))
+    left = 0
+    for t in threads:
+        if t.is_alive():
+            t.join(timeout)
+            if t.is_alive():
+                left += 1
+    with _HELD_LOCK:
+        _BY_OWNER.pop(id(owner), None)
+    return left
+
+
+def owner_thread_count(owner: object) -> int:
+    """How many workers this owner has in flight. For tests and leak checks; never for logic."""
+    with _HELD_LOCK:
+        return len(_BY_OWNER.get(id(owner), ()))
 
 
 class _Reaper(QObject):
@@ -211,6 +251,8 @@ def run_off_gui(owner: QObject, work, *args) -> None:
     with _HELD_LOCK:
         _HELD[token] = owner
     box = [work, args]                       # the worker's ONLY strong path to `owner`
+    key = id(owner)
+    cell: list = []                          # holds this thread, so `guarded` can retire itself
 
     def guarded() -> None:
         try:
@@ -219,9 +261,20 @@ def run_off_gui(owner: QObject, work, *args) -> None:
             traceback.print_exc()
         finally:
             box[0] = box[1] = None           # drop the closure, and the widget with it …
+            with _HELD_LOCK:                 # … stop advertising ourselves as joinable …
+                s = _BY_OWNER.get(key)
+                if s is not None:
+                    s.discard(cell[0] if cell else None)
+                    if not s:
+                        _BY_OWNER.pop(key, None)
             reaper.released.emit(token)      # … and only then ask the GUI thread to let go
 
     # Named after the owner, because `_no_leaked_threads` in conftest reports the thread NAME
     # when something outlives its test — and "Thread-47" tells nobody which face to go and look at.
-    threading.Thread(target=guarded, daemon=True,
-                     name=f"{type(owner).__name__}-bg").start()
+    th = threading.Thread(target=guarded, daemon=True, name=f"{type(owner).__name__}-bg")
+    cell.append(th)
+    # Registered BEFORE start(): a retire that lands between start() and registration would see
+    # nothing to join and destroy the owner under a worker that had already begun.
+    with _HELD_LOCK:
+        _BY_OWNER.setdefault(key, set()).add(th)
+    th.start()
