@@ -72,14 +72,41 @@ class Untrusted(Unreachable):
     """
 
 
-def _wrap(e: Exception) -> Unreachable:
-    """Classify a transport failure. A certificate problem is NOT an outage."""
+def _wrap(e: Exception, url: str = "") -> Unreachable:
+    """Classify a transport failure. A certificate problem is NOT an outage.
+
+    The message has to name WHICH certificate problem. The first version said only "not trusted by
+    this machine", and in the field that cost two rounds of investigation: an instructor reading it
+    reasonably concluded the students' trust stores were at fault, when the actual failure was a
+    hostname mismatch — a URL with the wrong port, pointing at a certificate issued for a different
+    name. Those two have nothing in common except the exception class. Python hands us the specific
+    reason; throwing it away turns a five-second diagnosis into a hunt.
+    """
     cause = getattr(e, "reason", e)
+    verify = getattr(cause, "verify_message", "") or ""
     if isinstance(cause, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+        where = f" ({url})" if url else ""
+        low = (verify or str(e)).lower()
+        if "hostname mismatch" in low:
+            detail = (f"the address you are connecting to{where} does not match the name on the "
+                      f"server's certificate — check the address in Settings, especially the port, "
+                      f"since a different port can serve a different certificate")
+        elif "expired" in low:
+            detail = ("the server's certificate has expired — check your computer's clock first, "
+                      "since a wrong date makes a good certificate look expired")
+        elif "self-signed" in low or "self signed" in low:
+            detail = ("the server's certificate is self-signed, or something on your network is "
+                      "intercepting secure connections")
+        elif "unable to get local issuer" in low:
+            detail = ("this machine cannot find the authority that issued the server's certificate "
+                      "— often an out-of-date certificate store, or security software inspecting "
+                      "HTTPS")
+        else:
+            detail = f"the server's certificate was rejected by this machine ({verify or cause})"
         return Untrusted(
-            "the course server's security certificate is not trusted by this machine. The server "
-            "is running — this is a certificate problem, so nothing you do in gBuilder will fix "
-            "it. Tell your instructor, and keep your proof file.")
+            f"{detail}. The server is running — this is a certificate problem, so nothing you do "
+            f"in gBuilder will fix it. Tell your instructor (tools/tc_check.py in the GINI repo "
+            f"prints the details they will ask for), and keep your proof file.")
     return Unreachable(str(e))
 
 
@@ -97,7 +124,7 @@ def _post(url: str, path: str, body: dict) -> tuple[int, dict]:
         except json.JSONDecodeError:
             return e.code, {"error": f"The course server replied with {e.code}."}
     except Exception as e:                                   # noqa: BLE001
-        raise _wrap(e) from e
+        raise _wrap(e, url) from e
 
 
 def _get(url: str, path: str) -> tuple[int, dict]:
@@ -111,7 +138,7 @@ def _get(url: str, path: str) -> tuple[int, dict]:
         except json.JSONDecodeError:
             return e.code, {"error": f"The course server replied with {e.code}."}
     except Exception as e:                                   # noqa: BLE001
-        raise _wrap(e) from e
+        raise _wrap(e, url) from e
 
 
 def check_code(url: str, code: str) -> dict:
