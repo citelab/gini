@@ -105,8 +105,8 @@ def _wrap(e: Exception, url: str = "") -> Unreachable:
             detail = f"the server's certificate was rejected by this machine ({verify or cause})"
         return Untrusted(
             f"{detail}. The server is running — this is a certificate problem, so nothing you do "
-            f"in gBuilder will fix it. Tell your instructor (tools/tc_check.py in the GINI repo "
-            f"prints the details they will ask for), and keep your proof file.")
+            f"in gBuilder will fix it. Tell your instructor (teaching-center/tools/tc_check.py in "
+            f"the GINI repo prints the details they will ask for), and keep your proof file.")
     return Unreachable(str(e))
 
 
