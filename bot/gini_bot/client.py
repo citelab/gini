@@ -71,6 +71,22 @@ def run(token: str = "", db: str | Path = "") -> int:
     @client.event
     async def on_ready():
         log.info("connected as %s; observing only, posting nothing", client.user)
+        # Say what is actually being watched, against what is actually there. A watch list naming a
+        # channel this server does not have records nothing at all, and every other signal looks
+        # healthy: it connects, it stays up, the log file exists and stays empty. That reads as a
+        # quiet server rather than a typo, and the two are indistinguishable without this line.
+        here = {c.name for g in client.guilds for c in getattr(g, "text_channels", [])}
+        if not watch:
+            log.info("watching all %d channels: %s", len(here), ", ".join(sorted(here)))
+            return
+        seen, missing = watch & here, watch - here
+        log.info("watching %s", ", ".join(f"#{c}" for c in sorted(seen)) or "NOTHING")
+        if missing:
+            log.warning("GINI_BOT_CHANNELS names %s, which this server does not have — nothing "
+                        "will be recorded from %s. Channels here: %s",
+                        ", ".join(f"#{c}" for c in sorted(missing)),
+                        "them" if len(missing) > 1 else "it",
+                        ", ".join(sorted(here)) or "(none visible)")
 
     @client.event
     async def on_message(message):
