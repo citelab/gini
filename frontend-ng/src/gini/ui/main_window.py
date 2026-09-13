@@ -1738,9 +1738,44 @@ class MainWindow(QMainWindow):
         except Exception as e:                        # noqa: BLE001 - never take the app down
             self.ctx.bus.log.emit("error", f"GINI Source: {e}")
 
-    def _xv6_agent(self):
-        """The in-container agent client of that machine, or None when nothing is running.
-        The HUD reads the kernel's event rings through it."""
+    def _xv6_agent(self, machine: str = ""):
+        """The in-container agent client of a running xv6 Machine, or None when nothing is running.
+
+        Read from `_xv6_providers` — the registry `_wire_xv6_providers` fills on Run — and NOT from
+        the MachineState's provider. Those are not the same thing, and the difference was an
+        intermittent bug: `MachineState.provider` is the plane matching the DISPLAY mode, so a state
+        created before the live bridge existed is a *demo* state, and `attach_real` then stores the
+        bridge in `_real` while deliberately leaving a demo user in Demo. The live bridge was
+        therefore sitting right there, invisible to this method, and GINI Source told the student
+        "No running xv6 machine" about a machine that was running perfectly.
+
+        Whether it happened depended on whether anything had touched that state before Run finished
+        — the OS HUD, an Ask GINI question, the kernel board, opening the Lab — which is exactly why
+        it looked random, and why opening GINI Source *after* the topology was up usually worked.
+
+        Only while running. The registry is never cleared on Stop, so consulting it afterwards would
+        have us talking to a container that no longer exists instead of saying nothing is running.
+
+        `machine` names which one, for a canvas with more than one xv6. Empty means the first, which
+        is what the kernel-source path has always asked for. A named machine that has no live bridge
+        returns None rather than another machine's agent: showing M1's source under a heading that
+        says M2 is worse than showing nothing.
+        """
+        if not self._running:
+            return None
+        providers = getattr(self, "_xv6_providers", {}) or {}
+        for d in self.ctx.topology.devices.values():
+            if getattr(d, "type_key", "") != "xv6":
+                continue
+            if machine and d.name != machine:
+                continue
+            bridge = providers.get(d.id)
+            if bridge is not None:
+                return getattr(bridge, "agent", None)
+            if machine:
+                return None                   # that machine specifically, and it has no bridge
+        # No registry entry. Fall back to whatever plane the shared state is on, which is how this
+        # worked before and still covers a state whose provider was attached by some other path.
         st = self._xv6_state()
         return getattr(getattr(st, "provider", None), "agent", None) if st else None
 
@@ -3863,6 +3898,14 @@ class MainWindow(QMainWindow):
                 ms.attach_real(bridge, vm=getattr(bridge, "vm", None),
                                fs=getattr(bridge, "fs", None))
         self._xv6_providers = providers
+        # GINI Source may have been pointed at a machine BEFORE any of this existed, in which case
+        # it is sitting on "No running xv6 machine" and has no reason of its own to ask again. This
+        # is the moment its answer changed, so re-ask for whatever it is showing. Without it a
+        # student who selected the machine while the topology was still coming up has to know to
+        # click it a second time — which is half of what "sometimes the apps appear" meant.
+        sb = getattr(self, "source_browser", None)
+        if sb is not None and getattr(sb, "_mode", "") == "apps":
+            sb.show_apps(getattr(sb, "_machine", ""))
 
     def _machine_state_for(self, device_id: str):
         """Get (or lazily create) the shared MachineState for an xv6 Machine — the bridge the

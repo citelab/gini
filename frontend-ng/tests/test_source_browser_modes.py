@@ -232,3 +232,215 @@ def test_apps_mode_with_no_machine_says_so_rather_than_showing_nothing(app, them
     b.show_apps("xv6-1")
     assert "No running xv6 machine" in b._sub.text()
     assert b._jump.count() == 0
+
+
+# --- the intermittent one ------------------------------------------------------------------- #
+
+def test_the_agent_is_found_even_when_the_lab_is_showing_demo_data(app, theme, monkeypatch):
+    """The race behind "sometimes the apps appear and sometimes they do not".
+
+    `MachineState.provider` is the plane matching the DISPLAY mode, not the live bridge. A state
+    created before the bridge existed is a Demo state, and `attach_real` deliberately leaves a demo
+    user in Demo — so the bridge sits in `_real`, and a lookup through `.provider` finds a
+    DemoScheduler with no `.agent`. GINI Source then said "No running xv6 machine" about a machine
+    that was running. Whether it happened depended on whether anything had touched the state first,
+    which is why it looked random.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from gini.domain.machine_state import MachineState
+    from gini.domain.xv6 import DemoScheduler
+    from gini.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    w = MainWindow(app if hasattr(app, "processEvents") else QApplication.instance())
+
+    class _Dev:
+        id, name, type_key, properties = "d1", "M1", "xv6", {}
+
+    class _Agent:
+        pass
+
+    class _Bridge:
+        agent = _Agent()
+        vm = fs = None
+
+    w.ctx.topology.devices["d1"] = _Dev()
+    w._running = True
+    w._xv6_providers = {"d1": _Bridge()}
+
+    # The state exists ALREADY and is in demo mode — the situation that made this intermittent.
+    ms = MachineState(DemoScheduler(), device_id="d1", mode="demo")
+    ms.attach_real(_Bridge(), vm=None, fs=None)
+    w.ctx.machine_states["d1"] = ms
+    assert getattr(ms.provider, "agent", None) is None, "the demo plane must have no agent"
+
+    assert w._xv6_agent() is not None, (
+        "the live bridge was in the registry and was not found: this is the flaky-apps bug")
+    assert w._xv6_agent("M1") is not None
+
+
+def test_no_agent_is_offered_once_the_topology_has_stopped(app, theme):
+    """The registry is never cleared on Stop, so it must not be consulted afterwards — otherwise
+    the panel talks to a container that no longer exists instead of saying nothing is running."""
+    from PySide6.QtWidgets import QApplication
+
+    from gini.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    w = MainWindow(QApplication.instance())
+
+    class _Dev:
+        id, name, type_key, properties = "d1", "M1", "xv6", {}
+
+    class _Bridge:
+        agent = object()
+
+    w.ctx.topology.devices["d1"] = _Dev()
+    w._xv6_providers = {"d1": _Bridge()}
+    w._running = False
+    assert w._xv6_agent() is None
+
+
+def test_a_named_machine_never_returns_another_machines_agent(app, theme):
+    """Two xv6 machines on one canvas. Showing M1's source under a heading that says M2 is worse
+    than showing nothing, so a named machine with no live bridge returns None."""
+    from PySide6.QtWidgets import QApplication
+
+    from gini.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    w = MainWindow(QApplication.instance())
+
+    class _Dev:
+        def __init__(self, i, n):
+            self.id, self.name, self.type_key, self.properties = i, n, "xv6", {}
+
+    class _Bridge:
+        agent = object()
+
+    w.ctx.topology.devices["d1"] = _Dev("d1", "M1")
+    w.ctx.topology.devices["d2"] = _Dev("d2", "M2")
+    w._running = True
+    w._xv6_providers = {"d1": _Bridge()}            # only M1 is live
+    assert w._xv6_agent("M1") is not None
+    assert w._xv6_agent("M2") is None, "M2 was handed M1's agent"
+
+
+# --- the one that lied ---------------------------------------------------------------------- #
+
+def test_a_machine_that_cannot_be_reached_is_not_reported_as_having_no_apps(app, theme):
+    """It said "That machine reported no apps" when the machine had said nothing at all — which
+    sent people looking through the image for programs that were in it the whole time."""
+    class _Refusing:
+        def __init__(self):
+            self.tries = 0
+
+        def get_json(self, path):
+            self.tries += 1
+            raise ConnectionRefusedError("connection refused")
+
+        def get_text(self, path):
+            return ""
+
+    from gini.ui import source_browser as sb
+    from gini.ui.source_browser import SourceBrowser
+
+    agent = _Refusing()
+    b = SourceBrowser(theme, fetch_fn=lambda: agent)
+    b.show_apps("xv6-1")
+    _settle(app, b, lambda: "Could not reach" in b._sub.text())
+    assert "Could not reach" in b._sub.text()
+    assert "reported no apps" not in b._sub.text()
+    assert agent.tries == sb._ASK_TRIES, "a refused connection must be retried, not believed"
+
+
+def test_an_agent_that_comes_up_late_is_still_asked(app, theme):
+    """The actual shape on a real machine: the container is up, the panel asks in the same second,
+    and the agent socket is not accepting yet. One refusal is not an answer."""
+    class _LateAgent:
+        def __init__(self):
+            self.tries = 0
+
+        def get_json(self, path):
+            self.tries += 1
+            if self.tries < 2:
+                raise ConnectionRefusedError("connection refused")
+            return {"programs": ["spin", "walker"]}
+
+        def get_text(self, path):
+            return "// an app\nint main(void){return 0;}\n"
+
+    b = SourceBrowser_for(theme, _LateAgent())
+    b.show_apps("xv6-1")
+    _settle(app, b, lambda: b._jump.count() >= 2)
+    assert [b._jump.item(i).text() for i in range(b._jump.count())] == ["spin", "walker"]
+
+
+def SourceBrowser_for(theme, agent):
+    from gini.ui.source_browser import SourceBrowser
+    return SourceBrowser(theme, fetch_fn=lambda: agent)
+
+
+def test_the_panel_asks_for_the_machine_it_is_pointed_at(app, theme):
+    """A fetch function that accepts a machine name gets one. Without this the panel shows the
+    first xv6 on the canvas under a heading naming a different one."""
+    asked = []
+
+    class _Agent:
+        def get_json(self, path):
+            return {"programs": ["spin"]}
+
+        def get_text(self, path):
+            return "// an app\n"
+
+    from gini.ui.source_browser import SourceBrowser
+
+    def fetch(machine=""):
+        asked.append(machine)
+        return _Agent()
+
+    b = SourceBrowser(theme, fetch_fn=fetch)
+    b.show_apps("M2")
+    _settle(app, b, lambda: b._jump.count() >= 1)
+    assert asked and asked[0] == "M2", f"asked for {asked}"
+
+
+def test_the_panel_asks_again_once_the_bridges_are_wired(app, theme):
+    """The other half of "sometimes". A student who selects the machine while the topology is still
+    coming up gets "No running xv6 machine", and nothing tells the panel that the answer changed a
+    second later — so it sits there being wrong until they think to click again."""
+    from PySide6.QtWidgets import QApplication
+
+    from gini.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    w = MainWindow(QApplication.instance())
+    sb = w.source_browser
+
+    sb.show_apps("M1")                              # asked too early: nothing is running
+    assert "No running xv6 machine" in sb._sub.text()
+
+    class _Agent:
+        def get_json(self, path):
+            return {"programs": ["spin", "walker"]}
+
+        def get_text(self, path):
+            return "// an app\n"
+
+    class _Bridge:
+        agent = _Agent()
+        vm = fs = None
+
+    class _Dev:
+        id, name, type_key, properties = "d1", "M1", "xv6", {}
+
+    w.ctx.topology.devices["d1"] = _Dev()
+    w._running = True
+    w._xv6_providers = {"d1": _Bridge()}
+    w._last_services = []                           # nothing new to wire; the re-ask is the point
+    w._wire_xv6_providers()
+
+    _settle(app, sb, lambda: sb._jump.count() >= 2)
+    assert [sb._jump.item(i).text() for i in range(sb._jump.count())] == ["spin", "walker"], (
+        "the panel never re-asked after the bridges came up")

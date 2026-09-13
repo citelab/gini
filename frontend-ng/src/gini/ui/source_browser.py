@@ -24,7 +24,9 @@ Revert and a workflow around them.
 """
 from __future__ import annotations
 
+import inspect
 import re
+import time
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
@@ -137,6 +139,12 @@ def _jump_item(label: str, kind: str, value) -> "QListWidgetItem":
     return it
 
 
+#: How hard to try the machine before telling the student it could not be reached. The window that
+#: matters is small — a container that has just started and is not yet accepting on its agent port.
+_ASK_TRIES = 3
+_ASK_GAP_S = 0.4
+
+
 class SourceBrowser(QWidget):
     """Read-only kernel source with a jump list. Fetches off the GUI thread."""
 
@@ -146,15 +154,24 @@ class SourceBrowser(QWidget):
     #: file list lives in the header combo (kernel mode) and wrong here, where the top pane IS the
     #: app list — a shared path would wipe the list the student is choosing from. Scripts mode
     #: sidesteps the same problem with its own `_open_script`; this is the async equivalent.
-    appsListed = Signal(list)              # ([app name, ...]) — the machine's own list
+    appsListed = Signal(list, str)         # ([app name, ...], error) — the machine's own list
     appLoaded = Signal(str, str)           # (rel path, text) — content only, list untouched
 
     def __init__(self, theme, fetch_fn=None, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
-        # () -> AgentClient|None, injected. The browser never imports main_window and never talks
-        # to Docker; it asks whoever owns the machine for a reader.
+        # () -> AgentClient|None, or (machine) -> AgentClient|None, injected. The browser never
+        # imports main_window and never talks to Docker; it asks whoever owns the machine for a
+        # reader. The one-argument form lets it ask for the machine it is POINTED AT rather than
+        # whichever xv6 happens to be first on the canvas — which matters the moment a topology has
+        # two, because the panel would otherwise put M1's source under a heading that says M2.
         self.fetch_fn = fetch_fn
+        self._machine = ""                 # the machine this panel is currently showing
+        try:
+            self._fetch_takes_machine = bool(fetch_fn) and len(
+                inspect.signature(fetch_fn).parameters) >= 1
+        except (TypeError, ValueError):    # a builtin or C callable has no inspectable signature
+            self._fetch_takes_machine = False
         self._block = ""
         self._sf = None
         self._mode = "kernel"          # "kernel" (xv6 source) | "scripts" (router Lua) | "none"
@@ -255,6 +272,7 @@ class SourceBrowser(QWidget):
         running: a student can read a module before deciding to load it.
         """
         self._mode = "scripts"
+        self._machine = ""             # left apps mode: stop asking for that machine by name
         self._block = ""
         self._set_lua_highlight(True)
         self._files.blockSignals(True)
@@ -297,6 +315,18 @@ class SourceBrowser(QWidget):
         self._view.moveCursor(QTextCursor.Start)
         self._sub.setText(f"{name}  ·  {line_count(text)} lines  ·  loads as /scripts/{name}")
 
+    def _agent(self):
+        """The reader for the machine this panel is pointed at, or None.
+
+        One place, so a call site cannot forget to name the machine and quietly get the first xv6
+        on the canvas instead.
+        """
+        if not self.fetch_fn:
+            return None
+        if self._machine and self._fetch_takes_machine:
+            return self.fetch_fn(self._machine)
+        return self.fetch_fn()
+
     # -- apps: the xv6 user programs -------------------------------------------------------- #
     def show_apps(self, machine: str = "") -> None:
         """Browse the xv6 USER PROGRAMS — spin, walker, alloc and the rest — read out of the
@@ -315,6 +345,7 @@ class SourceBrowser(QWidget):
         Layout follows scripts mode: the top pane is the app list, the bottom is the source.
         """
         self._mode = "apps"
+        self._machine = machine
         self._block = ""
         self._set_lua_highlight(False)
         self._files.blockSignals(True)
@@ -325,7 +356,7 @@ class SourceBrowser(QWidget):
         self._jump.blockSignals(True)
         self._jump.clear()
         self._jump.blockSignals(False)
-        agent = self.fetch_fn() if self.fetch_fn else None
+        agent = self._agent()
         if agent is None:
             self._view.setPlainText("")
             self._sub.setText("No running xv6 machine — start one to read the source of its apps.")
@@ -334,17 +365,37 @@ class SourceBrowser(QWidget):
 
         def work():
             # Blocking HTTP: off the GUI thread, like every other reader in this class.
-            try:
-                names = (agent.get_json("/programs") or {}).get("programs") or []
-            except Exception:                     # noqa: BLE001 - never take the app down
-                names = []
-            self.appsListed.emit(list(names))
+            #
+            # Retried, because the common failure is not a refusal but a socket that is not
+            # accepting yet: the container is up and this panel is asked for its apps in the same
+            # second, and the connection is simply refused. `/programs` is a constant on the agent
+            # side, so a successful ask is never empty and there is nothing to wait for beyond the
+            # listener itself — a second is plenty, and it is spent on a worker thread.
+            names, error = [], ""
+            for attempt in range(_ASK_TRIES):
+                try:
+                    names = (agent.get_json("/programs") or {}).get("programs") or []
+                    error = ""
+                    break
+                except Exception as e:            # noqa: BLE001 - never take the app down
+                    error = str(e) or type(e).__name__
+                    if attempt + 1 < _ASK_TRIES:
+                        time.sleep(_ASK_GAP_S)
+            self.appsListed.emit(list(names), error)
 
         run_off_gui(self, work)
 
-    def _on_apps_listed(self, names) -> None:
+    def _on_apps_listed(self, names, error: str = "") -> None:
         if self._mode != "apps":
             return                # the student moved on while the machine was answering
+        if error:
+            # NOT "reported no apps". The machine reported nothing at all, and saying otherwise
+            # sent people looking at the image for programs that were in it all along.
+            self._view.setPlainText("")
+            self._jump.clear()
+            self._sub.setText(f"Could not reach that machine to ask what it has ({error}). "
+                              f"If it has only just started, select it again in a moment.")
+            return
         rels = []
         for n in sorted({str(n).strip() for n in (names or []) if str(n).strip()}):
             rel = safe_rel(f"user/{n}.c")
@@ -372,7 +423,7 @@ class SourceBrowser(QWidget):
         if not rel:
             self._sub.setText("That path is not inside the kernel tree.")
             return
-        agent = self.fetch_fn() if self.fetch_fn else None
+        agent = self._agent()
         if agent is None:
             self._sub.setText("No running xv6 machine — start one to read the source of its apps.")
             self._view.setPlainText("")
@@ -407,6 +458,7 @@ class SourceBrowser(QWidget):
         still showing the last router's module is worse than an empty one, because it looks
         like it belongs to what you just clicked."""
         self._mode = "none"
+        self._machine = ""             # left apps mode: stop asking for that machine by name
         self._block = ""
         self._set_lua_highlight(False)
         self._files.setVisible(False)
@@ -424,6 +476,7 @@ class SourceBrowser(QWidget):
     def show_block(self, block: str, files=None) -> None:
         """Open the source behind a board block. Called from the HUD's open_source signal."""
         self._mode = "kernel"
+        self._machine = ""             # left apps mode: stop asking for that machine by name
         self._set_lua_highlight(False)
         self._files.setVisible(True)
         self._block = block or ""
