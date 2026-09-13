@@ -149,53 +149,13 @@ def classify(text: str, *, is_reply: bool = False) -> str:
 
 
 # --- what makes two messages the same problem -------------------------------------- #
+#
+# `terms` and `overlap` moved to `gini.domain.similarity` once the Teaching Center needed the same
+# notion of sameness to match a question against the teacher's answer bank. Two copies would drift,
+# and the failure would be invisible in the worst way: a cluster the console showed as answered
+# would go on being asked, with nothing on either screen explaining why.
 
-#: Below this many content words there is nothing to cluster on, and grouping would put unrelated
-#: one-liners ("it broke", "same here") into a fake incident.
-MIN_TERMS = 3
-
-
-def terms(text: str) -> str:
-    """The content words of a message, normalised and sorted — the material clustering works on.
-
-    Built with `gini.domain.lexicon.normalize`, the same normaliser `agent.recall` uses to turn a
-    student's phrasing into GINI vocabulary, so the bot's idea of "the same thing" is the one the
-    rest of GINI already has.
-
-    **A hash of this set was the first design and it does not work.** Two people reporting one
-    failure almost never use the same words: measured on a real pair —
-
-        "gbuilder core dumped on the lab machine, help?"
-        "the lab machine core dumped gbuilder"
-
-    — the sets differ by the single term `help`, and an exact hash therefore filed one incident as
-    two. Under-counting is not a cosmetic fault here; counting recurrence is the entire purpose of
-    step 1, and a mechanism that splits every incident by whichever filler word somebody typed
-    would report a quiet server no matter what was happening in it.
-
-    So sameness is decided by OVERLAP at read time (`log.clusters`), and this returns the terms
-    rather than a digest. "" when there is too little to go on, which is a real answer and not a
-    failure: an unclusterable message is still worth recording.
-    """
-    from gini.domain.lexicon import normalize
-
-    found = sorted(set(normalize(text or "", query=True)))
-    return " ".join(found) if len(found) >= MIN_TERMS else ""
-
-
-#: How much two messages must share to count as the same report. Jaccard over the term sets.
-#: 0.5 was chosen against the pair in `terms()` above: it groups them, while leaving two different
-#: complaints that merely share the word "gbuilder" apart.
-SAME = 0.5
-
-
-def overlap(a: str, b: str) -> float:
-    """Jaccard similarity of two `terms` strings. 0.0 when either is empty — an unclusterable
-    message never joins a cluster, rather than joining every cluster."""
-    sa, sb = set(a.split()), set(b.split())
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / len(sa | sb)
+from gini.domain.similarity import MIN_TERMS, SAME, overlap, terms       # noqa: F401  (re-exported)
 
 
 def observe(*, at: float, channel: str, user_id, salt: str, text: str,
