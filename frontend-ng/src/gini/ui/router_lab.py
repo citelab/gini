@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from ..domain.router_modules import BASE, CUSTOM, INLINE, MODULE_BY_KEY, RouterProgram
 from .theme import ThemeManager, icons
+from .windowing import standalone
 from .worker_host import run_off_gui
 
 
@@ -33,6 +34,9 @@ class RouterLab(QDialog):
                  on_console=None, command_fn=None, sdn=False, query_fn=None,
                  face=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.program = program

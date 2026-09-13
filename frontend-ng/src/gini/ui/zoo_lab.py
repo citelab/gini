@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLa
 
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+from .windowing import standalone
 
 
 class ZooLab(QDialog):
@@ -30,6 +31,9 @@ class ZooLab(QDialog):
 
     def __init__(self, parent, theme: ThemeManager, device, url: str) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.url = url

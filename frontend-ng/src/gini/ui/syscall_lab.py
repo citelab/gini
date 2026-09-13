@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from ..domain.xv6 import SyscallRate, parse_sccounts, parse_sctrace, syscall_name
 from .theme import ThemeManager, icons
+from .windowing import standalone
 from .worker_host import run_off_gui
 
 
@@ -63,6 +64,9 @@ class SyscallLab(QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, sc_source=None,
                  name_extra=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self._sc_source = sc_source or (lambda: "")

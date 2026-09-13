@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..services import tc_staff
+from .windowing import standalone
 from .worker_host import run_off_gui
 
 
@@ -76,6 +77,10 @@ class MarkDialog(QDialog):
         # happened WHILE looking at the topology it describes — closing the report the moment the
         # canvas fills means holding it in your head, or looking the receipt up twice.
         self.setModal(False)
+        # And for the same reason it is its own window rather than an owned dialog: reading the
+        # report BESIDE the canvas is the whole point, and on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
 
         root = QVBoxLayout(self)
         root.setSpacing(10)

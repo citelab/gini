@@ -26,6 +26,7 @@ from .live_poll import LivePollMixin
 from .no_data import has_data, paint_placeholder, panel_state, placeholder_for, title_for
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+from .windowing import standalone
 
 #: How often the live face re-reads. One round is three dumps (/vm, /vmall, /faults) and the
 #: serial line is the scarce resource, not the CPU — below the ~0.5 s tick so a student sees
@@ -189,6 +190,9 @@ class MemoryLab(LivePollMixin, QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
                  on_play=None, play_games=None, state=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.provider = provider or DemoVm()

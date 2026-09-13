@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from ..domain.xv6 import parse_lock_cpus, parse_locks
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+from .windowing import standalone
 from .worker_host import run_off_gui
 
 # Above this many spins per acquire a lock is worth splitting — the threshold is a teaching
@@ -97,6 +98,9 @@ class LockLab(QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
                  live: bool = False) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.provider = provider

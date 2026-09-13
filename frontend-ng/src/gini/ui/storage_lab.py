@@ -20,6 +20,7 @@ from .live_poll import LivePollMixin
 from .no_data import ABSENT, paint_placeholder, panel_state, placeholder_for
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+from .windowing import standalone
 
 _REGION_ACCENT = {"boot": "slate", "super": "blue", "log": "amber", "inodes": "green",
                   "bitmap": "purple", "data": "cyan"}
@@ -202,6 +203,9 @@ class StorageLab(LivePollMixin, QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
                  state=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.provider = provider or DemoDisk()

@@ -27,12 +27,16 @@ from ..domain.cpu_journey import (
     stages_for,
 )
 from .theme import ThemeManager, icons
+from .windowing import standalone
 
 
 class CpuJourney(QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, cpu=None, frame=None,
                  procs=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.cpu = cpu                      # a CpuState (real regs) to seed the syscall path

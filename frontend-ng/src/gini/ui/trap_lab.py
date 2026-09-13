@@ -28,6 +28,7 @@ from ..domain.xv6 import (
     TRAP_KINDS, TrapRate, parse_alarms, parse_trapcounts, parse_traptrace, trap_kind_name,
 )
 from .theme import ThemeManager, icons
+from .windowing import standalone
 
 # trap kinds the "Step a trap" catcher can target (kernel-side one-shot capture, armed over the
 # console mux — no gdb); "any" = next trap. NB known issue #13: "any"/"device" usually catch the
@@ -90,6 +91,9 @@ class TrapLab(LivePollMixin, QDialog):
     def __init__(self, parent, theme: ThemeManager, device=None, traps_source=None,
                  on_step=None, catch_source=None, alarm_source=None, on_play=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self._src = traps_source or (lambda: "")

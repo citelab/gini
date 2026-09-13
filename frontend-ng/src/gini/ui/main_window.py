@@ -9,8 +9,8 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QDockWidget, QFrame, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QToolBar,
     QToolButton, QWidget,
@@ -108,6 +108,11 @@ def _photo_data_url(path: str, size: int = 128) -> str:
 
 
 class MainWindow(QMainWindow):
+    #: `_check_updates` runs the PyPI read on a worker thread; this is how the answer crosses back.
+    #: A signal rather than a direct call because the receiver builds a dialog, and Qt widgets may
+    #: only be touched on the GUI thread — the same rule `ui/worker_host` exists to keep.
+    update_checked = Signal(dict)
+
     def __init__(self, app) -> None:
         super().__init__()
         self.ctx = AppContext()
@@ -176,6 +181,7 @@ class MainWindow(QMainWindow):
         self.ctx.bus.k8s_metrics.connect(self._on_k8s_metrics)
         self.ctx.bus.llm_reachable.connect(self._on_llm_reachable)
         self.ctx.bus.enrolment_changed.connect(self._on_enrolment)
+        self.update_checked.connect(self._on_update_checked)
         self._chat_dock = None
         self._force_new_signin = False             # one-shot: force the sign-in dialog (switch user)
         self._beat = QTimer(self)                  # presence + group progress, while signed in
@@ -1892,7 +1898,6 @@ class MainWindow(QMainWindow):
     # -- actions ------------------------------------------------------------ #
     # -- project persistence ------------------------------------------------ #
     def _make_menubar(self) -> None:
-        from PySide6.QtGui import QKeySequence
         mb = self.menuBar()
         filem = mb.addMenu("&File")
 
@@ -1969,9 +1974,142 @@ class MainWindow(QMainWindow):
         late_act = add(tm, "Accept a &late submission…", self._accept_late)
         late_act.setMenuRole(QAction.MenuRole.NoRole)
 
+        # Window: the way back to a lab that has gone behind this one.
+        #
+        # Not a convenience — it is the other half of the change in `ui/windowing`. The labs became
+        # independent top-level windows so that Windows would give each a taskbar button and Alt+Tab
+        # would reach them; the price of independence is that a lab can now sit BEHIND gBuilder,
+        # which an owned window never could. Alt+Tab and Cmd+` both get you back, but they are
+        # per-platform gestures a student has to already know. A menu listing the windows by name
+        # reads the same on all three platforms and can be found rather than remembered.
+        #
+        # Rebuilt on every open and never cached: labs are retired and replaced constantly, and a
+        # cached entry pointing at a `deleteLater()`d widget is exactly the menu item that raises
+        # when clicked.
+        winm = mb.addMenu("&Window")
+        winm.aboutToShow.connect(lambda: self._fill_window_menu(winm))
+        self._window_menu = winm         # a Python reference: `menuBar().actions()[i].menu()` hands
+        #                                  back a wrapper that dies with the action it came from
+        self._fill_window_menu(winm)     # so it is never empty before its first open
+
         helpm = mb.addMenu("&Help")
         tour_act = add(helpm, "&Feature Tour…", self.show_feature_tour)
         tour_act.setMenuRole(QAction.MenuRole.NoRole)
+        # NoRole again: macOS hoists anything it reads as "check for updates" into the application
+        # menu, where the student who was told "it is under Help" will not find it.
+        upd_act = add(helpm, "Check for &Updates…", self._check_updates)
+        upd_act.setMenuRole(QAction.MenuRole.NoRole)
+
+    # ---------------------------------------------------------------- the Window menu
+
+    def _fill_window_menu(self, menu) -> None:
+        """Rebuild the Window menu from the windows that exist at this instant.
+
+        Titles are escaped: `&` in a title is a mnemonic to Qt, and half the labs are named for a
+        device, so "Traps & Interrupts — M1" would otherwise render as "Traps  Interrupts" with the
+        I underlined. The numbers in front are mnemonics we mean — Alt+1 picks the first window once
+        the menu is open.
+        """
+        from PySide6.QtWidgets import QApplication
+        from .windowing import focus, open_windows
+
+        menu.clear()
+        mini = QAction("&Minimise", self)
+        mini.setShortcut(QKeySequence("Ctrl+M"))
+        mini.setMenuRole(QAction.MenuRole.NoRole)
+        mini.triggered.connect(self._minimise_active)
+        menu.addAction(mini)
+        front = QAction("Bring &All to Front", self)
+        front.setMenuRole(QAction.MenuRole.NoRole)
+        front.triggered.connect(self._bring_all_to_front)
+        menu.addAction(front)
+        menu.addSeparator()
+
+        active = QApplication.activeWindow()
+        for i, (title, w) in enumerate(open_windows(), start=1):
+            label = title.replace("&", "&&")
+            a = QAction(f"&{i}  {label}" if i < 10 else label, self)
+            a.setCheckable(True)                 # a tick on the one in front, so the list orients
+            a.setChecked(w is active)
+            a.triggered.connect(lambda _checked=False, win=w: focus(win))
+            menu.addAction(a)
+
+    def _minimise_active(self) -> None:
+        """Minimise whichever GINI window is in front — which is usually not this one.
+
+        The shortcut is on this window's action, so on Windows and Linux it fires while gBuilder
+        itself has focus; a lab in front is minimised by the platform's own gesture, which it now
+        has because it is a real window. On macOS the menu bar is shared by every window, so it
+        works from all of them.
+        """
+        from PySide6.QtWidgets import QApplication
+        w = QApplication.activeWindow() or self
+        w.showMinimized()
+
+    def _bring_all_to_front(self) -> None:
+        """Raise every GINI window above whatever else is on screen.
+
+        The macOS idiom, worth having everywhere now that the labs are independent: after switching
+        to a browser, one click brings the whole set back instead of Alt+Tabbing through them one at
+        a time.
+
+        The window that was in front goes last, so it is still in front afterwards. Raising the main
+        window last instead would be simpler and wrong — it would bury the lab the student was
+        reading under gBuilder every time they came back to it.
+        """
+        from PySide6.QtWidgets import QApplication
+        from .windowing import focus, open_windows
+
+        was_active = QApplication.activeWindow() or self
+        for _title, w in open_windows(exclude=was_active):
+            focus(w)
+        focus(was_active)
+
+    # ---------------------------------------------------------------- updates
+
+    def _check_updates(self) -> None:
+        """Help → Check for Updates. One GET to PyPI, off the GUI thread, one dialog back.
+
+        Deliberately not run at launch. A check that fires on its own turns a lab machine with no
+        internet into a machine that pauses and complains on every start, and it makes gBuilder talk
+        to the network without the student asking — which for a tool handed out by a course is not
+        ours to decide. See `services/update_check` for what is (and is not) sent.
+        """
+        self.ctx.log("Asking PyPI whether there is a newer gBuilder…", "info")
+
+        def work():
+            from ..services.update_check import check
+            self.update_checked.emit(check())
+        run_off_gui(self, work)
+
+    def _on_update_checked(self, result: dict) -> None:
+        """Show the answer. Every word of it is decided in `services/update_check.advice` — this
+        end only chooses a box and an icon, so what gets said to a student can be tested without
+        a Qt event loop.
+
+        The command is offered on the clipboard, never run. gBuilder pins its container images to
+        its own exact version, so upgrading the package alone leaves Run broken until the next
+        launch refreshes them; a button that did half the job would be worse than a sentence that
+        describes the whole of it.
+        """
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from ..services.update_check import advice
+
+        said = advice(result)
+        box = QMessageBox(self)
+        box.setWindowTitle("Check for Updates")
+        box.setIcon(QMessageBox.Information if result.get("ok") else QMessageBox.Warning)
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)    # the command has to be copyable
+        box.setText(said["headline"])
+        box.setInformativeText(said["detail"])
+        box.setStandardButtons(QMessageBox.Ok)   # explicit: a box built with none gets one only
+        #                                          when it is shown, which is too late to reason
+        #                                          about and impossible to test
+        if said["command"]:
+            copy = box.addButton("Copy command", QMessageBox.ActionRole)
+            copy.clicked.connect(
+                lambda _=False, c=said["command"]: QApplication.clipboard().setText(c))
+        box.exec()
 
     # ---------------------------------------------------------------- GINI32 boards
 
@@ -4181,21 +4319,16 @@ class MainWindow(QMainWindow):
     _LIVE_THEMED = ("MainWindow",)
 
     def _open_windows(self) -> list:
-        """Visible top-level windows of ours, other than this one. Menus, tooltips and popups are
-        top-level too, so anything without a title bar is ignored."""
-        from PySide6.QtWidgets import QApplication
-        out = []
-        for w in QApplication.topLevelWidgets():
-            if w is self or not w.isVisible():
-                continue
-            if type(w).__name__ in self._LIVE_THEMED:
-                continue
-            if not (w.windowFlags() & Qt.Window):        # menus/tooltips/popups are not windows
-                continue
-            title = w.windowTitle()
-            if title:
-                out.append(title)
-        return out
+        """Titles of the visible windows that would be left behind by a theme switch.
+
+        Enumeration lives in `ui/windowing` because the Window menu needs the same list, and two
+        copies of "what counts as one of our windows" is how the menu and this guard come to
+        disagree — the menu offering a window the theme guard does not see is a bug nobody would
+        think to look for here.
+        """
+        from .windowing import open_windows
+        return [title for title, w in open_windows(exclude=self)
+                if type(w).__name__ not in self._LIVE_THEMED]
 
     def _pick_theme(self, name: str) -> None:
         """Theme menu entry point. Refuses while another window is open, and says which."""

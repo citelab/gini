@@ -27,6 +27,7 @@ from ..domain.machine_state import MachineState
 from ..domain.xv6 import DemoScheduler, policy_name, ready_queue, short_pid
 from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
+from .windowing import standalone
 from .worker_host import join_owner, run_off_gui
 
 # scheduler policies the selector offers (must match domain POLICY_NAMES / kernel gini_pick)
@@ -231,6 +232,9 @@ class MachineLab(QDialog):
     def __init__(self, parent, theme: ThemeManager, device, state: MachineState | None = None,
                  live=False, on_console=None, on_log=None, recorder=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.device = device
         self.on_console = on_console
@@ -504,6 +508,11 @@ class MachineLab(QDialog):
         from PySide6.QtWidgets import QDialog
         t = self.theme.theme
         w = QDialog(self)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no taskbar button
+        # and Alt+Tab skips it. See ui/windowing. The student who asked for this named the Process
+        # Scheduler specifically, and it is the one lab window built inline rather than as a class,
+        # so the sweep over the lab classes would have missed it.
+        standalone(w)
         w.setWindowTitle(f"Process Scheduler Lab — {self.device.name}")
         w.resize(940, 700)
         w.setStyleSheet(f"QDialog{{background:{t.bg};}}")
@@ -1689,6 +1698,9 @@ class Xv6Console(QDialog):
 
     def __init__(self, parent, theme: ThemeManager, provider, device=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.provider = provider
         t = theme.theme

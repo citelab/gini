@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from .theme import ThemeManager
 from .theme.manager import scale_css as _scss
+from .windowing import standalone
 from .worker_host import run_off_gui
 
 # terminal-side built-ins (handled here, not sent to xv6 sh) and the common real xv6 programs the
@@ -37,6 +38,9 @@ class TerminalView(QDialog):
 
     def __init__(self, parent, theme: ThemeManager, provider, device=None) -> None:
         super().__init__(parent)
+        # Its own window, not an owned dialog: on Windows an owned dialog gets no
+        # taskbar button and Alt+Tab skips it. See ui/windowing.
+        standalone(self)
         self.theme = theme
         self.provider = provider
         self._cursor = 0                      # console byte offset we've displayed up to
