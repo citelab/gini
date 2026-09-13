@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Run the bot from anywhere, without setting anything up first.
+#
+#   ~/Programs/gini/bot/gini-bot                 # connect and observe
+#   ~/Programs/gini/bot/gini-bot backfill 300    # read the history
+#   ~/Programs/gini/bot/gini-bot report 30       # read what was collected
+#   ~/Programs/gini/bot/gini-bot tail
+#
+# This exists because `python3 -m gini_bot` needs PYTHONPATH pointing at two directories in this
+# checkout, and the failure when it is missing is `No module named gini_bot` — which reads as a
+# broken install and sends you looking in the wrong place. It is the same shape as
+# teaching-center/run.sh, for the same reason.
+#
+# Settings come from ~/.gini-bot/env if it exists (the token, the channels, the Teaching Center);
+# the paths below are worked out from where this script is, so moving the checkout is not a thing
+# you have to remember to fix.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(dirname "$here")"
+
+# Sourced FIRST, so the paths below win over a stale PYTHONPATH somebody once put in there.
+if [ -f "$HOME/.gini-bot/env" ]; then
+  set -a; . "$HOME/.gini-bot/env"; set +a
+fi
+export PYTHONPATH="$repo/core/src:$here${PYTHONPATH:+:$PYTHONPATH}"
+
+if ! python3 -c "import discord" 2>/dev/null && [ "${1:-}" != "report" ] && [ "${1:-}" != "tune" ]; then
+  echo "discord.py is not installed for $(command -v python3):" >&2
+  echo "    pip install --user --break-system-packages 'discord.py>=2.3'" >&2
+  echo "(--user keeps it in your home directory; see bot/README.md)" >&2
+  exit 2
+fi
+
+exec python3 -m gini_bot "$@"

@@ -31,6 +31,14 @@ export GINI_BOT_DB=~/.gini-bot/observations.db
 ~/.gini-bot/venv/bin/python -m gini_bot report 14   # read
 ```
 
+Or skip all of that and use the launcher, which works from any directory and reads
+`~/.gini-bot/env` itself:
+
+```bash
+~/Programs/gini/bot/gini-bot backfill 300
+~/Programs/gini/bot/gini-bot report 30
+```
+
 If `python3 -m venv` itself fails with *"ensurepip is not available"*, the distro split that out
 into `python3-venv`, and installing it needs root. **On a locked-down machine, skip the venv:**
 
