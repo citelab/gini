@@ -16,15 +16,24 @@ anything reasons about anything.
 ## Running it
 
 ```bash
-pip install --user 'discord.py>=2.3'        # the only dependency beyond gini-core
+# A venv, not `pip install --user`: Debian 12 and Ubuntu 24.04 mark the system Python
+# "externally managed" (PEP 668) and refuse both, with an error that reads like a broken
+# machine. It is not — it is the distro protecting its own packages, and the answer is a venv.
+python3 -m venv ~/.gini-bot/venv
+~/.gini-bot/venv/bin/pip install 'discord.py>=2.3'   # the only dependency beyond gini-core
+
 export PYTHONPATH=/path/to/gini/core/src:/path/to/gini/bot
 export GINI_BOT_TOKEN=...                   # developer portal -> Bot -> Reset Token
 export GINI_BOT_CHANNELS=help,os-lab        # optional; empty means every channel it can see
 export GINI_BOT_DB=~/.gini-bot/observations.db
 
-python -m gini_bot                          # observe
-python -m gini_bot report 14                # read
+~/.gini-bot/venv/bin/python -m gini_bot             # observe
+~/.gini-bot/venv/bin/python -m gini_bot report 14   # read
 ```
+
+If `python3 -m venv` itself fails with *"ensurepip is not available"*, the distro split it out:
+`sudo apt install python3-venv`. With no sudo, `--break-system-packages` will work but pollutes a
+shared machine's system Python — prefer asking for `python3-venv`, which is a one-line request.
 
 **Enable the Message Content Intent** on the bot in Discord's developer portal. It is privileged
 and off by default, and without it `message.content` arrives empty — the log fills with blank rows
