@@ -248,3 +248,51 @@ def test_a_failed_check_is_a_warning_that_does_not_blame_the_students_machine(bo
     assert "Copy command" not in [b.text() for b in boxes[-1].buttons()]
     from PySide6.QtWidgets import QMessageBox
     assert boxes[-1].icon() == QMessageBox.Warning
+
+
+def test_closing_gbuilder_closes_the_labs_so_the_process_can_exit():
+    """The consequence of dropping the Qt parent. Nothing destroys a lab with the main window any
+    more, and Qt counts a parentless window as a PRIMARY window — so one left open means
+    quitOnLastWindowClosed never fires and gBuilder keeps running behind a window the student
+    believes they just closed. Reported as "it won't quit" is what this prevents."""
+    from PySide6.QtGui import QCloseEvent
+
+    from gini.ui.windowing import open_windows
+
+    app, w = _win()
+    lab = _lab(w)
+    assert any("Traps" in t for t, _ in open_windows())
+
+    w.closeEvent(QCloseEvent())
+    app.processEvents()
+    assert not any("Traps" in t for t, _ in open_windows()), (
+        "a lab survived the main window closing; the app would never quit")
+
+
+def test_closing_the_machine_lab_takes_its_faces_with_it():
+    """It always did, because Qt destroyed them with their parent. Now that each face is its own
+    top-level window, the hub has to do it — closing the Machine Lab and leaving six orphaned
+    windows behind would be a surprising change to behaviour nobody asked to change."""
+    from PySide6.QtGui import QCloseEvent
+
+    from gini.ui.machine_lab import MachineLab
+    from gini.ui.trap_lab import TrapLab
+    from gini.ui.windowing import open_windows
+
+    app, w = _win()
+
+    class _Dev:
+        type_key, name, properties = "xv6", "M1", {"Timeslice": "1"}
+
+    hub = MachineLab(w, w.theme, _Dev(), state=None)
+    hub.show()
+    hub._traplab = TrapLab(hub, w.theme, _Dev(), traps_source=lambda: "")
+    hub._traplab.setWindowTitle("Traps & Interrupts — M1")
+    hub._traplab.show()
+    app.processEvents()
+    assert any("Traps" in t for t, _ in open_windows())
+
+    hub.closeEvent(QCloseEvent())
+    hub.close()
+    app.processEvents()
+    assert not any("Traps" in t for t, _ in open_windows()), "a face outlived its hub"

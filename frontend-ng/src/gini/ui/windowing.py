@@ -21,14 +21,36 @@ right for `cpu_lab`, `games_lab` and `fingerprint_lab` because those are `QWidge
 window type is `0x0`, i.e. not a window at all; the flag is what promotes them. A `QDialog` is
 already a window and needs its TYPE changed instead, which is what `setWindowFlags()` does here.
 
-The parent is deliberately kept. It survives the flag change (checked), so Qt still owns the child
-for cleanup and `MainWindow._retire_lab` / `MachineLab._retire` keep working exactly as they did —
-including the join added for the worker race. Reparenting to None would also produce a taskbar
-button and would break both.
+**THE SECOND TRAP, and it cost a round trip to a Windows machine to find.** Changing the type is
+still not enough while the widget has a Qt parent. This module first kept the parent deliberately,
+reasoning that Qt would then go on destroying the window for us and `MainWindow._retire_lab` /
+`MachineLab._retire` would keep working untouched. That reasoning was sound and the result did not
+work: Qt passes the parent's HWND to Windows as the window's OWNER, and an *owned* window gets no
+taskbar button and is skipped by Alt+Tab whatever its type says.
+
+Measured on Windows 11 with gBuilder, Machine Lab, Process Scheduler and Traps open: ONE Alt+Tab
+entry, and the main window could not be raised above any of the other three — an owner can never
+come above the windows it owns. So the ownership has to go too, and `standalone()` drops the
+parent. What the parent was doing is listed on that function, along with who does it now.
+
+None of this reproduces on macOS, where all four windows behaved correctly the whole time. Do not
+re-derive this from a Mac.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+
+#: How far a promoted window is offset from the window that opened it. Qt centres an owned dialog
+#: on its parent; a top-level window is placed by the OS, which on a multi-monitor desk can be
+#: nowhere near the thing the student just clicked. A fixed cascade is predictable and cheap.
+CASCADE = 40
+
+#: Promoted windows have NO Qt parent, so Qt no longer keeps them alive — Python is the only owner
+#: left. Every call site does hold one (`self._trap_lab` and its siblings), but a registry here
+#: means a future one that forgets gets a window that stays on screen rather than a window that
+#: vanishes between two statements, which is a far worse thing to debug.
+_HELD: dict[int, object] = {}
+
 
 #: A normal, decorated, independent window. The hints are explicit because `setWindowFlags`
 #: REPLACES the flag set rather than adding to it: taking the type alone would drop the close and
@@ -42,17 +64,68 @@ def standalone(w, title: str = "") -> None:
     """Promote a parented dialog to an independent, Alt+Tab-able window.
 
     Call it in `__init__`, BEFORE the widget is first shown — changing window flags on a visible
-    window makes Qt recreate the native handle, which hides it and needs an explicit `show()` to
-    come back.
+    window makes Qt recreate the native handle, which hides it and needs an explicit `show()`.
+
+    **The Qt parent is dropped, and that is the whole point.** Setting `Qt.Window` while keeping
+    the parent was the first attempt and it is not enough: Qt hands the parent's HWND to Windows as
+    the window's OWNER, and an owned window gets no taskbar button and is skipped by Alt+Tab no
+    matter what its type says. It was measured on Windows 11 — three labs open, one Alt+Tab entry,
+    and gBuilder unable to be raised above any of them, which is exactly how owned windows behave.
+    So the ownership has to go, not just the type.
+
+    What the parent was doing, and who does it now:
+
+    * *keeping the widget alive* — `_HELD` here, plus the attribute every call site already sets;
+    * *destroying it with the parent* — `MainWindow.closeEvent` and `MachineLab.closeEvent` call
+      `close_all`/close their own children explicitly. Without that the app cannot quit: a
+      parentless window counts as a primary window, so `quitOnLastWindowClosed` keeps waiting for
+      labs nobody can see any more;
+    * *placing it* — `CASCADE` from the opener, since nothing centres it on the parent now.
 
     `title` is a convenience, and it matters more than it looks: once a window has its own taskbar
-    button and its own line in the Window menu, an empty or duplicated title is what the user has
-    to pick from. Naming the device is usually the difference between "Traps & Interrupts" three
-    times and three windows a student can tell apart.
+    button and its own line in the Window menu, an empty or duplicated title is what the student
+    has to choose from.
     """
-    w.setWindowFlags(_WINDOW)
+    anchor = None
+    parent = w.parentWidget()
+    if parent is not None:
+        top = parent.window()
+        if top is not None and top.isVisible():
+            g = top.frameGeometry()
+            anchor = QPoint(g.left() + CASCADE, g.top() + CASCADE)
+    # The two-argument form. `setParent(None)` alone resets the flags to Qt.Widget, which would
+    # un-window the thing we are here to make a window.
+    w.setParent(None, _WINDOW)
+    if anchor is not None:
+        w.move(anchor)
+    key = id(w)
+    _HELD[key] = w
+    # Only the key is captured, never the widget: a closure over `w` would be a strong reference
+    # that outlives it and defeats the pop.
+    w.destroyed.connect(lambda *_: _HELD.pop(key, None))
     if title:
         w.setWindowTitle(title)
+
+
+def close_all(exclude=None) -> int:
+    """Close every promoted window. Returns how many were open.
+
+    Called when the main window closes. It is not tidiness: these windows have no Qt parent to
+    destroy them and they set `WA_QuitOnClose` like any widget, so Qt counts them as primary
+    windows and `quitOnLastWindowClosed` will not fire while one is still up. Without this,
+    closing gBuilder leaves the process running behind a lab window.
+    """
+    n = 0
+    for w in list(_HELD.values()):
+        if w is exclude:
+            continue
+        try:
+            if w.isVisible():
+                w.close()
+                n += 1
+        except RuntimeError:
+            _HELD.pop(id(w), None)            # already gone; nothing to close
+    return n
 
 
 def open_windows(exclude=None) -> list:

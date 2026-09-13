@@ -1533,6 +1533,12 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         self._persist_current_project()      # never lose the active project's work / chat
+        # Close the labs. They are top-level windows with no Qt parent now (ui/windowing), so
+        # nothing destroys them with this one, and Qt counts each as a primary window — leaving
+        # one open means quitOnLastWindowClosed never fires and gBuilder keeps running behind a
+        # window the student thought they had just closed.
+        from .windowing import close_all
+        close_all(exclude=self)
         # Reap any hardware worker still talking to a board over USB. Quitting while one
         # runs garbage-collects a live QThread, which Qt turns into an abort — so the app
         # would "crash on exit" for anyone who closed the window mid-scan.

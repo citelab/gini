@@ -108,12 +108,22 @@ def test_exactly_the_modeless_labs_promote_themselves_to_real_windows():
             f"classified {KIND.get(name, OWNED)!r}")
 
 
-def test_promoting_a_dialog_changes_its_window_type_and_keeps_its_parent():
-    """The trap this module was written around: `setWindowFlag(Qt.Window, True)` is a NO-OP on a
-    QDialog, because Qt.Dialog (0x3) already contains the Qt.Window bit (0x1). Only replacing the
-    type works — and the parent has to survive it, or `_retire_lab` stops being able to clean up."""
+def test_promoting_a_dialog_changes_its_window_type_and_drops_its_owner():
+    """Two things, and the second one is the whole feature.
+
+    `setWindowFlag(Qt.Window, True)` is a NO-OP on a QDialog — Qt.Dialog (0x3) already contains the
+    Qt.Window bit (0x1) — so the type has to be replaced outright.
+
+    And replacing the type is still not enough. Keeping the Qt parent was the first attempt, on the
+    reasoning that Qt would then still clean the window up; it was measured on Windows 11 and it
+    does not work, because Qt passes the parent's HWND to Windows as the window's OWNER. An owned
+    window gets no taskbar button and Alt+Tab skips it whatever its type says — three labs open,
+    one Alt+Tab entry, and the main window could not be raised above any of them, which is owned-
+    window behaviour exactly. So the parent goes.
+    """
     app = QApplication.instance() or QApplication([])
     parent = QWidget()
+    parent.show()
     d = QDialog(parent)
     assert int(d.windowFlags() & Qt.WindowType_Mask) == int(Qt.Dialog)
 
@@ -122,13 +132,13 @@ def test_promoting_a_dialog_changes_its_window_type_and_keeps_its_parent():
 
     standalone(d, "A Lab — M1")
     assert int(d.windowFlags() & Qt.WindowType_Mask) == int(Qt.Window)
-    assert d.parent() is parent, "lost its parent: Qt would no longer clean it up with the window"
+    assert d.parent() is None, "still owned: Windows would give it no taskbar button"
     assert d.windowFlags() & Qt.WindowCloseButtonHint, "a lab you cannot close is a worse bug"
     assert d.windowTitle() == "A Lab — M1"
-    del app
+    parent.close()
 
 
-def test_a_real_lab_becomes_a_window_without_being_orphaned():
+def test_a_real_lab_becomes_an_unowned_window():
     from gini.ui.theme import ThemeManager
     from gini.ui.trap_lab import TrapLab
 
@@ -140,7 +150,71 @@ def test_a_real_lab_becomes_a_window_without_being_orphaned():
     parent = QWidget()
     lab = TrapLab(parent, ThemeManager(app), _Dev(), traps_source=lambda: "")
     assert int(lab.windowFlags() & Qt.WindowType_Mask) == int(Qt.Window)
-    assert lab.parent() is parent
+    assert lab.parent() is None
+
+
+def test_a_promoted_window_is_not_collected_when_the_caller_drops_it():
+    """The risk the parent used to cover. With no Qt parent Python is the only owner, and a caller
+    that forgot the reference would get a window that vanished between two statements."""
+    import gc
+
+    from gini.ui.windowing import close_all
+
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()          # held: `QDialog(QWidget())` collects the parent, and the child
+    d = QDialog(parent)         # with it, before standalone() is ever reached
+    standalone(d, "Ephemeral")
+    d.show()
+    app.processEvents()
+    del d
+    gc.collect()
+    app.processEvents()
+    assert "Ephemeral" in [t for t, _ in open_windows()]
+    close_all()
+
+
+def test_close_all_closes_promoted_windows_so_the_app_can_quit():
+    """Not tidiness. A parentless window is a PRIMARY window to Qt, so quitOnLastWindowClosed does
+    not fire while one is up — leave one open and gBuilder keeps running behind a window the
+    student believes they just closed."""
+    from gini.ui.windowing import close_all
+
+    app = QApplication.instance() or QApplication([])
+    keep = QWidget()
+    keep.setWindowFlags(Qt.Window)
+    keep.setWindowTitle("Main")
+    keep.show()
+    for name in ("One", "Two"):
+        d = QDialog(keep)
+        standalone(d, name)
+        d.show()
+    app.processEvents()
+
+    assert close_all(exclude=keep) == 2
+    app.processEvents()
+    titles = [t for t, _ in open_windows()]
+    assert "One" not in titles and "Two" not in titles
+    assert "Main" in titles, "exclude= must spare the window doing the closing"
+    keep.close()
+
+
+def test_a_promoted_window_opens_near_the_one_that_opened_it():
+    """Qt centred an owned dialog on its parent. Nothing centres a top-level window, and on a
+    multi-monitor desk the OS default can be nowhere near what the student just clicked."""
+    from gini.ui.windowing import CASCADE, close_all
+
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.setWindowFlags(Qt.Window)
+    parent.move(300, 200)
+    parent.show()
+    app.processEvents()
+
+    d = QDialog(parent)
+    standalone(d, "Near")
+    assert abs(d.pos().x() - (parent.frameGeometry().left() + CASCADE)) <= 1
+    close_all()
+    parent.close()
 
 
 def test_open_windows_lists_only_visible_titled_windows():

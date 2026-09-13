@@ -1677,8 +1677,21 @@ class MachineLab(QDialog):
         cards.get("memory") and cards["memory"].set_stat("page tables & faults →")
         cards.get("storage") and cards["storage"].set_stat("inodes & the log →")
 
+    #: The faces this hub opens. Each is its own top-level window now, so Qt no longer closes them
+    #: with their parent — closing the Machine Lab and leaving six orphaned faces on screen would
+    #: be a surprising change to behaviour that has always worked the other way.
+    _FACES = ("_sclab", "_locklab", "_traplab", "_journey", "_memory", "_storage", "_console",
+              "_sched_win")
+
     def closeEvent(self, e) -> None:  # noqa: N802
         self._closed = True            # stop any in-flight worker from signalling a dead dialog
+        for attr in self._FACES:
+            face = getattr(self, attr, None)
+            try:
+                if face is not None and face.isVisible():
+                    face.close()
+            except RuntimeError:
+                pass                   # already destroyed; nothing to close
         self._poll.stop()
         self._ov_poll.stop()
         self._shadow_poll.stop()
