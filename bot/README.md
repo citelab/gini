@@ -31,9 +31,20 @@ export GINI_BOT_DB=~/.gini-bot/observations.db
 ~/.gini-bot/venv/bin/python -m gini_bot report 14   # read
 ```
 
-If `python3 -m venv` itself fails with *"ensurepip is not available"*, the distro split it out:
-`sudo apt install python3-venv`. With no sudo, `--break-system-packages` will work but pollutes a
-shared machine's system Python — prefer asking for `python3-venv`, which is a one-line request.
+If `python3 -m venv` itself fails with *"ensurepip is not available"*, the distro split that out
+into `python3-venv`, and installing it needs root. **On a locked-down machine, skip the venv:**
+
+```bash
+pip install --user --break-system-packages 'discord.py>=2.3'
+python3 -m gini_bot
+```
+
+`--break-system-packages` sounds worse than it is **when paired with `--user`**: the install goes to
+`~/.local/lib/pythonX.Y/site-packages`, inside your own home directory, where it cannot reach the
+system Python or any other account. What the flag overrides is PEP 668's refusal, not the isolation
+— and it is undone with `rm -rf ~/.local/lib/pythonX.Y/site-packages/discord*`. Without `--user`, on
+a machine where you DO have root, it writes into the distro's own tree and the warning means exactly
+what it says.
 
 **Enable the Message Content Intent** on the bot in Discord's developer portal. It is privileged
 and off by default, and without it `message.content` arrives empty — the log fills with blank rows
