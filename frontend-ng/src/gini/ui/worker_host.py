@@ -179,8 +179,20 @@ def join_owner(owner: object, timeout: float = JOIN_TIMEOUT) -> int:
             t.join(timeout)
             if t.is_alive():
                 left += 1
+    # Forget only the threads that actually FINISHED. Popping the whole entry was tidier and wrong:
+    # it threw away the stragglers this call had just reported, so a caller that did the obvious
+    # thing with the return value — join again, with longer — waited on an empty set and returned
+    # instantly, believing it had reaped a worker that was still running. `guarded` retires its own
+    # thread when it ends, so what stays here is exactly what is still alive, and it cleans itself
+    # up without help.
     with _HELD_LOCK:
-        _BY_OWNER.pop(id(owner), None)
+        s = _BY_OWNER.get(id(owner))
+        if s is not None:
+            for t in threads:
+                if not t.is_alive():
+                    s.discard(t)
+            if not s:
+                _BY_OWNER.pop(id(owner), None)
     return left
 
 

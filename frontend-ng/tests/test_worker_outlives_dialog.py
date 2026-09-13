@@ -189,3 +189,30 @@ def test_retiring_a_lab_waits_for_its_in_flight_read(app):
 
     assert left == 0 and waited >= 0.3, (
         f"retire reached deleteLater() with a worker still running (waited {waited:.2f}s)")
+
+
+def test_a_straggler_stays_joinable_after_the_bound_gives_up_on_it(app):
+    """`join_owner` reports how many are still running. A caller told "one is still running" will
+    reasonably join again with a longer bound — and that has to actually wait.
+
+    It did not. The bounded call popped the owner's whole entry, stragglers included, so the second
+    join found nothing, returned instantly, and reported success for a thread that was still going.
+    The cost was not theoretical: it made this file's own reaping a coin flip against conftest's
+    leaked-thread guard, which is why it failed roughly one run in several and passed every time it
+    was run alone.
+    """
+    from gini.ui.worker_host import join_owner, owner_thread_count, run_off_gui
+
+    w = QtWidgets.QWidget()
+    started = threading.Event()
+    _slow_worker(w, 0.6, started)
+    assert started.wait(2.0)
+
+    assert join_owner(w, timeout=0.1) == 1
+    assert owner_thread_count(w) == 1, "the straggler was forgotten, so it can never be waited for"
+
+    t0 = time.monotonic()
+    assert join_owner(w, timeout=3.0) == 0
+    assert time.monotonic() - t0 > 0.05, "the second join returned without waiting for anything"
+    assert owner_thread_count(w) == 0
+    w.deleteLater()
