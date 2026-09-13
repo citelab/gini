@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from pathlib import Path
 
 from .log import Log, salt_for
@@ -38,6 +37,77 @@ def _channels_from_env() -> set[str]:
     """
     raw = os.environ.get("GINI_BOT_CHANNELS", "").strip()
     return {c.strip().lstrip("#") for c in raw.split(",") if c.strip()}
+
+
+def backfill(days: int = 30, token: str = "", db: str | Path = "") -> int:
+    """Read what was already said, before the bot existed.
+
+    A server that has been running a course for a term already holds the thing step 1 was going to
+    spend a fortnight collecting — real questions, from real people, about a real assignment. There
+    is no reason to wait for it to happen again.
+
+    Safe to run repeatedly, and safe to run while the live bot is connected: `Log.append` ignores a
+    row it already has, and a message's identity here is (when it was sent, who sent it, what it
+    said), which is the same whether it arrives live or out of history. So overlapping a backfill
+    with live ingestion double-counts nothing, and neither does running this twice by accident.
+
+    Needs **Read Message History**, which is one of the two permissions the bot was invited with.
+    Channels it cannot read are named and skipped rather than failing the run — a forum or a
+    staff-only channel it has no business in should not stop it reading the ones it does.
+    """
+    try:
+        import discord
+    except ImportError:
+        print("discord.py is not installed:  pip install --user 'discord.py>=2.3'")
+        return 2
+
+    token = token or os.environ.get("GINI_BOT_TOKEN", "")
+    if not token:
+        print("No bot token. Set GINI_BOT_TOKEN.")
+        return 2
+
+    from datetime import datetime, timedelta, timezone
+
+    path = Path(db or os.environ.get("GINI_BOT_DB", "~/.gini-bot/observations.db")).expanduser()
+    store = Log(path)
+    salt = salt_for(path.parent)
+    watch = _channels_from_env()
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = discord.Client(intents=intents)
+    seen = {"read": 0, "kept": 0}
+
+    @client.event
+    async def on_ready():
+        before = store.count()
+        log.info("reading back %d days as %s", days, client.user)
+        for guild in client.guilds:
+            for ch in getattr(guild, "text_channels", []):
+                if watch and ch.name not in watch:
+                    continue
+                try:
+                    async for m in ch.history(limit=None, after=since, oldest_first=True):
+                        seen["read"] += 1
+                        if m.author.bot:
+                            continue
+                        store.append(observe(
+                            at=m.created_at.timestamp(), channel=ch.name, user_id=m.author.id,
+                            salt=salt, text=m.content or "", is_reply=m.reference is not None))
+                except discord.Forbidden:
+                    log.warning("no history access to #%s — skipped", ch.name)
+                except Exception:            # noqa: BLE001 — one bad channel must not end the run
+                    log.exception("could not read #%s", ch.name)
+                else:
+                    log.info("#%s done", ch.name)
+        seen["kept"] = store.count() - before
+        log.info("read %d messages; %d new rows (the rest were already recorded)",
+                 seen["read"], seen["kept"])
+        await client.close()
+
+    client.run(token, log_handler=None)
+    return 0
 
 
 def run(token: str = "", db: str | Path = "") -> int:
@@ -99,7 +169,11 @@ def run(token: str = "", db: str | Path = "") -> int:
             return
         try:
             store.append(observe(
-                at=time.time(), channel=channel, user_id=message.author.id, salt=salt,
+                # When it was SAID, not when we happened to read it. It matters for more than
+                # tidiness: it is what makes a live message and the same message seen again in
+                # history identical, and therefore counted once.
+                at=message.created_at.timestamp(), channel=channel,
+                user_id=message.author.id, salt=salt,
                 text=message.content or "",
                 is_reply=message.reference is not None))
         except Exception:                   # noqa: BLE001 — a bad row must not kill the connection

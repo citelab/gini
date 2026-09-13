@@ -1,6 +1,7 @@
 """Three commands: run the bot, read what it collected, or check it is collecting.
 
     python -m gini_bot            # connect and observe
+    python -m gini_bot backfill   # read the last 30 days of history, then exit
     python -m gini_bot report     # the last 14 days, by how many people hit each thing
     python -m gini_bot tail       # the last few rows, verbatim
 
@@ -25,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
     path = Path(os.environ.get("GINI_BOT_DB", "~/.gini-bot/observations.db")).expanduser()
+
+    if args and args[0] == "backfill":
+        from .client import backfill
+        return backfill(days=int(args[1]) if len(args) > 1 else 30, db=path)
 
     if args and args[0] == "tail":
         from .log import Log

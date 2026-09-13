@@ -40,6 +40,20 @@ CREATE INDEX IF NOT EXISTS obs_at   ON observations(at);
 CREATE INDEX IF NOT EXISTS obs_kind ON observations(kind);
 """
 
+#: Re-reading a channel's history must not invent traffic. `at` is the moment the message was SENT,
+#: to millisecond precision, so (when, who, what) identifies a message as surely as its id would —
+#: and unlike an id it is not a way back to it, which is the property `observations` is built on.
+#: Two genuinely different messages colliding would need the same author to post identical text in
+#: the same millisecond.
+#:
+#: The DELETE runs first because an index cannot be added over rows that already violate it: a log
+#: written before this existed may hold duplicates from a backfill that ran twice.
+DEDUP = """
+DELETE FROM observations WHERE rowid NOT IN
+  (SELECT MIN(rowid) FROM observations GROUP BY at, who, text);
+CREATE UNIQUE INDEX IF NOT EXISTS obs_once ON observations(at, who, text);
+"""
+
 
 @dataclass(frozen=True)
 class Cluster:
@@ -80,6 +94,7 @@ class Log:
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+        self._db.executescript(DEDUP)
         self._db.commit()
 
     def close(self) -> None:
@@ -88,8 +103,10 @@ class Log:
 
     def append(self, obs: Observation) -> None:
         with self._lock:
+            # OR IGNORE, so backfilling a channel twice — or backfilling one the live handler is
+            # already watching — adds nothing the second time.
             self._db.execute(
-                "INSERT INTO observations (at, channel, who, kind, text, terms) "
+                "INSERT OR IGNORE INTO observations (at, channel, who, kind, text, terms) "
                 "VALUES (?,?,?,?,?,?)",
                 (obs.at, obs.channel, obs.who, obs.kind, obs.text, obs.terms))
             self._db.commit()

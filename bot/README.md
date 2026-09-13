@@ -52,6 +52,21 @@ that look like a bug in `client.py` and are not.
 
 Start with a narrow `GINI_BOT_CHANNELS`. Widen it once the log looks like what you expected.
 
+## Reading what was already said
+
+A server that has been running a course for a term already holds what step 1 was going to spend a
+fortnight collecting — real questions, from real people, about a real assignment:
+
+    python -m gini_bot backfill 30
+
+Safe to run twice, and safe to run while the live bot is connected. A message is identified by
+*when it was sent, who sent it, and what it said*, so the same message arriving live and again out
+of history produces the same row and is counted once. Doing that with a message id would have been
+the obvious route and is the one thing this will not store — an id is a way back to the message, and
+the message names its author.
+
+Channels it cannot read are named and skipped rather than ending the run.
+
 ## What it will not write down
 
 The Teaching Center's own docstring says *"the portal never learns who did the work"*. A Discord bot

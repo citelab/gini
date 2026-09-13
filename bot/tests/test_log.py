@@ -100,3 +100,57 @@ def test_counts_by_kind_are_available_for_the_header(tmp_path):
     _say(lg, 2, "how do I add a router")
     assert lg.count() == 2
     assert lg.count(PROBLEM) == 1
+
+
+def test_reading_the_same_message_twice_records_it_once(tmp_path):
+    """Backfilling history overlaps live ingestion by design — the bot is usually running while the
+    backfill reads the same channel. A message is identified by when it was sent, who sent it and
+    what it said, so the two paths produce the same row and the second is ignored.
+
+    Doing this with a message id would have been the obvious route and is the one thing
+    `observations` will not store: an id is a way back to the message, and the message names its
+    author."""
+    lg = _log(tmp_path)
+    at = 1789000000.123
+    for _ in range(3):
+        lg.append(observe(at=at, channel="help", user_id=1, salt=SALT,
+                          text="gbuilder core dumped on the lab machine"))
+    assert lg.count() == 1
+
+
+def test_the_same_words_from_two_people_are_two_observations(tmp_path):
+    """The dedup key must not collapse a genuine recurrence — which is the signal, not noise."""
+    lg = _log(tmp_path)
+    at = 1789000000.123
+    for uid in (1, 2):
+        lg.append(observe(at=at, channel="help", user_id=uid, salt=SALT,
+                          text="gbuilder core dumped on the lab machine"))
+    assert lg.count() == 2
+    assert lg.clusters(min_people=2)[0].people == 2
+
+
+def test_one_person_saying_the_same_thing_at_two_moments_is_two_observations(tmp_path):
+    lg = _log(tmp_path)
+    for at in (1789000000.1, 1789000600.4):
+        lg.append(observe(at=at, channel="help", user_id=1, salt=SALT,
+                          text="gbuilder core dumped on the lab machine"))
+    assert lg.count() == 2
+
+
+def test_a_log_written_before_the_rule_existed_is_deduplicated_on_open(tmp_path):
+    """The unique index cannot be added over rows that already break it, and a log written by an
+    earlier build may hold duplicates from a backfill that ran twice."""
+    import sqlite3
+    path = tmp_path / "observations.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+      CREATE TABLE observations (at REAL, channel TEXT, who TEXT, kind TEXT, text TEXT, terms TEXT);
+      INSERT INTO observations VALUES (1.0,'help','abc','problem','it broke','broke it');
+      INSERT INTO observations VALUES (1.0,'help','abc','problem','it broke','broke it');
+      INSERT INTO observations VALUES (2.0,'help','def','problem','it broke','broke it');
+    """)
+    db.commit()
+    db.close()
+
+    lg = Log(path)
+    assert lg.count() == 2, "the duplicate pair should have collapsed, the distinct row survived"
