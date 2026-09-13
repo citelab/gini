@@ -75,11 +75,24 @@ def test_resemblance_still_keeps_unrelated_questions_apart():
     assert resemblance(a, b) == 0.0
 
 
-def test_a_handful_of_shared_words_is_not_evidence_on_its_own():
-    """Dividing by the smaller set makes a short message cheap to match, so a floor on the absolute
-    number of shared words is what keeps the proportion honest."""
-    from gini.domain.similarity import MIN_SHARED, resemblance
-    short = "router canvas"                      # two terms
-    long = "router canvas topology link switch machine cloud"
-    assert len(short.split()) < MIN_SHARED
-    assert resemblance(short, long) == 0.0
+def test_the_guard_against_a_scrap_matching_everything_is_MIN_TERMS_not_MIN_SHARED():
+    """Dividing by the smaller set makes a short message cheap to match, and the floor that stops
+    that is `terms` refusing to produce anything at all below MIN_TERMS content words.
+
+    The earlier version of this test hand-wrote a two-word terms string and asserted it matched
+    nothing — proving something about a value `terms` can never return, while the real floor
+    (MIN_SHARED) was set high enough to file "where do we send the receipt code" and "where does
+    the receipt code go" as two separate questions."""
+    from gini.domain.similarity import MIN_TERMS, resemblance
+    assert terms("router canvas") == "", "a scrap is not matchable in the first place"
+    assert resemblance("", "router canva topolog link switch") == 0.0
+    assert len(terms("how do I add a router to the canvas").split()) >= MIN_TERMS
+
+
+def test_one_incidental_word_in_common_is_still_not_a_match():
+    """What MIN_SHARED does rule out, now that MIN_TERMS carries the weight."""
+    from gini.domain.similarity import resemblance
+    a = terms("where do we send the receipt code")
+    b = terms("the code in trap.c is where the timer lands")
+    assert len(set(a.split()) & set(b.split())) == 1
+    assert resemblance(a, b) == 0.0

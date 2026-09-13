@@ -21,6 +21,7 @@ Run:  ./run.sh          (sets PYTHONPATH; gini.domain is a hard dependency)
 """
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
@@ -40,7 +41,8 @@ MATERIALS = ROOT / "materials"
 # course-scoped rather than in the server operator's home.
 os.environ.setdefault("GINI_HOME_DIR", str(ROOT))
 
-from . import accounts as _accounts                                       # noqa: E402
+from . import accounts as _accounts
+from . import community as _community                                       # noqa: E402
 from . import activities as _act                                          # noqa: E402
 from . import search as _search                                     # noqa: E402
 from .store import Store                                            # noqa: E402
@@ -832,6 +834,147 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "id": mid}
 
     # -- dispatch ---------------------------------------------------------- #
+    # ===================================================================== #
+    #  GINI AI — what the community is asking, and answering it from here     #
+    # ===================================================================== #
+    #
+    # The Center gains a view of Discord and a way to reply to it. It does NOT gain a model: every
+    # word that leaves here was typed by a teacher, so the docstring at the top of this file stays
+    # true — no model client is imported and no outbound model call is made.
+    #
+    # Two audiences, two gates. The bot authenticates with a shared key and may only push
+    # observations and collect replies; a teacher authenticates as staff and may only read and
+    # write. Neither can do the other's half, which is what keeps a leaked Discord token from being
+    # a way into the course.
+
+    def _bot_key_ok(self) -> bool:
+        """The bot, and only the bot.
+
+        A missing `GINI_BOT_KEY` means these endpoints do not exist rather than that they are open:
+        a Center with no bot configured should not advertise a surface for one. The comparison is
+        `compare_digest` because a plain `==` on a secret leaks its prefix through timing, and this
+        one is reachable by anyone who can open a socket.
+        """
+        want = os.environ.get("GINI_BOT_KEY", "").strip()
+        got = (self.headers.get("X-GINI-Bot-Key") or "").strip()
+        return bool(want) and hmac.compare_digest(want, got)
+
+    def _ai_routes(self) -> bool:
+        p = urllib.parse.urlsplit(self.path).path
+        if not p.startswith("/api/ai/"):
+            return False
+
+        # ---- the bot's half ------------------------------------------------------------- #
+        if p in ("/api/ai/observe", "/api/ai/outbox", "/api/ai/sent"):
+            if not self._bot_key_ok():
+                # 404 rather than 403: an unconfigured Center should look like one without these
+                # endpoints at all, and a wrong key should not confirm that a right one exists.
+                self._send(404, {"error": f"No endpoint at {p}."})
+                return True
+
+            if p == "/api/ai/observe" and self.command == "POST":
+                body = self._body()
+                stored = 0
+                for rec in (body.get("observations") or [])[:500]:
+                    oid = _STORE.observe_put(rec)
+                    stored += 1
+                    # The way back to the message, kept apart from the message and set to expire.
+                    # See the schema: the ability to reply is temporary, the record is not.
+                    if oid and rec.get("message_id"):
+                        _STORE.obs_ref_put(oid, rec.get("channel_id", ""), rec["message_id"],
+                                           time.time() + _community.REPLY_WINDOW_S)
+                _STORE.obs_refs_sweep(time.time())
+                self._send(200, {"ok": True, "stored": stored})
+                return True
+
+            if p == "/api/ai/outbox" and self.command == "GET":
+                # Rendered HERE, not by the bot: the byline is a decision about what a student is
+                # told, and the bot holds no decisions. It posts what it is handed.
+                out = []
+                for r in _STORE.replies_pending():
+                    if not r.get("channel_id"):
+                        continue          # its reference expired; there is nowhere to put it
+                    out.append({"id": r["id"], "channel_id": r["channel_id"],
+                                "message_id": r["message_id"],
+                                "body": _community.reply_body(r["body"], r["author"])})
+                self._send(200, out)
+                return True
+
+            if p == "/api/ai/sent" and self.command == "POST":
+                b = self._body()
+                _STORE.reply_settle(int(b.get("id", 0)), time.time(), str(b.get("error", "")))
+                self._send(200, {"ok": True})
+                return True
+
+            self._send(405, {"error": "Wrong method for that endpoint."})
+            return True
+
+        # ---- the teacher's half --------------------------------------------------------- #
+        #
+        # Any signed-in staff member, not staff OF A COURSE. The community server is one place for
+        # everybody's students; scoping this to a course would hide half the traffic from whoever
+        # is looking, and there is no course on a Discord message to scope it by.
+        me = self._who()
+        if me is None:
+            self._send(401, {"error": "Sign in first."})
+            return True
+
+        if p == "/api/ai/summary":
+            days = _community.window_days(self._q("window"))
+            since = time.time() - days * 86400
+            rows = _STORE.observations(since=since, kinds=("question", "problem"), limit=2000)
+            self._send(200, {
+                "window": self._q("window") or "week",
+                "days": days,
+                "counts": _STORE.observation_counts(since),
+                "groups": _community.summarise(rows)[:60],
+            })
+            return True
+
+        if p == "/api/ai/messages":
+            days = _community.window_days(self._q("window"))
+            kind = self._q("kind")
+            self._send(200, _STORE.observations(
+                since=time.time() - days * 86400,
+                kinds=(kind,) if kind else (),
+                channel=self._q("channel"), limit=400))
+            return True
+
+        if p == "/api/ai/thread":
+            # A conversation, oldest first, with whether each message can still be replied to —
+            # the console greys out the reply box rather than offering one that cannot be sent.
+            rows = _STORE.observation_thread(self._q("thread"))
+            if not rows and self._q("obs"):
+                one = _STORE.observation(int(self._q("obs") or 0))
+                rows = [one] if one else []
+            for r in rows:
+                r["repliable"] = _STORE.obs_ref(r["id"]) is not None
+                r["replies"] = _STORE.replies_for(r["id"])
+            self._send(200, rows)
+            return True
+
+        if p == "/api/ai/reply" and self.command == "POST":
+            b = self._body()
+            obs = int(b.get("obs", 0) or 0)
+            text = str(b.get("body", "")).strip()
+            if not text:
+                return self._send(400, {"error": "An empty reply would post an empty message."})
+            if _STORE.observation(obs) is None:
+                return self._send(404, {"error": "No such message."})
+            if _STORE.obs_ref(obs) is None:
+                # Deliberately a refusal rather than a channel post. A reply with nothing to attach
+                # to lands as a loose message in a busy channel where nobody can tell what it
+                # answers — worse than not sending it.
+                return self._send(409, {
+                    "error": "That message is too old to reply to — the link to it has expired. "
+                             "Answer it in Discord directly."})
+            rid = _STORE.reply_queue(obs, text, me["who"], time.time())
+            self._send(200, {"ok": True, "id": rid,
+                             "queued": "The bot will post it within a minute."})
+            return True
+
+        return False
+
     def _dispatch(self) -> None:
         """One entry point, and it always answers.
 
@@ -842,7 +985,7 @@ class Handler(BaseHTTPRequestHandler):
         staff or a code holder, and the traceback still goes to the server's own console.
         """
         try:
-            if self._open_routes() or self._console_routes():
+            if self._open_routes() or self._ai_routes() or self._console_routes():
                 return
             self._send(404, {"error": f"No endpoint at {self.path.split('?')[0]}."})
         except Exception as e:                                            # noqa: BLE001

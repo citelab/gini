@@ -39,7 +39,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from gini.domain.similarity import covers, terms
+from gini.domain.similarity import SAME, cluster, covers, terms
 
 #: How well a question must match a banked answer before it is posted. Above `SAME` (0.5) on
 #: purpose — see the module docstring on the asymmetry between a missed cluster and a wrong answer.
@@ -155,3 +155,69 @@ def unanswered(clusters, answers, *, course: str = "", floor: float = ANSWER_FLO
         if best_match(getattr(c, "sample", ""), answers, course=course, floor=floor) is None:
             out.append(c)
     return out
+
+
+# --- what the console shows ------------------------------------------------------------- #
+
+#: How long a message stays repliable. Nobody answers something from March, and after this the
+#: reference is swept and the observation is as anonymous as everything older than it. Long enough
+#: that a teacher who looks once a fortnight can still act on what they find.
+REPLY_WINDOW_S = 30 * 86400
+
+#: The windows the console offers. Day / week / month, because that is how a teacher actually asks
+#: — "what happened since yesterday", "what did I miss this week", "what keeps coming up".
+WINDOWS = {"day": 1, "week": 7, "month": 30, "term": 120}
+
+
+def window_days(name: str) -> int:
+    """Days for a named window, defaulting to a week. Unknown names fall back rather than erroring:
+    this comes off a query string, and a typo should show the common view, not a 400."""
+    return WINDOWS.get((name or "").strip().lower(), 7)
+
+
+def summarise(rows, answers=(), *, same: float = SAME) -> list[dict]:
+    """Group the log into the list a teacher reads, most-asked first.
+
+    Each group carries what it needs to be acted on: how many different PEOPLE (not messages —
+    one insistent person is one problem), the first person's actual words, whether the bank already
+    answers it, and whether anyone has replied. `obs` is the message to reply under.
+
+    Sorted by people, then by recency. Two things asked by the same number of people should show the
+    one still happening first — a teacher's attention is worth more on a live problem than on one
+    that stopped a fortnight ago.
+    """
+    groups = cluster(rows, lambda r: r.get("terms", ""), same=same)
+    out = []
+    for g in groups:
+        first = g[0]
+        covered = best_match(first.get("text", ""), answers) is not None
+        out.append({
+            "obs": first.get("id"),
+            "terms": first.get("terms", ""),
+            "sample": first.get("text", ""),
+            "channel": first.get("channel", ""),
+            "count": len(g),
+            "people": len({r.get("who") for r in g}),
+            "first_at": first.get("at", 0),
+            "last_at": max(r.get("at", 0) for r in g),
+            "kind": first.get("kind", ""),
+            "thread": first.get("thread", ""),
+            "answered": any(r.get("answered") for r in g),
+            "in_bank": covered,
+            "ids": [r.get("id") for r in g],
+        })
+    out.sort(key=lambda c: (-c["people"], -c["last_at"]))
+    return out
+
+
+def reply_body(body: str, author: str) -> str:
+    """Exactly what the bot posts, and who it says wrote it.
+
+    Attributed, never impersonated. Discord webhooks can put somebody else's name and picture on a
+    message, and a reply that is indistinguishable from the professor's own account is the wrong
+    thing to build: it is the same mechanism whether the words are theirs, or a bug's, or somebody
+    else's once the token leaks. A student reading this should be able to tell that the course
+    answered and that the bot carried it — both are true, and neither is hidden.
+    """
+    who = (author or "").split("@")[0] or "the course"
+    return f"{body.strip()}\n\n— {who}, via GINI AI"

@@ -141,3 +141,27 @@ sudo -u gini-bot env PYTHONPATH=/opt/gini-bot/src/bot:/opt/gini-bot/src/core/src
 `gini-core` is installed into the venv only if you prefer it to the checkout — the `PYTHONPATH`
 above takes `gini.domain` straight from `/opt/gini-bot/src/core/src`, so `git pull` updates the
 matcher and the bot together, which is what you want while this is still moving.
+
+## Pushing to the Teaching Center
+
+With a Center configured, the bot stops being a private notebook: what it hears appears in the
+console's **GINI AI** tab, and replies a teacher writes there come back for it to post.
+
+```bash
+export GINI_TC_URL=https://127.0.0.1:9443      # https only — it carries a shared key
+export GINI_BOT_KEY=...                        # the same value in the Center's environment
+export SSL_CERT_FILE=/tmp/tc-trial/tls/cert.pem   # only for a self-signed trial Center
+```
+
+The key is what the Center checks; without it set **on the Center**, `/api/ai/*` returns 404 rather
+than 403, so a Center with no bot does not advertise a surface for one.
+
+Replies are collected by polling, once a minute. The direction is the point: the Center never needs
+to reach the bot, so the bot holds no listener of its own and a Center restart is invisible to it.
+
+Leave both unset and everything above still works exactly as before — the bot logs locally and says
+nothing. That is not a fallback, it is step 1 continuing to be a thing you can run on its own.
+
+**For replies to actually leave the queue, the bot needs `Send Messages`** added in Discord's
+developer portal. Until you add it, a queued reply fails with `403 Forbidden` and the console shows
+that against the message rather than losing it.

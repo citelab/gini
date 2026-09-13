@@ -86,9 +86,18 @@ def covers(known: str, message: str) -> float:
     return len(k & m) / len(k)
 
 
-#: Two messages must share at least this many content words before their proportions mean anything.
-#: Without it, a three-word message that happens to sit inside a long one scores 1.0 and joins it.
-MIN_SHARED = 3
+#: Two messages must share at least this many content words before their proportion means anything.
+#:
+#: Two, not three, and the reason is `MIN_TERMS` above. Nothing shorter than three content words
+#: ever gets a `terms` string at all, so both sides of any comparison already carry at least three —
+#: and demanding three SHARED then means demanding that the shorter message match entirely. Real
+#: questions do not: "Where do we send the receipt code?" and "sorry, where does the receipt code
+#: go" reduce to `code receipt send` and `code go receipt sorry`, share {receipt, code}, and are
+#: plainly one question. At three they were filed as two.
+#:
+#: So the floor that does the work is MIN_TERMS, which stops a scrap from being matchable in the
+#: first place. This one only rules out a single incidental word, which is what it should do.
+MIN_SHARED = 2
 
 
 def resemblance(a: str, b: str, *, min_shared: int = MIN_SHARED) -> float:
@@ -117,3 +126,37 @@ def resemblance(a: str, b: str, *, min_shared: int = MIN_SHARED) -> float:
     if shared < min_shared:
         return 0.0
     return shared / min(len(sa), len(sb))
+
+
+def cluster(items, terms_of, *, same: float = SAME) -> list[list]:
+    """Group things that say the same thing. Returns groups in the order they were first seen.
+
+    Lives here, beside the measure, because two components need the same answer: the bot groups a
+    channel's traffic, and the Teaching Center groups what the console shows. Two implementations
+    would drift, and the failure would be the confusing kind — the console reporting a different
+    number of recurring problems than the bot's own report, with nothing on either screen to
+    explain why.
+
+    **Greedy and order-dependent**, and that is a choice rather than an oversight. Each item joins
+    the first group its terms reach, or starts one; a proper clustering would not depend on input
+    order. At class scale the input is hundreds of rows a week, the alternative costs a pairwise
+    matrix and a second threshold nobody can defend either, and what comes out is a list for a
+    human to read rather than a number anything depends on.
+
+    The representative stays the FIRST member's terms rather than drifting to the union of the
+    group, because a union grows with every join and eventually matches everything.
+    """
+    groups: list[list] = []
+    reps: list[str] = []
+    for item in items:
+        t = terms_of(item)
+        if not t:
+            continue                    # nothing to compare on: it joins nothing, see `terms`
+        for i, rep in enumerate(reps):
+            if resemblance(rep, t) >= same:
+                groups[i].append(item)
+                break
+        else:
+            groups.append([item])
+            reps.append(t)
+    return groups

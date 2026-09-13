@@ -127,6 +127,7 @@
     <button data-t="acts">Activities</button>
     <button data-t="content">Content</button>
     <button data-t="library">Library</button>
+    <button data-t="ai">GINI AI</button>
     <button data-t="staff" id="nav-staff">Staff</button>
   </nav>
   <span class="who" id="who"></span>
@@ -260,6 +261,38 @@ hand-in time: everyone is then due when code vending stops, however early they b
   </section>
 
   <!-- STAFF (admin) ---------------------------------------------------- -->
+  <!-- GINI AI ---------------------------------------------------------- -->
+  <section id="ai" hidden>
+    <h2>GINI AI</h2>
+    <div class="sub">What the community is asking, and answering it from here. Grouped by how many
+      <b>different people</b> asked — one person asking five times is one question, five people
+      asking once is a different fact.</div>
+
+    <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span class="muted">Show</span>
+      <button class="flat ai-win on" data-w="day">Today</button>
+      <button class="flat ai-win" data-w="week">This week</button>
+      <button class="flat ai-win" data-w="month">This month</button>
+      <button class="flat ai-win" data-w="term">This term</button>
+      <span id="ai-counts" class="muted" style="margin-left:auto"></span>
+    </div>
+
+    <div class="card"><table id="ai-list"></table></div>
+
+    <div id="ai-thread-card" class="card" hidden>
+      <h3 id="ai-thread-title" style="margin-top:0"></h3>
+      <div id="ai-thread"></div>
+      <div id="ai-reply-box" style="margin-top:14px">
+        <textarea id="ai-reply" rows="4" style="width:100%"
+                  placeholder="Answer it once. The bot posts this as a reply, attributed to you."></textarea>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px">
+          <button onclick="sendReply()">Reply on Discord</button>
+          <span class="muted" id="ai-reply-note"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section id="staff" hidden>
     <h2>Staff</h2>
     <div class="sub">Teachers you add get a one-time claim token. They choose their own password.
@@ -404,7 +437,7 @@ async function signIn(){
 }
 
 // ---- navigation -------------------------------------------------------------
-const TABS = ['courses','acts','content','library','staff'];
+const TABS = ['courses','acts','content','library','ai','staff'];
 document.querySelectorAll('.top nav button').forEach(b => b.onclick = () => show(b.dataset.t));
 
 function show(t){
@@ -414,7 +447,7 @@ function show(t){
   document.querySelectorAll('.top nav button').forEach(b => b.classList.toggle('on', b.dataset.t===t));
   TABS.forEach(x => $('#'+x).hidden = (x !== t));
   ({courses:loadCourses, acts:loadActs, content:loadMaterials, library:loadLibrary,
-    staff:loadStaff}[t]||(()=>{}))();
+    ai:loadAI, staff:loadStaff}[t]||(()=>{}))();
 }
 
 async function boot(){
@@ -952,6 +985,76 @@ async function getTopology(receipt){
 }
 
 // ---- content ----------------------------------------------------------------
+// ---- GINI AI ----------------------------------------------------------------
+// The Discord log, grouped, with a reply box. Nothing here composes anything: the teacher's words
+// go to Discord verbatim, attributed to them and carried by the bot.
+let AI_WINDOW = 'day';
+let AI_OBS = 0;               // the message a reply would attach to
+
+async function loadAI(){
+  document.querySelectorAll('.ai-win').forEach(b =>
+    b.classList.toggle('on', b.dataset.w === AI_WINDOW));
+  $('#ai-thread-card').hidden = true;
+
+  const r = await api('/api/ai/summary?window=' + encodeURIComponent(AI_WINDOW));
+  if (!r || r.ok === false) return;
+  const c = r.counts || {};
+  $('#ai-counts').textContent =
+    `${c.total||0} messages · ${c.question||0} questions · ${c.problem||0} problems · `
+    + `${c.people||0} people`;
+
+  const rows = r.groups || [];
+  $('#ai-list').innerHTML = rows.length ? (
+      '<tr><th>People<th>Said<th>Where<th>Last<th>' +
+      rows.map(g => `<tr>
+        <td><b>${g.people}</b>${g.count>g.people?` <span class="muted">(${g.count} msgs)</span>`:''}
+        <td>${esc(g.sample).slice(0,140)}
+        <td><span class="tag draft">#${esc(g.channel)}</span>
+        <td>${when(g.last_at)}
+        <td>${g.answered ? '<span class="tag">answered</span>'
+                         : `<button class="flat" onclick="openThread(${g.obs})">Open</button>`}`
+      ).join('')
+    ) : '<tr><td class="empty">Nothing recorded in this window. Is the bot running?</td></tr>';
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('.ai-win');
+  if (b) { AI_WINDOW = b.dataset.w; loadAI(); }
+});
+
+async function openThread(obs){
+  AI_OBS = obs;
+  const rows = await api('/api/ai/thread?obs=' + obs);
+  if (!Array.isArray(rows) || !rows.length) return;
+
+  $('#ai-thread-card').hidden = false;
+  $('#ai-thread-title').textContent = 'In #' + (rows[0].channel || '');
+  $('#ai-thread').innerHTML = rows.map(m => `
+    <div style="padding:8px 0;border-bottom:1px solid rgba(128,128,128,.18)">
+      <div class="muted" style="font-size:12px">${esc(m.who).slice(0,8)} · ${when(m.at)}</div>
+      <div>${esc(m.text)}</div>
+      ${(m.replies||[]).map(x => `<div class="muted" style="margin-top:6px">
+          ↳ ${esc(x.body)} ${x.sent ? '(posted)' : x.error ? '(FAILED: '+esc(x.error)+')'
+                                                           : '(queued)'}</div>`).join('')}
+    </div>`).join('');
+
+  // A message whose reference has expired cannot be threaded under, so do not offer a box that
+  // will be refused — say why, and where to answer instead.
+  const live = rows.some(m => m.repliable);
+  $('#ai-reply-box').style.display = live ? '' : 'none';
+  $('#ai-reply-note').textContent = live ? ''
+    : 'Too old to reply to from here — the link to that message has expired. Answer it in Discord.';
+  if (!live) $('#ai-reply-note').parentElement.parentElement.style.display = '';
+  $('#ai-reply').value = '';
+}
+
+async function sendReply(){
+  const body = $('#ai-reply').value.trim();
+  if (!body) { say('Nothing to send.'); return; }
+  const r = await api('/api/ai/reply', {obs: AI_OBS, body});
+  if (r && r.ok) { say(r.queued || 'Queued.', true); $('#ai-reply').value = ''; loadAI(); }
+}
+
 async function loadMaterials(){
   $('#content-sub').textContent = 'Materials for ' + COURSE;
   const rows = await api('/api/materials?course=' + encodeURIComponent(COURSE));

@@ -19,14 +19,20 @@ package can be tested — and the report read — on a machine that has never in
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 
+from .center import Center
 from .log import Log, salt_for
 from .observations import observe
 
 log = logging.getLogger("gini_bot")
+
+#: How often to ask the Center whether a teacher has written a reply. A minute is invisible to
+#: somebody who has just pressed a button and costs the Center one request.
+POLL_S = 60
 
 
 def _channels_from_env() -> set[str]:
@@ -74,10 +80,12 @@ def backfill(days: int = 30, token: str = "", db: str | Path = "") -> int:
     watch = _channels_from_env()
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
+    center = Center()
     intents = discord.Intents.default()
     intents.message_content = True
     client = discord.Client(intents=intents)
     seen = {"read": 0, "kept": 0}
+    batch: list = []
 
     @client.event
     async def on_ready():
@@ -92,18 +100,29 @@ def backfill(days: int = 30, token: str = "", db: str | Path = "") -> int:
                         seen["read"] += 1
                         if m.author.bot:
                             continue
-                        store.append(observe(
+                        o = observe(
                             at=m.created_at.timestamp(), channel=ch.name, user_id=m.author.id,
-                            salt=salt, text=m.content or "", is_reply=m.reference is not None))
+                            salt=salt, text=m.content or "", is_reply=m.reference is not None)
+                        store.append(o)
+                        batch.append({**o.__dict__, "channel_id": str(ch.id),
+                                      "message_id": str(m.id)})
+                        if len(batch) >= 200:     # batched: a term of history is thousands of rows
+                            center.push(batch)
+                            batch.clear()
                 except discord.Forbidden:
                     log.warning("no history access to #%s — skipped", ch.name)
                 except Exception:            # noqa: BLE001 — one bad channel must not end the run
                     log.exception("could not read #%s", ch.name)
                 else:
                     log.info("#%s done", ch.name)
+        if batch:
+            center.push(batch)
+            batch.clear()
         seen["kept"] = store.count() - before
         log.info("read %d messages; %d new rows (the rest were already recorded)",
                  seen["read"], seen["kept"])
+        if center.configured:
+            log.info("pushed to the Teaching Center — open the GINI AI tab")
         await client.close()
 
     client.run(token, log_handler=None)
@@ -134,13 +153,46 @@ def run(token: str = "", db: str | Path = "") -> int:
     watch = _channels_from_env()
     log.info("logging to %s; channels: %s", path, ", ".join(sorted(watch)) or "(all)")
 
+    center = Center()
+    if center.configured:
+        log.info("pushing to the Teaching Center at %s", center.url)
+    else:
+        log.info("no Teaching Center configured (GINI_TC_URL / GINI_BOT_KEY) — logging locally only")
+
     intents = discord.Intents.default()
     intents.message_content = True          # privileged — see the docstring
     client = discord.Client(intents=intents)
 
+    async def _deliver_replies():
+        """Post what teachers have written, every POLL_S.
+
+        A poll rather than a push from the Center, and the direction matters: the Center never
+        needs to reach the bot, so the bot can sit behind anything and hold no listener of its own.
+        It is also what makes a Center restart invisible — the next poll simply succeeds.
+        """
+        await client.wait_until_ready()
+        while not client.is_closed():
+            for item in center.outbox():
+                try:
+                    ch = client.get_channel(int(item["channel_id"]))
+                    if ch is None:
+                        ch = await client.fetch_channel(int(item["channel_id"]))
+                    msg = await ch.fetch_message(int(item["message_id"]))
+                    await msg.reply(item["body"])
+                    center.settle(item["id"])
+                    log.info("posted a reply in #%s", getattr(ch, "name", "?"))
+                except Exception as e:            # noqa: BLE001 — record it, do not retry for ever
+                    log.warning("could not post a reply: %s", e)
+                    center.settle(item["id"], f"{type(e).__name__}: {e}")
+            await asyncio.sleep(POLL_S)
+
     @client.event
     async def on_ready():
-        log.info("connected as %s; observing only, posting nothing", client.user)
+        log.info("connected as %s; %s", client.user,
+                 "replies from the Teaching Center will be posted"
+                 if center.configured else "observing only, posting nothing")
+        if center.configured:
+            client.loop.create_task(_deliver_replies())
         # Say what is actually being watched, against what is actually there. A watch list naming a
         # channel this server does not have records nothing at all, and every other signal looks
         # healthy: it connects, it stays up, the log file exists and stays empty. That reads as a
@@ -168,14 +220,20 @@ def run(token: str = "", db: str | Path = "") -> int:
         if watch and channel not in watch:
             return
         try:
-            store.append(observe(
+            obs = observe(
                 # When it was SAID, not when we happened to read it. It matters for more than
                 # tidiness: it is what makes a live message and the same message seen again in
                 # history identical, and therefore counted once.
                 at=message.created_at.timestamp(), channel=channel,
                 user_id=message.author.id, salt=salt,
                 text=message.content or "",
-                is_reply=message.reference is not None))
+                is_reply=message.reference is not None)
+            store.append(obs)
+            # The Center gets the message AND the way back to it. That reference expires there;
+            # see the observation_ref table. Failing to reach the Center is not an error worth
+            # stopping for — the row is already safe locally and pushes again next time.
+            center.push([{**obs.__dict__, "channel_id": str(message.channel.id),
+                          "message_id": str(message.id)}])
         except Exception:                   # noqa: BLE001 — a bad row must not kill the connection
             log.exception("could not record a message")
 

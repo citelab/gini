@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from gini.domain.similarity import resemblance
+from gini.domain.similarity import cluster
 
 from .observations import PROBLEM, QUESTION, SAME, Observation
 
@@ -147,20 +147,14 @@ class Log:
                 "SELECT at, channel, who, kind, text, terms FROM observations "
                 "WHERE at >= ? AND terms != '' ORDER BY at ASC", (since,)).fetchall()
 
-        buckets: list[dict] = []
-        for at, _channel, who, kind, text, terms in rows:
-            if kinds and kind not in kinds:
-                continue
-            for b in buckets:
-                if resemblance(b["terms"], terms) >= same:
-                    b["count"] += 1
-                    b["people"].add(who)
-                    b["last_at"] = at
-                    break
-            else:
-                buckets.append({"terms": terms, "count": 1, "people": {who},
-                                "first_at": at, "last_at": at, "sample": text})
-
+        # Grouping is `gini.domain.similarity.cluster` so the bot and the Teaching Center's
+        # console reach the same answer. Two copies would drift, and the symptom would be the
+        # console reporting a different number of recurring problems than `report` does.
+        rows = [r for r in rows if not kinds or r[3] in kinds]
+        groups = cluster(rows, lambda r: r[5], same=same)
+        buckets = [{"terms": g[0][5], "count": len(g), "people": {r[2] for r in g},
+                    "first_at": g[0][0], "last_at": g[-1][0], "sample": g[0][4]}
+                   for g in groups]
         out = [Cluster(terms=b["terms"], count=b["count"], people=len(b["people"]),
                        first_at=b["first_at"], last_at=b["last_at"], sample=b["sample"])
                for b in buckets if len(b["people"]) >= min_people]
