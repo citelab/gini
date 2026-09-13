@@ -9,7 +9,30 @@ be up. CI has no model, so the tests were written for the offline state; this fi
 state everywhere so results are environment-independent. Tests that need a model attach one
 explicitly (e.g. `assistant.set_loop(...)` or a fake backend).
 """
+import atexit
+import os
+import shutil
+import tempfile
+
 import pytest
+
+# GINI_HOME is redirected HERE, at import, and not only in the per-test fixture below.
+#
+# `gini.domain.fragments` builds its registry at MODULE IMPORT — `FRAGMENTS = _load()` — and that
+# import happens before any fixture can run. So on a machine where the developer has authored
+# fragments of their own into `~/.gini/content/fragments`, the suite read them, and
+# `_pristine_fragment_registry` then faithfully preserved that contaminated baseline as "the
+# registry the process started with".
+#
+# It cost a release. `test_archetypes_reference_real_concepts_and_elements` failed on this machine
+# with "cap-lan teaches unknown concept switching" — a fragment the maintainer had written, that
+# exists nowhere in this repo — while CI, which has no `~/.gini`, was green. A suite whose result
+# depends on who is running it cannot tell you whether a release is safe.
+#
+# `setdefault`, so anyone deliberately pointing the suite at a real home still can.
+_HOME = tempfile.mkdtemp(prefix="gini-tests-home-")
+os.environ.setdefault("GINI_HOME_DIR", _HOME)
+atexit.register(lambda: shutil.rmtree(_HOME, ignore_errors=True))
 
 
 @pytest.fixture(autouse=True)
