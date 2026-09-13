@@ -218,7 +218,72 @@ CREATE TABLE IF NOT EXISTS claim_attempt (
   outcome    TEXT DEFAULT ''          -- claimed | already_claimed | no_such_receipt
 );
 
-CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+-- Written on one line until the community tables were added after it, which is worth a note
+-- because the failure landed so far from its cause. `_column_block` reads a table's columns with a
+-- regex that ends at the first newline-then-close-bracket, and a single-line definition has none of
+-- its own -- so the match ran on to the NEXT table's closing bracket and handed `_migrate` the text
+-- in between as a column list. While kv was the last table in the schema there was no next bracket,
+-- the match simply failed, and nothing was wrong. Adding any table after it turned that into
+-- `ALTER TABLE kv ADD COLUMN CREATE ...` during startup, before anything could report why.
+CREATE TABLE IF NOT EXISTS kv (
+  k TEXT PRIMARY KEY,
+  v TEXT
+);
+
+-- WHAT THE COMMUNITY SAID — the Discord observation log, pushed here by the bot.
+--
+-- Anonymous by construction and permanently so: `who` is a salted hash the BOT computes, with the
+-- salt held on the bot's own host and never sent. Two people are distinguishable, which is what
+-- makes "four different people hit this" a fact; neither is nameable from anything in this file.
+-- `thread` is likewise a hash, so a conversation can be shown in order without any of its parts
+-- being a way back to Discord.
+--
+-- (at, who, text) is unique: a message is identified by when it was sent, who sent it and what it
+-- said, so the bot re-reading a channel's history adds nothing the second time.
+CREATE TABLE IF NOT EXISTS observation (
+  id       INTEGER PRIMARY KEY,
+  at       REAL NOT NULL,
+  channel  TEXT NOT NULL,
+  who      TEXT NOT NULL,
+  kind     TEXT NOT NULL,
+  text     TEXT NOT NULL,
+  terms    TEXT NOT NULL DEFAULT '',
+  thread   TEXT NOT NULL DEFAULT '',
+  answered REAL NOT NULL DEFAULT 0
+);
+
+-- THE WAY BACK TO A DISCORD MESSAGE, and the only place one exists — deliberately separate from
+-- the observation, and deliberately temporary.
+--
+-- A teacher replying in the console needs the message to reply UNDER, and that needs its real ids.
+-- Keeping them on the observation itself would make the whole log permanently joinable back to
+-- named students by anyone who ever holds a copy, which is the property the design rests on.
+--
+-- So the two are split by LIFETIME: the ability to reply expires, the record does not. Nobody
+-- replies to something from March, so after `expires` this row is swept and the observation stays
+-- exactly as anonymous as everything older than it.
+CREATE TABLE IF NOT EXISTS observation_ref (
+  obs        INTEGER PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  expires    REAL NOT NULL
+);
+
+-- REPLIES THE TEACHER HAS WRITTEN, waiting for the bot to collect and post.
+--
+-- A queue rather than a direct call, for the reason the submission outbox is one: the Center must
+-- never block on something outside it. Discord can be slow, rate-limited or down, and a teacher
+-- pressing Reply should get "queued" immediately rather than a spinner attached to somebody else's
+-- API. `sent` and `error` are what the console shows when it did not go.
+CREATE TABLE IF NOT EXISTS reply_outbox (
+  id     INTEGER PRIMARY KEY,
+  obs    INTEGER NOT NULL,
+  body   TEXT NOT NULL,
+  author TEXT NOT NULL,
+  queued REAL NOT NULL,
+  sent   REAL NOT NULL DEFAULT 0,
+  error  TEXT NOT NULL DEFAULT ''
+);
 """
 
 _INDEXES = """
@@ -232,6 +297,12 @@ CREATE INDEX IF NOT EXISTS ix_material_course ON material(course, uploaded);
 CREATE INDEX IF NOT EXISTS ix_claim_receipt ON claim_attempt(receipt, ts);
 CREATE INDEX IF NOT EXISTS ix_ref_section ON reference_section(ref, ord);
 CREATE INDEX IF NOT EXISTS ix_ref_figure ON reference_figure(section, ord);
+
+-- (at, who, text) is how a message is identified without keeping its id — so this is not a
+-- performance index, it is the rule that makes the bot re-reading a channel's history harmless.
+CREATE UNIQUE INDEX IF NOT EXISTS ix_observation_once ON observation(at, who, text);
+CREATE INDEX IF NOT EXISTS ix_observation_at ON observation(at);
+CREATE INDEX IF NOT EXISTS ix_reply_pending ON reply_outbox(sent);
 """
 
 _FTS = """
@@ -1026,3 +1097,112 @@ class Store:
 
     def kv_delete(self, k: str) -> None:
         self._run("DELETE FROM kv WHERE k=?", (k,))
+
+    # -- the community log (Discord) --------------------------------------- #
+    def observe_put(self, rec: dict) -> int:
+        """Record one observation. Returns its id, whether it was new or already here.
+
+        OR IGNORE, then read the id back: the bot pushes the same message twice as a matter of
+        course — a backfill overlapping the live feed — and the second push must be a no-op that
+        still tells the caller which row it is, so a message reference can be attached to it.
+        """
+        cols = ("at", "channel", "who", "kind", "text", "terms", "thread")
+        with self.lock:
+            self.db.execute(
+                f"INSERT OR IGNORE INTO observation({','.join(cols)}) "
+                f"VALUES({','.join('?' * len(cols))})",
+                tuple(rec.get(c, "") for c in cols))
+            row = self.db.execute(
+                "SELECT id FROM observation WHERE at=? AND who=? AND text=?",
+                (rec.get("at", 0), rec.get("who", ""), rec.get("text", ""))).fetchone()
+            self.db.commit()
+        return int(row["id"]) if row else 0
+
+    def observations(self, *, since: float = 0.0, kinds: tuple = (), channel: str = "",
+                     limit: int = 500) -> list[dict]:
+        sql = "SELECT * FROM observation WHERE at >= ?"
+        args: list = [since]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            args += list(kinds)
+        if channel:
+            sql += " AND channel=?"
+            args.append(channel)
+        sql += " ORDER BY at DESC LIMIT ?"
+        args.append(limit)
+        return self._all(sql, tuple(args))
+
+    def observation(self, obs_id: int) -> dict | None:
+        return self._one("SELECT * FROM observation WHERE id=?", (obs_id,))
+
+    def observation_thread(self, thread: str, limit: int = 200) -> list[dict]:
+        """One conversation, oldest first — which is the only order a conversation reads in."""
+        if not thread:
+            return []
+        return self._all("SELECT * FROM observation WHERE thread=? ORDER BY at ASC LIMIT ?",
+                         (thread, limit))
+
+    def observation_counts(self, since: float = 0.0) -> dict:
+        rows = self._all("SELECT kind, COUNT(*) AS n FROM observation WHERE at >= ? GROUP BY kind",
+                         (since,))
+        out = {r["kind"]: r["n"] for r in rows}
+        out["total"] = sum(out.values())
+        out["people"] = int(self._one(
+            "SELECT COUNT(DISTINCT who) AS n FROM observation WHERE at >= ?",
+            (since,))["n"])
+        return out
+
+    # -- the way back to a message, which expires -------------------------- #
+    def obs_ref_put(self, obs_id: int, channel_id: str, message_id: str, expires: float) -> None:
+        self._run("INSERT OR REPLACE INTO observation_ref(obs, channel_id, message_id, expires) "
+                  "VALUES(?,?,?,?)", (obs_id, str(channel_id), str(message_id), expires))
+
+    def obs_ref(self, obs_id: int) -> dict | None:
+        return self._one("SELECT * FROM observation_ref WHERE obs=?", (obs_id,))
+
+    def obs_refs_sweep(self, now: float) -> int:
+        """Drop every reference past its expiry. Returns how many were forgotten.
+
+        Called on the paths that read the log, rather than from a timer: a Center nobody has opened
+        for a month has nothing to protect, and one somebody is reading is sweeping as it goes.
+        """
+        with self.lock:
+            cur = self.db.execute("DELETE FROM observation_ref WHERE expires < ?", (now,))
+            self.db.commit()
+            return cur.rowcount or 0
+
+    # -- replies waiting to go out ----------------------------------------- #
+    def reply_queue(self, obs_id: int, body: str, author: str, now: float) -> int:
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT INTO reply_outbox(obs, body, author, queued) VALUES(?,?,?,?)",
+                (obs_id, body, author, now))
+            self.db.commit()
+            return int(cur.lastrowid)
+
+    def replies_pending(self, limit: int = 20) -> list[dict]:
+        """What the bot should post next, with the message to post it under.
+
+        The join is the point: a reply whose reference has expired comes back with no channel_id,
+        and the bot declines it rather than posting a naked message into a channel where nobody can
+        tell what it answers.
+        """
+        return self._all(
+            "SELECT r.id, r.obs, r.body, r.author, r.queued, "
+            "       f.channel_id, f.message_id, o.channel, o.text "
+            "FROM reply_outbox r "
+            "LEFT JOIN observation_ref f ON f.obs = r.obs "
+            "LEFT JOIN observation o ON o.id = r.obs "
+            "WHERE r.sent = 0 AND r.error = '' ORDER BY r.queued ASC LIMIT ?", (limit,))
+
+    def reply_settle(self, reply_id: int, now: float, error: str = "") -> None:
+        if error:
+            self._run("UPDATE reply_outbox SET error=? WHERE id=?", (error[:500], reply_id))
+            return
+        row = self._one("SELECT obs FROM reply_outbox WHERE id=?", (reply_id,))
+        self._run("UPDATE reply_outbox SET sent=? WHERE id=?", (now, reply_id))
+        if row:
+            self._run("UPDATE observation SET answered=? WHERE id=?", (now, row["obs"]))
+
+    def replies_for(self, obs_id: int) -> list[dict]:
+        return self._all("SELECT * FROM reply_outbox WHERE obs=? ORDER BY queued ASC", (obs_id,))
