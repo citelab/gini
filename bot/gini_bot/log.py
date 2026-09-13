@@ -25,7 +25,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .observations import PROBLEM, QUESTION, SAME, Observation, overlap
+from gini.domain.similarity import resemblance
+
+from .observations import PROBLEM, QUESTION, SAME, Observation
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
@@ -128,7 +130,7 @@ class Log:
         return [Observation(*r) for r in rows]
 
     def clusters(self, *, since: float = 0.0, kinds: tuple = (PROBLEM, QUESTION),
-                 min_people: int = 2) -> list[Cluster]:
+                 min_people: int = 2, same: float = SAME) -> list[Cluster]:
         """Distinct problems in a window, ordered by how many different people hit each.
 
         Greedy single-pass grouping: each message joins the first cluster its terms overlap by
@@ -150,7 +152,7 @@ class Log:
             if kinds and kind not in kinds:
                 continue
             for b in buckets:
-                if overlap(b["terms"], terms) >= SAME:
+                if resemblance(b["terms"], terms) >= same:
                     b["count"] += 1
                     b["people"].add(who)
                     b["last_at"] = at
@@ -165,11 +167,33 @@ class Log:
         out.sort(key=lambda c: (-c.people, -c.count, c.first_at))
         return out
 
-    def report(self, *, days: int = 14, min_people: int = 2) -> str:
+    def tune(self, *, days: int = 30) -> str:
+        """How the grouping threshold behaves on THIS server's traffic.
+
+        The number in `SAME` was chosen against invented examples, and the first contact with a real
+        term of messages showed how little that is worth: Jaccard at 0.5 found three recurring
+        things in 130 questions. A threshold is a judgement about a particular community's way of
+        writing, so this prints the curve and lets whoever runs it look.
+
+        Read it for the knee. Too strict and every paraphrase is its own incident; too loose and
+        unrelated questions collapse into one bucket that says nothing.
+        """
+        since = time.time() - days * 86400
+        out = [f"Grouping threshold against the last {days} days "
+               f"({self.count(QUESTION)} questions, {self.count(PROBLEM)} problems):\n"]
+        for t in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
+            cl = self.clusters(since=since, min_people=2, same=t)
+            biggest = max((c.people for c in cl), default=0)
+            mark = "  <- in use" if abs(t - SAME) < 1e-9 else ""
+            out.append(f"  {t:.1f}   {len(cl):>3} recurring   biggest {biggest:>2} people{mark}")
+        out.append("\n  Set GINI_BOT_SAME=0.x to report at another threshold.")
+        return "\n".join(out) + "\n"
+
+    def report(self, *, days: int = 14, min_people: int = 2, same: float = SAME) -> str:
         """The two-week read, as plain text. This IS the deliverable of step 1 — run it, read it,
         and decide whether any of the rest is worth building."""
         since = time.time() - days * 86400
-        cl = self.clusters(since=since, min_people=min_people)
+        cl = self.clusters(since=since, min_people=min_people, same=same)
         head = (f"{self.count()} observations, {self.count(PROBLEM)} problems, "
                 f"{self.count(QUESTION)} questions\n"
                 f"Last {days} days, seen by {min_people}+ different people:\n")

@@ -31,10 +31,11 @@ from __future__ import annotations
 #: one-liners ("it broke", "same here") together.
 MIN_TERMS = 3
 
-#: How much two messages must share to count as the same report. Chosen against the pair in the
-#: docstring: it groups them, while leaving two complaints that merely share the word "gbuilder"
-#: apart.
-SAME = 0.5
+#: How alike two messages must be to count as the same report, as `resemblance` measures it.
+#: Higher than the old Jaccard threshold because the measure is more generous by construction —
+#: and paired with MIN_SHARED, which is what stops a short message joining anything that contains
+#: its three words.
+SAME = 0.6
 
 
 def terms(text: str) -> str:
@@ -83,3 +84,36 @@ def covers(known: str, message: str) -> float:
     if not k or not m:
         return 0.0
     return len(k & m) / len(k)
+
+
+#: Two messages must share at least this many content words before their proportions mean anything.
+#: Without it, a three-word message that happens to sit inside a long one scores 1.0 and joins it.
+MIN_SHARED = 3
+
+
+def resemblance(a: str, b: str, *, min_shared: int = MIN_SHARED) -> float:
+    """How alike two messages are, measured against the SHORTER of them.
+
+    `overlap` (Jaccard) divides by the union, which makes it a length comparison as much as a
+    content one: a terse question and a long paragraph about the same thing score badly no matter
+    how completely the short one sits inside the long one. That is fine when both sides are the
+    same kind of object and fatal when they are not — and on a real Discord they never are. People
+    ask "where do we send the receipt code?" and people write three sentences of context, and both
+    are the same question.
+
+    Measured on a term of real traffic: 480 messages, 130 of them questions, and Jaccard at 0.5
+    found **three** recurring things. That is not a quiet server, it is a measure reporting on
+    message length.
+
+    Dividing by the smaller set (Szymkiewicz–Simpson) asks the question that actually matters: is
+    the shorter message's content present in the longer one? `min_shared` is what keeps that honest,
+    because a proportion over a tiny set is not evidence — three shared content words is the floor
+    for the ratio to mean anything at all.
+    """
+    sa, sb = set((a or "").split()), set((b or "").split())
+    if not sa or not sb:
+        return 0.0
+    shared = len(sa & sb)
+    if shared < min_shared:
+        return 0.0
+    return shared / min(len(sa), len(sb))

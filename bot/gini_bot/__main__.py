@@ -3,6 +3,7 @@
     python -m gini_bot            # connect and observe
     python -m gini_bot backfill   # read the last 30 days of history, then exit
     python -m gini_bot report     # the last 14 days, by how many people hit each thing
+    python -m gini_bot tune       # how the grouping threshold behaves on this server
     python -m gini_bot tail       # the last few rows, verbatim
 
 `report` is the actual deliverable of step 1. Run the bot for a fortnight, read this, and decide
@@ -26,6 +27,14 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
     path = Path(os.environ.get("GINI_BOT_DB", "~/.gini-bot/observations.db")).expanduser()
+
+    if args and args[0] == "tune":
+        from .log import Log
+        if not path.exists():
+            print(f"No log at {path} yet.")
+            return 1
+        print(Log(path).tune(days=int(args[1]) if len(args) > 1 else 30))
+        return 0
 
     if args and args[0] == "backfill":
         from .client import backfill
@@ -59,7 +68,9 @@ def main(argv: list[str] | None = None) -> int:
         if not path.exists():
             print(f"No log at {path} yet.")
             return 1
-        print(Log(path).report(days=days))
+        from gini.domain.similarity import SAME
+        same = float(os.environ.get("GINI_BOT_SAME", SAME))
+        print(Log(path).report(days=days, same=same))
         return 0
 
     from .client import run

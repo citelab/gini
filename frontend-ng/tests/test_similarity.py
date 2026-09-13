@@ -56,3 +56,30 @@ def test_covers_is_asymmetric_and_overlap_is_not():
 def test_an_unrelated_message_covers_nothing():
     known = terms("gbuilder core dumped on the lab machine")
     assert covers(known, terms("how do I add a router to the canvas")) < 0.3
+
+
+def test_a_terse_question_and_a_wordy_one_about_the_same_thing_are_alike():
+    """Measured on a real term of traffic: Jaccard at 0.5 found three recurring things in 130
+    questions. That was not a quiet server — it was a measure reporting on message length."""
+    from gini.domain.similarity import resemblance
+    a = terms("Where do we send the receipt code?")
+    b = terms("hi, quick question — where are we supposed to send the receipt code once we finish?")
+    assert overlap(a, b) < 0.5, "if this rises, the assertion below stops proving anything"
+    assert resemblance(a, b) >= 0.9
+
+
+def test_resemblance_still_keeps_unrelated_questions_apart():
+    from gini.domain.similarity import resemblance
+    a = terms("Where do we send the receipt code?")
+    b = terms("how do I add a router to the canvas")
+    assert resemblance(a, b) == 0.0
+
+
+def test_a_handful_of_shared_words_is_not_evidence_on_its_own():
+    """Dividing by the smaller set makes a short message cheap to match, so a floor on the absolute
+    number of shared words is what keeps the proportion honest."""
+    from gini.domain.similarity import MIN_SHARED, resemblance
+    short = "router canvas"                      # two terms
+    long = "router canvas topology link switch machine cloud"
+    assert len(short.split()) < MIN_SHARED
+    assert resemblance(short, long) == 0.0

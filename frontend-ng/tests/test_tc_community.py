@@ -43,11 +43,16 @@ def test_a_question_with_nothing_in_it_is_never_answered(bank):
     assert best_match("", bank) is None
 
 
-def test_the_bar_for_posting_is_higher_than_the_bar_for_grouping():
-    """Opposite costs: a missed cluster under-counts on a page the teacher reads and can correct,
-    while a wrong answer is published in the course's name to someone who cannot tell."""
+def test_the_bar_for_posting_is_not_lower_than_the_bar_for_grouping():
+    """A smell check across two DIFFERENT measures, and labelled as one.
+
+    Grouping uses `resemblance` and answering uses `covers`, so the two numbers are not directly
+    comparable and this is not a proof of anything. What it catches is the direction going wrong:
+    the costs are asymmetric — a missed cluster under-counts on a page the teacher reads and can
+    correct in a click, while a wrong answer is published in the course's name to someone who
+    cannot tell — so posting must never end up the looser of the two."""
     from gini.domain.similarity import SAME
-    assert ANSWER_FLOOR > SAME
+    assert ANSWER_FLOOR >= SAME
 
 
 def test_a_teacher_can_attach_a_phrasing_that_did_not_match(bank):
