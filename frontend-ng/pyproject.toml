@@ -14,7 +14,7 @@ authors = [{ name = "GINI Toolkit" }]
 # container runtime (Docker/Colima) and images are NOT pip-installable — gBuilder detects what is
 # missing at launch and offers to bring them in (gini/services/bootstrap.py).
 dependencies = [
-    "gini-core>=6.11.3",          # A FLOOR, not a bare name: the two halves share a namespace and
+    "gini-core>=6.12.0",          # A FLOOR, not a bare name: the two halves share a namespace and
     #                              a release number, and an older core beside a newer toolkit fails
     #                              at import, not at install.
     #
