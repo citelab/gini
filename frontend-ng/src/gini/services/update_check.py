@@ -1,9 +1,10 @@
 """Is there a newer gBuilder — and what would installing it actually take?
 
 Asked by a student, answered honestly. The check is READ-ONLY and does not install anything, which
-is a deliberate stopping point rather than an unfinished one: gBuilder pins its container images to
-its own EXACT version (`setup/images.image_tag` has no fallback), so upgrading the Python
-package alone leaves a machine whose app wants `gini-xv6:6.11.4` and whose Docker has 6.11.3. The
+is a deliberate stopping point rather than an unfinished one: a RELEASED gBuilder pins its
+container images to its own exact version (`setup/images.image_tag` — only a dev build falls back
+to `latest`), so upgrading the Python package alone leaves a machine whose app wants
+`gini-xv6:6.11.4` and whose Docker has 6.11.3. The
 next launch does recover — `services/bootstrap` reports UPDATE and offers to refresh the images —
 but a one-click button that silently leaves Run broken until a restart is worse than a sentence
 telling the student the command and what happens next. So this prints the command; it does not run
