@@ -2055,6 +2055,29 @@ class MainWindow(QMainWindow):
         from .windowing import focus, open_windows
 
         menu.clear()
+
+        # Panels. Every dock carries a close button, and closing one was a one-way door: the only
+        # way back was to quit and relaunch, because nothing persists dock visibility. That is a
+        # bad trade on a small laptop screen, where knocking the Console and Dashboard out of the
+        # way is exactly the right thing to do — the facility is useful, it just needed an undo.
+        #
+        # Built from the docks that EXIST rather than a list of names, so a dock added later turns
+        # up here without anyone remembering to add it. `toggleViewAction()` is Qt's own: it shows
+        # and hides the dock and keeps its own tick in step, including when the student closes the
+        # dock with its X. The actions belong to the docks, not to this menu, so `clear()` above
+        # removes them without destroying them.
+        docks = sorted(self.findChildren(QDockWidget), key=lambda d: d.windowTitle().lower())
+        if docks:
+            panels = menu.addMenu("&Panels")
+            for d in docks:
+                panels.addAction(d.toggleViewAction())
+            panels.addSeparator()
+            show_all = QAction("Show &All Panels", self)
+            show_all.setMenuRole(QAction.MenuRole.NoRole)
+            show_all.triggered.connect(self._show_all_panels)
+            panels.addAction(show_all)
+            menu.addSeparator()
+
         mini = QAction("&Minimise", self)
         mini.setShortcut(QKeySequence("Ctrl+M"))
         mini.setMenuRole(QAction.MenuRole.NoRole)
@@ -2074,6 +2097,17 @@ class MainWindow(QMainWindow):
             a.setChecked(w is active)
             a.triggered.connect(lambda _checked=False, win=w: focus(win))
             menu.addAction(a)
+
+    def _show_all_panels(self) -> None:
+        """Bring every closed dock back. The one click that undoes a tidy-up that went too far.
+
+        Deliberately does NOT restore the layout — where a dock was docked, how wide, which tab was
+        in front. That is `saveState`/`restoreState` and it is a different feature; this one answers
+        "I closed it and I want it back", which is the question that was actually being asked.
+        """
+        for d in self.findChildren(QDockWidget):
+            if not d.isVisible():
+                d.show()
 
     def _minimise_active(self) -> None:
         """Minimise whichever GINI window is in front — which is usually not this one.

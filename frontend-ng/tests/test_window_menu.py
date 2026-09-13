@@ -296,3 +296,72 @@ def test_closing_the_machine_lab_takes_its_faces_with_it():
     hub.close()
     app.processEvents()
     assert not any("Traps" in t for t, _ in open_windows()), "a face outlived its hub"
+
+
+# --- Panels: undoing a dock you closed ------------------------------------------------------ #
+
+def _panels(w):
+    """The Panels submenu, rebuilt. The QAction is returned too and must be kept alive — PySide
+    hands back a QMenu wrapper that dies with the action it came from."""
+    w._window_menu.aboutToShow.emit()
+    act = next(a for a in w._window_menu.actions() if a.text() == "&Panels")
+    return act, act.menu()
+
+
+def test_every_dock_can_be_brought_back_from_the_window_menu():
+    """Each dock has a close button and closing one was a one-way door — nothing persists dock
+    visibility, so the only way back was to quit and relaunch."""
+    from PySide6.QtWidgets import QDockWidget
+
+    _, w = _win()
+    act, panels = _panels(w)
+    listed = {a.text() for a in panels.actions() if not a.isSeparator()}
+    for d in w.findChildren(QDockWidget):
+        assert d.windowTitle() in listed, f"{d.windowTitle()} cannot be recovered"
+    assert "Show &All Panels" in listed
+
+
+def test_the_list_is_built_from_the_docks_that_exist_not_from_a_list_of_names():
+    """So a dock added later turns up without anyone remembering to add it here."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDockWidget
+
+    _, w = _win()
+    extra = QDockWidget("A Later Panel", w)
+    extra.setObjectName("dock_later")
+    w.addDockWidget(Qt.BottomDockWidgetArea, extra)
+
+    act, panels = _panels(w)
+    assert "A Later Panel" in {a.text() for a in panels.actions() if not a.isSeparator()}
+
+
+def test_closing_a_dock_with_its_x_clears_its_tick_and_the_entry_brings_it_back():
+    from PySide6.QtWidgets import QDockWidget
+
+    app, w = _win()
+    cons = next(d for d in w.findChildren(QDockWidget) if d.windowTitle() == "Console")
+    cons.close()
+    app.processEvents()
+
+    act, panels = _panels(w)
+    entry = next(a for a in panels.actions() if a.text() == "Console")
+    assert not entry.isChecked(), "the tick must follow the dock, not the last click"
+
+    entry.trigger()
+    app.processEvents()
+    assert cons.isVisible()
+
+
+def test_show_all_panels_recovers_a_tidy_up_that_went_too_far():
+    from PySide6.QtWidgets import QDockWidget
+
+    app, w = _win()
+    for d in w.findChildren(QDockWidget):
+        d.close()
+    app.processEvents()
+    assert all(not d.isVisible() for d in w.findChildren(QDockWidget))
+
+    w._show_all_panels()
+    app.processEvents()
+    still = [d.windowTitle() for d in w.findChildren(QDockWidget) if not d.isVisible()]
+    assert not still, f"still hidden after Show All Panels: {still}"
