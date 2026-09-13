@@ -40,7 +40,10 @@ test)
   # Extra arguments REPLACE the default target rather than adding to it: `dev.sh test
   # tests/test_bootstrap.py` should run that file, not the whole suite plus that file.
   targets=("${@:2}")
-  [ ${#targets[@]} -eq 0 ] && targets=(tests/)
+  # The Discord bot's tests live in bot/, outside this package, because the bot is a service run
+  # from the checkout rather than a distribution (bot/README.md says why). They are listed here so
+  # they run in the ordinary `dev.sh test`, rather than being the one directory nobody executes.
+  [ ${#targets[@]} -eq 0 ] && targets=(tests/ ../bot/tests/)
   # This runs EVERYTHING, Qt included. There is no separate Qt suite to exclude: an --ignore for
   # `tests/test_qt_suite.py` used to sit here, and no such file has ever existed in this repo, so
   # it excluded nothing while advertising a suite you could not run.
