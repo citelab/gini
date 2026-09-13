@@ -87,21 +87,33 @@ def open_windows(exclude=None) -> list:
 def focus(w) -> bool:
     """Bring one window to the front. False if it has gone away since the menu was built.
 
-    `showNormal()` for a minimised window, because a minimised window ignores `raise_()`: the entry
-    would appear to do nothing at all, which is exactly the complaint this module exists to answer.
-    A minimised window is still `isVisible()` in Qt, so the guard below does not catch it.
+    Four steps, and Windows needs all four — this is where macOS and Windows part company, and
+    testing it on a Mac proves nothing:
 
-    It will NOT re-show a window that has been closed. A lab can close itself between the menu
-    being built and the entry being clicked, and `show()` on a closed-but-not-yet-destroyed lab
-    brings back a husk: `stop_polling()` has already run, its workers are joined, so it would sit
-    there displaying whatever was on screen when it closed and never update again. Refusing is
-    honest — the menu is rebuilt every time it opens, so the entry is gone by the next look.
+    * `isVisible()` first. It will NOT re-show a window that has been closed. A lab can close
+      itself between the menu being built and the entry being clicked, and `show()` on a
+      closed-but-not-yet-destroyed lab brings back a husk: `stop_polling()` has already run and its
+      workers are joined, so it would sit there showing whatever was on screen when it closed and
+      never update again. Refusing is honest — the menu is rebuilt every time it opens.
+    * **`WindowActive` in the window state.** The one that was missing. On macOS `raise_()` is
+      enough and this looks redundant; on Windows 11 the entry did nothing at all without it.
+      Clearing `WindowMinimized` in the same call is what restores a minimised window, since a
+      minimised window ignores `raise_()`.
+    * `show()`, safe precisely because the visibility check above already passed, so it can only
+      re-show a window that is already up. It is what makes Windows re-evaluate the window state
+      just set.
+    * `raise_()` then `activateWindow()` — z-order, then keyboard focus.
+
+    `activateWindow()` may still be refused: Windows only lets the process that owns the foreground
+    window, or one that just received input, steal focus. A menu click satisfies that, but if it
+    ever does not, Windows flashes the taskbar button instead — which still tells the student where
+    the window went.
     """
     try:
         if not w.isVisible():
             return False                  # closed since the menu was built; do not resurrect it
-        if w.isMinimized():
-            w.showNormal()
+        w.setWindowState((w.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        w.show()
         w.raise_()
         w.activateWindow()
         return True

@@ -217,3 +217,26 @@ def test_a_dialog_built_inline_is_promoted_or_modal_like_any_other():
     assert not offenders, (
         f"{offenders} builds a QDialog it neither exec()s nor passes to windowing.standalone(). "
         f"If it is modal, exec() it; if it stays on screen, promote it.")
+
+
+def test_focus_restores_a_minimised_window_and_marks_it_active():
+    """The active bit is the line that is easy to read as redundant and delete. On macOS it IS
+    redundant — `raise_()` alone works — so a Mac suite would stay green while the Window menu
+    silently stopped doing anything on Windows 11, which is the bug it was added for. Pin it here
+    so the deletion fails somewhere.
+    """
+    app = QApplication.instance() or QApplication([])
+    w = QWidget()
+    w.setWindowFlags(Qt.Window)
+    w.setWindowTitle("Behind")
+    w.show()
+    app.processEvents()
+
+    w.showMinimized()
+    app.processEvents()
+    assert focus(w) is True
+    app.processEvents()
+    assert not (w.windowState() & Qt.WindowMinimized), "a minimised window ignores raise_()"
+    assert w.windowState() & Qt.WindowActive, (
+        "WindowActive is what Windows needs; without it the menu entry does nothing there")
+    w.close()
