@@ -67,3 +67,42 @@ the design proposes splitting out, not here.
 | `log.py` | SQLite, and `clusters()` — the read that answers the question above. |
 | `client.py` | the Discord adapter. Reads, writes rows, says nothing. |
 | `tests/` | run with `./scripts/dev.sh test`, or `pytest bot/tests` |
+
+## On the server
+
+The Center runs on a VM (`gini.cs.mcgill.ca`) under systemd — see
+`teaching-center/deploy/gini-tc.service`. The bot goes beside it the same way, as its **own user**:
+it holds a Discord token, the Center holds staff password hashes and every student's submitted
+work, and there is no reason for one to reach the other. When the console page lands, the Center
+reads the bot's log file — not the reverse.
+
+```bash
+sudo useradd -r -m -d /opt/gini-bot gini-bot
+sudo -u gini-bot mkdir -p /opt/gini-bot/{data,src}
+sudo -u gini-bot git clone https://github.com/citelab/gini /opt/gini-bot/src
+sudo -u gini-bot python3 -m venv /opt/gini-bot/venv
+sudo -u gini-bot /opt/gini-bot/venv/bin/pip install 'discord.py>=2.3'
+
+# the token, and nothing else in git
+sudo -u gini-bot tee /opt/gini-bot/env >/dev/null <<'EOF'
+GINI_BOT_TOKEN=...
+GINI_BOT_CHANNELS=help
+EOF
+sudo chmod 600 /opt/gini-bot/env
+
+sudo cp /opt/gini-bot/src/bot/deploy/gini-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now gini-bot
+journalctl -u gini-bot -f          # expect: connected as …; observing only, posting nothing
+```
+
+Reading it, any time after:
+
+```bash
+sudo -u gini-bot env PYTHONPATH=/opt/gini-bot/src/bot:/opt/gini-bot/src/core/src \
+  GINI_BOT_DB=/opt/gini-bot/data/observations.db \
+  /opt/gini-bot/venv/bin/python -m gini_bot report 14
+```
+
+`gini-core` is installed into the venv only if you prefer it to the checkout — the `PYTHONPATH`
+above takes `gini.domain` straight from `/opt/gini-bot/src/core/src`, so `git pull` updates the
+matcher and the bot together, which is what you want while this is still moving.

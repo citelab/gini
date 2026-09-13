@@ -1,0 +1,54 @@
+# The observation bot, as a service on the VM that runs the Teaching Center.
+#
+#   sudo cp deploy/gini-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gini-bot
+#   journalctl -u gini-bot -f
+#
+# Modelled on teaching-center/deploy/gini-tc.service, with two deliberate differences.
+#
+# **Its own user.** The bot holds a Discord token and the Center holds staff password hashes and
+# every student's submitted work. Running both as `gini-tc` would mean a leaked or abused token
+# reaching that database, and there is no reason for it to: the bot needs its own log and nothing
+# else. When the console page lands, the Center reads the bot's file — not the other way round.
+#
+# **No port, no certificate.** This process accepts nothing. It opens one outbound websocket to
+# Discord and writes rows. There is no listener to protect, which is also why it is safe to run on
+# a VM the whole school can log into.
+[Unit]
+Description=GINI observation bot (Discord, read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gini-bot
+Group=gini-bot
+WorkingDirectory=/opt/gini-bot
+Environment=PYTHONUNBUFFERED=1
+# The checkout, not an install: bot/ is a service run from source and deliberately not a
+# distribution (bot/README.md says why). core/src carries gini.domain, which the matcher needs.
+Environment=PYTHONPATH=/opt/gini-bot/src/bot:/opt/gini-bot/src/core/src
+Environment=GINI_BOT_DB=/opt/gini-bot/data/observations.db
+# GINI_BOT_TOKEN and GINI_BOT_CHANNELS live here, chmod 600, owned by gini-bot. This unit file is
+# in git; the token must never be.
+EnvironmentFile=/opt/gini-bot/env
+ExecStart=/opt/gini-bot/venv/bin/python -m gini_bot
+
+# Discord drops connections routinely — a disconnect is normal operation, not a fault.
+Restart=always
+RestartSec=5
+
+# The log holds what a whole class said, with the author hashed. The salt sits beside it, and the
+# two together are what would make it re-identifiable — so both are locked to this user.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gini-bot/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
