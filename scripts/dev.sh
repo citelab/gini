@@ -16,15 +16,43 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 PY="${PYTHON:-python3}"
 
+# Which Python, decided ONCE and acted on rather than warned about.
+#
+# This used to print "no virtualenv is active … pip may refuse (PEP 668)" and then run the install
+# anyway. It was right every time: on Debian 12, Ubuntu 24.04 and a current macOS the install dies
+# with `externally-managed-environment`, and the distro's own advice in that error — "try apt
+# install python3-xyz" — is wrong for this repo and sends people somewhere unhelpful. A warning
+# that knows exactly what is about to happen and lets it happen is not a warning.
+#
+# So: an active virtualenv wins; otherwise a .venv sitting in the checkout is used, because
+# somebody made it here for this; otherwise stop, with the two commands that fix it.
+if [ -n "${PYTHON:-}" ]; then
+  :                                         # an explicit choice is never second-guessed
+elif [ -n "${VIRTUAL_ENV:-}" ]; then
+  PY="$VIRTUAL_ENV/bin/python"
+elif [ -x ".venv/bin/python" ]; then
+  PY="$PWD/.venv/bin/python"
+  echo "Using the virtualenv in this checkout: .venv"
+  echo "(activate it with \`source .venv/bin/activate\` if you want gbuilder on your PATH too.)"
+  echo
+elif [ "${1:-install}" != "check" ]; then
+  cat >&2 <<EOF
+No virtualenv, and no .venv in this checkout.
+
+Debian, Ubuntu and current macOS refuse to install into the system Python (PEP 668), and the
+error they give sends you to apt for packages that are not there. Make one first:
+
+    python3 -m venv .venv
+    ./scripts/dev.sh ${1:-install}
+
+(PYTHON=/path/to/python overrides this if you know what you want.)
+EOF
+  exit 1
+fi
+
 case "${1:-install}" in
 
 install)
-  if [ -z "${VIRTUAL_ENV:-}" ]; then
-    echo "Note: no virtualenv is active. On a recent macOS/Linux, pip may refuse to install into"
-    echo "the system Python (PEP 668). If that happens:"
-    echo "    $PY -m venv .venv && source .venv/bin/activate && $0 install"
-    echo
-  fi
   echo "Installing gini-core, gini-toolkit and gini-teaching-center (editable)…"
   # core FIRST: the other two depend on it, and installing them first would pull the published
   # gini-core from PyPI over the top of your checkout — the exact confusion this avoids.
