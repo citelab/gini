@@ -884,7 +884,23 @@ class Handler(BaseHTTPRequestHandler):
                         _STORE.obs_ref_put(oid, rec.get("channel_id", ""), rec["message_id"],
                                            time.time() + _community.REPLY_WINDOW_S)
                 _STORE.obs_refs_sweep(time.time())
-                self._send(200, {"ok": True, "stored": stored})
+                # The bank's answer travels back with the acknowledgement, so the bot needs no
+                # second call and still holds no judgement — it posts what it is handed. Only for a
+                # LIVE message (one observation, carrying its ids); a backfill of a term of history
+                # must not answer a question somebody asked in March.
+                reply = None
+                obs = (body.get("observations") or [])
+                if len(obs) == 1 and obs[0].get("message_id") and not body.get("backfill"):
+                    rec = obs[0]
+                    if rec.get("kind") in ("question", "problem"):
+                        hit = _community.answer_for(
+                            rec.get("text", ""), _STORE.answers(),
+                            channel=rec.get("channel", ""), now=time.time())
+                        if hit is not None:
+                            a, _score = hit
+                            _STORE.answer_used(a.id)
+                            reply = _community.render(a)
+                self._send(200, {"ok": True, "stored": stored, "reply": reply})
                 return True
 
             if p == "/api/ai/outbox" and self.command == "GET":
@@ -951,6 +967,47 @@ class Handler(BaseHTTPRequestHandler):
                 r["repliable"] = _STORE.obs_ref(r["id"]) is not None
                 r["replies"] = _STORE.replies_for(r["id"])
             self._send(200, rows)
+            return True
+
+        if p == "/api/ai/answers":
+            if self.command == "GET":
+                self._send(200, _STORE.answers())
+                return True
+            # Save — new or edited. The question a real person asked is the default trigger, so the
+            # common path is "read what they wrote, write the reply, save" with nothing to invent.
+            b = self._body()
+            text = str(b.get("answer", "")).strip()
+            question = str(b.get("question", "")).strip()
+            if not text or not question:
+                return self._send(400, {"error": "An answer needs a question and a reply."})
+            existing = _STORE.answer(str(b.get("id", "")))
+            if existing:
+                a = _community.from_row(existing)
+                a.question, a.answer = question, text
+                a.enabled = bool(b.get("enabled", True))
+                a.updated_at = time.time()
+            else:
+                a = _community.from_cluster(question, text, author=me["who"],
+                                            course=str(b.get("course", "")))
+            _STORE.answer_put(_community.to_row(a))
+            self._send(200, {"ok": True, "id": a.id})
+            return True
+
+        if p == "/api/ai/answers/attach" and self.command == "POST":
+            # The console's second verb: a question that is plainly the same thing but scored below
+            # the floor becomes one click, and nobody answers it again.
+            b = self._body()
+            row = _STORE.answer(str(b.get("id", "")))
+            if row is None:
+                return self._send(404, {"error": "No such answer."})
+            a = _community.attach(_community.from_row(row), str(b.get("sample", "")))
+            _STORE.answer_put(_community.to_row(a))
+            self._send(200, {"ok": True, "triggers": len(a.triggers)})
+            return True
+
+        if p == "/api/ai/answers/delete" and self.command == "POST":
+            _STORE.answer_delete(str(self._body().get("id", "")))
+            self._send(200, {"ok": True})
             return True
 
         if p == "/api/ai/reply" and self.command == "POST":

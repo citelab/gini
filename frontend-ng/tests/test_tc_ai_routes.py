@@ -210,3 +210,95 @@ def test_the_windows_a_teacher_actually_asks_for(tc):
     assert call("/api/ai/summary?window=day", session=tok)[1]["counts"]["total"] == 1
     assert call("/api/ai/summary?window=month", session=tok)[1]["counts"]["total"] == 2
     assert call("/api/ai/summary?window=nonsense", session=tok)[1]["days"] == 7
+
+
+# -- the answer bank: the public door's voice ----------------------------------- #
+
+def test_a_banked_answer_comes_back_with_the_push_that_asked_it(tc):
+    """The whole of the public door's voice, and the bot still holds no judgement: it pushes a
+    message and is handed the words to post, or nothing."""
+    _, tok, call, _ = tc
+    call("/api/ai/answers", {"question": "Where do we send the receipt code?",
+                             "answer": "On MyCourses, under Assignment 3."}, session=tok)
+
+    st, r = call("/api/ai/observe",
+                 {"observations": [_said("my gbuilder — sorry, where do we send the receipt code")]},
+                 bot=KEY)
+    assert st == 200
+    assert r["reply"] and "MyCourses" in r["reply"]
+    assert "via GINI AI" not in r["reply"], "a banked answer is the course's own words"
+    assert "boss" in r["reply"], "with a byline, so a student knows who settled it"
+
+
+def test_nothing_comes_back_when_the_bank_does_not_cover_it(tc):
+    """Silence is a valid answer. A hedge from a bot is noise on a busy server."""
+    _, tok, call, _ = tc
+    call("/api/ai/answers", {"question": "Where do we send the receipt code?",
+                             "answer": "On MyCourses."}, session=tok)
+    r = call("/api/ai/observe",
+             {"observations": [_said("how do I add a router to the canvas")]}, bot=KEY)[1]
+    assert r["reply"] is None
+
+
+def test_six_people_piling_onto_one_outage_are_answered_once(tc):
+    _, tok, call, _ = tc
+    call("/api/ai/answers", {"question": "gbuilder core dumped on the lab machine",
+                             "answer": "Install libxcb-cursor0."}, session=tok)
+    said = 0
+    for i in range(4):
+        o = _said("gbuilder core dumped on the lab machine", who=f"p{i}",
+                  at=time.time() + i, mid=f"m{i}")
+        o["kind"] = "problem"
+        said += bool(call("/api/ai/observe", {"observations": [o]}, bot=KEY)[1]["reply"])
+    assert said == 1, "the answer is useful once and spam five times"
+
+
+def test_a_backfill_of_old_history_never_answers_anybody(tc):
+    """Reading a term of history must not reply to a question somebody asked in March."""
+    _, tok, call, _ = tc
+    call("/api/ai/answers", {"question": "Where do we send the receipt code?",
+                             "answer": "On MyCourses."}, session=tok)
+    r = call("/api/ai/observe",
+             {"backfill": True,
+              "observations": [_said("where do we send the receipt code")]}, bot=KEY)[1]
+    assert r["reply"] is None
+
+    many = [_said("where do we send the receipt code", who=f"x{i}", at=time.time() - i, mid=f"b{i}")
+            for i in range(3)]
+    assert call("/api/ai/observe", {"observations": many}, bot=KEY)[1]["reply"] is None, \
+        "a batch is history; only a single live message can be answered"
+
+
+def test_a_teacher_teaches_the_bank_a_phrasing_in_one_click(tc):
+    _, tok, call, _ = tc
+    aid = call("/api/ai/answers", {"question": "Where do we send the receipt code?",
+                                   "answer": "On MyCourses."}, session=tok)[1]["id"]
+    odd = _said("do the receipt codes go on mycourses or by email to you")
+    assert call("/api/ai/observe", {"observations": [odd]}, bot=KEY)[1]["reply"] is None
+
+    call("/api/ai/answers/attach", {"id": aid, "sample": odd["text"]}, session=tok)
+    odd2 = dict(odd, at=time.time() + 9999, mid="m9")
+    assert call("/api/ai/observe", {"observations": [odd2]}, bot=KEY)[1]["reply"] is not None
+
+
+def test_a_disabled_answer_stops_being_posted_without_being_lost(tc):
+    _, tok, call, _ = tc
+    aid = call("/api/ai/answers", {"question": "Where do we send the receipt code?",
+                                   "answer": "On MyCourses."}, session=tok)[1]["id"]
+    call("/api/ai/answers", {"id": aid, "question": "Where do we send the receipt code?",
+                             "answer": "On MyCourses.", "enabled": False}, session=tok)
+    assert call("/api/ai/observe",
+                {"observations": [_said("where do we send the receipt code", mid="mz")]},
+                bot=KEY)[1]["reply"] is None
+    assert len(call("/api/ai/answers", session=tok)[1]) == 1, "disabled, not deleted"
+
+
+def test_the_bank_needs_a_signed_in_teacher(tc):
+    _, _, call, _ = tc
+    assert call("/api/ai/answers", {"question": "q", "answer": "a"})[0] == 401
+    assert call("/api/ai/answers", {"question": "q", "answer": "a"}, bot=KEY)[0] == 401
+
+
+def test_an_answer_with_nothing_in_it_is_refused(tc):
+    _, tok, call, _ = tc
+    assert call("/api/ai/answers", {"question": "q", "answer": "   "}, session=tok)[0] == 400

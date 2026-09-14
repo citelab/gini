@@ -282,11 +282,35 @@ hand-in time: everyone is then due when code vending stops, however early they b
       <span id="ai-counts" class="muted" style="margin-left:auto"></span>
     </div>
 
-    <div class="card"><table id="ai-list"></table></div>
+    <div style="display:flex;gap:6px;margin:18px 0 0">
+      <button class="flat ai-view on" data-v="asked">What is being asked</button>
+      <button class="flat ai-view" data-v="bank">Answer bank</button>
+    </div>
+
+    <div id="ai-asked">
+      <div class="card"><table id="ai-list"></table></div>
+    </div>
+
+    <div id="ai-bank" hidden>
+      <div class="sub">Answers the bot posts verbatim, the next time anyone asks. Written once,
+        by you — nothing here is composed, so it cannot be confidently wrong.</div>
+      <div class="card"><table id="ai-bank-list"></table></div>
+    </div>
 
     <div id="ai-thread-card" class="card" hidden>
       <h3 id="ai-thread-title" style="margin-top:0"></h3>
       <div id="ai-thread"></div>
+      <div id="ai-bank-box" style="margin-top:14px;padding-top:14px;
+           border-top:1px dashed var(--rule)">
+        <div class="muted" style="margin-bottom:6px">Answer it once, for everyone who asks next:</div>
+        <textarea id="ai-bank-text" rows="3" style="width:100%"
+                  placeholder="The bot posts this verbatim, in your name, to whoever asks this again."></textarea>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px">
+          <button class="flat" onclick="bankAnswer()">Save to the answer bank</button>
+          <span class="muted">— and it answers the next person without you being here.</span>
+        </div>
+      </div>
+
       <div id="ai-reply-box" style="margin-top:14px">
         <textarea id="ai-reply" rows="4" style="width:100%"
                   placeholder="Answer it once. The bot posts this as a reply, attributed to you."></textarea>
@@ -1004,6 +1028,7 @@ const kindTag = k => `<span class="tag kind" style="color:${
 
 let AI_WINDOW = 'day';
 let AI_OBS = 0;               // the message a reply would attach to
+let AI_SAMPLE = '';           // its words — the trigger a banked answer is matched on
 
 async function loadAI(){
   document.querySelectorAll('.ai-win').forEach(b =>
@@ -1032,9 +1057,58 @@ async function loadAI(){
 }
 
 document.addEventListener('click', e => {
-  const b = e.target.closest && e.target.closest('.ai-win');
-  if (b) { AI_WINDOW = b.dataset.w; loadAI(); }
+  const w = e.target.closest && e.target.closest('.ai-win');
+  if (w) { AI_WINDOW = w.dataset.w; loadAI(); return; }
+  const v = e.target.closest && e.target.closest('.ai-view');
+  if (v) {
+    document.querySelectorAll('.ai-view').forEach(b => b.classList.toggle('on', b === v));
+    $('#ai-asked').hidden = v.dataset.v !== 'asked';
+    $('#ai-bank').hidden  = v.dataset.v !== 'bank';
+    if (v.dataset.v === 'bank') loadBank();
+  }
 });
+
+async function loadBank(){
+  const rows = await api('/api/ai/answers');
+  if (!Array.isArray(rows)) return;
+  $('#ai-bank-list').innerHTML = rows.length ? (
+      '<tr><th>Question<th>Answer<th>Used<th>Phrasings<th>' +
+      rows.map(a => `<tr>
+        <td>${esc(a.question).slice(0,90)}
+        <td class="muted">${esc(a.answer).slice(0,90)}
+        <td>${a.uses||0}<td>${(JSON.parse(a.triggers||'[]').length)+1}
+        <td>${a.enabled ? '' : '<span class="tag draft">off</span> '}
+            <button class="flat" onclick="toggleAnswer('${esc(a.id)}',${a.enabled?0:1})"
+              >${a.enabled?'Disable':'Enable'}</button>
+            <button class="danger" style="margin-left:10px"
+              onclick="dropAnswer('${esc(a.id)}')">Remove</button>`).join('')
+    ) : '<tr><td class="empty">Nothing banked yet. Open a question and answer it once.</td></tr>';
+}
+
+async function bankAnswer(){
+  const text = $('#ai-bank-text').value.trim();
+  if (!text) { say('Nothing to save.'); return; }
+  // The question a real person asked IS the trigger — the next person will phrase it the way the
+  // last one did, not the way a textbook would.
+  const r = await api('/api/ai/answers', {question: AI_SAMPLE, answer: text});
+  if (r && r.ok) { say('Banked. The next person to ask gets this.', true);
+                   $('#ai-bank-text').value = ''; }
+}
+
+async function toggleAnswer(id, on){
+  const rows = await api('/api/ai/answers');
+  const a = (rows||[]).find(x => x.id === id);
+  if (!a) return;
+  const r = await api('/api/ai/answers',
+                      {id, question: a.question, answer: a.answer, enabled: !!on});
+  if (r && r.ok) loadBank();
+}
+
+async function dropAnswer(id){
+  if (!confirm('Remove this answer? The bot stops posting it.')) return;
+  const r = await api('/api/ai/answers/delete', {id});
+  if (r && r.ok) loadBank();
+}
 
 async function openThread(obs){
   AI_OBS = obs;
@@ -1043,6 +1117,7 @@ async function openThread(obs){
 
   $('#ai-thread-card').hidden = false;
   $('#ai-thread-title').textContent = 'In #' + (rows[0].channel || '');
+  AI_SAMPLE = rows[0].text || '';
   $('#ai-thread').innerHTML = rows.map(m => `
     <div style="padding:8px 0;border-bottom:1px solid rgba(128,128,128,.18)">
       <div class="muted" style="font-size:12px">${esc(m.who).slice(0,8)} · ${when(m.at)}</div>

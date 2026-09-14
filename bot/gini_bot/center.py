@@ -62,11 +62,31 @@ class Center:
         if not self.configured or not observations:
             return 0
         try:
-            return int(self._call("/api/ai/observe", {"observations": observations})
+            return int(self._call("/api/ai/observe",
+                                  {"observations": observations, "backfill": True})
                        .get("stored", 0))
         except Exception as e:                       # noqa: BLE001 — never stop listening
             log.warning("could not reach the Teaching Center (%s); keeping it local", e)
             return 0
+
+    def push_one(self, observation: dict) -> str:
+        """Hand over one live message and get back the bank's answer to post, or "".
+
+        One call rather than push-then-ask, because the Center already has to look at the message to
+        store it and asking twice would race: between the two calls a teacher could bank an answer,
+        or another person could ask the same thing and use up the cooldown.
+
+        A batch (`push`) never gets an answer back. Reading a term of history must not reply to a
+        question somebody asked in March, and the Center enforces that rather than trusting callers.
+        """
+        if not self.configured:
+            return ""
+        try:
+            return str(self._call("/api/ai/observe",
+                                  {"observations": [observation]}).get("reply") or "")
+        except Exception as e:                       # noqa: BLE001 — never stop listening
+            log.warning("could not reach the Teaching Center (%s); keeping it local", e)
+            return ""
 
     def outbox(self) -> list:
         """Replies a teacher has written, already worded and addressed. Empty on any failure."""

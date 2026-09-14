@@ -36,6 +36,7 @@ two terms ago may be about a version that no longer exists.
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 
@@ -221,3 +222,49 @@ def reply_body(body: str, author: str) -> str:
     """
     who = (author or "").split("@")[0] or "the course"
     return f"{body.strip()}\n\n— {who}, via GINI AI"
+
+
+# --- the bank, as it is stored ------------------------------------------------------------ #
+
+def from_row(row: dict) -> Answer:
+    """One stored row as an Answer. `triggers` is JSON in the column and a list in the object —
+    kept here rather than in the store so a malformed value degrades to "no extra phrasings"
+    instead of taking a page down."""
+    try:
+        trig = json.loads(row.get("triggers") or "[]")
+    except (TypeError, ValueError):
+        trig = []
+    return Answer(id=row.get("id", ""), question=row.get("question", ""),
+                  answer=row.get("answer", ""), triggers=list(trig),
+                  author=row.get("author", ""), created_at=row.get("created") or 0.0,
+                  updated_at=row.get("updated") or 0.0, uses=int(row.get("uses") or 0),
+                  enabled=bool(row.get("enabled", 1)), course=row.get("course", ""))
+
+
+def to_row(a: Answer) -> dict:
+    return {"id": a.id, "question": a.question, "answer": a.answer,
+            "triggers": json.dumps(list(a.triggers)), "author": a.author, "course": a.course,
+            "enabled": 1 if a.enabled else 0, "uses": a.uses,
+            "created": a.created_at, "updated": a.updated_at or a.created_at}
+
+
+#: Answers already said in a channel recently: `{(answer_id, channel): when}`. Deliberately in
+#: memory rather than a table — its whole purpose is to stop six people piling onto one outage
+#: getting six identical replies, and a restart allowing one extra reply is not worth a write.
+_RECENT: dict = {}
+
+
+def answer_for(question: str, rows, *, channel: str, now: float, course: str = ""):
+    """The bank's reply to post, or None. `(Answer, score)` when there is one.
+
+    The whole of the public door's voice. `None` is the usual case and the correct one: silence is
+    a valid answer, and a bot that hedges in a busy server teaches people to ignore it.
+    """
+    hit = best_match(question, [from_row(r) for r in rows], course=course)
+    if hit is None:
+        return None
+    a, score = hit
+    if not should_post(a.id, channel, now, _RECENT):
+        return None
+    _RECENT[(a.id, channel)] = now
+    return a, score

@@ -37,10 +37,26 @@ def test_pushing_the_same_message_twice_records_it_once_and_returns_the_same_row
 
 def test_the_log_itself_holds_no_way_back_to_discord(store):
     """The property the whole design rests on. Everything identifying lives in the separate,
-    expiring table — never on the observation."""
+    expiring table — never on the observation.
+
+    Asserted as the WHOLE column set rather than as "no message_id", so that adding a column to this
+    table is a decision somebody has to come here and make. A privacy guarantee that is a property
+    of a schema needs the schema pinned; `source` was added deliberately and landed here first."""
     obs = store.observation(_obs(store))
-    assert set(obs) == {"id", "at", "channel", "who", "kind", "text", "terms", "thread", "answered"}
+    assert set(obs) == {"id", "at", "channel", "who", "kind", "text", "terms", "thread",
+                        "answered", "source"}
     assert "message_id" not in obs and "channel_id" not in obs
+
+
+def test_where_a_question_was_asked_travels_with_it(store):
+    """`source` is load-bearing, not bookkeeping: a chat question counts toward every number a
+    teacher sees, and none of its words may ever be quoted into a public channel."""
+    pub = _obs(store, at=1.0, text="asked in public")
+    assert store.observation(pub)["source"] == "discord", "the default is the public case"
+
+    priv = store.observe_put({"at": 2.0, "channel": "chat", "who": "z", "kind": "question",
+                              "text": "asked privately", "terms": "ask privat", "source": "chat"})
+    assert store.observation(priv)["source"] == "chat"
 
 
 def test_a_teacher_can_reply_to_something_recent(store):

@@ -74,11 +74,46 @@ The quieter win: a question asked privately still joins the anonymous corpus, so
 never post appear in the clusters**, and "what is this class stuck on" stops measuring who is
 willing to ask in public.
 
-**What it costs.** The Center sees the text of something a student believes is private. Same
-discipline as everything else — hashed author, no handle, no way back — but it must be *said*, in
-gBuilder, before they type: *"Answers come from your course. Questions are recorded, without your
-name, so your instructor can see what the class is stuck on."* With a setting to keep the local
-path, and a course that never turns it on losing nothing.
+### The student chooses who is in the conversation
+
+**Decided (2026-09-13), refining the above.** A Settings option in gBuilder, and it is the better
+answer than recording everything and disclosing it:
+
+- **GINI AI only** — the ladder answers, and the question is *not* recorded for staff. Private in
+  the way the word normally means.
+- **GINI AI and my instructor** — the ladder answers, *and* the question reaches the console, where
+  a teacher can see it, see what it clusters with, and reply. The reply comes back into the
+  student's own Chat.
+
+The second mode is worth having as more than a permission: it is the quiet student's route to a
+teacher. Asking in Discord means asking in front of everybody, and the students who will not do
+that are exactly the ones nobody hears from. This gives them a private line that a human can
+actually answer.
+
+**Consequences to build.** A chat observation needs a way back to the session, the way a Discord
+one needs a way back to the message — the same expiring reference, pointed at a Chat session rather
+than a channel. And `reply_outbox` grows a destination, because a queued reply now goes to Discord
+or to Chat.
+
+**Default: shared, said plainly.** A Center with an empty console helps nobody, and the content is
+anonymous by the time it lands. But it is a student-facing default that shares, so gBuilder states
+it where they will read it rather than in a settings page they will not, and turning it off costs
+them nothing — the ladder still answers.
+
+**Decided earlier the same day: Chat routes through the Center, and what it records is visible to
+the teaching staff only.** Same discipline as everything else — hashed author, no handle, no way back —
+and gBuilder says so before a student types: *"Answers come from your course. Questions are
+recorded, without your name, so your instructor can see what the class is stuck on."*
+
+**The rule that decision creates.** "Staff only" is an access property, and clustering quietly
+threatens it: a private Chat question joins a group, the group becomes an FAQ, and the FAQ is posted
+to Discord in somebody's own words. Nobody would have decided that; it would simply happen.
+
+So the SOURCE travels with the observation — `chat` or `discord` — and publication is gated on it.
+A chat-sourced message counts toward every number a teacher sees, and **none of its words may ever
+be quoted into a public channel**. A cluster mixing both is published from the Discord phrasing or
+not at all. The teacher's own reply is unaffected: those are their words, and they choose to post
+them.
 
 ## 7. Release notes and announcements
 

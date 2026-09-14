@@ -232,8 +232,15 @@ def run(token: str = "", db: str | Path = "") -> int:
             # The Center gets the message AND the way back to it. That reference expires there;
             # see the observation_ref table. Failing to reach the Center is not an error worth
             # stopping for — the row is already safe locally and pushes again next time.
-            center.push([{**obs.__dict__, "channel_id": str(message.channel.id),
-                          "message_id": str(message.id)}])
+            answer = center.push_one({**obs.__dict__,
+                                      "channel_id": str(message.channel.id),
+                                      "message_id": str(message.id)})
+            if answer:
+                # The Center decided; this posts. Whether the bank covers it, whether it has been
+                # said in this channel recently, and what words to use are all decisions, and the
+                # bot holds none of them.
+                await message.reply(answer)
+                log.info("answered from the bank in #%s", channel)
         except Exception:                   # noqa: BLE001 — a bad row must not kill the connection
             log.exception("could not record a message")
 

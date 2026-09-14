@@ -249,7 +249,15 @@ CREATE TABLE IF NOT EXISTS observation (
   text     TEXT NOT NULL,
   terms    TEXT NOT NULL DEFAULT '',
   thread   TEXT NOT NULL DEFAULT '',
-  answered REAL NOT NULL DEFAULT 0
+  answered REAL NOT NULL DEFAULT 0,
+  -- Where it was said: 'discord' (public) or 'chat' (gBuilder, private to the student).
+  --
+  -- Load-bearing, not bookkeeping. A chat question counts toward every number a teacher sees, and
+  -- none of its WORDS may ever be quoted into a public channel — otherwise clustering quietly
+  -- undoes the privacy nobody decided to give up: a private question joins a group, the group
+  -- becomes an FAQ, and the FAQ is posted in somebody's own words. A mixed cluster is published
+  -- from its Discord phrasing or not at all.
+  source   TEXT NOT NULL DEFAULT 'discord'
 );
 
 -- THE WAY BACK TO A DISCORD MESSAGE, and the only place one exists — deliberately separate from
@@ -267,6 +275,25 @@ CREATE TABLE IF NOT EXISTS observation_ref (
   channel_id TEXT NOT NULL,
   message_id TEXT NOT NULL,
   expires    REAL NOT NULL
+);
+
+-- THE ANSWER BANK — what the course has settled, in the teacher's words.
+--
+-- The reason the public door can speak at all. A teacher writes an answer once and the bot posts it
+-- verbatim to whoever asks next, so nothing composes anything and it cannot be confidently wrong.
+-- `triggers` is a JSON list of extra phrasings: one settled question arrives in many shapes, and
+-- the console collects them a click at a time rather than asking the teacher to guess them upfront.
+CREATE TABLE IF NOT EXISTS answer (
+  id       TEXT PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer   TEXT NOT NULL,
+  triggers TEXT NOT NULL DEFAULT '[]',
+  author   TEXT NOT NULL DEFAULT '',
+  course   TEXT NOT NULL DEFAULT '',
+  enabled  INTEGER NOT NULL DEFAULT 1,
+  uses     INTEGER NOT NULL DEFAULT 0,
+  created  REAL NOT NULL DEFAULT 0,
+  updated  REAL NOT NULL DEFAULT 0
 );
 
 -- REPLIES THE TEACHER HAS WRITTEN, waiting for the bot to collect and post.
@@ -1106,12 +1133,12 @@ class Store:
         course — a backfill overlapping the live feed — and the second push must be a no-op that
         still tells the caller which row it is, so a message reference can be attached to it.
         """
-        cols = ("at", "channel", "who", "kind", "text", "terms", "thread")
+        cols = ("at", "channel", "who", "kind", "text", "terms", "thread", "source")
         with self.lock:
             self.db.execute(
                 f"INSERT OR IGNORE INTO observation({','.join(cols)}) "
                 f"VALUES({','.join('?' * len(cols))})",
-                tuple(rec.get(c, "") for c in cols))
+                tuple(rec.get(c) or ("discord" if c == "source" else "") for c in cols))
             row = self.db.execute(
                 "SELECT id FROM observation WHERE at=? AND who=? AND text=?",
                 (rec.get("at", 0), rec.get("who", ""), rec.get("text", ""))).fetchone()
@@ -1151,6 +1178,30 @@ class Store:
             "SELECT COUNT(DISTINCT who) AS n FROM observation WHERE at >= ?",
             (since,))["n"])
         return out
+
+    # -- the answer bank --------------------------------------------------- #
+    def answer_put(self, rec: dict) -> None:
+        cols = ("id", "question", "answer", "triggers", "author", "course", "enabled", "uses",
+                "created", "updated")
+        self._run(f"INSERT OR REPLACE INTO answer({','.join(cols)}) "
+                  f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c) for c in cols))
+
+    def answers(self, course: str = "") -> list[dict]:
+        if course:
+            return self._all("SELECT * FROM answer WHERE course IN ('', ?) ORDER BY updated DESC",
+                             (course,))
+        return self._all("SELECT * FROM answer ORDER BY updated DESC")
+
+    def answer(self, aid: str) -> dict | None:
+        return self._one("SELECT * FROM answer WHERE id=?", (aid,))
+
+    def answer_delete(self, aid: str) -> None:
+        self._run("DELETE FROM answer WHERE id=?", (aid,))
+
+    def answer_used(self, aid: str) -> None:
+        """How many times it saved somebody answering by hand — the only measure of whether the
+        bank is worth keeping up."""
+        self._run("UPDATE answer SET uses = uses + 1 WHERE id=?", (aid,))
 
     # -- the way back to a message, which expires -------------------------- #
     def obs_ref_put(self, obs_id: int, channel_id: str, message_id: str, expires: float) -> None:
