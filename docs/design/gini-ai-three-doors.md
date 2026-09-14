@@ -35,7 +35,7 @@ Tried in order. The model is third, never first, and composes only from what the
 |---|---|---|
 | **L0** | the teacher's answer bank | **built.** Exact words, term containment, no model. Stops here on a match. |
 | **L1** | retrieval + a confidence | **built, unused.** `agent/recall.py` over the manual, concepts, recipes and `search.py`. Returns `strength ∈ {strong, thin, empty}`. |
-| **L2** | the model, grounded | composes *from what L1 retrieved*, never from its weights — the shape `agent/reasoning.py` was built for. Runs only at `strong`. |
+| **L2** | the model, grounded | composes *from what L1 retrieved*, never from its weights — the shape `agent/reasoning.py` was built for. Runs only at `strong`, **and is audited by the Reasoning Twin before it counts as an answer — see §4a.** |
 | **L3** | a person | at `thin`/`empty`: say what *is* known and tag a human. Not a hedge — a bot that says "ask a TA" is noise, and it teaches people to ignore the bot. |
 
 The ladder is also the outage plan. GPU off: L0 and L1 still answer, the console still works, the
@@ -52,6 +52,66 @@ bot still collects.
 
 It decays the right way: every approved draft can become a bank entry in one click, so the *public*
 door improves without the model ever being trusted in public.
+
+## 4a. The Reasoning Twin is the L2 gate
+
+`strength == strong` is a statement about RETRIEVAL, not about the answer. It says the knowledge
+base covered the question; it says nothing about whether the model used what it was handed. That
+hole is already named in this tree, one layer down, by the module written to close it:
+
+> gBuilder already asks the course server what it holds on a question and pastes the answer into
+> the prompt as a few lines of context. **Nothing then checks whether the model used it.** A student
+> asks about connecting two LANs, their course has a released activity called "Multi-LAN routing"
+> that is the very lab they are recording, and the tutor may answer out of general knowledge and
+> never mention it — with no trace anywhere that it did. The material was DELIVERED and nobody was
+> ANSWERABLE for it.
+> — `agent/twin/course.py`
+
+The same sentence describes GINI AI with L1 in place of `tc_ask`. So L2's gate is not a threshold,
+it is the dialectic: enumerate the concerns the retrieval produced, require the model to report
+coverage against them, diff EXACTLY (a set diff, no NLP), adjudicate each claimed omission against
+ground truth, object to silent misses, allow one bounded revision, and turn what survives into a
+visible flag — never a silent ship, never suppression.
+
+**All of it runs headless.** `twin.{contracts,dialectic,justify,salience,course,harness}` import
+with PySide6 blocked — checked, not assumed — so the reason service uses them as they are.
+
+### What transfers, and what does not
+
+| | |
+|---|---|
+| `contracts.py` | Concern / Coverage / Objection. A concern is only ever emitted with deterministic evidence: **the Twin can only cite what GINI can prove.** |
+| `dialectic.py` | The exact diff, the bounded revision, the flag. |
+| `justify.py` | An objection is defeated only by a *validated* justification — five checkable patterns, ground truth as referee. |
+| `salience.py` | `MAX_CONCERNS = 5`, `MUST_ADDRESS = 2` — "the Twin whispers, it does not checklist". |
+| `harness.py` | Golden turns and a false-objection rate: a regression gate for prompt and model changes, **before** anything is pointed at a class. |
+
+What does *not* transfer is five of the six concern sources. They read a live canvas — unmet
+objectives, legality flags, watcher events, authoring gaps, the learner model — and a Discord
+question has no canvas. **`course.py` is the one that carries over directly**, and it is the one
+built on `tc_ask` hits, which is exactly what L1 produces.
+
+### The two sources GINI AI has to add
+
+- **The answer bank.** If the teacher has banked something adjacent, the model must account for it.
+  High salience by construction: the course already settled this, and answering around it is worse
+  than not answering.
+- **The manual's own limits.** Every page in `docs/manual/` carries a required *"Limits and
+  honesty"* heading. That is a ready-made source of what must not be claimed — an answer asserting
+  something a page lists as a limit is a silent miss with deterministic evidence behind it.
+
+### What it buys the public door
+
+A draft reaching the staff channel arrives **annotated**: *did not mention the course's own lab on
+this*, *claimed X, which os-06 lists as a limit*. A teacher approving a draft sees what the auditor
+objected to instead of re-deriving it — which is the difference between reviewing and rubber-
+stamping, and it is the whole reason the public door can eventually be trusted at all.
+
+**Stated plainly:** the Twin is Phase A and feature-flagged off (`Settings.twin_enabled`). Phases
+B–E of `docs/REASONING_2.0_DESIGN.md` are open and `twin/learner.py` duck-types against a shape
+nothing yet produces. It is real, tested code — not battle-worn code. Using it here is the first
+time it would face traffic, and the harness is what makes that a measurable risk rather than a
+hopeful one.
 
 ## 5. Where the model runs
 
