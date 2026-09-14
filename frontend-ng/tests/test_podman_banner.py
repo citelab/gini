@@ -224,3 +224,52 @@ def test_an_engine_that_cannot_be_asked_reports_nothing_rather_than_guessing(mon
 
     monkeypatch.setattr(mod.subprocess, "run", boom)
     assert _orch_at()._status_by_label("/tmp") == {}
+
+
+def test_compose_ps_printing_nothing_reaches_the_label_fallback(tmp_path, monkeypatch):
+    """The bug in the first version of the fix. podman-compose's `ps --format json` writes NOTHING
+    to stdout, and `status()` returned {} on empty output before it ever reached the fallback — so
+    the symptom was unchanged and the fix looked applied.
+
+    Reproduced the way the lab machine behaves: compose ps silent, engine ps full of containers.
+    """
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    def run(cmd, **kw):
+        if "compose" in cmd[:2] or cmd[1:2] == ["compose"]:
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stderr": "", "stdout":
+                              "gini-lab_r1_1\tUp 26 seconds\n"
+                              "gini-lab_m1_1\tUp 25 seconds\n"
+                              "gini-lab_m2_1\tUp 24 seconds\n"})()
+
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, "gini-lab"
+    assert o.status(tmp_path) == {"r1": "running", "m1": "running", "m2": "running"}
+
+
+def test_docker_compose_answering_properly_never_reaches_the_fallback(tmp_path, monkeypatch):
+    """The Docker side must be untouched: when compose's own `ps` answers, that is the answer, and
+    the engine is never asked a second question."""
+    import json
+
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    asked = []
+
+    def run(cmd, **kw):
+        asked.append(cmd)
+        if cmd[1:2] == ["compose"]:
+            return type("R", (), {"returncode": 0, "stderr": "", "stdout": json.dumps(
+                [{"Service": "m1", "State": "running"},
+                 {"Service": "m2", "State": "exited"}])})()
+        raise AssertionError("the engine must not be asked when compose answered")
+
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, "gini-lab"
+    assert o.status(tmp_path) == {"m1": "running", "m2": "exited"}
+    assert len(asked) == 1

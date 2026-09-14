@@ -1530,14 +1530,19 @@ class Orchestrator:
         wd = workdir or self.workdir
         if not wd:
             return {}
+        # EVERY failure here falls through to `_status_by_label`, and that is the whole point of
+        # having it. The first version of this fix put the fallback only after the parse loop, and
+        # podman-compose's `ps --format json` writes NOTHING to stdout — so the `if not out`
+        # return above it fired and the fallback was unreachable. The symptom was unchanged: a
+        # launch going Running -> idle with three containers up, and a fix that looked applied.
         try:
             r = subprocess.run([*self._dc, "ps", "--format", "json"],
                                cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
-            return {}
+            return self._status_by_label(wd)
         out = (r.stdout or "").strip()
         if not out:
-            return {}
+            return self._status_by_label(wd)
         rows: list = []
         try:
             data = json.loads(out)
