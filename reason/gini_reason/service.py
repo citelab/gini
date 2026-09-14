@@ -30,21 +30,65 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("GINI_REASON_PORT", "8765"))
 
 
-def _llm():
-    """The model, or None. None is a supported state, not a failure — the ladder's lower rungs are
-    the outage plan and they do not need one."""
+#: Where Ollama is when nobody says. The tunnel to citelab-1 lands on the same port Ollama uses
+#: locally, so the common setup needs no configuration at all — and an unset variable should not
+#: look like a missing model.
+DEFAULT_LLM = "http://127.0.0.1:11434"
+
+
+def llm_with_reason():
+    """`(backend, reason)`. The backend is None when there is no model, and `reason` says WHY.
+
+    Three different ways to end up with no model — nothing configured, the import failing, the
+    server not answering — and the first version of this returned None for all three in silence.
+    That is the failure this whole project keeps meeting: a thing that quietly does less, with
+    every visible signal saying it is fine. `model=no` on a machine with a working tunnel is not a
+    diagnosis, it is a shrug.
+    """
     url = os.environ.get("GINI_LLM_URL", "").strip()
+    where = "GINI_LLM_URL"
     if not url:
-        return None
+        url, where = DEFAULT_LLM, "the default"
     try:
         from gini.agent.llm.ollama import OllamaBackend
-    except Exception:                                  # noqa: BLE001
-        return None
+    except Exception as e:                             # noqa: BLE001
+        return None, (f"gini.agent.llm.ollama could not be imported ({e}). Is frontend-ng/src on "
+                      f"PYTHONPATH?")
+    model = os.environ.get("GINI_LLM_MODEL", "llama3.1")
     try:
-        be = OllamaBackend(url=url, model=os.environ.get("GINI_LLM_MODEL", "llama3.1"))
-        return be if be.available() else None
+        be = OllamaBackend(url=url, model=model)
+    except Exception as e:                             # noqa: BLE001
+        return None, f"could not build the Ollama client for {url} ({e})"
+    if not be.available():
+        return None, (f"nothing answered at {url} (from {where}). If the tunnel is up, check "
+                      f"`curl {url}/api/tags`; if the model lives elsewhere, set GINI_LLM_URL.")
+
+    # The server answering is not the model existing, and conflating them costs a real diagnosis:
+    # `available()` asks /api/tags and is satisfied by a reply, so a wrong GINI_LLM_MODEL passes it
+    # and then fails at the first question with a bare `HTTP Error 404: Not Found`. Nothing in that
+    # names the model, and the obvious reading is that the tunnel broke.
+    have = _installed(url)
+    if have and not any(m == model or m.split(":")[0] == model.split(":")[0] for m in have):
+        return None, (f"{url} is up but has no model called {model!r}. It serves: "
+                      f"{', '.join(sorted(have)[:8])}. Set GINI_LLM_MODEL to one of those.")
+    return be, f"{model} at {url} (from {where})"
+
+
+def _installed(url: str) -> set:
+    """Model names the server actually has. Empty on any failure — an unreadable list must not
+    become an accusation that the model is missing."""
+    import json as _json
+    import urllib.request as _u
+    try:
+        with _u.urlopen(url.rstrip("/") + "/api/tags", timeout=3.0) as r:
+            data = _json.loads(r.read() or b"{}")
+        return {str(m.get("name", "")) for m in (data.get("models") or []) if m.get("name")}
     except Exception:                                  # noqa: BLE001
-        return None
+        return set()
+
+
+def _llm():
+    return llm_with_reason()[0]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,9 +107,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):        # noqa: N802
         if self.path.startswith("/health"):
-            be = _llm()
-            return self._send(200, {"ok": True, "model": bool(be),
-                                    "url": os.environ.get("GINI_LLM_URL", "")})
+            be, why = llm_with_reason()
+            return self._send(200, {"ok": True, "model": bool(be), "why": why})
         self._send(404, {"error": "Only POST /answer and GET /health."})
 
     def do_POST(self):       # noqa: N802
@@ -94,9 +137,11 @@ class Handler(BaseHTTPRequestHandler):
 def serve(port: int = 0) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
     httpd = ThreadingHTTPServer((HOST, port or PORT), Handler)
-    be = _llm()
-    log.info("reason service on http://%s:%d — model: %s", HOST, httpd.server_address[1],
-             os.environ.get("GINI_LLM_URL") if be else "none (the lower rungs still answer)")
+    be, why = llm_with_reason()
+    log.info("reason service on http://%s:%d", HOST, httpd.server_address[1])
+    log.info("model: %s", why if be else f"NONE — {why}")
+    if not be:
+        log.info("the lower rungs still answer; this is the outage plan, not a broken service")
     log.info("drafting only; nothing here is posted to anybody")
     httpd.serve_forever()
     return 0

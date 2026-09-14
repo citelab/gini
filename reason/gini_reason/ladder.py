@@ -29,10 +29,20 @@ from gini.domain.similarity import query_terms
 
 from . import manual
 
-#: Weighted coverage at or above this counts as solid grounding. Matches `agent/recall.py`'s own
-#: thresholds rather than inventing a second scale for the same judgement.
-STRONG = 0.45
-THIN = 0.15
+#: Weighted coverage at or above this counts as solid grounding, and therefore whether the model
+#: is allowed to compose at all. Borrowed from `agent/recall.py`'s scale rather than inventing a
+#: second one — but borrowed, which is the same move that made MIN_SHARED wrong, so it is
+#: overridable and worth measuring against a real question set before trusting.
+#:
+#: Measured on ten plausible questions: six reach `strong`, and the near misses are instructive —
+#: "why is my process stuck in the scheduler" finds exactly the right page and scores 0.39, while
+#: "what is the quantum" scores 1.00 on the same page. Short questions made of rare words score
+#: high; longer ones dilute across common words. That is a property of coverage, not of the
+#: question's quality, and it is the thing to watch when tuning this.
+import os as _os
+
+STRONG = float(_os.environ.get("GINI_REASON_STRONG", "0.45"))
+THIN = float(_os.environ.get("GINI_REASON_THIN", "0.15"))
 
 
 @dataclass
@@ -64,6 +74,8 @@ class Draft:
     citations: list = field(default_factory=list)
     flags: list = field(default_factory=list)        # what the audit objected to and kept
     used_model: bool = False
+    score: float = 0.0                               # best grounding coverage, for legibility
+    why: str = ""                                    # why it stopped on this rung, in words
 
 
 def retrieve(question: str, *, course_hits=(), root: str = "") -> Grounding:
@@ -113,25 +125,36 @@ def answer(question: str, *, llm=None, course_hits=(), root: str = "", audit=Non
     ladder stays testable with a scripted auditor, which is what `twin/harness.py` exists to do.
     """
     g = retrieve(question, course_hits=course_hits, root=root)
-    d = Draft(strength=g.strength, citations=g.citations())
+    best = max((s for _p, s in g.pages), default=0.0)
+    d = Draft(strength=g.strength, citations=g.citations(), score=best)
 
     if g.strength == "empty":
         d.rung, d.text = "L3", _refusal(g)
+        d.why = "nothing in the manual, the knowledge base or the course covers this"
         return d
 
-    if llm is None or g.strength != "strong":
+    if llm is None:
+        d.rung, d.text = "L1", _pointer(g)
+        d.why = "no model attached"
+        return d
+
+    if g.strength != "strong":
         # L1 on its own: name what the course has on this rather than composing around it. This is
         # also exactly what happens with the GPU off, which is why it is a rung and not a fallback.
         d.rung, d.text = "L1", _pointer(g)
+        d.why = (f"grounding {best:.2f} is below {STRONG:.2f}, so the model was not asked "
+                 f"(GINI_REASON_STRONG overrides)")
         return d
 
     try:
         d.text = _compose(question, g, llm)
         d.rung, d.used_model = "L2", True
-    except Exception:                                # noqa: BLE001 — a model failure drops a rung
+    except Exception as e:                           # noqa: BLE001 — a model failure drops a rung
         d.rung, d.text = "L1", _pointer(g)
+        d.why = f"the model was asked and failed ({type(e).__name__}: {e})"
         return d
 
+    d.why = f"grounding {best:.2f}, composed from {len(g.citations())} source(s)"
     if audit is not None:
         d.flags = list(audit(question, g, d.text) or [])
     return d

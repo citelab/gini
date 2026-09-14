@@ -14,13 +14,20 @@ def main(argv=None) -> int:
     if args and args[0] == "ask":
         from . import audit
         from .ladder import answer
-        from .service import _llm
+        from .service import llm_with_reason
         q = " ".join(args[1:]).strip()
         if not q:
             print('usage: python -m gini_reason ask "the question"')
             return 2
-        d = answer(q, llm=_llm(), audit=lambda qq, g, t: audit.flags(audit.review(qq, g, t)))
-        print(f"[{d.rung}] strength={d.strength} model={'yes' if d.used_model else 'no'}\n")
+        be, why = llm_with_reason()
+        d = answer(q, llm=be, audit=lambda qq, g, t: audit.flags(audit.review(qq, g, t)))
+        # Two different questions, and the first version ran them together into `model=no`:
+        # is there a model, and was it USED. A live tunnel plus thin grounding answers yes to the
+        # first and no to the second, which reads as a broken connection and is not one.
+        print(f"[{d.rung}] strength={d.strength} ({d.score:.2f})  "
+              f"model {'used' if d.used_model else 'not used'}")
+        print(f"      model: {why}" if be else f"      model: none — {why}")
+        print(f"      {d.why}\n")
         print(d.text or "(nothing)")
         if d.citations:
             print("\nfrom:")

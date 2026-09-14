@@ -31,11 +31,33 @@ rungs — which is the outage plan, not a degraded mode.
 ## Running it
 
 ```bash
-export GINI_LLM_URL=http://127.0.0.1:11434      # the tunnel to citelab-1
-export GINI_LLM_MODEL=llama3.1
-python3 -m gini_reason                          # 127.0.0.1:8765
+export GINI_LLM_URL=http://127.0.0.1:11434   # optional — this is already the default
+export GINI_LLM_MODEL=gemma3:4b              # NOT optional: it must be a model the server has
+python3 -m gini_reason                       # 127.0.0.1:8765
 curl -s localhost:8765/health
 ```
+
+`GINI_LLM_MODEL` is the one that bites. The server answering is not the model existing: Ollama's
+`/api/tags` replies happily whatever you ask for, so a wrong name passes every check and then fails
+at the first question with a bare `HTTP Error 404: Not Found` — which names nothing, and reads as
+the tunnel having dropped. The service checks the name against the server's list and, when it is
+wrong, says so and prints what the server actually serves.
+
+`ask` says which rung it stopped on and why:
+
+```
+[L1] strength=thin (0.39)  model not used
+      model: gemma3:4b at http://127.0.0.1:11434 (from the default)
+      grounding 0.39 is below 0.45, so the model was not asked (GINI_REASON_STRONG overrides)
+```
+
+Those are two different facts and the first version ran them together into `model=no`: *is there a
+model* and *was it used*. A live tunnel with thin grounding answers yes and no, which looks exactly
+like a broken connection.
+
+`GINI_REASON_STRONG` moves the bar L2 needs. It is borrowed from `agent/recall.py`'s scale and
+measured on ten plausible questions — six reach `strong` — but it is borrowed, which is the move
+that made `MIN_SHARED` wrong, so it is worth checking against your own questions before trusting.
 
 **Loopback only, and no authentication.** It has no user: the only thing that may call it is the
 Center on the same host. A service like this on a public interface would be an unauthenticated
