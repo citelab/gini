@@ -160,3 +160,67 @@ def cluster(items, terms_of, *, same: float = SAME) -> list[list]:
             groups.append([item])
             reps.append(t)
     return groups
+
+
+# --- weighting, for ranking one question against a corpus --------------------------------- #
+
+def idf_table(docs) -> dict:
+    """Inverse document frequency over a corpus of `terms` strings.
+
+    Plain coverage cannot tell a rare word from a common one, and on a small curated corpus that is
+    not a subtlety — it is the difference between an answer and a coin toss. Measured on the OS
+    manual: "what does scause 13 mean" scored `os-storage` and `os-traps` identically at 0.33,
+    because each contributed exactly one matching term out of three, and the tie broke
+    alphabetically. Weighted, `scause` is worth several times `mean` and the right page wins.
+
+    `docs` is any iterable of terms strings. Same formula as `agent/recall.py`, which computes it
+    over concepts and recipes and caches it at import against that fixed corpus; it is left alone
+    rather than rewired through here, because unifying them would refactor a live retrieval path
+    for no change in behaviour.
+    """
+    df: dict = {}
+    n = 0
+    for d in docs:
+        n += 1
+        for t in set((d or "").split()):
+            df[t] = df.get(t, 0) + 1
+    import math
+    return {t: math.log((n + 1) / (c + 0.5)) for t, c in df.items()}
+
+
+def unknown_idf(table: dict) -> float:
+    """The weight for a query term the corpus has never seen. Rare is informative, so this is the
+    ceiling rather than zero — the same reading `recall.py` takes."""
+    return max(table.values(), default=1.0)
+
+
+def weighted_coverage(question: str, doc: str, table: dict) -> float:
+    """How much of the QUESTION's meaning this document addresses, 0..1.
+
+    The direction matters and is the same one `covers` takes: a page that speaks to more of what
+    was asked ranks higher, rather than a page that merely resembles the question as a string. A
+    document about everything would win the second measure.
+    """
+    q = [t for t in (question or "").split()]
+    if not q:
+        return 0.0
+    seen = set((doc or "").split())
+    ceiling = unknown_idf(table)
+    total = sum(table.get(t, ceiling) for t in q)
+    hit = sum(table.get(t, ceiling) for t in q if t in seen)
+    return (hit / total) if total else 0.0
+
+
+def query_terms(text: str) -> str:
+    """Normalised terms for a SEARCH, with no minimum length.
+
+    `terms()` returns "" below `MIN_TERMS`, which is right where it is used — a scrap of a message
+    must not cluster with everything — and wrong here. "lock contention" is two content words and a
+    perfectly good question; putting it through `terms()` produced "" and the manual returned
+    nothing at all for a subject it has a whole page on.
+
+    Two jobs, two helpers. Anything ranking a question against a corpus wants this one.
+    """
+    from .lexicon import normalize
+
+    return " ".join(sorted(set(normalize(text or "", query=True))))
