@@ -81,6 +81,11 @@
   .tag.live{background:var(--green);color:#fff}
   .tag.draft{background:#e6ecea;color:var(--dim)}
   .tag.warn{background:var(--amber);color:#fff}
+  /* A channel tag is coloured from its own NAME (see chanHue), not from a list kept here. The
+     server has as many channels as somebody decides to make, and a hardcoded palette would leave
+     every new one grey — which reads as "unknown channel" rather than "nobody picked a colour". */
+  .tag.chan{background:hsl(var(--h) 62% 92%);color:hsl(var(--h) 72% 26%)}
+  .tag.kind{background:transparent;border:1.5px solid currentColor;padding:2px 9px;font-size:11px}
   .big{font-size:34px;font-weight:800;letter-spacing:-.02em}
   .code{font-family:ui-monospace,Menlo,monospace;font-size:26px;font-weight:800;
         letter-spacing:.08em;background:var(--chip);border-radius:12px;padding:10px 16px;
@@ -988,6 +993,15 @@ async function getTopology(receipt){
 // ---- GINI AI ----------------------------------------------------------------
 // The Discord log, grouped, with a reply box. Nothing here composes anything: the teacher's words
 // go to Discord verbatim, attributed to them and carried by the bot.
+// A stable hue per channel: same name, same colour, every session and every teacher's screen —
+// which is what makes the colour worth reading at all. Hashed rather than assigned, so #questions
+// and #install-problems differ without anyone maintaining a table.
+const chanHue = n => { let h = 0; for (const c of String(n)) h = (h * 31 + c.charCodeAt(0)) % 360;
+                       return h; };
+const chanTag = n => `<span class="tag chan" style="--h:${chanHue(n)}">#${esc(n)}</span>`;
+const kindTag = k => `<span class="tag kind" style="color:${
+  k === 'problem' ? 'var(--amber)' : k === 'question' ? 'var(--green)' : 'var(--dim)'}">${esc(k)}</span>`;
+
 let AI_WINDOW = 'day';
 let AI_OBS = 0;               // the message a reply would attach to
 
@@ -1009,7 +1023,7 @@ async function loadAI(){
       rows.map(g => `<tr>
         <td><b>${g.people}</b>${g.count>g.people?` <span class="muted">(${g.count} msgs)</span>`:''}
         <td>${esc(g.sample).slice(0,140)}
-        <td><span class="tag draft">#${esc(g.channel)}</span>
+        <td>${chanTag(g.channel)} ${kindTag(g.kind)}
         <td>${when(g.last_at)}
         <td>${g.answered ? '<span class="tag">answered</span>'
                          : `<button class="flat" onclick="openThread(${g.obs})">Open</button>`}`
