@@ -356,3 +356,39 @@ def run_shell(cmd: str, run=subprocess.run) -> int:
         return run(cmd, shell=True).returncode
     except Exception:
         return 1
+
+
+#: Lines Podman prints on its own behalf, on stderr, for every single compose command.
+#:
+#:     >>>> Executing external compose provider "/usr/bin/podman-compose". Please refer to the
+#:     documentation for details. <
+#:
+#: Podman 5 delegates `podman compose` to an external provider and announces it every time. It is
+#: not an error and it is not about the command that was run, but it arrives on the same stream as
+#: real failures and it arrives FIRST — so anything that reports "the first 120 characters of
+#: stderr" reports the banner, on every Podman machine, for every failure. Reported from the
+#: Trottier lab as "Name resolution could not be set up on M1: >>>> Executing external compose
+#: provider", which names the wrong thing entirely and hides the one that mattered.
+_NOISE = (
+    "executing external compose provider",
+    "please refer to the documentation",
+    "podman-compose version",
+    "exit code:",
+)
+
+
+def compose_error(raw, *, limit: int = 240) -> str:
+    """The useful part of a failed compose command's stderr.
+
+    Two fixes in one: drop the provider banner, and read from the END. A traceback or a usage
+    message puts its point on the last line and its preamble on the first, so truncating the front
+    keeps the preamble — which is how a real error becomes a quote of somebody's boilerplate.
+    """
+    text = raw.decode(errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
+    lines = [ln.strip() for ln in text.splitlines()]
+    keep = [ln for ln in lines
+            if ln and not any(n in ln.lower() for n in _NOISE)]
+    if not keep:
+        return ""
+    out = " / ".join(keep[-2:])
+    return out[:limit]

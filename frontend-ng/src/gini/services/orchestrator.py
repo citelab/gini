@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from ..runtime import HostSim, Router, make_switch
+from ..setup.runtime import compose_error
 from .compiler import RuntimeConfig
 
 
@@ -1603,10 +1604,12 @@ class Orchestrator:
             u = subprocess.run([*_engine_argv(), "update", "--cpus", f"{cpus:g}", ids[0]],
                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             if u.returncode != 0:
-                why = (u.stderr or u.stdout).strip() or (
+                why = compose_error(u.stderr, limit=4000) or (u.stdout or "").strip() or (
                     f"{_engine_bin()} update --cpus is not supported on this engine")
                 return False, why
-            return True, (u.stderr or u.stdout).strip()
+            # A SUCCESSFUL `up` still writes Podman's provider banner to stderr, so reporting
+            # stderr first made every good run announce itself with somebody else's boilerplate.
+            return True, (compose_error(u.stderr, limit=4000) or (u.stdout or "").strip())
         except FileNotFoundError:
             return False, f"{_engine_bin()} not found — is the container engine installed and running?"
         except subprocess.TimeoutExpired:

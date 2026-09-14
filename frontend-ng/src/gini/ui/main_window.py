@@ -23,6 +23,7 @@ from .canvas import NODE_H, NODE_W, CanvasView
 from .inspector import Inspector
 from .palette import Palette
 from .theme import ThemeManager, icons
+from ..setup import runtime as _runtime
 from .worker_host import join_owner, run_off_gui
 
 
@@ -856,7 +857,9 @@ class MainWindow(QMainWindow):
     def _ai_context(self) -> str:
         """Live canvas snapshot fed to the assistant each turn (topology + run-state)."""
         digest = self.api.context_digest()
-        state = "running on Docker" if self._running else "not running (idle, editable)"
+        from ..setup.runtime import engine_name
+        state = (f"running on {engine_name()}" if self._running
+                 else "not running (idle, editable)")
         ctx = f"{digest}\nRuntime: the topology is {state}."
         m = getattr(self.ctx, "mission", None)            # Wizard: keep follow-ups goal-aware
         if m is not None:
@@ -2584,7 +2587,8 @@ class MainWindow(QMainWindow):
         self._live_ctrl_app = {_svc_name(c.name): c.app for c in cfg.controllers}
         self._workdir = tempfile.mkdtemp(prefix="gini-lab-")
         self.ctx.log(f"Launching {len(cfg.machines)} machines + {len(cfg.routers)} "
-                     f"gRouters + {len(cfg.services)} cloud services via Docker…", "info")
+                     f"gRouters + {len(cfg.services)} cloud services via "
+                     f"{_runtime.engine_name()}…", "info")
         self.ctx.log(f"Project: {self._workdir}  (double-click a device to log in)", "info")
 
         auto_internet = self.ctx.settings.auto_internet
@@ -2618,7 +2622,11 @@ class MainWindow(QMainWindow):
             self._stopping = False
             self._set_runtime_status("running")
             self._poll.start()                  # reconcile with real container state
-            self.ctx.log("Topology running on Docker.", "ok")
+            # `engine_name`, not the word Docker. Its own docstring says why: telling somebody
+            # with Podman that their topology is running on Docker is confusing at best, and on a
+            # campus machine where Docker is not installed at all it reads as the app talking about
+            # a different computer.
+            self.ctx.log(f"Topology running on {_runtime.engine_name()}.", "ok")
             # GINI32: say out loud whether real boards can find this lab, and on which
             # address. Discovery failing silently is indistinguishable from a board
             # being broken, and it sends people debugging the wrong end of the link.
@@ -2969,7 +2977,7 @@ class MainWindow(QMainWindow):
             return
         dc = list(getattr(orch, "_dc", None) or [])
         if not dc:
-            from ..setup.runtime import compose_cli
+            from ..setup.runtime import compose_cli, compose_error
             dc = list(compose_cli())
         wd = getattr(orch, "workdir", None)
         devs = [d for d in self.ctx.topology.devices.values()
@@ -3015,7 +3023,9 @@ class MainWindow(QMainWindow):
                         if r.returncode == 0:
                             err = ""
                             break
-                        err = (r.stderr or b"").decode(errors="replace").strip()[:120]
+                        # Not `stderr[:120]`: on Podman that is the provider banner every
+                        # time, and the real failure is further down. See runtime.compose_error.
+                        err = compose_error(r.stderr) or f"exit {r.returncode}"
                     except Exception as e:       # noqa: BLE001 — best-effort
                         err = str(e)[:120]
                     time.sleep(0.75 * (attempt + 1))
@@ -3613,7 +3623,7 @@ class MainWindow(QMainWindow):
         orch = getattr(self._gloader, "orchestrator", None) or getattr(self.ctx, "orchestrator", None)
         if orch is not None:
             return list(getattr(orch, "_dc", []))
-        from ..setup.runtime import compose_cli
+        from ..setup.runtime import compose_cli, compose_error
         return list(compose_cli())
 
     def element_query(self, device_name: str, command: str) -> str:
@@ -3643,7 +3653,11 @@ class MainWindow(QMainWindow):
                        "python", "-m", "dataplane.console", svc, command]
             r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
                                text=True, encoding="utf-8", errors="replace", timeout=15)
-            return (r.stdout or r.stderr or "").strip() or "(no output)"
+            # Podman announces its compose provider on stderr for every command, so a command
+            # with no output would "return" that banner as its result. See runtime.compose_error.
+            return ((r.stdout or "").strip()
+                    or compose_error(r.stderr, limit=4000)
+                    or "(no output)")
         except Exception as e:
             return f"(query failed: {e})"
 
@@ -3725,7 +3739,7 @@ class MainWindow(QMainWindow):
                     warm = "cold start" if d.get("cold") else "warm"
                     text = f"HTTP {d['code']} · {d['ms']} ms · {warm}\n\n{d['body']}"
                 else:
-                    text = "(no response)\n" + (r.stderr or "").strip()
+                    text = "(no response)\n" + compose_error(r.stderr, limit=4000)
             except Exception as e:
                 text = f"Invoke failed: {e}"
             self.ctx.bus.function_invoke_result.emit(device_id, text)
