@@ -19,6 +19,16 @@ from pathlib import Path
 from ..runtime import HostSim, Router, make_switch
 from ..setup.runtime import compose_error
 
+#: The project name written into every compose file this module generates, as its `name:` key.
+#:
+#: It is NOT `Orchestrator.project`, which is the optional `-p` for per-student namespacing and is
+#: empty in every normal run. That distinction cost four wrong diagnoses: the containers carry
+#: `com.docker.compose.project=gini-lab` because the FILE says so, while the code looking for them
+#: asked `self.project` and got "", filtered on nothing, and concluded the topology had stopped.
+#:
+#: One constant, used by the writer and by every reader, so the two cannot drift again.
+COMPOSE_PROJECT = "gini-lab"
+
 #: Said ONCE per distinct message. A run-state poll fires every couple of seconds, so a problem
 #: here would otherwise fill the console with the same line and bury everything around it — and
 #: this exists to be read, not to be scrolled past.
@@ -939,7 +949,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         return [f"      TTYD_CMD: '{cmd}'"] if cmd else []
 
 
-    lines = ["name: gini-lab", "networks:", *net, "services:"]
+    lines = [f"name: {COMPOSE_PROJECT}", "networks:", *net, "services:"]
 
     # fabric = the L2 switch substrate only (skip entirely if there are no switches)
     if rt["switches"]:
@@ -1598,13 +1608,14 @@ class Orchestrator:
         Container names are the fallback's fallback, because the two disagree there too:
         podman-compose builds `project_service_1` and compose v2 builds `project-service-1`.
         """
-        if not self.project:
-            _status_note("no project name, so there is no label to filter containers by")
-            return {}
+        # `-p` when namespaced, otherwise the `name:` the compose file declares. Reading
+        # `self.project` alone was the bug: it is empty in every run that does not namespace, so
+        # the filter matched nothing and a healthy topology read as stopped.
+        project = self.project or COMPOSE_PROJECT
         try:
             r = subprocess.run(
                 [*_engine_argv(), "ps", "-a",
-                 "--filter", f"label=com.docker.compose.project={self.project}",
+                 "--filter", f"label=com.docker.compose.project={project}",
                  "--format", "{{.Names}}\t{{.Status}}"],
                 cwd=str(wd), capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=20)
@@ -1617,7 +1628,7 @@ class Orchestrator:
             return {}
 
         import re as _re
-        pat = _re.compile(rf"^{_re.escape(self.project)}[-_](?P<svc>.+?)[-_]\d+$")
+        pat = _re.compile(rf"^{_re.escape(project)}[-_](?P<svc>.+?)[-_]\d+$")
         states: dict[str, str] = {}
         for line in (r.stdout or "").splitlines():
             name, _, status = line.partition("\t")
@@ -1633,7 +1644,7 @@ class Orchestrator:
             # and the machine has the answer.
             seen = [ln.split("\t")[0] for ln in (r.stdout or "").splitlines() if ln.strip()]
             _status_note(
-                f"no containers matched project {self.project!r}. "
+                f"no containers matched project {project!r}. "
                 f"{_engine_bin()} ps returned {len(seen)} row(s): {', '.join(seen[:6]) or 'none'}")
         return states
 

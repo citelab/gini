@@ -292,12 +292,16 @@ def test_an_empty_run_state_says_what_it_asked_and_what_came_back(monkeypatch, c
     assert "somebody-elses" in err, "what came back has to be in the message, not just a count"
 
 
-def test_a_missing_project_name_says_that_rather_than_nothing(monkeypatch, capsys):
+def test_an_empty_project_is_not_an_empty_filter(monkeypatch, capsys):
+    """This used to log "no project name, so there is no label to filter containers by" and give
+    up — which was an accurate description of the code and the wrong behaviour. An empty
+    `Orchestrator.project` is the NORMAL case; it means "not namespaced", not "unknown"."""
     import gini.services.orchestrator as mod
 
     mod._SAID.clear()
-    assert _orch_at(project="")._status_by_label("/tmp") == {}
-    assert "no project name" in capsys.readouterr().err
+    monkeypatch.setattr(mod.subprocess, "run", _ps("gini-lab_m1_1\tUp 1 minute\n"))
+    assert _orch_at(project="")._status_by_label("/tmp") == {"m1": "running"}
+    assert capsys.readouterr().err == "", "nothing went wrong, so nothing should be reported"
 
 
 def test_the_same_complaint_is_not_printed_on_every_poll(monkeypatch, capsys):
@@ -311,3 +315,51 @@ def test_the_same_complaint_is_not_printed_on_every_poll(monkeypatch, capsys):
     for _ in range(5):
         o._status_by_label("/tmp")
     assert capsys.readouterr().err.count("no containers matched") == 1
+
+
+def test_the_project_is_the_one_the_compose_file_declares(monkeypatch):
+    """The actual bug, after four wrong diagnoses.
+
+    `Orchestrator.project` is the optional `-p` for per-student namespacing and is EMPTY in every
+    normal run. The project name that containers are labelled with comes from the `name:` key this
+    module writes into the compose file. The code looking for those containers read `self.project`,
+    got "", filtered on nothing, and concluded a healthy topology had stopped.
+    """
+    import gini.services.orchestrator as mod
+
+    monkeypatch.setattr(mod.subprocess, "run", _ps(
+        "gini-lab_r1_1\tUp 26 seconds\n"
+        "gini-lab_m1_1\tUp 25 seconds\n"
+        "gini-lab_m2_1\tUp 24 seconds\n"))
+    assert _orch_at(project="")._status_by_label("/tmp") == {
+        "r1": "running", "m1": "running", "m2": "running"}
+
+
+def test_namespacing_still_wins_over_the_files_name(monkeypatch):
+    """`-p` overrides the file's `name:` for compose, so it must override it here too — otherwise
+    two students on one machine would each see the other's containers as their own."""
+    import gini.services.orchestrator as mod
+
+    seen = {}
+
+    def run(cmd, **kw):
+        seen["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stderr": "",
+                              "stdout": "cs310-bob_m1_1\tUp 1 minute\n"})()
+
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    assert _orch_at(project="cs310-bob")._status_by_label("/tmp") == {"m1": "running"}
+    assert "label=com.docker.compose.project=cs310-bob" in seen["cmd"]
+
+
+def test_the_writer_and_the_reader_use_one_constant():
+    """Two copies of "gini-lab" is how this drifts back. The compose file's `name:` and the label
+    filter must come from the same place."""
+    import inspect
+
+    import gini.services.orchestrator as mod
+
+    src = inspect.getsource(mod)
+    literals = src.count('"gini-lab"') + src.count("'gini-lab'")
+    assert literals == 1, f"'gini-lab' is written {literals} times; it should be COMPOSE_PROJECT"
+    assert 'name: {COMPOSE_PROJECT}' in src
