@@ -363,3 +363,104 @@ def test_the_writer_and_the_reader_use_one_constant():
     literals = src.count('"gini-lab"') + src.count("'gini-lab'")
     assert literals == 1, f"'gini-lab' is written {literals} times; it should be COMPOSE_PROJECT"
     assert 'name: {COMPOSE_PROJECT}' in src
+
+
+# -- one broken teardown poisoning the next launch ------------------------------ #
+
+def _fake_engine(ids, *, rm_ok=True, after_rm=None, calls=None):
+    """An engine whose `ps -aq` lists `ids` until `rm -f` runs, then lists `after_rm`."""
+    state = {"ids": list(ids)}
+
+    def run(cmd, **kw):
+        if calls is not None:
+            calls.append(cmd)
+        if "rm" in cmd:
+            if rm_ok:
+                state["ids"] = list(after_rm if after_rm is not None else [])
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if "-aq" in cmd:
+            return type("R", (), {"returncode": 0, "stderr": "",
+                                  "stdout": "\n".join(state["ids"])})()
+        # the label-format ps used by _status_by_label
+        rows = "".join(f"gini-lab_m{i}_1\tUp 1 minute\n" for i, _ in enumerate(state["ids"], 1))
+        return type("R", (), {"returncode": 0, "stdout": rows, "stderr": ""})()
+    return run
+
+
+def test_containers_left_by_a_failed_teardown_are_removed_directly(tmp_path, monkeypatch):
+    """Rootless Podman: `down` dies with "rootless netns: kill network process: permission
+    denied", compose gives up, and the containers survive. Stop is not finished at that point."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    monkeypatch.setattr(o, "_stop_advertiser", lambda: None, raising=False)
+    monkeypatch.setattr(Orchestrator, "_compose",
+                        lambda self, *a: (False, "rootless netns: kill network process"))
+    monkeypatch.setattr(mod.subprocess, "run", _fake_engine(["aaa", "bbb"]))
+
+    ok, msg = o.down()
+    assert ok, "Stop is not done while the containers are still there"
+    assert "removed 2 container(s) directly" in msg
+    assert "rootless netns" in msg, "and it still says what compose could not do"
+
+
+def test_a_teardown_that_cannot_be_forced_still_reports_failure(tmp_path, monkeypatch):
+    """Saying "stopped" while containers survive would be worse than the error."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    monkeypatch.setattr(o, "_stop_advertiser", lambda: None, raising=False)
+    monkeypatch.setattr(Orchestrator, "_compose", lambda self, *a: (False, "nope"))
+    monkeypatch.setattr(mod.subprocess, "run",
+                        _fake_engine(["aaa"], rm_ok=False, after_rm=["aaa"]))
+    ok, _ = o.down()
+    assert not ok
+
+
+def test_a_successful_down_never_touches_the_engine(tmp_path, monkeypatch):
+    """The Docker path must be unchanged: when compose works, nothing else runs."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    monkeypatch.setattr(o, "_stop_advertiser", lambda: None, raising=False)
+    monkeypatch.setattr(Orchestrator, "_compose", lambda self, *a: (True, "done"))
+
+    def boom(cmd, **kw):
+        raise AssertionError("the engine must not be asked after a clean down")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    assert o.down() == (True, "done")
+
+
+def test_a_launch_clears_debris_before_compose_sees_it(tmp_path, monkeypatch, capsys):
+    """Each launch writes a NEW workdir while the project name is fixed, so leftovers are adopted
+    rather than replaced — and a half-stopped container fails with "must be in Created or Stopped
+    state to be started". That was the whole alternating run/fail/run/fail."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    mod._SAID.clear()
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run", _fake_engine(["old1", "old2"], calls=calls))
+
+    assert o._purge() == 2
+    assert any("rm" in c for c in calls), "leftovers must actually be removed"
+    assert o._purge() == 0, "and a second sweep finds nothing to do"
+
+
+def test_purging_nothing_is_not_an_error(tmp_path, monkeypatch):
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    monkeypatch.setattr(mod.subprocess, "run", _fake_engine([]))
+    assert o._purge() == 0

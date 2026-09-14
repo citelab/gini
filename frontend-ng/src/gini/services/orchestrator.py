@@ -1298,6 +1298,14 @@ class Orchestrator:
         # --remove-orphans clears containers from a previous run that are no longer in
         # this compose, so stale services (e.g. an old web app) can't linger on the
         # network and shadow / break name resolution.
+        # Anything still carrying this project's label belongs to a previous launch: the name is
+        # fixed and this workdir is new, so compose would try to REUSE those containers rather than
+        # create them. When a teardown half-failed they are in a state compose cannot start, and
+        # the launch dies on somebody else's leftovers.
+        stale = self._purge()
+        if stale:
+            _status_note(f"removed {stale} container(s) left over from an earlier launch")
+
         ok, msg = self._compose("up", "--build", "-d", "--remove-orphans")
         if ok:
             # `up` exiting 0 is NOT the same as the topology running, and on podman-compose it is
@@ -1553,7 +1561,51 @@ class Orchestrator:
         self._stop_advertiser()      # stop announcing before the relay goes away
         if not self.workdir:
             return True, "nothing running"
-        return self._compose("down")
+        ok, msg = self._compose("down")
+        if ok:
+            return True, msg
+
+        # `down` failing is not the end of Stop. Reported from a rootless Podman box:
+        #
+        #     rootless netns: kill network process: permission denied
+        #
+        # compose gives up, the containers survive, and because every launch writes a NEW workdir
+        # while the project name is fixed, the NEXT launch adopts them — where they fail with
+        # "must be in Created or Stopped state to be started". That is the whole of the alternating
+        # run/fail/run/fail the box was showing: one broken teardown poisoning the launch after it.
+        #
+        # So ask the engine directly. `rm -f` does not care about netns bookkeeping.
+        gone = self._purge()
+        if gone and not self._status_by_label(self.workdir):
+            return True, f"compose down failed ({msg}); removed {gone} container(s) directly"
+        return False, msg
+
+    def _purge(self) -> int:
+        """Force-remove every container carrying this project's label. Returns how many.
+
+        Safe because the project name is FIXED (`COMPOSE_PROJECT`) while each launch gets a fresh
+        temporary workdir — so anything still wearing the label when a launch begins is debris from
+        a previous one, and adopting it is never what anybody wanted. Two gBuilders on one machine
+        would already collide on those same container names long before this.
+        """
+        project = self.project or COMPOSE_PROJECT
+        try:
+            r = subprocess.run(
+                [*_engine_argv(), "ps", "-aq",
+                 "--filter", f"label=com.docker.compose.project={project}"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return 0
+        ids = [i for i in (r.stdout or "").split() if i]
+        if not ids:
+            return 0
+        try:
+            subprocess.run([*_engine_argv(), "rm", "-f", *ids],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=120)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return 0
+        return len(ids)
 
     def status(self, workdir: str | Path | None = None) -> dict[str, str]:
         """Map service -> state ('running' / 'exited' / ...) via `docker compose ps`."""
