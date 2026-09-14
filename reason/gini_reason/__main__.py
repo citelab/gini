@@ -1,5 +1,6 @@
 """    python -m gini_reason              # serve on 127.0.0.1:8765
     python -m gini_reason ask "why is my process stuck"    # one question, straight to stdout
+    python -m gini_reason batch [N]    # the log's top N questions, and where each one landed
 
 `ask` is how step 2 is meant to be used at first: read what it would say, against real questions
 out of the observation log, before any student can reach it.
@@ -11,6 +12,15 @@ import sys
 
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "batch":
+        from . import batch
+        from .service import llm_with_reason
+        be, why = llm_with_reason()
+        print(f"model: {why}\n" if be else f"model: none — {why}\n")
+        limit = int(args[1]) if len(args) > 1 and args[1].isdigit() else 40
+        print(batch.report(batch.run(limit=limit, llm=be), verbose="-v" in args))
+        return 0
+
     if args and args[0] == "ask":
         from . import audit
         from .ladder import answer

@@ -42,7 +42,8 @@ MATERIALS = ROOT / "materials"
 os.environ.setdefault("GINI_HOME_DIR", str(ROOT))
 
 from . import accounts as _accounts
-from . import community as _community                                       # noqa: E402
+from . import community as _community
+from . import search as _search                                       # noqa: E402
 from . import activities as _act                                          # noqa: E402
 from . import search as _search                                     # noqa: E402
 from .store import Store                                            # noqa: E402
@@ -969,6 +970,31 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, rows)
             return True
 
+        if p == "/api/ai/draft":
+            # What GINI AI WOULD say — shown to staff, sent to nobody. The whole of step 2 in
+            # docs/design/gini-ai-three-doors.md: read it against real questions before any student
+            # can reach it.
+            #
+            # Over loopback to a separate process, with a short timeout, because `server.py` has
+            # said since v1 that no model client is imported here and no outbound model call is
+            # made — and a student submitting at 23:58 must not be behind one. That stays true: this
+            # is a call to a neighbour, and it failing is a message rather than an outage.
+            obs = _STORE.observation(int(self._q("obs") or 0))
+            question = (obs or {}).get("text") or str(self._q("q") or "")
+            if not question:
+                return self._send(400, {"error": "Nothing to draft an answer to."})
+
+            # The course's OWN material goes with the question. It is what the student is marked
+            # on, and `agent/twin/course.py` is built on the argument that it outranks anything
+            # GINI knows in general.
+            hits = []
+            course = self._q("course")
+            if course and _STORE.staffs(course, me["who"], me["role"]):
+                hits = _search.rank(question, _STORE.activities(course),
+                                    _STORE.materials(course))
+            self._send(200, _draft_from_reasoner(question, hits))
+            return True
+
         if p == "/api/ai/answers":
             if self.command == "GET":
                 self._send(200, _STORE.answers())
@@ -1059,6 +1085,36 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):       # noqa: N802
         self._dispatch()
+
+
+#: Where the reason service listens. Loopback by construction — it has no authentication because it
+#: has no user, and the only thing that may call it is this process on the same host.
+REASON_URL = os.environ.get("GINI_REASON_URL", "http://127.0.0.1:8765")
+REASON_TIMEOUT = 30.0          # a teacher is watching; a wedged model must not hold the console
+
+
+def _draft_from_reasoner(question: str, course_hits: list) -> dict:
+    """Ask the neighbour what it would say. Never raises, and says why when it cannot.
+
+    A reason service that is down must read as "not running" on the teacher's screen rather than as
+    a broken console — the distinction matters because one of those is a thing they can fix in a
+    terminal and the other sends them looking at the Center.
+    """
+    import urllib.error
+    import urllib.request
+
+    payload = json.dumps({"question": question, "course_hits": course_hits}).encode()
+    req = urllib.request.Request(REASON_URL.rstrip("/") + "/answer", data=payload,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=REASON_TIMEOUT) as r:
+            out = json.loads(r.read() or b"{}")
+    except Exception as e:                                            # noqa: BLE001
+        return {"ok": False, "rung": "", "text": "", "flags": [], "citations": [],
+                "error": f"The reason service did not answer ({type(e).__name__}). "
+                         f"Is it running on {REASON_URL}?"}
+    out["asked"] = question
+    return out
 
 
 def _tls_context(cert: str, key: str) -> "ssl.SSLContext":

@@ -300,6 +300,16 @@ hand-in time: everyone is then due when code vending stops, however early they b
     <div id="ai-thread-card" class="card" hidden>
       <h3 id="ai-thread-title" style="margin-top:0"></h3>
       <div id="ai-thread"></div>
+      <div id="ai-draft-box" style="margin-top:14px;padding-top:14px;
+           border-top:1px dashed var(--rule)">
+        <div style="display:flex;gap:10px;align-items:center">
+          <button class="flat" onclick="askGini()">What would GINI AI say?</button>
+          <span class="muted" id="ai-draft-note">Shown to you, sent to nobody.</span>
+        </div>
+        <div id="ai-draft" hidden style="margin-top:10px;padding:12px;background:var(--sunken, #f3f2ec);
+             border-left:3px solid var(--green)"></div>
+      </div>
+
       <div id="ai-bank-box" style="margin-top:14px;padding-top:14px;
            border-top:1px dashed var(--rule)">
         <div class="muted" style="margin-bottom:6px">Answer it once, for everyone who asks next:</div>
@@ -1083,6 +1093,43 @@ async function loadBank(){
             <button class="danger" style="margin-left:10px"
               onclick="dropAnswer('${esc(a.id)}')">Remove</button>`).join('')
     ) : '<tr><td class="empty">Nothing banked yet. Open a question and answer it once.</td></tr>';
+}
+
+async function askGini(){
+  // A draft, and it goes nowhere. The teacher reads it, and may take it into the bank or the
+  // reply box with a copy — deliberately not a one-click "post this", because the public door
+  // does not take model answers and this is the screen where that rule is visible.
+  $('#ai-draft-note').textContent = 'thinking…';
+  const course = COURSE ? '&course=' + encodeURIComponent(COURSE) : '';
+  const r = await api('/api/ai/draft?obs=' + AI_OBS + course);
+  $('#ai-draft-note').textContent = 'Shown to you, sent to nobody.';
+  if (!r) return;
+  const box = $('#ai-draft');
+  box.hidden = false;
+  if (r.ok === false) {
+    box.innerHTML = `<span class="muted">${esc(r.error || 'No answer.')}</span>`;
+    return;
+  }
+  const rung = {L2:'the model answered', L1:'pointed at the material',
+                L3:'nothing covers this'}[r.rung] || r.rung;
+  box.innerHTML =
+    `<div class="muted" style="font-size:12px;margin-bottom:6px">${esc(r.rung)} — ${esc(rung)}`
+    + (r.used_model ? '' : ' · no model used') + `</div>`
+    + `<div>${esc(r.text || '')}</div>`
+    + ((r.citations||[]).length ? `<div class="muted" style="margin-top:8px;font-size:12px">from: `
+        + (r.citations||[]).map(esc).join(' · ') + `</div>` : '')
+    + ((r.flags||[]).length ? `<div style="margin-top:8px;color:var(--amber)">`
+        + (r.flags||[]).map(f => '! ' + esc(f)).join('<br>') + `</div>` : '')
+    + `<div style="margin-top:10px"><button class="flat" onclick="useDraft()">Use as my answer</button></div>`;
+  window._AI_DRAFT = r.text || '';
+}
+
+function useDraft(){
+  // Into the TEACHER's box, not out to Discord. Whatever goes public is something a person typed
+  // or approved word by word — which is the difference between a tool and an autoresponder.
+  $('#ai-bank-text').value = window._AI_DRAFT || '';
+  $('#ai-reply').value = window._AI_DRAFT || '';
+  say('Copied into your reply. Edit it before you send.', true);
 }
 
 async function bankAnswer(){

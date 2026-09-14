@@ -302,3 +302,53 @@ def test_the_bank_needs_a_signed_in_teacher(tc):
 def test_an_answer_with_nothing_in_it_is_refused(tc):
     _, tok, call, _ = tc
     assert call("/api/ai/answers", {"question": "q", "answer": "   "}, session=tok)[0] == 400
+
+
+# -- the draft: what GINI AI would say, shown to staff and sent to nobody -------- #
+
+def test_a_draft_needs_a_signed_in_teacher(tc):
+    _, _, call, _ = tc
+    assert call("/api/ai/draft?q=anything")[0] == 401
+    assert call("/api/ai/draft?q=anything", bot=KEY)[0] == 401
+
+
+def test_a_reason_service_that_is_not_running_says_so_rather_than_breaking_the_console(tc):
+    """Two different things for a teacher to do about them: start a service, or report a bug. The
+    message has to say which."""
+    import gini_teaching_center.server as server
+    _, tok, call, _ = tc
+    old, server.REASON_URL = server.REASON_URL, "http://127.0.0.1:59998"
+    try:
+        st, r = call("/api/ai/draft?q=why+is+my+process+stuck", session=tok)
+    finally:
+        server.REASON_URL = old
+    assert st == 200, "the console must still get an answer it can render"
+    assert r["ok"] is False
+    assert "reason service did not answer" in r["error"]
+    assert "59998" in r["error"], "and where it looked"
+
+
+def test_a_draft_is_asked_about_the_message_that_was_opened(tc, monkeypatch):
+    import gini_teaching_center.server as server
+    _, tok, call, _ = tc
+    call("/api/ai/observe",
+         {"observations": [_said("why is my process stuck in the scheduler")]}, bot=KEY)
+    obs = call("/api/ai/summary?window=day", session=tok)[1]["groups"][0]["obs"]
+
+    seen = {}
+
+    def fake(question, course_hits):
+        seen["q"], seen["hits"] = question, course_hits
+        return {"ok": True, "rung": "L1", "text": "the course has material on this",
+                "citations": ["os-02-scheduler.md"], "flags": [], "used_model": False}
+
+    monkeypatch.setattr(server, "_draft_from_reasoner", fake)
+    st, r = call(f"/api/ai/draft?obs={obs}", session=tok)
+    assert st == 200 and r["ok"]
+    assert seen["q"] == "why is my process stuck in the scheduler"
+    assert r["rung"] == "L1"
+
+
+def test_nothing_to_draft_about_is_a_refusal_not_an_empty_question(tc):
+    _, tok, call, _ = tc
+    assert call("/api/ai/draft?obs=99999", session=tok)[0] == 400
