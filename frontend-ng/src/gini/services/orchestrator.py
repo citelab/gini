@@ -1554,6 +1554,50 @@ class Orchestrator:
             raw = str(row.get("State") or row.get("Status", "")).lower()
             if svc:
                 states[svc] = "running" if "running" in raw or "up" in raw else raw
+        return states or self._status_by_label(wd)
+
+    def _status_by_label(self, wd) -> dict[str, str]:
+        """Run state read from the ENGINE's labels, when compose's own `ps` says nothing useful.
+
+        `compose ps --format json` is docker compose v2's shape. podman-compose 1.0.6 does not
+        produce it, so the parse above came back empty, `status()` returned {}, and gBuilder read
+        "no services running" as "everything died" — one second after a successful launch, with
+        three healthy containers on screen in `podman ps`. Reported from the Trottier lab as the
+        run going Running -> idle on its own.
+
+        The labels are the common ground. podman-compose writes the docker-compose ones as well as
+        its own — `com.docker.compose.project` and `com.docker.compose.service` are in its `podman
+        run` line verbatim — so asking the engine rather than the compose wrapper gets the same
+        answer from both, using only flags every version of both has had for years.
+
+        Container names are the fallback's fallback, because the two disagree there too:
+        podman-compose builds `project_service_1` and compose v2 builds `project-service-1`.
+        """
+        if not self.project:
+            return {}
+        try:
+            r = subprocess.run(
+                [*_engine_argv(), "ps", "-a",
+                 "--filter", f"label=com.docker.compose.project={self.project}",
+                 "--format", "{{.Names}}\t{{.Status}}"],
+                cwd=str(wd), capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return {}
+        if r.returncode != 0:
+            return {}
+
+        import re as _re
+        pat = _re.compile(rf"^{_re.escape(self.project)}[-_](?P<svc>.+?)[-_]\d+$")
+        states: dict[str, str] = {}
+        for line in (r.stdout or "").splitlines():
+            name, _, status = line.partition("\t")
+            m = pat.match(name.strip())
+            if not m:
+                continue
+            raw = status.strip().lower()
+            states[m.group("svc")] = ("running" if raw.startswith("up") or "running" in raw
+                                      else raw or "unknown")
         return states
 
     def set_controller_app(self, service: str, app: str,

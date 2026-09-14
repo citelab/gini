@@ -149,3 +149,78 @@ def test_being_unable_to_ask_is_never_an_accusation(tmp_path, monkeypatch):
     o = Orchestrator.__new__(Orchestrator)
     o.workdir, o.project = tmp_path, ""
     assert o._not_running(_Cfg(["m1"])) == []
+
+
+# -- "Running" then "idle", with three healthy containers on screen ------------- #
+
+def _orch_at(project="gini-lab", wd="/tmp"):
+    from gini.services.orchestrator import Orchestrator
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = wd, project
+    return o
+
+
+def _ps(out, rc=0):
+    def run(cmd, **kw):
+        return type("R", (), {"returncode": rc, "stdout": out, "stderr": ""})()
+    return run
+
+
+def test_run_state_is_read_from_labels_when_compose_ps_says_nothing(monkeypatch):
+    """`compose ps --format json` is docker compose v2's shape; podman-compose 1.0.6 does not
+    produce it. status() came back empty, gBuilder read "no services" as "everything died", and a
+    launch went Running -> idle one second later with three healthy containers in `podman ps`."""
+    import gini.services.orchestrator as mod
+
+    monkeypatch.setattr(mod.subprocess, "run", _ps(
+        "gini-lab_r1_1\tUp 49 minutes\n"
+        "gini-lab_m1_1\tUp 58 seconds\n"
+        "gini-lab_m2_1\tUp 57 seconds\n"))
+    assert _orch_at()._status_by_label("/tmp") == {
+        "r1": "running", "m1": "running", "m2": "running"}
+
+
+def test_both_naming_conventions_are_understood(monkeypatch):
+    """podman-compose builds `project_service_1`; compose v2 builds `project-service-1`. The two
+    disagree about the separator as well as about the JSON."""
+    import gini.services.orchestrator as mod
+
+    monkeypatch.setattr(mod.subprocess, "run", _ps("gini-lab-r1-1\tUp 2 minutes\n"))
+    assert _orch_at()._status_by_label("/tmp") == {"r1": "running"}
+
+
+def test_a_stopped_container_is_not_reported_as_running(monkeypatch):
+    import gini.services.orchestrator as mod
+
+    monkeypatch.setattr(mod.subprocess, "run", _ps(
+        "gini-lab_m1_1\tUp 58 seconds\ngini-lab_m2_1\tExited (0) 2 minutes ago\n"))
+    st = _orch_at()._status_by_label("/tmp")
+    assert st["m1"] == "running"
+    assert st["m2"] != "running"
+
+
+def test_somebody_elses_container_is_not_ours(monkeypatch):
+    """The label filter scopes it to this project, and the name pattern is a second gate — a box
+    running two labs must not have one report the other's containers as its own."""
+    import gini.services.orchestrator as mod
+
+    monkeypatch.setattr(mod.subprocess, "run", _ps(
+        "gini-lab_m1_1\tUp 1 minute\nsomeone-elses-thing\tUp 3 hours\n"))
+    assert _orch_at()._status_by_label("/tmp") == {"m1": "running"}
+
+
+def test_with_no_project_there_is_nothing_to_scope_to(monkeypatch):
+    import gini.services.orchestrator as mod
+
+    monkeypatch.setattr(mod.subprocess, "run", _ps("anything\tUp 1 minute\n"))
+    assert _orch_at(project="")._status_by_label("/tmp") == {}
+
+
+def test_an_engine_that_cannot_be_asked_reports_nothing_rather_than_guessing(monkeypatch):
+    import gini.services.orchestrator as mod
+
+    def boom(cmd, **kw):
+        raise FileNotFoundError("podman")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    assert _orch_at()._status_by_label("/tmp") == {}
