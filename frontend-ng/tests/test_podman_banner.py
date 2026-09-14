@@ -79,3 +79,73 @@ def test_the_app_names_the_engine_it_is_actually_using(monkeypatch):
             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     bad = [t for t in said if "on Docker" in t or "via Docker" in t]
     assert not bad, f"a hardcoded engine name is back in a user-facing message: {bad}"
+
+
+# -- `up` exiting 0 is not the topology running --------------------------------- #
+
+class _Cfg:
+    """A RuntimeConfig's shape, as far as `_not_running` reads it."""
+
+    def __init__(self, names):
+        self._names = names
+
+    def to_runtime(self, docker: bool):
+        return {"machines": [{"name": n} for n in self._names],
+                "routers": [], "switches": [], "services": []}
+
+
+def _orch(tmp_path, ps_result):
+    from gini.services.orchestrator import Orchestrator
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir = tmp_path
+    o.project = ""
+    object.__setattr__(type(o), "_dc", property(lambda self: ["docker", "compose"]))
+    import gini.services.orchestrator as mod
+    mod.subprocess = type("S", (), {"run": staticmethod(ps_result),
+                                    "TimeoutExpired": TimeoutError,
+                                    "PIPE": -1})
+    return o, mod
+
+
+def test_a_service_with_no_container_is_reported_as_not_started(tmp_path, monkeypatch):
+    """The Trottier lab case: podman-compose printed `exit code: 125` for both machines, exited
+    0 overall, and gBuilder said "Topology running". Every message after that was about the wrong
+    thing — including a name-resolution failure that was really "there is no container"."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    def fake_run(cmd, **kw):
+        svc = cmd[-1]
+        out = "" if svc in ("m1", "m2") else "abc123\n"
+        return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    assert o._not_running(_Cfg(["r1", "m1", "m2"])) == ["m1", "m2"]
+
+
+def test_everything_running_reports_nothing(tmp_path, monkeypatch):
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: type(
+        "R", (), {"returncode": 0, "stdout": "abc\n", "stderr": ""})())
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    assert o._not_running(_Cfg(["r1", "m1"])) == []
+
+
+def test_being_unable_to_ask_is_never_an_accusation(tmp_path, monkeypatch):
+    """A `ps` that cannot run means we do not know, and "your topology did not start" is not what
+    "we do not know" means. That is the same mistake this check exists to correct, reversed."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    def boom(cmd, **kw):
+        raise OSError("compose is gone")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    assert o._not_running(_Cfg(["m1"])) == []

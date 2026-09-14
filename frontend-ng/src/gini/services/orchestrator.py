@@ -1270,6 +1270,21 @@ class Orchestrator:
         # network and shadow / break name resolution.
         ok, msg = self._compose("up", "--build", "-d", "--remove-orphans")
         if ok:
+            # `up` exiting 0 is NOT the same as the topology running, and on podman-compose it is
+            # routinely false. Reported from the Trottier lab: alpine could not be pulled, so the
+            # machine image could not be built, so `podman run gini-machine-lean` failed with
+            # `short-name did not resolve` for BOTH machines — each printing `exit code: 125` —
+            # and podman-compose still exited 0. gBuilder said "Topology running", then could not
+            # exec into anything, and reported that as a name-resolution problem. Every message on
+            # screen was about the wrong thing.
+            #
+            # So the exit code is not the verdict: ask which containers exist.
+            missing = self._not_running(config)
+            if missing:
+                ok = False
+                msg = (f"{', '.join(missing)} did not start.\n{msg}".strip()
+                       if msg else f"{', '.join(missing)} did not start.")
+        if ok:
             self._start_advertiser(config)
         return ok, msg
 
@@ -1957,11 +1972,44 @@ class Orchestrator:
         except Exception:            # noqa: BLE001 — relay may not be up yet, or no boards
             return None
 
+    def _not_running(self, config) -> list:
+        """Services the compose file declares that have no container. Empty is the good case.
+
+        `compose ps -q <svc>` per service rather than one `ps` parse: it is the call already used
+        by update_cpus and stats, so it is known to behave the same on docker compose and on
+        podman-compose, and the two disagree about almost every other flag.
+
+        Failure to ASK is not failure to run — a `ps` that errors returns nothing here, because
+        turning an unreadable answer into "your topology did not start" would be the same mistake
+        this method exists to correct, pointed the other way.
+        """
+        try:
+            rt = config.to_runtime(docker=True)
+        except Exception:                         # noqa: BLE001
+            return []
+        want = [n["name"] for key in ("machines", "routers", "switches", "services")
+                for n in (rt.get(key) or []) if n.get("name")]
+        missing = []
+        for svc in want:
+            try:
+                r = subprocess.run([*self._dc, "ps", "-q", svc], cwd=str(self.workdir),
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=20)
+            except Exception:                     # noqa: BLE001
+                return []                         # cannot ask; do not accuse
+            if r.returncode == 0 and not (r.stdout or "").strip():
+                missing.append(svc)
+        return missing
+
     def _compose(self, *args: str) -> tuple[bool, str]:
         try:
             r = subprocess.run([*self._dc, *args], cwd=str(self.workdir),
                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
-            return r.returncode == 0, (r.stderr or r.stdout).strip()
+            # stderr through `compose_error`: Podman writes its provider banner there on every
+            # command, success included, so preferring raw stderr made a good run report itself
+            # with somebody else's boilerplate.
+            return r.returncode == 0, (compose_error(r.stderr, limit=4000)
+                                       or (r.stdout or "").strip())
         except FileNotFoundError:
             return False, "docker not found — is Docker installed and running?"
         except subprocess.TimeoutExpired:
