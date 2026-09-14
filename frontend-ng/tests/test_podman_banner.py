@@ -273,3 +273,41 @@ def test_docker_compose_answering_properly_never_reaches_the_fallback(tmp_path, 
     o.workdir, o.project = tmp_path, "gini-lab"
     assert o.status(tmp_path) == {"m1": "running", "m2": "exited"}
     assert len(asked) == 1
+
+
+def test_an_empty_run_state_says_what_it_asked_and_what_came_back(monkeypatch, capsys):
+    """Three wrong diagnoses in a row for "the topology is running and gBuilder says it stopped",
+    each costing a round trip to somebody else's machine, and every time the machine knew. This is
+    the line that makes the next one self-diagnosing."""
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    mod._SAID.clear()
+    monkeypatch.setattr(mod.subprocess, "run", _ps(
+        "somebody-elses\tUp 3 hours\nother_thing_1\tUp 1 minute\n"))
+    o = _orch_at()
+    assert o._status_by_label("/tmp") == {}
+    err = capsys.readouterr().err
+    assert "no containers matched project 'gini-lab'" in err
+    assert "somebody-elses" in err, "what came back has to be in the message, not just a count"
+
+
+def test_a_missing_project_name_says_that_rather_than_nothing(monkeypatch, capsys):
+    import gini.services.orchestrator as mod
+
+    mod._SAID.clear()
+    assert _orch_at(project="")._status_by_label("/tmp") == {}
+    assert "no project name" in capsys.readouterr().err
+
+
+def test_the_same_complaint_is_not_printed_on_every_poll(monkeypatch, capsys):
+    """The run-state poll fires every couple of seconds. A line that repeated would bury the
+    console it is meant to be read in."""
+    import gini.services.orchestrator as mod
+
+    mod._SAID.clear()
+    monkeypatch.setattr(mod.subprocess, "run", _ps("nothing-of-ours\tUp 1 minute\n"))
+    o = _orch_at()
+    for _ in range(5):
+        o._status_by_label("/tmp")
+    assert capsys.readouterr().err.count("no containers matched") == 1

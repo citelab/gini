@@ -18,6 +18,26 @@ from pathlib import Path
 
 from ..runtime import HostSim, Router, make_switch
 from ..setup.runtime import compose_error
+
+#: Said ONCE per distinct message. A run-state poll fires every couple of seconds, so a problem
+#: here would otherwise fill the console with the same line and bury everything around it — and
+#: this exists to be read, not to be scrolled past.
+_SAID: set = set()
+
+
+def _status_note(msg: str) -> None:
+    """Why the run state came back empty.
+
+    A topology that is running while gBuilder believes it stopped has been diagnosed wrong three
+    times: a provider banner, a silent half-launch, and a JSON shape podman-compose does not emit.
+    Each time the machine knew and nothing asked it. This prints what was asked and what came back,
+    to stderr, where `journalctl`/a terminal keeps it without a UI change.
+    """
+    import sys
+    if msg in _SAID:
+        return
+    _SAID.add(msg)
+    print(f"[gini] run state: {msg}", file=sys.stderr)
 from .compiler import RuntimeConfig
 
 
@@ -1579,6 +1599,7 @@ class Orchestrator:
         podman-compose builds `project_service_1` and compose v2 builds `project-service-1`.
         """
         if not self.project:
+            _status_note("no project name, so there is no label to filter containers by")
             return {}
         try:
             r = subprocess.run(
@@ -1587,9 +1608,12 @@ class Orchestrator:
                  "--format", "{{.Names}}\t{{.Status}}"],
                 cwd=str(wd), capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=20)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            _status_note(f"could not ask {_engine_bin()} for containers ({type(e).__name__})")
             return {}
         if r.returncode != 0:
+            _status_note(f"{_engine_bin()} ps failed: "
+                         f"{compose_error(r.stderr, limit=200) or r.returncode}")
             return {}
 
         import re as _re
@@ -1603,6 +1627,14 @@ class Orchestrator:
             raw = status.strip().lower()
             states[m.group("svc")] = ("running" if raw.startswith("up") or "running" in raw
                                       else raw or "unknown")
+        if not states:
+            # The one that matters: containers exist and none of them looked like ours. Print what
+            # was asked and what came back, because every guess about this so far has been wrong
+            # and the machine has the answer.
+            seen = [ln.split("\t")[0] for ln in (r.stdout or "").splitlines() if ln.strip()]
+            _status_note(
+                f"no containers matched project {self.project!r}. "
+                f"{_engine_bin()} ps returned {len(seen)} row(s): {', '.join(seen[:6]) or 'none'}")
         return states
 
     def set_controller_app(self, service: str, app: str,
