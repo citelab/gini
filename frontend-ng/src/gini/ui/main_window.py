@@ -2977,7 +2977,7 @@ class MainWindow(QMainWindow):
             return
         dc = list(getattr(orch, "_dc", None) or [])
         if not dc:
-            from ..setup.runtime import compose_cli, compose_error
+            from ..setup.runtime import compose_cli
             dc = list(compose_cli())
         wd = getattr(orch, "workdir", None)
         devs = [d for d in self.ctx.topology.devices.values()
@@ -3025,7 +3025,14 @@ class MainWindow(QMainWindow):
                             break
                         # Not `stderr[:120]`: on Podman that is the provider banner every
                         # time, and the real failure is further down. See runtime.compose_error.
-                        err = compose_error(r.stderr) or f"exit {r.returncode}"
+                        # Module-scope `_runtime`, never a function-scope import: this used to be
+                        # a bare `compose_error`, imported inside the `if not dc:` branch above —
+                        # so on any engine where the orchestrator already knows its compose CLI
+                        # (the normal path) the branch never ran, the closure cell was empty, and
+                        # the NameError landed in the `except` below and was REPORTED AS THE
+                        # DEVICE'S ERROR. Every machine then failed with "cannot access free
+                        # variable 'compose_error'", which hid whatever had actually gone wrong.
+                        err = _runtime.compose_error(r.stderr) or f"exit {r.returncode}"
                     except Exception as e:       # noqa: BLE001 — best-effort
                         err = str(e)[:120]
                     time.sleep(0.75 * (attempt + 1))
@@ -3623,7 +3630,7 @@ class MainWindow(QMainWindow):
         orch = getattr(self._gloader, "orchestrator", None) or getattr(self.ctx, "orchestrator", None)
         if orch is not None:
             return list(getattr(orch, "_dc", []))
-        from ..setup.runtime import compose_cli, compose_error
+        from ..setup.runtime import compose_cli
         return list(compose_cli())
 
     def element_query(self, device_name: str, command: str) -> str:
@@ -3656,7 +3663,7 @@ class MainWindow(QMainWindow):
             # Podman announces its compose provider on stderr for every command, so a command
             # with no output would "return" that banner as its result. See runtime.compose_error.
             return ((r.stdout or "").strip()
-                    or compose_error(r.stderr, limit=4000)
+                    or _runtime.compose_error(r.stderr, limit=4000)
                     or "(no output)")
         except Exception as e:
             return f"(query failed: {e})"
@@ -3739,7 +3746,7 @@ class MainWindow(QMainWindow):
                     warm = "cold start" if d.get("cold") else "warm"
                     text = f"HTTP {d['code']} · {d['ms']} ms · {warm}\n\n{d['body']}"
                 else:
-                    text = "(no response)\n" + compose_error(r.stderr, limit=4000)
+                    text = "(no response)\n" + _runtime.compose_error(r.stderr, limit=4000)
             except Exception as e:
                 text = f"Invoke failed: {e}"
             self.ctx.bus.function_invoke_result.emit(device_id, text)
