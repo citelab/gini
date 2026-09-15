@@ -61,7 +61,11 @@ say "  image:  $IMAGE"
 # -- 1. seed the host lab folder from the image ---------------------------- #
 head_ "1. Seed a host lab folder from the image's pristine tree"
 mkdir -p "$WORK/M1" || exit 1
-$ENGINE run --rm --entrypoint sh -v "$WORK/M1:/out" "$IMAGE" -c \
+# :z asks Podman to relabel the directory for SELinux. Harmless on engines that do not use it,
+# and without it a container on an enforcing host cannot read or write the mount at all.
+SEED="$WORK/M1:/out"
+[ "$ENGINE" = "podman" ] && SEED="$SEED:z"
+$ENGINE run --rm --entrypoint sh -v "$SEED" "$IMAGE" -c \
   'cd /opt/xv6-riscv && for f in kernel/syscall.h kernel/syscall.c kernel/sysproc.c \
      user/user.h user/usys.pl Makefile; do cp "$f" "/out/$(basename $f)"; done' >/dev/null 2>&1
 n=$(ls "$WORK/M1" 2>/dev/null | wc -l | tr -d ' ')
