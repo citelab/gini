@@ -373,8 +373,12 @@ class Qemu:
             except Exception:
                 p.kill()
 
-    def restart(self):
+    def restart(self, on_down=None):
+        """Cycle QEMU. `on_down` runs while it is stopped — the only moment the files QEMU holds
+        open can be replaced safely. That window is what the disk-image swap below needs."""
         self.stop()
+        if on_down is not None:
+            on_down()
         time.sleep(0.3)          # let :4444/:1234 free up before QEMU re-listens
         self.start()
 
@@ -490,17 +494,149 @@ def _scope_errors(log: str) -> str:
     return "\n".join(keep[-40:]) or log.strip()[-2000:]
 
 
-def _rebuild():
-    """Incremental `make` (recompiles the changed shadow file + relinks), then restart QEMU with the
-    new kernel. Returns (ok, log). The bind-mounted gini_sched.c is newer, so make rebuilds just it."""
+FS_IMG = XV6_DIR + "/fs.img"       # the disk QEMU has open
+FS_NEW = XV6_DIR + "/fs-new.img"   # a finished image waiting for the next restart window
+FS_LIVE = XV6_DIR + "/fs-live.img"  # where the live image is parked while mkfs runs
+
+
+def _make(targets, timeout=180):
+    """Run one `make` in the xv6 tree. Returns (ok, scoped log)."""
     try:
-        r = subprocess.run(["make", "kernel/kernel", "fs.img"], cwd=XV6_DIR,
-                           capture_output=True, text=True, timeout=180)
+        r = subprocess.run(["make", *targets], cwd=XV6_DIR,
+                           capture_output=True, text=True, timeout=timeout)
     except Exception as e:
         return False, f"build error: {e}"
     if r.returncode != 0:
         return False, _scope_errors(r.stdout + r.stderr)
-    _QEMU.restart()
+    return True, ""
+
+
+def _fs_is_stale() -> bool:
+    """Would `make` rebuild fs.img? `make -q` answers without building anything.
+
+    Asked FIRST, because the answer is usually no. A Load that only touched a kernel file must
+    not regenerate the disk — that would silently delete any file the student created inside
+    xv6 during this session, which is not what "rebuild my kernel" means.
+    """
+    try:
+        r = subprocess.run(["make", "-q", "fs.img"], cwd=XV6_DIR,
+                           capture_output=True, text=True, timeout=60)
+    except Exception:
+        return True                      # cannot tell -> rebuild, the safe direction
+    return r.returncode != 0             # 0 = up to date; 1 = out of date; 2 = error
+
+
+def _stage_fs():
+    """Build the new disk image WITHOUT writing to the one the running QEMU has open.
+
+    `mkfs` opens fs.img O_TRUNC and writes two megabytes into it. QEMU has that same file open
+    read-write and may write its own dirty blocks back at any moment, so `make fs.img` under a
+    live QEMU is two writers on one inode — and the loser is the disk the student is about to
+    boot. It survived every test run, which is exactly what makes it worth removing: a race that
+    usually looks like it worked is the kind that fails in a lab, once, unreproducibly.
+
+    The fix uses the same distinction as the rest of this system: an open file is an INODE, a
+    build target is a PATH. Renaming the live image leaves QEMU's open file exactly where it was
+    — same inode, still its disk — while `make` creates a brand-new file at the path. The two
+    writers are now two different files and cannot meet. The finished image is parked as
+    fs-new.img and swapped in while QEMU is stopped.
+
+    Returns (ok, log, staged) — `staged` says whether there is an image waiting to be swapped.
+    """
+    if not _fs_is_stale():
+        return True, "", False
+    parked = False
+    try:
+        if os.path.exists(FS_IMG):
+            os.replace(FS_IMG, FS_LIVE)          # QEMU keeps the inode; the PATH is now free
+            parked = True
+    except Exception as e:
+        return False, f"could not park the live disk image: {e}", False
+    ok, log = _make(["fs.img"])
+    try:
+        if ok:
+            os.replace(FS_IMG, FS_NEW)           # the new image waits for the restart
+        elif os.path.exists(FS_IMG):
+            os.remove(FS_IMG)                    # a half-written image is worse than none
+        if parked:
+            os.replace(FS_LIVE, FS_IMG)          # the tree is consistent again either way
+    except Exception as e:
+        return False, f"could not stage the new disk image: {e}", False
+    return ok, log, ok
+
+
+def _swap_fs():
+    """Move the staged image into place. Only ever called with QEMU stopped."""
+    try:
+        if os.path.exists(FS_NEW):
+            os.replace(FS_NEW, FS_IMG)
+    except Exception:
+        pass                                     # QEMU boots the old disk; the kernel is new
+
+
+def _recover_disk_image():
+    """Put the disk back together after an agent that died mid-swap.
+
+    Both intermediate names are unambiguous, which is what makes this safe to do unattended:
+    fs-live.img exists only while mkfs is running, and fs-new.img only ever holds a COMPLETED
+    image (it is named on success, never before). So: restore the live disk if the path is
+    empty, then apply a build that never reached its restart. Without this the container could
+    come up with no fs.img at all and QEMU would fail to open its drive.
+    """
+    try:
+        if not os.path.exists(FS_IMG) and os.path.exists(FS_LIVE):
+            os.replace(FS_LIVE, FS_IMG)
+        if os.path.exists(FS_NEW):
+            os.replace(FS_NEW, FS_IMG)
+    except Exception:
+        pass
+
+
+def _touch_sources():
+    """Make the container the last writer of every file the student can edit.
+
+    A bind mount caches file attributes, and on at least one engine (Docker Desktop on macOS,
+    virtiofs) a file just written on the HOST still reports its OLD mtime inside the container
+    for a moment afterwards. `make` compares that stale timestamp against the .o, decides it is
+    up to date, and builds nothing — so /rebuild restarts QEMU on the PREVIOUS kernel while
+    reporting {"ok": true, "log": "loaded"}.
+
+    That is the worst failure this loop can produce. It is silent, it survives a retry often
+    enough to look like the student's fault, and the symptom it produces — `unknown sys call 23`
+    from a syscall they can see in their own syscall.h — sends them looking in exactly the wrong
+    place. Reproduced with backend/xv6/lab_feasibility.sh, which now prints it as
+    "make: 'kernel/kernel' is up to date." at the moment the student pressed Load.
+
+    Touching from INSIDE the container updates that cache as a side effect of the write, so the
+    timestamp make reads is the one we just set. The cost is recompiling the handful of files
+    the student owns on every Load — about a second — and in exchange `make` can no longer
+    conclude that a Load has nothing to do.
+    """
+    for path, _ref in SHADOWS.values():
+        try:
+            if os.path.exists(path):
+                os.utime(path, None)
+        except Exception:
+            pass                     # a read-only file just keeps make's own answer
+
+
+def _rebuild():
+    """Incremental `make`, then restart QEMU on the result. Returns (ok, log).
+
+    Two makes rather than one, because the kernel and the disk image fail differently and are
+    replaced differently. The kernel is read once at boot, so overwriting kernel/kernel under a
+    live QEMU is harmless; the disk is held open for the life of the machine, so it is built
+    out of place and swapped in during the restart (see _stage_fs). On any failure QEMU is left
+    alone — a student whose code does not compile keeps the machine they had.
+    """
+    _touch_sources()
+    ok, log = _make(["kernel/kernel"])
+    if not ok:
+        return False, log
+    ok, log, staged = _stage_fs()
+    if not ok:
+        return False, log
+    _QEMU.restart(on_down=_swap_fs if staged else None)
     return True, "loaded"
 
 
@@ -919,5 +1055,6 @@ if __name__ == "__main__":
                 shutil.copyfile(_ref, _path)
             except Exception:
                 pass
+    _recover_disk_image()
     _QEMU.start()                                     # launch the kernel; the agent stays PID 1
     HTTPServer(("0.0.0.0", 5000), Handler).serve_forever()

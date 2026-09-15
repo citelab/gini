@@ -1,7 +1,8 @@
 # Compiling student code in the shipped xv6 image
 
 **Status: feasibility established by experiment (2026-09-15, branch `xv6-user-code`).
-Two fixes landed; the rest is unbuilt and specified below.**
+Three fixes landed — error scoping, the disk-image swap, the stale build. The rest is unbuilt
+and specified below.**
 
 The question this answers: can we ship a syscall assignment — where a student writes a real
 system call, writes an app that calls it, compiles both, and watches it in the Syscall Lab —
@@ -70,26 +71,69 @@ scales with the list, which is the point — a COW lab must link `trap.c`, a sys
 | 6 | Does a fresh container recover it? | Yes — relink + 1s build |
 | 7 | Rootless/SELinux file ownership | **Untested off macOS** — this is what the script is for |
 
-Two things worth knowing that only came out of running it:
+## The two silent failures, and what they now do instead
 
-**`mkfs` overwrites `fs.img` while QEMU still has it open.** `_rebuild()` builds *then* restarts
-QEMU. The kernel survived it here, but the ordering is luck, not design: the safe order is stop
-QEMU, build, start. Cheap to fix, and it removes a class of "my file system went weird" reports.
+Both were found by running the loop rather than reading it, and both matter far more than an
+ordinary bug, because **neither looks like a failure**. The student presses Load, the agent
+answers `{"ok": true, "log": "loaded"}`, QEMU comes back — and something is wrong that they will
+spend the evening blaming on their own code.
 
-**A host write is not always instantly visible in the container.** Seen twice on macOS
-(Docker Desktop / virtiofs) and never on a native Linux bind mount, where host and container share
-one page cache. Once it produced phantom compile errors from a truncated read; once — far worse —
-`make` decided it was up to date, `/rebuild` returned `{"ok": true, "log": "loaded"}`, and QEMU
-came back running the **old kernel** while the student's app printed `unknown sys call 23`. A
-second Load fixed it. Neither reproduced in 3 repeats or 60 controlled trials, so the mechanism is
-not pinned down; the mitigation is cheap and worth taking regardless:
+### `mkfs` wrote into the disk QEMU had open
 
-- write lab files **atomically** (temp + `os.replace`) wherever gBuilder writes them;
-- have `/rebuild` **verify** rather than trust — compare the built kernel against the source it
-  claims to be built from, and say "no change detected" instead of "loaded".
+`_rebuild()` ran `make kernel/kernel fs.img` and *then* restarted QEMU. So `mkfs` opened `fs.img`
+`O_TRUNC` and wrote two megabytes into it while the live QEMU held that same file open
+read-write, free to write its own dirty blocks back at any moment. Two writers, one inode, and
+the loser is the disk the student is about to boot. It survived every test run here — which is
+the whole problem with it. A race that usually looks like it worked is the kind that fails once,
+in a lab, unreproducibly.
 
-Check 4 of the script asserts `make` actually recompiled, so this shows up as a failure rather
-than as a confused student.
+The fix uses the same distinction as the rest of this system: **an open file is an inode, a build
+target is a path.** Renaming the live image leaves QEMU's open file exactly where it was — same
+inode, still its disk — while `make` creates a brand-new file at the path. The two writers are
+now two different files and cannot meet. The finished image is parked as `fs-new.img` and swapped
+in by `Qemu.restart(on_down=…)`, which runs its hook **after the stop and before the start** —
+the only moment the swap is free.
+
+Three properties that took a test each, because all three are easy to get wrong:
+
+- **A kernel-only Load must not regenerate the disk.** `make -q fs.img` is asked first, and
+  usually answers "up to date". Rebuilding anyway would silently delete any file the student
+  created inside xv6 this session, which is not what "rebuild my kernel" means. Verified live:
+  a file written at the xv6 shell survives a kernel-only Load, and `fs.img` keeps its inode.
+- **A build that fails after the live image is parked must put it back.** That is the dangerous
+  path, and it is the one a broken *user program* takes — the failure happens inside the disk
+  stage. Verified live: inode unchanged, no `fs-new.img`/`fs-live.img` left, machine still running.
+- **An agent that dies mid-swap must recover.** `fs-live.img` exists only while `mkfs` is running
+  and `fs-new.img` only ever holds a **completed** image, so both are unambiguous at startup:
+  restore the live disk if the path is empty, then apply a build that never reached its restart.
+  Without it the container can come up with no `fs.img` at all. Both cases verified by killing
+  and restarting a real container.
+
+### `make` decided there was nothing to do
+
+The worse one. A bind mount caches file attributes, and on Docker Desktop/macOS (virtiofs) a file
+**just written on the host still reports its old mtime inside the container**. `make` compares
+that stale timestamp against a `.o` built seconds earlier, concludes the kernel is up to date,
+builds nothing — and `/rebuild` restarts QEMU on the **previous kernel** while reporting success.
+
+The symptom is vicious: the student's app prints `unknown sys call 23` for a syscall they can
+read in their own `syscall.h`. A second Load fixes it, so it reads as flakiness.
+
+It is now **reproducible on demand** — check 6 of the script prints the exact evidence,
+`make: 'kernel/kernel' is up to date.`, at the moment the student pressed Load — and the
+mechanism is understood, so the mitigation can be targeted rather than hopeful. `_touch_sources()`
+makes the container **the last writer** of every file the student can edit before each build:
+writing from inside updates that cache as a side effect, so the timestamp `make` reads is the one
+we just set. It costs about a second of recompilation per Load, and in exchange `make` can no
+longer conclude that a Load has nothing to do.
+
+`_touch_sources` currently walks `SHADOWS`. **When `LAB_FILES` arrives it must walk that too** —
+this is the one place the new lab plugs into an existing guarantee rather than adding its own.
+
+On a native Linux bind mount host and container share one page cache and this cannot happen, so
+check 6 is reported as a **warning, not a failure**: it is a property of the engine that GINI
+works around, and the check immediately after it proves the workaround holds. Expect it to pass
+outright on Podman — that is one of the things your two runs will tell us.
 
 ## What is missing in the Machine Lab
 
@@ -166,7 +210,9 @@ No debugger is needed. A file, a line, a column and the source line is what a st
 
 - **Rootless Podman and SELinux.** The one thing macOS cannot answer. The script mounts with `:z`
   under Podman and checks both directions of ownership; run it on the home box and on campus.
-- Stop QEMU before `make` touches `fs.img`.
+- **Whether check 6 warns on Linux.** It should not. If it does, the attribute-cache lag is not
+  a macOS artefact and `_touch_sources` stops being belt-and-braces.
+- Extend `_touch_sources` to `LAB_FILES` when that list exists.
 - Decide the first assignment: `sysinfo` (gradeable against the existing `free_pages` and process
   table) or `trace` (needs console capture).
 - Author the `LAB_FILES` list and the mission YAML.

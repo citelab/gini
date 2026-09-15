@@ -21,12 +21,15 @@ ENGINE="${ENGINE:-}"
 IMAGE="${IMAGE:-gini-xv6:latest}"
 NAME="ginilabcheck$$"
 WORK="${TMPDIR:-/tmp}/gini-labcheck-$$"
-PASS=0; FAIL=0; SKIP=0
+PASS=0; FAIL=0; SKIP=0; WARN=0
 
 say()  { printf '%s\n' "$*"; }
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
 skip() { SKIP=$((SKIP+1)); printf '  \033[33mSKIP\033[0m  %s\n' "$*"; }
+# A property of this engine that GINI already works around. Loud, but not a reason to stop:
+# the verdict is "can this machine run the lab", and a mitigated hazard does not change it.
+warn() { WARN=$((WARN+1)); printf '  \033[33mWARN\033[0m  %s\n' "$*"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 cleanup() {
@@ -189,19 +192,44 @@ print(u.urlopen(\"http://127.0.0.1:5000/sc\", timeout=10).read().decode())"' 2>/
 [ -n "$SC" ] && ok "the Syscall Lab counter sees it: $SC" \
              || bad "syscall 23 not counted (visualization would be blank)"
 
-# -- 6. error display ------------------------------------------------------ #
-head_ "6. What the student sees when it does not compile"
+# -- 6. the stale-build hazard, and the error display ---------------------- #
+head_ "6. A fresh host edit against a just-built object file"
 cp "$D/sysproc.c" "$D/sysproc.c.keep"
 printf '\nuint64\nsys_broken(void)\n{\n  return notdeclared;\n}\n' >> "$D/sysproc.c"
-$ENGINE exec "$NAME" sh -c 'cd /opt/xv6-riscv && make kernel/kernel fs.img > /tmp/e.log 2>&1'
-if $ENGINE exec "$NAME" sh -c 'grep -q "error:" /tmp/e.log' >/dev/null 2>&1; then
-    ok "a compile error is reported; the line the student needs:"
-    $ENGINE exec "$NAME" sh -c 'grep "error:" /tmp/e.log | head -2 | sed "s/^/          /"'
+
+# THE hazard. A .o built seconds ago in check 4, a .c just written on the host. If the mount
+# still reports the file's OLD mtime, `make` concludes there is nothing to do -- and /rebuild
+# restarts QEMU on the PREVIOUS kernel while answering {"ok": true, "log": "loaded"}. Silent,
+# and it sends the student looking at their own code. On a native Linux bind mount host and
+# container share one page cache and this cannot happen; that is what this line measures.
+if $ENGINE exec "$NAME" sh -c 'cd /opt/xv6-riscv && make -q kernel/kernel' >/dev/null 2>&1; then
+    warn "make says 'up to date' right after a host edit — attribute-cache lag on this engine"
+    say "       Unmitigated, this is the silent stale build: Load answers \"loaded\" and QEMU"
+    say "       comes back on the PREVIOUS kernel. The agent forces the issue in _touch_sources,"
+    say "       and the next check proves it works. Expected to PASS outright on Linux."
 else
-    bad "a deliberate compile error did not produce a diagnostic"
+    ok "make saw the host edit on its own — no attribute-cache lag on this engine"
 fi
+
+# Whatever the answer above, pressing Load must report the error. Go through the AGENT, because
+# that is what the button does, and it is the agent's scoped log the student actually reads.
+LOG=$($ENGINE exec "$NAME" sh -c 'python3 -c "
+import urllib.request as u
+print(u.urlopen(\"http://127.0.0.1:5000/rebuild\", data=b\"\", timeout=200).read().decode())"' 2>/dev/null)
+case "$LOG" in
+  *notdeclared*)
+    ok "Load reported the error, scoped to what the student needs:"
+    printf '%s' "$LOG" | tr ',' '\n' | grep -o "sysproc.c:[0-9]*:[0-9]*: error: [^\\]*" | head -2 \
+        | sed 's/^/          /'
+    ;;
+  *'"ok": true'*)
+    bad "Load reported SUCCESS for code that does not compile (stale build reached the student)"
+    ;;
+  *) bad "Load gave no usable diagnostic: $(printf '%s' "$LOG" | head -c 160)" ;;
+esac
+
 mv "$D/sysproc.c.keep" "$D/sysproc.c"
-$ENGINE exec "$NAME" sh -c 'cd /opt/xv6-riscv && make kernel/kernel fs.img >/dev/null 2>&1'
+$ENGINE exec "$NAME" sh -c 'cd /opt/xv6-riscv && touch kernel/sysproc.c && make kernel/kernel fs.img >/dev/null 2>&1'
 
 # -- 7. survive a Stop/Run ------------------------------------------------- #
 head_ "7. Survive Stop/Run (compose down destroys the container)"
@@ -230,7 +258,7 @@ make kernel/kernel fs.img >/tmp/r.log 2>&1' >/dev/null 2>&1 \
 
 # -- verdict --------------------------------------------------------------- #
 head_ "Verdict"
-say "  $PASS passed, $FAIL failed, $SKIP skipped   ($ENGINE, $IMAGE)"
+say "  $PASS passed, $FAIL failed, $WARN warned, $SKIP skipped   ($ENGINE, $IMAGE)"
 [ $FAIL -eq 0 ] && say "  This machine can run a student-code xv6 lab with the SHIPPED image." \
                 || say "  Something above needs fixing before a lab ships on this machine."
 exit $FAIL
