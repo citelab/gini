@@ -438,11 +438,56 @@ class Wedge:
 _WEDGE = Wedge()
 
 
+# A toolchain INVOCATION, which `make` echoes for every file — each about 700 characters of
+# -fno-builtin flags. A tool name followed by WHITESPACE is a command; the same name followed by
+# a COLON is that tool reporting a problem (`riscv64-unknown-elf-ld -z …` versus
+# `riscv64-unknown-elf-ld: undefined reference …`). That distinction is the whole trick here.
+_CMD = re.compile(r"^\s*(riscv64-[\w.-]+|gcc|ld|perl|sed|awk|mkfs/\w+|python3|cp|mv|rm|make\[)\s")
+
+# What a student actually needs: the diagnostic lines, and the source echo + caret gcc prints
+# underneath them (`  124 |   return notdeclared + mask;` / `      |          ^~~~~~~~~~~`), which
+# are the most useful part of a gcc error and which the old filter dropped on the floor.
+_DIAG = re.compile(
+    r"^\S+:\d+(:\d+)?:\s"          # file:line[:col]: error|warning|note: …
+    r"|^\s*\d+\s*\|"               # the source line echoed under a diagnostic
+    r"|^\s*\|\s*[\^~]"             # the caret/tilde line under that
+    r"|^(make|cc1|collect2|as):"    # make's "Error 1", cc1's "all warnings being treated as errors"
+    r"|^\S*ld:"                     # a LINKER diagnostic — carries no "error:" anywhere
+    r"|undefined reference|multiple definition|No rule to make target"
+    r"|In function|At top level"
+)
+
+# Properties of how xv6 is linked and how the Makefile invokes gcc, not of the student's code.
+# Both appear on EVERY failure, and a report that always carries the same two irrelevant lines
+# teaches a student to skim past the ones that matter.
+_BENIGN = ("has a LOAD segment with RWX permissions",
+           "unrecognized command-line option '-Wno-unknown-attributes'")
+
+
 def _scope_errors(log: str) -> str:
-    """Keep the gcc lines that name the student's shadow file (or say 'error:'), so a compile
-    failure is legible instead of a wall of kernel build output."""
-    keep = [ln for ln in log.splitlines() if "gini_sched" in ln or "error:" in ln]
-    return "\n".join(keep[-40:]) or log[-2000:]
+    """Reduce a failed `make` to the lines that tell the student what is wrong.
+
+    The rule this replaced kept lines containing "gini_sched" or "error:". Building a real
+    syscall lab showed it failing in both directions, and the second way is the damaging one:
+
+    * A LINKER failure carries no "error:" at all. Forgetting `entry("sysinfo");` in user/usys.pl
+      is the single most common mistake in this lab, and its whole message is
+      `undefined reference to 'sysinfo'` — which was dropped.
+    * With nothing kept, the fallback returned the tail of the raw log, and the kernel's link
+      COMMAND names kernel/shadows/gini_sched.o. So that 580-character `ld` invocation matched
+      "gini_sched" and became the entire report: the student's only feedback pointed at a file
+      they had never opened, and the real error was not shown anywhere.
+
+    So: drop the invocations, keep the diagnostics. This is deliberately generic — it names no
+    lab file, so it reads a shadow build, a syscall build and anything later the same way.
+    """
+    keep = []
+    for ln in log.splitlines():
+        if not ln.strip() or _CMD.match(ln) or any(b in ln for b in _BENIGN):
+            continue
+        if _DIAG.search(ln):
+            keep.append(ln.rstrip())
+    return "\n".join(keep[-40:]) or log.strip()[-2000:]
 
 
 def _rebuild():
