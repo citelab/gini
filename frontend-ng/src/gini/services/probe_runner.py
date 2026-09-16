@@ -25,6 +25,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 from ..domain import reach_strategy as _reach
+from .orchestrator import exec_argv_for
 
 # How many `docker compose exec` calls to have in flight at once. The work is almost entirely
 # waiting on a subprocess, so concurrency turns the sweep's cost into a series of waves:
@@ -76,7 +77,7 @@ class DockerProbeRunner:
         return self._svc_cache.get(name.lower(), name.lower())
 
     def _exec(self, service: str, argv: list[str]) -> tuple[int, str]:
-        cmd = [*self.orch._dc, "exec", "-T", service, *argv]
+        cmd = [*exec_argv_for(self.orch, service), *argv]
         # `docker compose` (no -f) finds the project via the CWD — every orchestrator call runs in
         # the workdir, so the probe MUST too, or `exec` can't find the running stack (a false
         # negative: probes fail even though the containers are up and reachable).

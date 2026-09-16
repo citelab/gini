@@ -1258,6 +1258,25 @@ def _startup_ms(created: str, started: str) -> float | None:
     return round((s - c).total_seconds() * 1000.0, 1)
 
 
+def exec_argv_for(orch, service: str, env: dict | None = None) -> list:
+    """argv to run a command inside one service, given anything orchestrator-shaped.
+
+    `Orchestrator.exec_argv` finds the container by label instead of letting the compose provider
+    guess its name. This wrapper keeps that an OPTIONAL part of the contract: probes, riders and
+    the rider session take whatever object they are handed, and the test suite hands them small
+    stubs carrying only `_dc`. Requiring a new method here would have broken every one of them —
+    and, worse, would have broken any caller outside this repo doing the same thing.
+    """
+    fn = getattr(orch, "exec_argv", None)
+    if callable(fn):
+        return list(fn(service, env))
+    flags: list = []
+    for k, v in (env or {}).items():
+        flags += ["-e", f"{k}={v}"]
+    return [*list(getattr(orch, "_dc", None) or ["docker", "compose"]),
+            "exec", "-T", *flags, service]
+
+
 class Orchestrator:
     """Manages the Docker lifecycle of a compiled topology on the user's machine."""
 
@@ -1280,8 +1299,76 @@ class Orchestrator:
             prefix = ["docker", "compose"]
         return prefix + (["-p", self.project] if self.project else [])
 
+    @property
+    def _cids(self) -> dict:
+        """service -> engine container id (see `container_id`), cleared on every up/down.
+
+        Lazily created rather than set in __init__ because tests legitimately build a bare
+        instance with `Orchestrator.__new__` to exercise one method in isolation, and a cache
+        that only exists on fully constructed objects would turn that into an AttributeError.
+        """
+        cache = self.__dict__.get("_cids")
+        if cache is None:
+            cache = self.__dict__["_cids"] = {}
+        return cache
+
+    def container_id(self, service: str, refresh: bool = False) -> str:
+        """The ENGINE's own id for one compose service, found by label. "" if there is none.
+
+        `compose exec` asks the compose PROVIDER to work out a container name, and the providers
+        disagree about how to build one: podman-compose 1.0.6 makes `project_service_1`, compose
+        v2 makes `project-service-1`. When the guess is wrong the provider does not fall back —
+        it fails with `no container with name or ID "gini-lab_m1_1" found` and exit 125.
+
+        That is what every exec on a Podman lab machine was doing: name resolution, probes,
+        riders, kubectl and the element console all go through `compose exec`, so all of them
+        failed together while `podman ps` showed a healthy topology. The user-visible symptom was
+        name resolution warning about all five machines at once.
+
+        Labels are the common ground, exactly as `_status_by_label` already relies on:
+        podman-compose writes the docker-compose labels verbatim. Filtering on
+        `com.docker.compose.service` needs no name convention at all. Only `--filter label=` and
+        `{{.ID}}` are used, which every version of both engines has had for years.
+        """
+        if not refresh and service in self._cids:
+            return self._cids[service]
+        project = self.project or COMPOSE_PROJECT
+        try:
+            r = subprocess.run(
+                [*_engine_argv(), "ps", "-q",
+                 "--filter", f"label=com.docker.compose.project={project}",
+                 "--filter", f"label=com.docker.compose.service={service}"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return ""
+        if r.returncode != 0:
+            return ""
+        cid = next((i for i in (r.stdout or "").split() if i), "")
+        if cid:
+            self._cids[service] = cid
+        return cid
+
+    def exec_argv(self, service: str, env: dict | None = None) -> list:
+        """argv to run a command inside one service, without a TTY.
+
+        Engine-native when the container can be found by label — that is immune to the provider
+        naming split above and is also a great deal faster, since podman-compose reconstructs
+        every `--env` of the service on its way to the same `podman exec`. Falls back to
+        `compose exec -T` when the lookup comes up empty, so a service that has not been labelled
+        (or an engine that answers `ps` oddly) behaves exactly as it did before.
+        """
+        flags: list = []
+        for k, v in (env or {}).items():
+            flags += ["-e", f"{k}={v}"]
+        cid = self.container_id(service)
+        if cid:
+            return [*_engine_argv(), "exec", "-i", *flags, cid]
+        return [*self._dc, "exec", "-T", *flags, service]
+
     def up(self, config: RuntimeConfig, workdir: str | Path,
            auto_internet: bool = True, laptop_id: str = "") -> tuple[bool, str]:
+        self._cids.clear()                          # ids do not survive a relaunch
         ok, msg = self._ensure_compose()            # the thing that launches everything below
         if not ok:
             return False, msg
@@ -1559,6 +1646,7 @@ class Orchestrator:
 
     def down(self) -> tuple[bool, str]:
         self._stop_advertiser()      # stop announcing before the relay goes away
+        self._cids.clear()           # ids do not survive a teardown
         if not self.workdir:
             return True, "nothing running"
         ok, msg = self._compose("down")
@@ -1809,7 +1897,7 @@ class Orchestrator:
         (run inside the cluster container — k3s ships kubectl, so no host kubectl needed)."""
         if not self.workdir:
             return False, "not running"
-        base = [*self._dc, "exec", "-T", service, "kubectl"]
+        base = [*self.exec_argv(service), "kubectl"]
         for _ in range(40):                  # k3s takes ~15-30s to come up
             try:
                 r = subprocess.run(base + ["get", "nodes", "--no-headers"],
@@ -1832,7 +1920,7 @@ class Orchestrator:
             return []
         try:
             r = subprocess.run(
-                [*self._dc, "exec", "-T", service, "kubectl", "get", "pods",
+                [*self.exec_argv(service), "kubectl", "get", "pods",
                  "-A", "-o", "json"], cwd=str(self.workdir),
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1861,7 +1949,7 @@ class Orchestrator:
             return {}
         try:
             r = subprocess.run(
-                [*self._dc, "exec", "-T", service, "kubectl",
+                [*self.exec_argv(service), "kubectl",
                  "get", "hpa,deploy", "-o", "json"], cwd=str(self.workdir),
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1911,7 +1999,7 @@ class Orchestrator:
             return False, "not running"
         try:
             r = subprocess.run(
-                [*self._dc, "exec", "-T", service, "kubectl", "scale",
+                [*self.exec_argv(service), "kubectl", "scale",
                  f"deployment/{deployment}", f"--replicas={int(replicas)}"],
                 cwd=str(self.workdir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             return r.returncode == 0, (r.stderr or r.stdout).strip()
@@ -1933,7 +2021,7 @@ class Orchestrator:
                 "target": {"type": "Utilization", "averageUtilization": int(target)}}}]
         try:
             r = subprocess.run(
-                [*self._dc, "exec", "-T", service, "kubectl", "patch",
+                [*self.exec_argv(service), "kubectl", "patch",
                  f"hpa/{hpa}", "--type", "merge", "-p", json.dumps({"spec": spec})],
                 cwd=str(self.workdir), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             return r.returncode == 0, (r.stderr or r.stdout).strip()

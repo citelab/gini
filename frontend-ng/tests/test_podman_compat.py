@@ -12,6 +12,7 @@ import pytest
 
 from gini.domain.topology import Topology
 from gini.services.compiler import RuntimeCompiler, _cadvisor_command, _cadvisor_volumes
+import gini.services.orchestrator as mod_orch
 from gini.services.orchestrator import Orchestrator, _compose
 from gini.setup import images, runtime
 from gini.setup.images import PullProgress
@@ -288,3 +289,123 @@ def test_rootless_podman_detection():
         raise FileNotFoundError("podman not found")
     
     assert runtime._is_rootless_podman(run=error_run) is False
+
+
+# --------------------------------------------------------------------------- #
+# Finding a container without asking the compose provider to guess its name.
+#
+# Reported from the campus lab: every machine failed name resolution at once. The exec behind it,
+# run by hand, said:
+#
+#     podman compose exec -T m1 sh -lc 'echo hi'
+#     >>>> Executing external compose provider "/usr/bin/podman-compose" <<<<
+#     podman exec ... gini-lab_m1_1 sh -lc echo hi
+#     Error: no container with name or ID "gini-lab_m1_1" found: no such container
+#     exit code: 125
+#
+# podman-compose 1.0.6 builds `project_service_1`; compose v2 builds `project-service-1`. The
+# provider does not fall back when its guess is wrong — it just fails. Every exec in gBuilder went
+# through `compose exec`, so probes, riders, kubectl and the element console were failing the same
+# way on the same machine, unreported, at the same time.
+# --------------------------------------------------------------------------- #
+
+def _orch_with_engine(monkeypatch, engine="podman"):
+    # GINI_ENGINE outranks the probe cache, and conftest pins the suite to Docker — so this is
+    # the knob, not runtime._ENGINE.
+    monkeypatch.setenv("GINI_ENGINE", engine)
+    runtime._reset_engine_cache()
+    o = Orchestrator(runtime_dir=".")
+    o.workdir = "/tmp/gini-lab-xyz"
+    return o
+
+
+def _ps_returning(cid, seen):
+    def run(cmd, **_k):
+        seen.append(list(cmd))
+        return types.SimpleNamespace(returncode=0, stdout=(cid + "\n") if cid else "", stderr="")
+    return run
+
+
+def test_a_container_is_found_by_label_not_by_a_guessed_name(monkeypatch):
+    seen = []
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("c0ffee123456", seen))
+    o = _orch_with_engine(monkeypatch)
+    assert o.container_id("m1") == "c0ffee123456"
+    argv = seen[0]
+    assert argv[:3] == ["podman", "ps", "-q"]
+    assert "label=com.docker.compose.project=gini-lab" in argv
+    assert "label=com.docker.compose.service=m1" in argv
+    # the thing that broke: no name is constructed anywhere
+    assert not any("gini-lab_m1_1" in a or "gini-lab-m1-1" in a for a in argv)
+
+
+def test_exec_goes_straight_to_the_engine_when_the_container_is_known(monkeypatch):
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("abc123", []))
+    o = _orch_with_engine(monkeypatch)
+    assert o.exec_argv("m1") == ["podman", "exec", "-i", "abc123"]
+
+
+def test_exec_falls_back_to_compose_when_no_container_is_labelled(monkeypatch):
+    """An unlabelled container, or an engine whose `ps` says nothing, behaves as before."""
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("", []))
+    o = _orch_with_engine(monkeypatch)
+    assert o.exec_argv("m1") == ["podman", "compose", "exec", "-T", "m1"]
+
+
+def test_env_flags_land_before_the_container_id(monkeypatch):
+    """`podman exec -e K=V <id> cmd` — after the id they would be arguments to the command."""
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("abc123", []))
+    o = _orch_with_engine(monkeypatch)
+    argv = o.exec_argv("faas", {"GINI_FN": "hello"})
+    assert argv == ["podman", "exec", "-i", "-e", "GINI_FN=hello", "abc123"]
+    assert argv.index("-e") < argv.index("abc123")
+
+
+def test_env_flags_land_before_the_service_on_the_compose_fallback(monkeypatch):
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("", []))
+    o = _orch_with_engine(monkeypatch)
+    argv = o.exec_argv("faas", {"GINI_FN": "hello"})
+    assert argv == ["podman", "compose", "exec", "-T", "-e", "GINI_FN=hello", "faas"]
+
+
+def test_the_lookup_is_cached_so_a_probe_loop_does_not_re_ask_every_time(monkeypatch):
+    seen = []
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("abc123", seen))
+    o = _orch_with_engine(monkeypatch)
+    for _ in range(5):
+        o.exec_argv("m1")
+    assert len(seen) == 1
+
+
+def test_a_relaunch_invalidates_the_cache(monkeypatch):
+    """Container ids do not survive down/up, and a stale one execs into nothing."""
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("abc123", []))
+    o = _orch_with_engine(monkeypatch)
+    assert o.container_id("m1") == "abc123"
+    monkeypatch.setattr(Orchestrator, "_compose", lambda self, *a: (True, "done"))
+    monkeypatch.setattr(o, "_stop_advertiser", lambda: None, raising=False)
+    o.down()
+    assert o._cids == {}
+
+
+def test_the_cache_survives_an_instance_built_without_init():
+    """Tests build bare Orchestrators to exercise one method; that must not AttributeError."""
+    o = Orchestrator.__new__(Orchestrator)
+    assert o._cids == {}
+    o._cids["m1"] = "abc"
+    assert o._cids == {"m1": "abc"}
+
+
+def test_an_orchestrator_stub_without_exec_argv_still_works():
+    """probes/riders take whatever object they are handed — the suite hands them small stubs."""
+    stub = types.SimpleNamespace(_dc=["podman", "compose", "-p", "lab1"])
+    assert mod_orch.exec_argv_for(stub, "m1") == [
+        "podman", "compose", "-p", "lab1", "exec", "-T", "m1"]
+    assert mod_orch.exec_argv_for(stub, "faas", {"A": "b"}) == [
+        "podman", "compose", "-p", "lab1", "exec", "-T", "-e", "A=b", "faas"]
+
+
+def test_exec_argv_for_prefers_a_real_orchestrator(monkeypatch):
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("abc123", []))
+    o = _orch_with_engine(monkeypatch)
+    assert mod_orch.exec_argv_for(o, "m1") == ["podman", "exec", "-i", "abc123"]
