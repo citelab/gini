@@ -26,6 +26,101 @@ xv6 lab cannot.
   Assignment 1 hands over the same GINI-carrying kernel files as Assignment 2, and the earlier
   claim that it had a smaller blast radius was wrong.
 
+## What the student actually looks at
+
+The handouts tell students to press **Load**, press **Revert**, and read a compile log. None of
+those have a home: Load and Revert exist as endpoints, but their only UI is the shadow bar bolted
+onto the Scheduler face, where it ended up because shadows began as a scheduler feature.
+
+**The plan is one new face — `My Code` — and it is where student-authored kernel code lives for
+every lab type, shadows included.**
+
+### Where it goes
+
+The Machine Lab's home page is a stack of layer bands — USER SPACE, the `ecall` boundary, the
+SYSTEM-CALL INTERFACE, the KERNEL, the HARDWARE — an architecture diagram you can click. Each band
+is a place *in the machine*.
+
+A student's own code is not a layer of the machine; it is an overlay on it. So `My Code` gets its
+own band above USER SPACE, labelled for the assignment rather than for a layer. That also keeps it
+honest when the lab is about paging or the file system: the face does not move, only its file list
+changes.
+
+### What it shows
+
+```
+┌ My Code ───────────────────────────────────────────────────────────┐
+│  Assignment 1 — sysinfo          ~/.gini/xv6-lab/M1      [ Reveal ] │
+│                                                                     │
+│  FILES YOU OWN                                                      │
+│    syscall.h       edited      [Revert]                             │
+│    syscall.c       edited      [Revert]                             │
+│    sysproc.c       edited      [Revert]                             │
+│    user.h          edited      [Revert]                             │
+│    usys.pl         untouched                                        │
+│    sysinfo.h       untouched                                        │
+│    defs.h          untouched                                        │
+│    kalloc.c        untouched                                        │
+│    proc.c          untouched                                        │
+│    sysinfotest.c   edited      [Revert]                             │
+│                                                                     │
+│  WIRING                                                             │
+│    #define SYS_sysinfo 23      ✓        kernel/syscall.h            │
+│    extern uint64 sys_sysinfo   ✓        kernel/syscall.c            │
+│    row in syscalls[]           ✓        kernel/syscall.c            │
+│    prototype in user.h         ✓        user/user.h                 │
+│    entry("sysinfo")            ✗        user/usys.pl                │
+│                                                                     │
+│  [ Load ]      last build: failed, 12s ago                          │
+│    ./user/sysinfotest.c:9: undefined reference to `sysinfo'         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Four things, in order of how often a student needs them:
+
+1. **Which assignment is armed, and where the files are.** A path they can open in their own
+   editor, with a button that reveals it in Finder or Explorer. Students lose this folder.
+2. **The files they own, and whether they have touched them.** `edited` versus `untouched` is
+   computed the way the shadow bar already does it — an md5 against the pristine copy kept outside
+   the mount. Revert is per file, so throwing away a broken `proc.c` does not cost them the
+   `syscall.c` they got working.
+3. **The wiring check.** GINI parses the student's own files and says which of the five
+   registration sites are present. This is the handout's failure table, live, and it turns a
+   linker error into a checklist.
+4. **Load, and the scoped compile log underneath it** — the same widget as the shadow bar, lifted
+   out and made reusable rather than copied.
+
+### How this pairs with the System Calls Lab
+
+They answer different questions and the student needs both:
+
+| | |
+|---|---|
+| **My Code** | *Is it wired?* — static, read from their files, before anything runs |
+| **System Calls Lab** | *Is it running?* — live, read from the kernel, as their program executes |
+
+That is why the handout's check table has three rows rather than two: nothing in the histogram is a
+wiring problem, `sys23` is a `#define` problem, and the name appearing means both faces agree.
+
+### The one open question
+
+**How much should the wiring check give away?** Telling a student that `entry("sysinfo")` is
+missing is scaffolding; it names the gap, not the fix, and it replaces a link error most of them
+cannot read. But the five sites *are* the lesson of Part A, and a checklist that ticks itself off
+as they type makes it a fill-in-the-blanks exercise.
+
+Options, in increasing order of restraint: always visible; revealed after the first failed Load;
+or behind a "Check my wiring" button they have to choose to press. **Leaning: after the first
+failed Load** — they meet the real error first, and get help once it has actually cost them
+something.
+
+### Where LAB_FILES comes from
+
+The mission YAML, which ships in `gini-core`. So a new assignment is a `gini-core` release — not a
+container image, and not a `gini-toolkit` release either. That is the whole point of
+`docs/design/xv6-student-code.md`: the image is a toolchain and a pristine tree, and an assignment
+is data.
+
 ## What GINI must do that it does not do yet
 
 Grouped by what each unblocks. Nothing here is started.
@@ -41,10 +136,15 @@ Grouped by what each unblocks. Nothing here is started.
 - `_touch_sources` in the agent must walk `LAB_FILES`, or the stale-build fix does not cover
   these files and a Load can silently load the previous kernel.
 
-### The buttons the handouts tell students to press
-- **Load** and **Revert** exist (`/rebuild`, `/revert`) but the only UI for them is the shadow bar
-  on the Scheduler face. A syscall lab needs them, with the scoped compile log underneath.
+### The `My Code` face (see above)
+- The face itself: file list with per-file state, Revert, Load, the scoped compile log, and the
+  wiring check. New band on the Machine Lab home page.
+- Lift the shadow bar's Load/Revert/log out of `machine_lab.py`'s Scheduler face into a reusable
+  widget, so shadows and lab files share one implementation rather than two that drift.
 - Per-file Revert: `/revert?sub=` is keyed to the three shadow subsystems, not to a lab file list.
+- "Reveal in Finder/Explorer" for the lab folder.
+- The wiring check needs a small parser per lab — for a syscall lab, five patterns over the
+  student's own files. It belongs in `core/` (pure, testable) with the face only rendering it.
 
 ### The feedback loop the handouts are built around
 - **`SyscallLab(name_extra=…)` is unwired.** Every "by name" claim in both handouts depends on it.
