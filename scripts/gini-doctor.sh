@@ -310,44 +310,42 @@ probe_live() {
         emit live.skipped "no engine answering"
         return
     fi
-    # An image that is already here, so a broken pull does not mask everything else. Falls back to
-    # pulling the smallest public image, and reports the pull as its own fact — a failing pull is
-    # a finding, not a reason to stop.
+    # CAN THIS MACHINE TALK TO A REGISTRY? Asked on every machine, always, even when it already
+    # has every image it needs. The first version skipped this whenever a local image was present,
+    # which meant the WORKING machine never answered it — and "can the broken one pull?" is not a
+    # question you can answer without knowing whether the working one can.
+    _perr=$($_e pull docker.io/library/busybox:latest 2>&1)
+    if [ $? -eq 0 ]; then
+        emit live.pull ok
+    else
+        emit live.pull FAILED
+        emit live.pull.error "$(printf '%s' "$_perr" | tail -2 | cut -c1-200)"
+        # Retry with EVERY credential source neutralised. --authfile alone is not enough and
+        # saying so matters: podman falls back to $DOCKER_CONFIG/config.json (default
+        # ~/.docker/config.json) when the authfile has no entry for the registry, so an
+        # "--authfile /dev/null" test still sends the stored docker credential and still fails —
+        # which reads as "not a credential problem" when it is precisely a credential problem.
+        _cfg=${TMPDIR:-/tmp}/gini-doctor-emptycfg.$$
+        mkdir -p "$_cfg" 2>/dev/null
+        printf '{}' > "$_cfg/config.json" 2>/dev/null
+        printf '{}' > "$_cfg/auth.json" 2>/dev/null
+        if DOCKER_CONFIG="$_cfg" REGISTRY_AUTH_FILE="$_cfg/auth.json" \
+           $_e pull --authfile "$_cfg/auth.json" docker.io/library/busybox:latest >/dev/null 2>&1
+        then
+            emit live.pull.without_creds "OK — a STORED CREDENTIAL is what blocks the pull"
+        else
+            emit live.pull.without_creds "still fails with no credentials at all"
+        fi
+        rm -rf "$_cfg" 2>/dev/null
+    fi
+
+    # An image for the round trip: one already here, so a broken pull does not mask everything
+    # else on a machine that has plenty of images and one bad credential.
     _img=$($_e images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
            | grep -v '<none>' | head -1)
     if [ -z "$_img" ]; then
-        # Fully qualified on purpose: a short name failing is a registries.conf problem and a
-        # qualified name failing is something else, and the two want opposite fixes.
-        _perr=$($_e pull docker.io/library/busybox:latest 2>&1)
-        if [ $? -eq 0 ]; then
-            _img=docker.io/library/busybox:latest
-            emit live.pull ok
-        else
-            emit live.pull FAILED
-            # WHY it failed is the entire question on a machine with an empty image store, and
-            # the first version of this reported only "FAILED" — which named the symptom the
-            # machine was already showing and nothing else. The last line carries the reason.
-            emit live.pull.error "$(printf '%s' "$_perr" | tail -2 | cut -c1-200)"
-            # Repeat the pull with an EMPTY auth file. If that works, the registry is reachable
-            # and the credential is the problem — which is a fix the user can apply themselves,
-            # in their own home directory, without an admin.
-            _tmpauth=${TMPDIR:-/tmp}/gini-doctor-empty-auth.$$
-            printf '{}' > "$_tmpauth" 2>/dev/null
-            if $_e pull --authfile "$_tmpauth" docker.io/library/busybox:latest >/dev/null 2>&1; then
-                emit live.pull.without_creds "OK — the stored credential is what blocks the pull"
-                _img=docker.io/library/busybox:latest
-                emit live.pull ok-without-creds
-            else
-                emit live.pull.without_creds "also fails — not a credential problem"
-            fi
-            rm -f "$_tmpauth" 2>/dev/null
-            if [ -z "$_img" ]; then
-                emit live.skipped "no local image and pull failed"
-                return
-            fi
-        fi
-    else
-        emit live.pull "skipped (using local $_img)"
+        emit live.skipped "no local image to exercise, and the pull above failed"
+        return
     fi
     emit live.image "$_img"
 
@@ -465,12 +463,7 @@ summarise() {
 
     v=$(get live.pull)
     if [ -n "$v" ]; then
-        case "$v" in
-            ok) s=ok ;;
-            skipped*) s=info ;;           # an image was already here; nothing to prove
-            ok-without-creds) s=warn ;;
-            *) s=FAIL ;;
-        esac
+        case "$v" in ok) s=ok ;; *) s=FAIL ;; esac
         line "pull from a registry" "$s" "$v"
         w=$(get live.pull.error);        [ -n "$w" ] && line "  pull error" "info" "$w"
         w=$(get live.pull.without_creds);[ -n "$w" ] && line "  without credentials" "info" "$w"
