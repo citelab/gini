@@ -1,0 +1,52 @@
+# Publishes gini-doctor to PyPI.
+#
+# Independent of the other three: it depends on nothing, so unlike teaching-center.yml there is no
+# ordering to respect on a first release.
+name: publish gini-doctor
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade build
+      - run: python -m build --sdist --wheel --outdir dist/ doctor/
+
+      # The shell script IS the package. Left out of the wheel this installs cleanly and then the
+      # command fails on first use, on the machine least able to work out why — so it is checked
+      # here rather than discovered in a lab.
+      - name: the wheel carries the script it runs
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          w = glob.glob("dist/gini_doctor-*.whl")[0]
+          z = zipfile.ZipFile(w)
+          names = z.namelist()
+          assert "gini_doctor/gini-doctor.sh" in names, f"the probe script is missing: {names}"
+          body = z.read("gini_doctor/gini-doctor.sh").decode()
+          assert body.lstrip().startswith("#!/bin/sh"), "not the shell script we expect"
+          assert "GROUPS_DEFAULT" in body, "the script in the wheel is not the doctor"
+
+          # Zero dependencies is this package's entire point: a diagnostic that has to install
+          # something first can be unavailable for the same reason as its patient. PySide6 in
+          # particular must never arrive here — an admin checking thirty machines is not
+          # installing Qt on them.
+          meta = z.read([n for n in names if n.endswith("METADATA")][0]).decode()
+          reqs = [l for l in meta.splitlines() if l.startswith("Requires-Dist:")]
+          assert not reqs, f"gini-doctor must depend on nothing, got: {reqs}"
+          print(w, "ok")
+          PY
+      - uses: pypa/gh-action-pypi-publish@release/v1

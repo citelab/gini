@@ -49,8 +49,13 @@ Three guards, each of which has already cost something here:
 
 ## Diagnosing a lab
 
-`gini-doctor.sh` exists for the case where one machine runs GINI and the others do not, and
-nobody can say what is different about the one that works. It collects the same ~80 facts
+`gini-doctor.sh` here is a **wrapper**: the script itself lives in the `gini-doctor`
+distribution at `doctor/src/gini_doctor/gini-doctor.sh`, which is what ships inside that wheel.
+One file, reachable as `sh ./scripts/gini-doctor.sh` from a checkout and as `gini-doctor` after
+`pipx install gini-doctor`.
+
+It exists for the case where one machine runs GINI and the others do not, and nobody can say what
+is different about the one that works. It collects the same ~80 facts
 everywhere in a `key<TAB>value` form and then prints only the fields that disagree, so thirty
 machines reduce to a handful of lines.
 

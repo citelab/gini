@@ -4,8 +4,19 @@
 and podman compose. "Nothing is special about tr-open-12" is almost certainly true — and that is
 the point: whatever differs is something nobody chose, so nobody remembers it.
 
-`scripts/gini-doctor.sh` collects the same ~80 facts on every machine and then shows only the
-ones that disagree. It needs nothing installed: `--fanout` pipes the script itself over ssh.
+`gini-doctor` collects the same ~80 facts on every machine and then shows only the ones that
+disagree. Three ways in, all the same script:
+
+```bash
+pipx install gini-doctor && gini-doctor        # an admin with no GINI checkout
+sh scripts/gini-doctor.sh                      # from a checkout
+curl -fsSL https://raw.githubusercontent.com/citelab/gini/master/doctor/src/gini_doctor/gini-doctor.sh | sh
+```
+
+`gini-doctor` depends on nothing — not even `gini-core` — because the machine that needs a
+diagnostic is one where something is already wrong, and anything it had to install first is a way
+for it to be unavailable exactly when it is wanted. `--fanout` pipes the script itself over ssh,
+so the hosts need nothing either.
 
 ## Run it
 

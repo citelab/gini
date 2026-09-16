@@ -53,12 +53,15 @@ fi
 case "${1:-install}" in
 
 install)
-  echo "Installing gini-core, gini-toolkit and gini-teaching-center (editable)…"
+  echo "Installing gini-core, gini-toolkit, gini-teaching-center and gini-doctor (editable)…"
   # core FIRST: the other two depend on it, and installing them first would pull the published
   # gini-core from PyPI over the top of your checkout — the exact confusion this avoids.
   $PY -m pip install -e ./core
   $PY -m pip install -e ./frontend-ng
   $PY -m pip install -e ./teaching-center
+  # Depends on nothing, so order does not matter — but it is a distribution in this checkout and
+  # `dev.sh install` claiming to install them all has to mean it.
+  $PY -m pip install -e ./doctor
   echo
   "$0" check
   ;;
@@ -91,7 +94,7 @@ check)
   # Look next to the interpreter FIRST. `command -v` only sees an activated venv, so an install
   # into a venv you have not sourced would report "not on PATH" and read as a failed install.
   bindir="$(dirname "$($PY -c 'import sys; print(sys.executable)')")"
-  for c in gbuilder gini-tc gini-teaching-center; do
+  for c in gbuilder gini-tc gini-teaching-center gini-doctor; do
     if [ -x "$bindir/$c" ]; then
       printf '  %-22s %s\n' "$c" "$bindir/$c"
     else
