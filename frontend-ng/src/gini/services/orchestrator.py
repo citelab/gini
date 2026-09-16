@@ -1258,6 +1258,15 @@ def _startup_ms(created: str, started: str) -> float | None:
     return round((s - c).total_seconds() * 1000.0, 1)
 
 
+def _env_flags(env: dict | None) -> list:
+    """`{"A": "b"}` -> `["-e", "A=b"]`. Always placed BEFORE the container id or service name:
+    after it they would be arguments to the command being run, not variables for it."""
+    flags: list = []
+    for k, v in (env or {}).items():
+        flags += ["-e", f"{k}={v}"]
+    return flags
+
+
 def exec_argv_for(orch, service: str, env: dict | None = None) -> list:
     """argv to run a command inside one service, given anything orchestrator-shaped.
 
@@ -1270,11 +1279,8 @@ def exec_argv_for(orch, service: str, env: dict | None = None) -> list:
     fn = getattr(orch, "exec_argv", None)
     if callable(fn):
         return list(fn(service, env))
-    flags: list = []
-    for k, v in (env or {}).items():
-        flags += ["-e", f"{k}={v}"]
     return [*list(getattr(orch, "_dc", None) or ["docker", "compose"]),
-            "exec", "-T", *flags, service]
+            "exec", "-T", *_env_flags(env), service]
 
 
 class Orchestrator:
@@ -1372,19 +1378,20 @@ class Orchestrator:
     def exec_argv(self, service: str, env: dict | None = None) -> list:
         """argv to run a command inside one service, without a TTY.
 
-        Engine-native when the container can be found by label — that is immune to the provider
-        naming split above and is also a great deal faster, since podman-compose reconstructs
-        every `--env` of the service on its way to the same `podman exec`. Falls back to
-        `compose exec -T` when the lookup comes up empty, so a service that has not been labelled
-        (or an engine that answers `ps` oddly) behaves exactly as it did before.
+        Engine-native whenever an id can be found at all — immune to the provider naming split,
+        and a great deal faster, since podman-compose reconstructs every `--env` of the service
+        on its way to the same `podman exec`.
+
+        Through `_resolve_cid`, so this asks the same question the rest of the class asks. Using
+        `container_id` alone here meant a container that labels could not see but `compose ps -q`
+        could still took the fragile path, while update_cpus and stats got a real id for the same
+        service in the same second. `compose exec -T` remains the last resort, so a service with
+        no id available anywhere behaves exactly as it did before.
         """
-        flags: list = []
-        for k, v in (env or {}).items():
-            flags += ["-e", f"{k}={v}"]
-        cid = self.container_id(service)
+        cid = self._resolve_cid(service)
         if cid:
-            return [*_engine_argv(), "exec", "-i", *flags, cid]
-        return [*self._dc, "exec", "-T", *flags, service]
+            return [*_engine_argv(), "exec", "-i", *_env_flags(env), cid]
+        return [*self._dc, "exec", "-T", *_env_flags(env), service]
 
     def up(self, config: RuntimeConfig, workdir: str | Path,
            auto_internet: bool = True, laptop_id: str = "") -> tuple[bool, str]:

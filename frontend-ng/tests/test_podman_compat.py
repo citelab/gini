@@ -409,3 +409,34 @@ def test_exec_argv_for_prefers_a_real_orchestrator(monkeypatch):
     monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("abc123", []))
     o = _orch_with_engine(monkeypatch)
     assert mod_orch.exec_argv_for(o, "m1") == ["podman", "exec", "-i", "abc123"]
+
+
+def test_exec_uses_an_id_compose_can_find_even_when_labels_cannot(monkeypatch):
+    """`exec_argv` asks the same question as every other id lookup in the class.
+
+    It used to call `container_id` (labels only) while `update_cpus` and the stats sampler went
+    through `_resolve_cid` (labels, then `compose ps -q`). So a container the labels could not
+    see but compose could took the FRAGILE path — `compose exec` — in the same second that a
+    sibling method got a real id for the same service.
+    """
+    def fake_run(cmd, **_k):
+        if any(str(a).startswith("label=") for a in cmd):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")   # labels: blind
+        return types.SimpleNamespace(returncode=0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(mod_orch.subprocess, "run", fake_run)
+    o = _orch_with_engine(monkeypatch)
+    assert o.exec_argv("m1") == ["podman", "exec", "-i", "abc123"]
+
+
+def test_exec_still_falls_back_when_no_id_exists_anywhere(monkeypatch):
+    monkeypatch.setattr(mod_orch.subprocess, "run", _ps_returning("", []))
+    o = _orch_with_engine(monkeypatch)
+    assert o.exec_argv("m1") == ["podman", "compose", "exec", "-T", "m1"]
+
+
+def test_env_flags_have_one_definition(monkeypatch):
+    """Three copies of this loop had drifted into orchestrator and main_window."""
+    assert mod_orch._env_flags(None) == []
+    assert mod_orch._env_flags({}) == []
+    assert mod_orch._env_flags({"A": "b", "C": "d"}) == ["-e", "A=b", "-e", "C=d"]

@@ -3637,14 +3637,17 @@ class MainWindow(QMainWindow):
         instead of letting the compose provider guess its name — see Orchestrator.exec_argv.
         Falls back to `compose exec -T` only when there is no orchestrator to ask.
         """
+        import types
+
+        from ..services.orchestrator import exec_argv_for
         orch = (getattr(self._gloader, "orchestrator", None)
                 or getattr(self.ctx, "orchestrator", None))
-        if orch is not None and hasattr(orch, "exec_argv"):
-            return list(orch.exec_argv(service, env))
-        flags: list = []
-        for k, v in (env or {}).items():
-            flags += ["-e", f"{k}={v}"]
-        return [*self._compose_argv(), "exec", "-T", *flags, service]
+        # `exec_argv_for` takes anything orchestrator-shaped, so the no-orchestrator case is one
+        # too: a stand-in carrying the compose prefix this window would have used. That keeps a
+        # single definition of "how an exec is spelled" instead of a second copy here that could
+        # drift from it.
+        return exec_argv_for(orch if orch is not None
+                             else types.SimpleNamespace(_dc=self._compose_argv()), service, env)
 
     def element_query(self, device_name: str, command: str) -> str:
         """Run a one-shot console command against a network element (needs Docker up)."""

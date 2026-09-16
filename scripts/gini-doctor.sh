@@ -620,12 +620,24 @@ case "${1:-}" in
   --compare-all) shift; SHOWALL=1 compare "$@" ;;
   --fanout)  shift; [ $# -ge 1 ] || { echo "usage: $0 --fanout hosts.txt [outdir]" >&2; exit 2; }
              fanout "$@" ;;
-  --report)  NORUN=${NORUN:-0}; [ "${2:-}" = "--no-run" ] && NORUN=1; run_probes ;;
-  --no-run)  NORUN=1
-             _f="gini-doctor-$(hostname 2>/dev/null || echo host).txt"
-             run_probes > "$_f"; summarise "$_f" ;;
   -h|--help) sed -n '2,20p' "$SELF" ;;
-  "")        _f="gini-doctor-$(hostname 2>/dev/null || echo host).txt"
-             run_probes > "$_f"; summarise "$_f" ;;
+  --report|--no-run|"")
+             # The probe modes take their flags in any order: `--report --no-run` and
+             # `--no-run --report` were not the same command, which is the kind of thing nobody
+             # discovers until they are typing it on the twentieth machine.
+             NORUN=0; REPORT=0
+             for _a in "$@"; do
+                 case "$_a" in
+                     --no-run) NORUN=1 ;;
+                     --report) REPORT=1 ;;
+                     *) echo "unknown option: $_a (try --help)" >&2; exit 2 ;;
+                 esac
+             done
+             if [ "$REPORT" = "1" ]; then
+                 run_probes
+             else
+                 _f="gini-doctor-$(hostname 2>/dev/null || echo host).txt"
+                 run_probes > "$_f"; summarise "$_f"
+             fi ;;
   *)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
 esac
