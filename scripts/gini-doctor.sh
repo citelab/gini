@@ -114,6 +114,34 @@ probe_engine() {
             emit "$_key" "$(podman info --format "{{.$_tpl}}" 2>/dev/null || echo '?')"
         done
         emit podman.images.count "$(podman images -q 2>/dev/null | wc -l | tr -d ' ')"
+
+        # Does the id mapping podman is ACTUALLY using match what /etc/subuid grants today?
+        #
+        # These come apart silently. The storage records its mapping when it is first created, so
+        # a machine whose subuid range was assigned (or changed) afterwards keeps the old one, and
+        # every field a comparison can see still looks right: subuid is present, the range is
+        # valid, podman info is happy. It surfaces only when a layer wants a high uid:
+        #
+        #   potentially insufficient UIDs or GIDs available in user namespace
+        #   (requested 65534:65534 for /home) … lchown /home: invalid argument
+        #
+        # which reads as a subuid problem and is not one — the range is fine, the STORAGE is
+        # stale. `podman system migrate` is the fix and podman names it in the error, but only
+        # after a pull gets far enough to unpack, so a machine with an unrelated earlier failure
+        # (a bad credential, say) never gets to see it.
+        _map=$(podman unshare cat /proc/self/uid_map 2>/dev/null | awk 'NR==2{print $2}')
+        _sub=$(grep "^$(id -un 2>/dev/null):" /etc/subuid 2>/dev/null | head -1 | cut -d: -f2)
+        emit podman.idmap.inuse "${_map:-unknown}"
+        emit podman.idmap.subuid "${_sub:-unknown}"
+        if [ -n "$_map" ] && [ -n "$_sub" ]; then
+            if [ "$_map" = "$_sub" ]; then
+                emit podman.idmap.matches "yes"
+            else
+                emit podman.idmap.matches "NO — /etc/subuid grants $_sub, podman storage uses $_map; run: podman system migrate"
+            fi
+        else
+            emit podman.idmap.matches "unknown"
+        fi
     elif have podman; then
         emit podman.info.ok "NO — podman is installed but not answering"
     fi
@@ -439,6 +467,12 @@ summarise() {
     v=$(get subuid)
     case "$v" in MISSING*) s=FAIL ;; n/a*) s=info ;; *) s=ok ;; esac
     line "subuid mapping" "$s" "$v"
+
+    v=$(get podman.idmap.matches)
+    if [ -n "$v" ]; then
+        case "$v" in yes) s=ok ;; unknown) s=info ;; *) s=FAIL ;; esac
+        line "podman id mapping" "$s" "$v"
+    fi
 
     v=$(get xdg.runtime.exists)
     case "$v" in NO) s=warn ;; *) s=ok ;; esac

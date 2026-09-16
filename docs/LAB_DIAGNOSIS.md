@@ -47,12 +47,13 @@ image count — come back with `--compare-all`.
 | `compose.provider` | **The most likely answer.** `podman compose` is a pass-through, and which provider answers is a real behavioural fork: podman-compose and docker-compose v2 disagree about container naming, about what `ps --format json` prints, and about whether exit 0 means anything. Two machines "both having podman compose" are not the same machine. | Install the same provider everywhere. The docker-compose v2 binary is the better one. |
 | `compose.podman_compose.version` | 1.0.6 names containers `project_service_1`; later versions moved to `project-service-1`. | Pin one version across the lab. |
 | `podman.network.backend` | `cni` vs `netavark`. Container-to-container DNS differs between them, which is exactly what a drawn topology depends on. | Standardise on `netavark`. |
-| `subuid` / `subgid` | `MISSING` means rootless podman cannot map users and every container fails at start. | `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>` (admin). |
+| `podman.idmap.matches` | **`NO` is the one that hides.** Podman records its id mapping when the storage is first created, so a machine whose subuid range was assigned or changed afterwards keeps the old one — and every visible field still looks right. It surfaces only when a layer wants a high uid: *"potentially insufficient UIDs or GIDs available … lchown /home: invalid argument"*, which reads as a subuid problem and is not one. The range is fine; the storage is stale. | `podman system migrate` (as the user, no admin). |
+| `subuid` / `subgid` | `MISSING` means rootless podman cannot map users and every container fails at start. Ranges **differing between machines is normal** and not itself a fault — what matters is `podman.idmap.matches`. | `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>` (admin). |
 | `xdg.runtime.exists` | `NO` — usually an ssh login with no systemd user session. Podman falls back to other paths for its socket and auth file, so behaviour changes with how you logged in. | `loginctl enable-linger <user>` (admin), and check `linger` in the report. |
 | `linger` | Without it, the user's containers are killed at logout. | `loginctl enable-linger <user>`. |
 | `cgroup2.user.controllers` | No `cpu` here means a CPU cap cannot be applied, and sized elements ask for one. | Enable cgroup delegation for the user slice. |
 | `podman.storage.driver` | `vfs` instead of `overlay` is far slower and much larger on disk; usually means `fuse-overlayfs` is missing. | Install `fuse-overlayfs`. |
-| `auth./etc/containers/auth.json` | `creds=1` on a file nobody meant to create turns an anonymous pull into `invalid username/password`. This already bit this rollout. | Remove or empty it (admin). |
+| `auth…config.json` / `auth…auth.json` | `creds=1` on a file nobody meant to create turns an anonymous pull into `invalid username/password`. On a lab with **shared home directories this breaks every machine at once**, while the one whose local image store was filled in beforehand never notices. Check `live.pull.without_creds`. | Move the file aside (it is in the user's own home — no admin). |
 | `reg…unqualified` / `shortname` | Decides whether a bare `alpine` resolves. A machine that cannot resolve short names cannot build the machine image. | Match tr-open-12's `/etc/containers/registries.conf`. |
 | `lib.libxcb-cursor` | `0` means gBuilder will not start at all, with an error naming a Qt platform plugin rather than a package. | `apt install libxcb-cursor0` (admin). |
 | `pkg.gini-*` | Different GINI versions, or one machine on an editable checkout and the rest on PyPI. Worth ruling out before blaming the OS. | `./scripts/dev.sh check` on each. |
@@ -63,6 +64,9 @@ image count — come back with `--compare-all`.
 
 Four facts, in order, and the first one that fails is the real problem:
 
+0. `live.pull` — can it reach a registry and unpack what it gets? Two different failures wear
+   the same "pull failed" label: a credential (`live.pull.without_creds` says so) and a stale id
+   mapping (`podman.idmap.matches` says so). Fixing the first can reveal the second.
 1. `live.run` — can this machine run a container at all?
 2. `live.container.by_label` — did `compose up` actually create one? (Exit 0 does not mean it did.)
 3. `live.exec.engine` — can we run a command inside it the way gBuilder now does?
