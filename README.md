@@ -315,6 +315,8 @@ so a program inside them reaches services by name (`psql -h database1`,
 core/               gini-core — the domain model + proof format, no Qt (PyPI: gini-core)
 frontend-ng/        gBuilder 6.0 — PySide6 app (ui · agent · runtime · services) (PyPI: gini-toolkit)
 teaching-center/    the course server, no Qt (PyPI: gini-teaching-center)
+doctor/             gini-doctor — diagnose a machine that should run GINI, no dependencies at
+                    all (PyPI: gini-doctor)
 scripts/            install, test, release, container images — see scripts/README.md
 backend/
   src/grouter/      the real C gRouter (~20k lines) incl. OpenFlow/SDN mode
@@ -359,8 +361,8 @@ versions all three packages at once**:
 ```
 
 Pushing the tag is what publishes: the workflows in `.github/workflows/` fire on `v*` and upload
-`gini-core`, `gini-toolkit` and `gini-teaching-center` to PyPI via trusted publishing, so there is
-no API token anywhere.
+`gini-core`, `gini-toolkit`, `gini-teaching-center` and `gini-doctor` to PyPI via trusted
+publishing, so there is no API token anywhere.
 
 Container images are **not** built by a release — they are slow and want a machine of each
 architecture, since these images compile a C router and a RISC-V toolchain:

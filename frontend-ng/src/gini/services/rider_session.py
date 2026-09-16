@@ -20,6 +20,7 @@ import subprocess
 import threading
 
 from ..domain import riders as _riders
+from .orchestrator import exec_argv_for
 
 # donor neighbours a ping/http rider can auto-target (reachable by service name)
 _TARGETABLE = {"host", "router", "instance", "container", "kinstance", "web_app", "firewall"}
@@ -104,7 +105,7 @@ class RiderSessions:
         pidfile = f"/tmp/gini-rider-{rider_id}.pid"
         # write our PID, then exec the tool (so `stop` can kill exactly this process in the container)
         wrapped = ["sh", "-lc", f"echo $$ > {pidfile}; exec {shlex.join(argv)}"]
-        cmd = [*self.orch._dc, "exec", "-T", service, *wrapped]
+        cmd = [*exec_argv_for(self.orch, service), *wrapped]
         wd = getattr(self.orch, "workdir", None)
         try:
             proc = self._popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -154,7 +155,7 @@ class RiderSessions:
         wd = getattr(self.orch, "workdir", None)
         try:                                             # kill the tool INSIDE the container
             subprocess.run(
-                [*self.orch._dc, "exec", "-T", sess.service, "sh", "-lc",
+                [*exec_argv_for(self.orch, sess.service), "sh", "-lc",
                  f"kill $(cat {sess.pidfile}) 2>/dev/null; rm -f {sess.pidfile}"],
                 cwd=str(wd) if wd else None, capture_output=True, timeout=self.timeout)
         except Exception:                                # noqa: BLE001

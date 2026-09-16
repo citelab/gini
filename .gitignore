@@ -65,3 +65,6 @@ tc-data/
 teaching-center/example/data/
 *.db-wal
 *.db-shm
+
+# gini-doctor reports (machine-specific, collected ad hoc)
+gini-doctor-*.txt

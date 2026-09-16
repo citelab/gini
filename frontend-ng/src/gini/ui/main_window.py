@@ -2966,6 +2966,7 @@ class MainWindow(QMainWindow):
         address on that machine's own segment."""
         import subprocess
         from ..services.compiler import _role, _svc, overlay_host_lines
+        from ..services.orchestrator import exec_argv_for
         orch = getattr(self.ctx, "orchestrator", None)
         if orch is None:
             return
@@ -2975,10 +2976,6 @@ class MainWindow(QMainWindow):
         addressing = getattr(self.ctx, "addressing", {}) or {}
         if len(overlay_host_lines(addressing)) < 2:
             return
-        dc = list(getattr(orch, "_dc", None) or [])
-        if not dc:
-            from ..setup.runtime import compose_cli, compose_error
-            dc = list(compose_cli())
         wd = getattr(orch, "workdir", None)
         devs = [d for d in self.ctx.topology.devices.values()
                 if _role(d.type_key) in ("machine", "router", "compute")]
@@ -3011,7 +3008,7 @@ class MainWindow(QMainWindow):
             import time
             failed = []
             for dev in devs:
-                cmd = [*dc, "exec", "-T", _svc(dev.name), "sh", "-lc", scripts[dev.name]]
+                cmd = [*exec_argv_for(orch, _svc(dev.name)), "sh", "-lc", scripts[dev.name]]
                 err = ""
                 # Retry: this fires right after `up` returns, and a container may not be accepting
                 # execs yet — native Linux docker returns from `up` far sooner than Docker Desktop,
@@ -3025,7 +3022,14 @@ class MainWindow(QMainWindow):
                             break
                         # Not `stderr[:120]`: on Podman that is the provider banner every
                         # time, and the real failure is further down. See runtime.compose_error.
-                        err = compose_error(r.stderr) or f"exit {r.returncode}"
+                        # Module-scope `_runtime`, never a function-scope import: this used to be
+                        # a bare `compose_error`, imported inside the `if not dc:` branch above —
+                        # so on any engine where the orchestrator already knows its compose CLI
+                        # (the normal path) the branch never ran, the closure cell was empty, and
+                        # the NameError landed in the `except` below and was REPORTED AS THE
+                        # DEVICE'S ERROR. Every machine then failed with "cannot access free
+                        # variable 'compose_error'", which hid whatever had actually gone wrong.
+                        err = _runtime.compose_error(r.stderr) or f"exit {r.returncode}"
                     except Exception as e:       # noqa: BLE001 — best-effort
                         err = str(e)[:120]
                     time.sleep(0.75 * (attempt + 1))
@@ -3623,8 +3627,27 @@ class MainWindow(QMainWindow):
         orch = getattr(self._gloader, "orchestrator", None) or getattr(self.ctx, "orchestrator", None)
         if orch is not None:
             return list(getattr(orch, "_dc", []))
-        from ..setup.runtime import compose_cli, compose_error
+        from ..setup.runtime import compose_cli
         return list(compose_cli())
+
+    def _exec_argv(self, service: str, env: dict | None = None) -> list:
+        """argv to run something inside one service's container, without a TTY.
+
+        Prefers the orchestrator's engine-native lookup, which finds the container by LABEL
+        instead of letting the compose provider guess its name — see Orchestrator.exec_argv.
+        Falls back to `compose exec -T` only when there is no orchestrator to ask.
+        """
+        import types
+
+        from ..services.orchestrator import exec_argv_for
+        orch = (getattr(self._gloader, "orchestrator", None)
+                or getattr(self.ctx, "orchestrator", None))
+        # `exec_argv_for` takes anything orchestrator-shaped, so the no-orchestrator case is one
+        # too: a stand-in carrying the compose prefix this window would have used. That keeps a
+        # single definition of "how an exec is spelled" instead of a second copy here that could
+        # drift from it.
+        return exec_argv_for(orch if orch is not None
+                             else types.SimpleNamespace(_dc=self._compose_argv()), service, env)
 
     def element_query(self, device_name: str, command: str) -> str:
         """Run a one-shot console command against a network element (needs Docker up)."""
@@ -3645,18 +3668,18 @@ class MainWindow(QMainWindow):
             # wedge the serial rctl server: dead console + empty HUD queries).
             if is_router:
                 # the real C gRouter: run one CLI command over its control socket
-                cmd = [*self._compose_argv(), "exec", "-T", svc, "timeout", "12",
+                cmd = [*self._exec_argv(svc), "timeout", "12",
                        "python3", "/build/grouter-build/grconsole.py",
                        f"/run/{svc}.ctl", "--once", command]
             else:
-                cmd = [*self._compose_argv(), "exec", "-T", "fabric", "timeout", "12",
+                cmd = [*self._exec_argv("fabric"), "timeout", "12",
                        "python", "-m", "dataplane.console", svc, command]
             r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
                                text=True, encoding="utf-8", errors="replace", timeout=15)
             # Podman announces its compose provider on stderr for every command, so a command
             # with no output would "return" that banner as its result. See runtime.compose_error.
             return ((r.stdout or "").strip()
-                    or compose_error(r.stderr, limit=4000)
+                    or _runtime.compose_error(r.stderr, limit=4000)
                     or "(no output)")
         except Exception as e:
             return f"(query failed: {e})"
@@ -3673,7 +3696,7 @@ class MainWindow(QMainWindow):
         from ..services.compiler import _svc
         try:
             svc = _svc(device_name)
-            r = subprocess.run([*self._compose_argv(), "exec", "-T", svc, "sh", "-c", command],
+            r = subprocess.run([*self._exec_argv(svc), "sh", "-c", command],
                                cwd=self._workdir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
             return r.stdout or ""
         except Exception:
@@ -3727,9 +3750,9 @@ class MainWindow(QMainWindow):
         fn = _svc(dev.name)
 
         def work():
-            cmd = [*self._compose_argv(), "exec", "-T",
-                   "-e", f"GINI_FN={fn}", "-e", f"GINI_METHOD={method}",
-                   "-e", f"GINI_BODY={body}", "faas", "python", "-c", _FAAS_INVOKE]
+            cmd = [*self._exec_argv("faas", {"GINI_FN": fn, "GINI_METHOD": method,
+                                             "GINI_BODY": body}),
+                   "python", "-c", _FAAS_INVOKE]
             try:
                 r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace", timeout=30)
@@ -3739,7 +3762,7 @@ class MainWindow(QMainWindow):
                     warm = "cold start" if d.get("cold") else "warm"
                     text = f"HTTP {d['code']} · {d['ms']} ms · {warm}\n\n{d['body']}"
                 else:
-                    text = "(no response)\n" + compose_error(r.stderr, limit=4000)
+                    text = "(no response)\n" + _runtime.compose_error(r.stderr, limit=4000)
             except Exception as e:
                 text = f"Invoke failed: {e}"
             self.ctx.bus.function_invoke_result.emit(device_id, text)

@@ -158,6 +158,7 @@ cat <<INFO
     .github/workflows/gini-core.yml       -> PyPI gini-core $VERSION
     .github/workflows/gini-toolkit.yml    -> PyPI gini-toolkit $VERSION
     .github/workflows/teaching-center.yml -> PyPI gini-teaching-center $VERSION
+    .github/workflows/gini-doctor.yml     -> PyPI gini-doctor $VERSION
 
   Container images are NOT built by this — they are slow and need both machines:
     ./scripts/images.sh build $VERSION      (on each machine)

@@ -427,6 +427,65 @@ def test_docker_missing_from_PATH_says_so_and_names_the_cause():
     assert said and "PATH" in said[0] and "terminal" in said[0]
 
 
+# Two failures from the Trottier rollout, September 2026. Both are quoted verbatim, because the
+# point of these tests is that the exact strings the engines produce are recognised — a
+# paraphrase would pass while the real thing went unrecognised.
+#
+# These sit alongside `test_a_credential_helper_failure_reaches_the_student_verbatim`, which says
+# GINI must not classify a failure it cannot fix. That still holds, and the line between them is
+# the point: for these two GINI knows the exact command that fixes it, verified on the machines
+# that produced them. The raw text is never edited — the remedy is APPENDED — so a failure we
+# have not seen still arrives unedited and unexplained rather than wearing a guess.
+MIGRATE_ERR = (
+    'Error: copying system image from manifest list: writing blob: adding layer with blob '
+    '"sha256:b05093807bb0": processing tar file(potentially insufficient UIDs or GIDs available '
+    'in user namespace (requested 65534:65534 for /home): Check /etc/subuid and /etc/subgid if '
+    'configured locally and run "podman system migrate": lchown /home: invalid argument): '
+    'exit status 1')
+AUTH_ERR = (
+    'Error: initializing source docker://busybox:latest: unable to retrieve auth token: '
+    'invalid username/password: unauthorized: incorrect username or password')
+
+
+def test_a_stale_id_mapping_is_answered_with_the_command_that_fixes_it():
+    """The range in /etc/subuid was valid; podman's storage remembered an older one.
+
+    The message reads as a subuid problem and is not one, which is why it needs translating: a
+    student told to "check /etc/subuid" looks at a file that is already correct.
+    """
+    from gini.setup.images import pull_advice
+    a = pull_advice(MIGRATE_ERR)
+    assert "podman system migrate" in a
+    assert "stops running containers" in a, "it ends a running lab; that must not be a surprise"
+
+
+def test_a_credential_blocking_a_public_pull_names_the_file():
+    from gini.setup.images import pull_advice
+    a = pull_advice(AUTH_ERR)
+    assert "config.json" in a
+    assert "administrator" in a, "the fix is in the user's own home — say so"
+
+
+def test_an_unrecognised_failure_gets_no_advice_at_all():
+    """The rule the credential-helper test set, kept: silence rather than a guess."""
+    from gini.setup.images import pull_advice
+    assert pull_advice("error: no space left on device") == ""
+    assert pull_advice("") == ""
+    assert pull_advice('error getting credentials - err: exec: "docker-credential-desktop"') == ""
+
+
+def test_advice_is_appended_and_never_replaces_what_the_engine_said():
+    import subprocess as sp
+    said = {}
+    images.pull_images(
+        [XV6],
+        run=lambda cmd, **kw: sp.CompletedProcess(cmd, 1, "", MIGRATE_ERR),
+        on_error=lambda ref, text: said.__setitem__(ref, text))
+    text = said.get(XV6, "")
+    assert "lchown /home: invalid argument" in text, "the evidence survives"
+    assert "podman system migrate" in text, "and the remedy is there too"
+
+
 def test_the_reason_is_the_most_specific_line_docker_printed():
     """Docker puts the useful part last, after a preamble that says nothing."""
     from gini.setup.images import _last_line
@@ -434,6 +493,10 @@ def test_the_reason_is_the_most_specific_line_docker_printed():
         == "error: no space left on device"
     assert _last_line("") == "", "silence must read as silence, not as an explanation"
     assert len(_last_line("x" * 900)) <= 300         # it lands in a dialog
+    # And when it has to cut, it keeps the END: these messages nest outwards, so the specific
+    # part is last — the same reason the last LINE is the one chosen.
+    long_one = "outer wrapper: " + "x" * 400 + ": lchown /home: invalid argument"
+    assert _last_line(long_one).endswith("lchown /home: invalid argument")
 
 
 def test_a_tag_that_fails_after_a_good_pull_is_explained():

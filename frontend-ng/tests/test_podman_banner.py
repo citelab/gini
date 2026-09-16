@@ -115,7 +115,11 @@ def test_a_service_with_no_container_is_reported_as_not_started(tmp_path, monkey
     from gini.services.orchestrator import Orchestrator
 
     def fake_run(cmd, **kw):
+        # Two shapes now: the engine's `ps -q --filter label=...service=m1`, asked first, and
+        # compose's `ps -q m1` behind it. Here NEITHER can see m1/m2 — they really are absent.
         svc = cmd[-1]
+        if svc.startswith("label=com.docker.compose.service="):
+            svc = svc.rsplit("=", 1)[-1]
         out = "" if svc in ("m1", "m2") else "abc123\n"
         return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
@@ -123,6 +127,33 @@ def test_a_service_with_no_container_is_reported_as_not_started(tmp_path, monkey
     o = Orchestrator.__new__(Orchestrator)
     o.workdir, o.project = tmp_path, ""
     assert o._not_running(_Cfg(["r1", "m1", "m2"])) == ["m1", "m2"]
+
+
+def test_a_running_container_the_compose_provider_cannot_see_is_not_accused(tmp_path, monkeypatch):
+    """The campus case, and the reason this stopped trusting `compose ps -q` on its own.
+
+    podman-compose answers 0 with an empty stdout when it cannot map a service to a container
+    name — the same failure that made `compose exec` say `no container with name or ID
+    "gini-lab_m1_1" found`. Read literally that means "nothing started", so a healthy topology
+    was reported as every machine failing to launch, one second after a launch that worked.
+    """
+    import gini.services.orchestrator as mod
+    from gini.services.orchestrator import Orchestrator
+
+    asked = []
+
+    def fake_run(cmd, **kw):
+        asked.append(list(cmd))
+        last = cmd[-1]
+        if last.startswith("label=com.docker.compose.service="):
+            return type("R", (), {"returncode": 0, "stdout": "abc123\n", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()   # compose: blind
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    o = Orchestrator.__new__(Orchestrator)
+    o.workdir, o.project = tmp_path, ""
+    assert o._not_running(_Cfg(["r1", "m1", "m2"])) == []
+    assert all("ps" in c for c in asked)
 
 
 def test_everything_running_reports_nothing(tmp_path, monkeypatch):
@@ -378,6 +409,10 @@ def _fake_engine(ids, *, rm_ok=True, after_rm=None, calls=None):
             if rm_ok:
                 state["ids"] = list(after_rm if after_rm is not None else [])
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if "{{.ID}}\t{{.Names}}" in cmd:          # _purge: id + name, so it can say WHICH
+            rows = "".join(f"{i}\tgini-lab_svc{n}_1\n"
+                           for n, i in enumerate(state["ids"], 1))
+            return type("R", (), {"returncode": 0, "stdout": rows, "stderr": ""})()
         if "-aq" in cmd:
             return type("R", (), {"returncode": 0, "stderr": "",
                                   "stdout": "\n".join(state["ids"])})()
@@ -451,9 +486,14 @@ def test_a_launch_clears_debris_before_compose_sees_it(tmp_path, monkeypatch, ca
     calls = []
     monkeypatch.setattr(mod.subprocess, "run", _fake_engine(["old1", "old2"], calls=calls))
 
-    assert o._purge() == 2
+    removed = o._purge()
+    assert len(removed) == 2
+    # the NAMES come back, so the launch message can say which containers those were rather
+    # than only how many — "removed 4 container(s)" next to a failed launch was read as
+    # gBuilder deleting the machines it was starting.
+    assert removed == ["gini-lab_svc1_1", "gini-lab_svc2_1"]
     assert any("rm" in c for c in calls), "leftovers must actually be removed"
-    assert o._purge() == 0, "and a second sweep finds nothing to do"
+    assert o._purge() == [], "and a second sweep finds nothing to do"
 
 
 def test_purging_nothing_is_not_an_error(tmp_path, monkeypatch):
@@ -463,4 +503,4 @@ def test_purging_nothing_is_not_an_error(tmp_path, monkeypatch):
     o = Orchestrator.__new__(Orchestrator)
     o.workdir, o.project = tmp_path, ""
     monkeypatch.setattr(mod.subprocess, "run", _fake_engine([]))
-    assert o._purge() == 0
+    assert o._purge() == []

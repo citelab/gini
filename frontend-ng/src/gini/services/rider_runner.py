@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 
 from ..domain import riders as _riders
+from .orchestrator import exec_argv_for
 
 
 class RiderRunner:
@@ -35,7 +36,7 @@ class RiderRunner:
         return self._svc_cache.get(name.lower(), name.lower())
 
     def _exec(self, service: str, argv: list[str]) -> tuple[int, str]:
-        cmd = [*self.orch._dc, "exec", "-T", service, *argv]
+        cmd = [*exec_argv_for(self.orch, service), *argv]
         wd = getattr(self.orch, "workdir", None)
         try:
             r = subprocess.run(cmd, cwd=str(wd) if wd else None,

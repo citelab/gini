@@ -78,22 +78,44 @@ def test_update_cpus_safe_when_not_running():
     assert ok is False and "not running" in msg
 
 
-def test_update_cpus_builds_docker_update_command(monkeypatch):
-    # verify the live path resolves the container id then calls `docker update --cpus`
+class _R:
+    def __init__(self, out="", rc=0): self.stdout, self.returncode, self.stderr = out, rc, ""
+
+
+def _cpu_run(calls, *, engine_out, compose_out):
+    """An engine that answers the label lookup with `engine_out` and `compose ps -q` with
+    `compose_out`. The two are separate because the container id is now resolved by LABEL
+    first — `compose ps -q` is only the fallback, since podman-compose answers it blind."""
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "compose", "ps"]:
+            return _R(out=compose_out)
+        if "ps" in cmd and any(str(a).startswith("label=") for a in cmd):
+            return _R(out=engine_out)
+        return _R(out="ok")
+    return fake_run
+
+
+def test_update_cpus_resolves_the_container_by_label_then_updates_it(monkeypatch):
     from gini.services.orchestrator import Orchestrator
     import gini.runtime as rt
     import subprocess as sp
     calls = []
+    monkeypatch.setattr(sp, "run", _cpu_run(calls, engine_out="container123\n", compose_out=""))
+    o = Orchestrator(rt.__path__[0]); o.workdir = "/tmp/x"
+    ok, _ = o.update_cpus("wa1", 2.0)
+    assert ok is True
+    assert ["docker", "update", "--cpus", "2", "container123"] in calls
+    assert any(any(str(a) == "label=com.docker.compose.service=wa1" for a in c) for c in calls)
 
-    class R:
-        def __init__(self, out="", rc=0): self.stdout, self.returncode, self.stderr = out, rc, ""
 
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        if cmd[:3] == ["docker", "compose", "ps"]:
-            return R(out="container123\n")
-        return R(out="ok")
-    monkeypatch.setattr(sp, "run", fake_run)
+def test_update_cpus_falls_back_to_compose_when_nothing_is_labelled(monkeypatch):
+    """An unlabelled container still resolves exactly as it did before."""
+    from gini.services.orchestrator import Orchestrator
+    import gini.runtime as rt
+    import subprocess as sp
+    calls = []
+    monkeypatch.setattr(sp, "run", _cpu_run(calls, engine_out="", compose_out="container123\n"))
     o = Orchestrator(rt.__path__[0]); o.workdir = "/tmp/x"
     ok, _ = o.update_cpus("wa1", 2.0)
     assert ok is True

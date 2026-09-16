@@ -12,6 +12,11 @@ Three scripts. Everything you do repeatedly should be one of them.
 | `./scripts/images.sh build <version>` | build + push this machine's architecture to GHCR |
 | `./scripts/images.sh merge <version>` | merge both architectures into one tag |
 | `./scripts/images.sh all <version>` | both architectures on one machine, via QEMU (slow) |
+| `sh ./scripts/gini-doctor.sh` | a menu of probe groups at a terminal; the usual set when piped |
+| `sh ./scripts/gini-doctor.sh --list` | the groups: system, engine, compose, rootless, registry, qt, gini, live, perf, xv6 |
+| `sh ./scripts/gini-doctor.sh --only perf,xv6` | measure the Machine Lab's feed — for "the trap feed stutters on some machines" |
+| `sh ./scripts/gini-doctor.sh --compare r1.txt r2.txt …` | show only the facts on which those machines disagree |
+| `sh ./scripts/gini-doctor.sh --fanout hosts.txt [dir]` | ssh each host, collect a report, then compare — nothing to install on the hosts |
 
 `../commit.sh "message"` still commits and pushes in one go.
 
@@ -41,6 +46,32 @@ Three guards, each of which has already cost something here:
 * **The tests run first.** A release is the worst moment to discover a failure.
 
 ---
+
+## Diagnosing a lab
+
+`gini-doctor.sh` here is a **wrapper**: the script itself lives in the `gini-doctor`
+distribution at `doctor/src/gini_doctor/gini-doctor.sh`, which is what ships inside that wheel.
+One file, reachable as `sh ./scripts/gini-doctor.sh` from a checkout and as `gini-doctor` after
+`pipx install gini-doctor`.
+
+It exists for the case where one machine runs GINI and the others do not, and nobody can say what
+is different about the one that works. It collects the same ~80 facts
+everywhere in a `key<TAB>value` form and then prints only the fields that disagree, so thirty
+machines reduce to a handful of lines.
+
+```bash
+printf '%s\n' tr-open-10 tr-open-11 tr-open-12 > hosts.txt
+sh ./scripts/gini-doctor.sh --fanout hosts.txt reports/
+```
+
+Run it **as the user who runs gBuilder, not as root** — subuid mappings, `XDG_RUNTIME_DIR` and
+lingering are per-user, and a root report describes a machine nobody uses. POSIX sh, no
+dependencies, and `--fanout` pipes the script itself over ssh so nothing has to be deployed
+first. It creates and removes one throwaway compose project and never touches `gini-lab`;
+`--no-run` skips even that.
+
+What a differing field means, and what to do about it, is in
+[`docs/LAB_DIAGNOSIS.md`](../docs/LAB_DIAGNOSIS.md).
 
 ## Container images
 

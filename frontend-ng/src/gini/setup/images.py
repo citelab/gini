@@ -270,7 +270,13 @@ def pull_one(ref: str, on_progress=None, run=None, why=None) -> bool:
     and three versions were installed chasing a message that named the wrong thing. A reason we
     cannot interpret is still worth every guess we could compose.
     """
-    tell = why or (lambda _t: None)
+    _why = why or (lambda _t: None)
+
+    def tell(reason: str) -> None:
+        """Report the reason, plus the remedy when the reason is one we recognise."""
+        hint = pull_advice(reason)
+        _why(f"{reason}\n\n{hint}" if hint else reason)
+
     if on_progress is None:
         try:
             r = (run or subprocess.run)([*engine_cli(), "pull", ref], capture_output=True, text=True,
@@ -313,6 +319,41 @@ def pull_one(ref: str, on_progress=None, run=None, why=None) -> bool:
         return False
 
 
+# Failure shapes seen on real machines, turned into the command that fixes them. The raw line is
+# always kept — it is the evidence, and it is what a student finds podman's own issue tracker
+# with — but a line naming a COMMAND is worth more than a line naming a symptom.
+#
+# Deliberately advice and never action. `podman system migrate` stops every running container, so
+# a Run that quietly repaired the storage would end somebody's lab mid-experiment to fix a
+# problem they did not know they had; and reconfiguring a user's container storage is not a thing
+# "download an image" should do. Detect, say exactly what to type, let them choose the moment.
+_PULL_ADVICE = (
+    (("insufficient uids", "insufficient gids", "system migrate"),
+     "This machine's podman storage was created under a different subuid range than "
+     "/etc/subuid grants now, so unpacking a layer fails. Run  podman system migrate  "
+     "(it stops running containers — do it with no lab running) and pull again. One time, "
+     "unless the ranges change again."),
+    (("invalid username/password", "unauthorized", "authentication required"),
+     "The registry refused a credential for an image that needs none, which means one is being "
+     "sent. Look at ~/.docker/config.json and $XDG_RUNTIME_DIR/containers/auth.json — moving a "
+     "stale one aside is usually the whole fix, and needs no administrator. On a lab with shared "
+     "home directories one such file breaks every machine at once."),
+)
+
+
+def pull_advice(reason: str) -> str:
+    """The remedy for a recognised pull failure, or "" when we have nothing to add.
+
+    "" and not a sentence saying we do not know, for the reason `_last_line` gives: a
+    reason-shaped non-reason reads as an explanation and crowds out the real one.
+    """
+    low = (reason or "").lower()
+    for needles, text in _PULL_ADVICE:
+        if any(n in low for n in needles):
+            return text
+    return ""
+
+
 def _last_line(text: str) -> str:
     """The most specific line docker printed — its last non-empty one.
 
@@ -324,7 +365,17 @@ def _last_line(text: str) -> str:
     # ("docker failed without saying why") reads as an explanation and, worse, satisfies the
     # caller's `if reason:` — suppressing the one genuinely useful thing left to offer, which is
     # the command whose output would be the answer.
-    return lines[-1][:300] if lines else ""
+    if not lines:
+        return ""
+    last = lines[-1]
+    if len(last) <= 300:
+        return last
+    # Over the budget, keep the END. The rule that picks the last LINE is the same rule inside a
+    # line: these messages nest outwards, so the specific part is last. Podman's stale-mapping
+    # error is 380 characters and the two things that matter — `podman system migrate` and
+    # `lchown /home: invalid argument` — are both in the final 80. Cutting from the end left a
+    # reason that said "copying system image from manifest list: writing blob" and stopped.
+    return "…" + last[-299:]
 
 
 def pull_images(refs, run=subprocess.run, on_progress=None, on_error=None
