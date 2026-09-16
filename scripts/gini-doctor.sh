@@ -9,6 +9,7 @@
 #   sh gini-doctor.sh                      # probe this machine; human summary + a report file
 #   sh gini-doctor.sh --report             # just the report, to stdout (what --fanout collects)
 #   sh gini-doctor.sh --no-run             # skip the live container/compose round trip
+#   sh gini-doctor.sh --summarise report.txt       # read a collected report in human form
 #   sh gini-doctor.sh --compare a.txt b.txt …      # show ONLY the fields that differ
 #   sh gini-doctor.sh --fanout hosts.txt [dir]     # ssh each host, collect, then compare
 #
@@ -221,17 +222,49 @@ probe_registries_auth() {
     emit storage.conf "$( [ -r /etc/containers/storage.conf ] && echo present || echo absent)"
 }
 
+# The interpreter that actually runs gBuilder, which is usually NOT /usr/bin/python3: a pipx or
+# `pip install --user` install puts gbuilder in ~/.local/bin with a shebang pointing at its own
+# venv. Probing the system python instead reports "No module named PySide6" on a machine where
+# gBuilder starts perfectly — and reports it on EVERY machine, so it survives the comparison as a
+# permanent false alarm, which is worse than not checking at all.
+resolve_gini_python() {
+    [ -n "${GPY:-}" ] && return 0
+    GPY=python3
+    _gb=$(command -v gbuilder 2>/dev/null)
+    [ -n "$_gb" ] || return 0
+    # Two shapes, and the second is the common one. A plain `#!/path/to/python`; or pipx's
+    # trampoline, which is `#!/bin/sh` followed by
+    #     '''exec' "/…/pipx/venvs/gini-toolkit/bin/python" "$0" "$@"
+    # and exists precisely so the shebang can stay short. Reading line 1 there yields /bin/sh, and
+    # every probe then runs the wrong interpreter and reports that Python has no Python in it.
+    _c1=$(sed -n '1s|^#! *\([^ ]*\).*|\1|p' "$_gb" 2>/dev/null)
+    _c2=$(sed -n "2,3s|.*exec' *\"\\([^\"]*\\)\".*|\\1|p" "$_gb" 2>/dev/null | head -1)
+    # Verified, not guessed: a candidate counts only if it answers as a Python. The venv path
+    # can contain spaces ("Application Support"), so it stays quoted throughout.
+    for _c in "$_c2" "$_c1"; do
+        [ -n "$_c" ] || continue
+        [ -x "$_c" ] || continue
+        if [ "$("$_c" -c 'import sys; print("PY")' 2>/dev/null)" = "PY" ]; then
+            GPY=$_c
+            return 0
+        fi
+    done
+}
+
 probe_python_qt() {
+    resolve_gini_python
+    emit gbuilder.python "$GPY"
     emit python3.path "$(command -v python3 || echo absent)"
     emit python3.version "$(cap python3 --version)"
     emit python3.venv_module "$(python3 -c 'import venv' 2>/dev/null && echo yes || echo NO)"
     emit pip.version "$(cap python3 -m pip --version)"
     # PySide6 is where a headless-looking machine actually fails, and the message names a library
     # rather than a package, which is why this reports the import error verbatim.
-    if have python3; then
-        _q=$(python3 -c 'import PySide6, PySide6.QtWidgets; print(PySide6.__version__)' 2>&1 | tail -1)
+    if [ -x "$GPY" ] || have "$GPY"; then
+        emit gbuilder.python.version "$("$GPY" --version 2>&1 | tail -1)"
+        _q=$("$GPY" -c 'import PySide6, PySide6.QtWidgets; print(PySide6.__version__)' 2>&1 | tail -1)
         emit pyside6 "$_q"
-        _off=$(QT_QPA_PLATFORM=offscreen python3 -c 'from PySide6.QtWidgets import QApplication; QApplication([]); print("ok")' 2>&1 | tail -1)
+        _off=$(QT_QPA_PLATFORM=offscreen "$GPY" -c 'from PySide6.QtWidgets import QApplication; QApplication([]); print("ok")' 2>&1 | tail -1)
         emit pyside6.offscreen "$_off"
     fi
     if have ldconfig; then
@@ -246,11 +279,12 @@ probe_python_qt() {
 
 probe_gini() {
     emit gbuilder.path "$(command -v gbuilder || echo absent)"
-    if have python3; then
+    resolve_gini_python
+    if [ -x "$GPY" ] || have "$GPY"; then
         for d in gini-core gini-toolkit gini-teaching-center; do
-            emit "pkg.$d" "$(python3 -m pip show "$d" 2>/dev/null | awk '/^Version:/{v=$2} /^Location:/{l=$2} END{print (v?v:"absent") " @ " l}')"
+            emit "pkg.$d" "$("$GPY" -m pip show "$d" 2>/dev/null | awk '/^Version:/{v=$2} /^Location:/{sub(/^Location: */,""); l=$0} END{print (v?v:"absent") " @ " (l?l:"-")}')"
         done
-        emit gini.import "$(python3 -c 'import gini.domain, gini.services.bootstrap; print("ok")' 2>&1 | tail -1)"
+        emit gini.import "$("$GPY" -c 'import gini.domain, gini.services.bootstrap; print("ok")' 2>&1 | tail -1)"
     fi
     emit gini.home "$( [ -d "$HOME/.gini" ] && echo present || echo absent)"
     if [ -r "$HOME/.gini/config.json" ]; then
@@ -282,13 +316,35 @@ probe_live() {
     _img=$($_e images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
            | grep -v '<none>' | head -1)
     if [ -z "$_img" ]; then
-        if $_e pull docker.io/library/busybox:latest >/dev/null 2>&1; then
+        # Fully qualified on purpose: a short name failing is a registries.conf problem and a
+        # qualified name failing is something else, and the two want opposite fixes.
+        _perr=$($_e pull docker.io/library/busybox:latest 2>&1)
+        if [ $? -eq 0 ]; then
             _img=docker.io/library/busybox:latest
             emit live.pull ok
         else
             emit live.pull FAILED
-            emit live.skipped "no local image and pull failed"
-            return
+            # WHY it failed is the entire question on a machine with an empty image store, and
+            # the first version of this reported only "FAILED" — which named the symptom the
+            # machine was already showing and nothing else. The last line carries the reason.
+            emit live.pull.error "$(printf '%s' "$_perr" | tail -2 | cut -c1-200)"
+            # Repeat the pull with an EMPTY auth file. If that works, the registry is reachable
+            # and the credential is the problem — which is a fix the user can apply themselves,
+            # in their own home directory, without an admin.
+            _tmpauth=${TMPDIR:-/tmp}/gini-doctor-empty-auth.$$
+            printf '{}' > "$_tmpauth" 2>/dev/null
+            if $_e pull --authfile "$_tmpauth" docker.io/library/busybox:latest >/dev/null 2>&1; then
+                emit live.pull.without_creds "OK — the stored credential is what blocks the pull"
+                _img=docker.io/library/busybox:latest
+                emit live.pull ok-without-creds
+            else
+                emit live.pull.without_creds "also fails — not a credential problem"
+            fi
+            rm -f "$_tmpauth" 2>/dev/null
+            if [ -z "$_img" ]; then
+                emit live.skipped "no local image and pull failed"
+                return
+            fi
         fi
     else
         emit live.pull "skipped (using local $_img)"
@@ -402,6 +458,24 @@ summarise() {
     case "$v" in ok) s=ok ;; "") s=warn ;; *) s=FAIL ;; esac
     line "gini imports" "$s" "$v"
 
+    v=$(get image.gini-xv6.local)
+    if [ -n "$v" ]; then
+        line "GINI images present" "FAIL" "$v — nothing can launch until these are here"
+    fi
+
+    v=$(get live.pull)
+    if [ -n "$v" ]; then
+        case "$v" in
+            ok) s=ok ;;
+            skipped*) s=info ;;           # an image was already here; nothing to prove
+            ok-without-creds) s=warn ;;
+            *) s=FAIL ;;
+        esac
+        line "pull from a registry" "$s" "$v"
+        w=$(get live.pull.error);        [ -n "$w" ] && line "  pull error" "info" "$w"
+        w=$(get live.pull.without_creds);[ -n "$w" ] && line "  without credentials" "info" "$w"
+    fi
+
     v=$(get live.run)
     if [ -n "$v" ]; then
         case "$v" in ok) s=ok ;; *) s=FAIL ;; esac
@@ -424,7 +498,9 @@ summarise() {
     # It is reported so the difference between two machines is visible, not as a verdict.
     v=$(get live.exec.compose)
     if [ -n "$v" ]; then
-        case "$v" in ok) s=ok ;; *) s=warn ;; esac
+        # podman-compose prints "exit code: 0" rather than the command's own output, so the
+        # success case does not look like one.
+        case "$v" in ok|"exit code: 0") s=ok ;; *) s=warn ;; esac
         line "exec via compose" "$s" "$v"
     fi
 
@@ -510,6 +586,9 @@ fanout() {
 
 # --------------------------------------------------------------------------- #
 case "${1:-}" in
+  --summarise|--summarize)
+                 shift; [ -r "${1:-}" ] || { echo "usage: $0 --summarise report.txt" >&2; exit 2; }
+                 summarise "$1" ;;
   --compare)     shift; compare "$@" ;;
   --compare-all) shift; SHOWALL=1 compare "$@" ;;
   --fanout)  shift; [ $# -ge 1 ] || { echo "usage: $0 --fanout hosts.txt [outdir]" >&2; exit 2; }
