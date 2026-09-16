@@ -12,7 +12,9 @@ Three scripts. Everything you do repeatedly should be one of them.
 | `./scripts/images.sh build <version>` | build + push this machine's architecture to GHCR |
 | `./scripts/images.sh merge <version>` | merge both architectures into one tag |
 | `./scripts/images.sh all <version>` | both architectures on one machine, via QEMU (slow) |
-| `sh ./scripts/gini-doctor.sh` | probe THIS machine: engine, compose provider, rootless prerequisites, Qt, a live container round trip |
+| `sh ./scripts/gini-doctor.sh` | a menu of probe groups at a terminal; the usual set when piped |
+| `sh ./scripts/gini-doctor.sh --list` | the groups: system, engine, compose, rootless, registry, qt, gini, live, perf, xv6 |
+| `sh ./scripts/gini-doctor.sh --only perf,xv6` | measure the Machine Lab's feed — for "the trap feed stutters on some machines" |
 | `sh ./scripts/gini-doctor.sh --compare r1.txt r2.txt …` | show only the facts on which those machines disagree |
 | `sh ./scripts/gini-doctor.sh --fanout hosts.txt [dir]` | ssh each host, collect a report, then compare — nothing to install on the hosts |
 

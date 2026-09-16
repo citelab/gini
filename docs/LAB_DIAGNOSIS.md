@@ -37,6 +37,24 @@ The run creates and destroys one throwaway compose project (`ginidoctor<pid>`) u
 already on the machine. It never touches `gini-lab`, and it removes its own containers even if
 `down` fails. `--no-run` skips that part if you would rather it touched nothing.
 
+## Picking what to run
+
+At a terminal, `sh scripts/gini-doctor.sh` with no arguments puts up a menu. Everything in it is
+also a flag, because thirty machines are not driven from a menu:
+
+```bash
+sh scripts/gini-doctor.sh --list                 # the groups and what each covers
+sh scripts/gini-doctor.sh --only engine,perf     # just those
+sh scripts/gini-doctor.sh --all                  # everything, including the xv6 feed test
+sh scripts/gini-doctor.sh --fanout hosts.txt reports/ perf,xv6   # one group across the lab
+```
+
+The menu appears only when there is a terminal on both ends, so a pipe, a cron job or
+`ssh host sh -s` never sits waiting for somebody to choose something.
+
+`xv6` is not in the default set: it boots a real kernel and polls it, which takes about fifty
+seconds and is worth asking for deliberately rather than thirty times during a fanout.
+
 ## Reading the diff
 
 Only differing fields are printed. Two that always differ and are suppressed — free disk and the
@@ -74,6 +92,45 @@ Four facts, in order, and the first one that fails is the real problem:
 
 A machine where 1–3 pass and only 4 fails is **fine for current GINI** and would have been broken
 before the label-based exec landed.
+
+## A feed that stutters
+
+The Machine Lab's live faces — the trap feed on CPU & Registers especially — are polls of the
+in-container agent, drawn as they arrive. So the feed is exactly as steady as the CPU time that
+container is getting, and "it looks like the processor went to sleep" is close to literally true.
+
+The thing to understand first: **xv6 is a RISC-V kernel on an x86 host, so QEMU is emulating, not
+virtualising.** No KVM, no hardware assist — one host core, flat out, in software. That makes the
+Machine Lab far more sensitive to CPU conditions than anything else in GINI, and it is why the
+same build feels smooth on a developer laptop and jerky on a lab desktop.
+
+```bash
+sh scripts/gini-doctor.sh --only perf,xv6
+```
+
+`perf.xv6.poll` is the measurement that matches the complaint — 24 polls of the running agent,
+timed from inside the container:
+
+```
+n=24 min=6 med=7 p95=9 max=354 stalls>1s=0 failed=0      ← smooth (a Mac, for reference)
+n=24 min=8 med=240 p95=3100 max=9000 stalls>1s=7         ← what a student is describing
+```
+
+`stalls>1s` is the number a student can see happen: the lab redraws a few times a second, so a
+poll past a second is a visible hole. Run it on a machine where the feed is smooth and on one
+where it is not, and compare — a single machine's numbers mean much less than the pair.
+
+| Field | What it means | Fix |
+|---|---|---|
+| `perf.cpu.governor` = `powersave` | The most likely cause. A governor that keeps deciding this load is not worth ramping up for produces exactly a feed that is fine, then is not. | `cpupower frequency-set -g performance`, or the distro's tuned profile (admin). |
+| `perf.cpu.throttle.count` > 0 | Thermal throttling, and it is counted by the kernel rather than inferred. Dusty lab desktops do this. | Hardware; nothing GINI can do, but it ends the argument. |
+| `perf.host.cpu` `spread=` large | The machine's speed is changing under a fixed workload. Governor, thermal, or something else on the box. | Look at the two rows above, then `perf.loadavg`. |
+| `perf.host.cpu` `median=` large | The machine is simply slower. TCG emulation is the most CPU-bound thing GINI runs, so this shows up here first. | Fewer xv6 elements per machine; a bigger time-slice makes the feed coarser but steadier. |
+| `perf.cgroup.user.cpu_max` not `max` | The user slice has a hard CPU cap, and a container inside it cannot exceed that however its own limits are written. | Raise or remove the slice's cap (admin). |
+| `perf.loadavg` high | Something else is using the machine. | Find it before blaming GINI. |
+
+If `perf.xv6.poll` is steady but the lab still stutters, the problem is on the gBuilder side
+rather than the guest's — say so, and include the report, because that is a different hunt.
 
 ## If everything matches
 

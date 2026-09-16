@@ -6,9 +6,12 @@
 # key<TAB>value form, and then DIFFS them. The output that matters is not any single report, it is
 # the short list of fields on which the broken machines disagree with the working one.
 #
-#   sh gini-doctor.sh                      # probe this machine; human summary + a report file
+#   sh gini-doctor.sh                      # a menu at a terminal; the usual set when piped
 #   sh gini-doctor.sh --report             # just the report, to stdout (what --fanout collects)
 #   sh gini-doctor.sh --no-run             # skip the live container/compose round trip
+#   sh gini-doctor.sh --only engine,perf           # just those groups (--list shows them all)
+#   sh gini-doctor.sh --all                        # everything, including the xv6 feed test
+#   sh gini-doctor.sh --menu                       # pick from a menu, even when piped
 #   sh gini-doctor.sh --summarise report.txt       # read a collected report in human form
 #   sh gini-doctor.sh --compare a.txt b.txt …      # show ONLY the fields that differ
 #   sh gini-doctor.sh --fanout hosts.txt [dir]     # ssh each host, collect, then compare
@@ -429,15 +432,236 @@ YML
     rm -rf "$_dir" 2>/dev/null
 }
 
+# --------------------------------------------------------------------------- #
+# performance — why the trap feed stutters on some machines and not others
+#
+# xv6 runs under QEMU as a RISC-V guest on an x86 host, which means TCG: pure software
+# emulation, no KVM, one host core pinned flat out. So the Machine Lab's live feeds are only as
+# steady as the CPU time that container actually receives, and "the processor has gone to sleep"
+# is a literal description of what a powersave governor, a thermal cap or a busy host does to it.
+#
+# Nothing here is a number to admire on its own. Every one of them exists to be COMPARED against
+# the same number from a machine where the feed is smooth.
+# --------------------------------------------------------------------------- #
+probe_perf() {
+    emit perf.loadavg "$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3 \
+                          || sysctl -n vm.loadavg 2>/dev/null || echo '?')"
+    emit perf.cpu.model "$(awk -F: '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null \
+                            || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo '?')"
+    emit perf.cpu.cores "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?')"
+
+    # The governor is the first thing to look at. A desktop left on `powersave` runs TCG at a
+    # fraction of the speed of the same silicon on `performance`, and it does it in bursts,
+    # because the governor keeps deciding the load is not worth ramping up for.
+    _gov=/sys/devices/system/cpu/cpu0/cpufreq
+    if [ -r "$_gov/scaling_governor" ]; then
+        emit perf.cpu.governor "$(cat "$_gov/scaling_governor" 2>/dev/null)"
+        emit perf.cpu.freq.cur.khz "$(cat "$_gov/scaling_cur_freq" 2>/dev/null || echo '?')"
+        emit perf.cpu.freq.max.khz "$(cat "$_gov/cpuinfo_max_freq" 2>/dev/null || echo '?')"
+        emit perf.cpu.freq.limit.khz "$(cat "$_gov/scaling_max_freq" 2>/dev/null || echo '?')"
+    else
+        emit perf.cpu.governor "n/a (no cpufreq)"
+    fi
+    # Intel records throttling events per core; a non-zero count is proof, not a theory.
+    _thr=/sys/devices/system/cpu/cpu0/thermal_throttle/core_throttle_count
+    [ -r "$_thr" ] && emit perf.cpu.throttle.count "$(cat "$_thr" 2>/dev/null)"
+    for z in /sys/class/thermal/thermal_zone0/temp; do
+        [ -r "$z" ] && emit perf.cpu.temp.milli "$(cat "$z" 2>/dev/null)"
+    done
+
+    # What the user slice is actually allowed. "max" means no cap; a number means there is one,
+    # and a container inside it cannot exceed it however its own limits are written.
+    _cg=/sys/fs/cgroup/user.slice/user-$(id -u 2>/dev/null).slice
+    [ -r "$_cg/cpu.max" ] && emit perf.cgroup.user.cpu_max "$(cat "$_cg/cpu.max" 2>/dev/null)"
+    [ -r /sys/fs/cgroup/cpu.max ] && emit perf.cgroup.root.cpu_max "$(cat /sys/fs/cgroup/cpu.max 2>/dev/null)"
+
+    # A fixed amount of arithmetic, five times. The MEDIAN says how fast this machine is; the
+    # SPREAD says whether it stays that way, and the spread is the one that matches the symptom —
+    # a feed that is fine and then is not is a machine whose speed changes underneath it.
+    if have python3; then
+        emit perf.host.cpu "$(python3 - <<'PYBENCH' 2>/dev/null || echo '?'
+import time
+runs = []
+for _ in range(5):
+    t0 = time.perf_counter()
+    x = 0
+    for i in range(2_000_000):
+        x += i
+    runs.append((time.perf_counter() - t0) * 1000)
+runs.sort()
+med, lo, hi = runs[2], runs[0], runs[-1]
+print("median=%.0fms spread=%.0f%%" % (med, (hi - lo) / med * 100))
+PYBENCH
+)"
+    fi
+}
+
+# The measurement that matches the complaint: how steady is the Machine Lab's feed?
+#
+# The lab polls the in-container agent and draws what comes back, so the feed is exactly as
+# regular as those replies. Timed from INSIDE the container, which removes the host exec and
+# leaves what the student sees: the agent asking a QEMU that is either getting CPU or is not.
+probe_perf_xv6() {
+    _e=""
+    have docker && docker info >/dev/null 2>&1 && _e="docker"
+    [ -z "$_e" ] && have podman && podman info >/dev/null 2>&1 && _e="podman"
+    [ -n "$_e" ] || { emit perf.xv6 "skipped (no engine)"; return; }
+    if [ -z "$($_e images -q gini-xv6:latest 2>/dev/null)" ]; then
+        emit perf.xv6 "skipped (no gini-xv6:latest — pull it first)"
+        return
+    fi
+    _n=ginidoctorperf$$
+    $_e run -d --name "$_n" gini-xv6:latest >/dev/null 2>&1 \
+        || { emit perf.xv6 "could not start gini-xv6"; return; }
+    _i=0
+    while [ $_i -lt 40 ]; do
+        $_e exec "$_n" python3 -c "
+import urllib.request as u
+u.urlopen('http://127.0.0.1:5000/procs', timeout=5).read()" >/dev/null 2>&1 && break
+        _i=$((_i+1)); sleep 1
+    done
+    if [ $_i -ge 40 ]; then
+        emit perf.xv6 "agent never answered within 40s"
+        $_e rm -f "$_n" >/dev/null 2>&1
+        return
+    fi
+    emit perf.xv6.boot.s "$_i"
+    # -i, or the heredoc never reaches python and the probe reports "no output" on a machine
+    # where everything is fine.
+    _out=$($_e exec -i "$_n" python3 - <<'PYFEED' 2>/dev/null
+import time, urllib.request as u
+lat = []
+for _ in range(24):
+    t0 = time.perf_counter()
+    try:
+        u.urlopen("http://127.0.0.1:5000/procs", timeout=20).read()
+        lat.append((time.perf_counter() - t0) * 1000)
+    except Exception:
+        lat.append(float("nan"))
+    time.sleep(0.25)
+good = [x for x in lat if x == x]
+good.sort()
+if not good:
+    print("all polls failed")
+else:
+    n = len(good)
+    p = lambda q: good[min(n - 1, int(q * n))]
+    # A poll that takes more than a second is a visible hole in the feed: the lab redraws a few
+    # times a second, so anything past ~1000ms is a gap a student watches happen.
+    stalls = len([x for x in good if x > 1000])
+    print("n=%d min=%.0f med=%.0f p95=%.0f max=%.0f stalls>1s=%d failed=%d"
+          % (n, good[0], p(0.5), p(0.95), good[-1], stalls, len(lat) - n))
+PYFEED
+)
+    emit perf.xv6.poll "${_out:-no output}"
+    $_e rm -f "$_n" >/dev/null 2>&1
+}
+
+# --------------------------------------------------------------------------- #
+# groups — so a run can be a targeted question, not always the whole interrogation
+# --------------------------------------------------------------------------- #
+# DEFAULT is what a rollout comparison wants and costs about half a minute. `xv6` is separate
+# because it boots a real kernel and polls it for six seconds, which is worth doing deliberately
+# and not thirty times by accident during a fanout.
+GROUPS_DEFAULT="system engine compose rootless registry qt gini live perf"
+GROUPS_ALL="$GROUPS_DEFAULT xv6"
+
+group_desc() {
+    case "$1" in
+        system)   echo "host identity: OS, kernel, arch, memory, disk" ;;
+        engine)   echo "podman / docker: version, rootless, network backend, storage, id mapping" ;;
+        compose)  echo "which compose PROVIDER answers, and its version" ;;
+        rootless) echo "subuid/subgid, user namespaces, XDG_RUNTIME_DIR, lingering, cgroup delegation" ;;
+        registry) echo "registries.conf, stored credentials, and a real pull" ;;
+        qt)       echo "the interpreter gBuilder uses, PySide6, and the X libraries Qt needs" ;;
+        gini)     echo "installed packages, the GINI images, ~/.gini" ;;
+        live)     echo "a throwaway container + compose project: run, find by label, exec, tear down" ;;
+        perf)     echo "CPU governor, throttling, cgroup caps, and a steadiness benchmark" ;;
+        xv6)      echo "boot a real xv6 kernel and measure the Machine Lab's feed (~50s)" ;;
+        *)        echo "" ;;
+    esac
+}
+
+run_group() {
+    case "$1" in
+        system)   probe_identity ;;
+        engine)   probe_engine ;;
+        compose)  probe_compose ;;
+        rootless) probe_rootless_prereqs ;;
+        registry) probe_registries_auth ;;
+        qt)       probe_python_qt ;;
+        gini)     probe_gini ;;
+        live)     probe_live ;;
+        perf)     probe_perf ;;
+        xv6)      probe_perf_xv6 ;;
+        *)        echo "unknown group: $1" >&2; return 1 ;;
+    esac
+}
+
 run_probes() {
-    probe_identity
-    probe_engine
-    probe_compose
-    probe_rootless_prereqs
-    probe_registries_auth
-    probe_python_qt
-    probe_gini
-    [ "${NORUN:-0}" = "1" ] || probe_live
+    _sel=${1:-$GROUPS_DEFAULT}
+    # `system` always runs: without host/os the report cannot be compared against anything.
+    case " $_sel " in *" system "*) ;; *) _sel="system $_sel" ;; esac
+    emit doctor.groups "$(printf '%s' "$_sel" | tr -s ' ')"
+    for g in $_sel; do
+        [ "$g" = "live" ] && [ "${NORUN:-0}" = "1" ] && continue
+        run_group "$g"
+    done
+}
+
+list_groups() {
+    printf '\nProbe groups:\n\n'
+    for g in $GROUPS_ALL; do printf '  %-9s %s\n' "$g" "$(group_desc "$g")"; done
+    printf '\n  default: %s\n' "$GROUPS_DEFAULT"
+    printf '  run a subset with:  sh %s --only engine,perf\n\n' "$SELF"
+}
+
+# --------------------------------------------------------------------------- #
+# menu — for one machine in front of you. Everything it offers is reachable by flag too,
+# because thirty machines are not driven from a menu.
+# --------------------------------------------------------------------------- #
+menu() {
+    while :; do
+        printf '\n\033[1mgini-doctor\033[0m — %s\n\n' "$(hostname 2>/dev/null || echo this machine)"
+        _n=0
+        for g in $GROUPS_ALL; do
+            _n=$((_n+1))
+            printf '  %d) %-9s %s\n' "$_n" "$g" "$(group_desc "$g")"
+        done
+        printf '\n  a) everything (including the xv6 feed test)\n'
+        printf '  d) the usual set — everything except xv6\n'
+        printf '  c) compare reports you have already collected\n'
+        printf '  q) quit\n\n'
+        printf 'choose (e.g. 2,3 or d): '
+        read -r _ans || return 0
+        case "$_ans" in
+            q|Q|"") return 0 ;;
+            a|A) _sel=$GROUPS_ALL ;;
+            d|D) _sel=$GROUPS_DEFAULT ;;
+            c|C) printf 'report files (space separated): '
+                 read -r _files || return 0
+                 # shellcheck disable=SC2086
+                 [ -n "$_files" ] && compare $_files
+                 continue ;;
+            *)   _sel=""
+                 # commas or spaces, numbers or names — whatever somebody actually types
+                 for _t in $(printf '%s' "$_ans" | tr ',' ' '); do
+                     _i=0; _hit=""
+                     for g in $GROUPS_ALL; do
+                         _i=$((_i+1))
+                         if [ "$_t" = "$_i" ] || [ "$_t" = "$g" ]; then _hit=$g; break; fi
+                     done
+                     if [ -z "$_hit" ]; then
+                         printf '  no such choice: %s\n' "$_t"; _sel=""; break
+                     fi
+                     _sel="$_sel $_hit"
+                 done
+                 [ -n "$_sel" ] || continue ;;
+        esac
+        _f="gini-doctor-$(hostname 2>/dev/null || echo host).txt"
+        run_probes "$_sel" > "$_f"
+        summarise "$_f"
+    done
 }
 
 # --------------------------------------------------------------------------- #
@@ -455,18 +679,25 @@ summarise() {
     printf '  %s · %s · %s\n\n' "$(get os.pretty)" "$(get kernel)" "$(get arch)"
 
     v=$(get gini.engine.effective)
-    case "$v" in none|*"not answering"*) s=FAIL ;; *) s=ok ;; esac
-    line "engine gBuilder uses" "$s" "$v"
+    if [ -n "$v" ]; then
+        case "$v" in none|*"not answering"*) s=FAIL ;; *) s=ok ;; esac
+        line "engine gBuilder uses" "$s" "$v"
+    fi
 
     v=$(get compose.provider)
-    case "$v" in unknown*) s=FAIL ;; *) s=ok ;; esac
-    line "compose provider" "$s" "$v"
+    if [ -n "$v" ]; then
+        case "$v" in unknown*|no-engine*) s=FAIL ;; *) s=ok ;; esac
+        line "compose provider" "$s" "$v"
+    fi
 
     v=$(get podman.rootless); [ -n "$v" ] && line "podman rootless" "info" "$v"
+    v=$(get doctor.groups);  [ -n "$v" ] && line "groups run" "info" "$v"
 
     v=$(get subuid)
-    case "$v" in MISSING*) s=FAIL ;; n/a*) s=info ;; *) s=ok ;; esac
-    line "subuid mapping" "$s" "$v"
+    if [ -n "$v" ]; then
+        case "$v" in MISSING*) s=FAIL ;; n/a*) s=info ;; *) s=ok ;; esac
+        line "subuid mapping" "$s" "$v"
+    fi
 
     v=$(get podman.idmap.matches)
     if [ -n "$v" ]; then
@@ -475,20 +706,28 @@ summarise() {
     fi
 
     v=$(get xdg.runtime.exists)
-    case "$v" in NO) s=warn ;; *) s=ok ;; esac
-    line "XDG_RUNTIME_DIR" "$s" "$v ($(get xdg.runtime.dir))"
+    if [ -n "$v" ]; then
+        case "$v" in NO) s=warn ;; *) s=ok ;; esac
+        line "XDG_RUNTIME_DIR" "$s" "$v ($(get xdg.runtime.dir))"
+    fi
 
     v=$(get pyside6)
-    case "$v" in *rror*) s=FAIL ;; absent|"") s=warn ;; *) s=ok ;; esac
-    line "PySide6 import" "$s" "$v"
+    if [ -n "$v" ]; then
+        case "$v" in *rror*) s=FAIL ;; absent) s=warn ;; *) s=ok ;; esac
+        line "PySide6 import" "$s" "$v"
+    fi
 
     v=$(get pyside6.offscreen)
-    case "$v" in ok) s=ok ;; "") s=warn ;; *) s=FAIL ;; esac
-    line "Qt starts headless" "$s" "$v"
+    if [ -n "$v" ]; then
+        case "$v" in ok) s=ok ;; *) s=FAIL ;; esac
+        line "Qt starts headless" "$s" "$v"
+    fi
 
     v=$(get gini.import)
-    case "$v" in ok) s=ok ;; "") s=warn ;; *) s=FAIL ;; esac
-    line "gini imports" "$s" "$v"
+    if [ -n "$v" ]; then
+        case "$v" in ok) s=ok ;; *) s=FAIL ;; esac
+        line "gini imports" "$s" "$v"
+    fi
 
     v=$(get image.gini-xv6.local)
     if [ -n "$v" ]; then
@@ -543,6 +782,25 @@ summarise() {
         line "teardown leftovers" "$s" "$v"
     fi
 
+    v=$(get perf.cpu.governor)
+    if [ -n "$v" ]; then
+        # `powersave` is not a fault, but on a machine emulating a RISC-V kernel in software it
+        # is the difference between a live feed and a stuttering one.
+        case "$v" in powersave*) s=warn ;; n/a*) s=info ;; *) s=ok ;; esac
+        line "cpu governor" "$s" "$v"
+    fi
+    v=$(get perf.host.cpu);          [ -n "$v" ] && line "cpu speed + steadiness" "info" "$v"
+    v=$(get perf.cpu.throttle.count)
+    if [ -n "$v" ]; then
+        case "$v" in 0) s=ok ;; *) s=warn ;; esac
+        line "thermal throttling" "$s" "$v events"
+    fi
+    v=$(get perf.xv6.poll)
+    if [ -n "$v" ]; then
+        case "$v" in *"stalls>1s=0"*) s=ok ;; skipped*) s=info ;; *) s=warn ;; esac
+        line "xv6 feed steadiness" "$s" "$v"
+    fi
+
     printf '\n  full report: %s  (%s facts)\n' "$_f" "$(wc -l < "$_f" | tr -d ' ')"
     printf '  compare with:  sh %s --compare r1.txt r2.txt …\n\n' "$SELF"
 }
@@ -593,12 +851,15 @@ compare() {
 fanout() {
     _hosts=$1
     _out=${2:-gini-doctor-reports}
+    _grp=${3:-}
+    _flags="--report"
+    [ -n "$_grp" ] && _flags="--report --only $_grp"
     [ -r "$_hosts" ] || { echo "cannot read host list: $_hosts" >&2; exit 2; }
     mkdir -p "$_out" || exit 2
     while IFS= read -r h; do
         case "$h" in ''|\#*) continue ;; esac
         printf 'collecting %-24s ' "$h"
-        if ssh -o BatchMode=yes -o ConnectTimeout=10 "$h" 'sh -s -- --report' \
+        if ssh -o BatchMode=yes -o ConnectTimeout=10 "$h" "sh -s -- $_flags" \
                < "$SELF" > "$_out/$h.txt" 2>"$_out/$h.err"; then
             printf 'ok (%s facts)\n' "$(wc -l < "$_out/$h.txt" | tr -d ' ')"
         else
@@ -618,26 +879,37 @@ case "${1:-}" in
                  summarise "$1" ;;
   --compare)     shift; compare "$@" ;;
   --compare-all) shift; SHOWALL=1 compare "$@" ;;
-  --fanout)  shift; [ $# -ge 1 ] || { echo "usage: $0 --fanout hosts.txt [outdir]" >&2; exit 2; }
-             fanout "$@" ;;
-  -h|--help) sed -n '2,20p' "$SELF" ;;
-  --report|--no-run|"")
-             # The probe modes take their flags in any order: `--report --no-run` and
-             # `--no-run --report` were not the same command, which is the kind of thing nobody
-             # discovers until they are typing it on the twentieth machine.
-             NORUN=0; REPORT=0
-             for _a in "$@"; do
-                 case "$_a" in
-                     --no-run) NORUN=1 ;;
-                     --report) REPORT=1 ;;
-                     *) echo "unknown option: $_a (try --help)" >&2; exit 2 ;;
-                 esac
-             done
-             if [ "$REPORT" = "1" ]; then
-                 run_probes
-             else
-                 _f="gini-doctor-$(hostname 2>/dev/null || echo host).txt"
-                 run_probes > "$_f"; summarise "$_f"
-             fi ;;
-  *)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
+  --fanout)      shift; [ $# -ge 1 ] || { echo "usage: $0 --fanout hosts.txt [outdir] [groups]" >&2; exit 2; }
+                 fanout "$@" ;;
+  --list|--groups) list_groups ;;
+  -h|--help)     sed -n '2,24p' "$SELF" ;;
+  *)
+    # Everything else is a probe run. Flags in any order; an unrecognised one is refused by name
+    # rather than silently taken as a mode.
+    _had=$#
+    NORUN=0; REPORT=0; SEL=""; WANT_MENU=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-run) NORUN=1 ;;
+            --report) REPORT=1 ;;
+            --all)    SEL=$GROUPS_ALL ;;
+            --menu)   WANT_MENU=1 ;;
+            --only)   shift; SEL=$(printf '%s' "${1:-}" | tr ',' ' ') ;;
+            --only=*) SEL=$(printf '%s' "${1#--only=}" | tr ',' ' ') ;;
+            "")       ;;
+            *)        echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
+        esac
+        shift
+    done
+    # The menu is for a machine in front of you, so it needs a terminal on both ends; a pipe, a
+    # cron job or `ssh host sh -s` must never sit waiting for somebody to choose something.
+    if [ "$WANT_MENU" = "1" ] || { [ "$_had" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }; then
+        menu
+    elif [ "$REPORT" = "1" ]; then
+        run_probes "${SEL:-$GROUPS_DEFAULT}"
+    else
+        _f="gini-doctor-$(hostname 2>/dev/null || echo host).txt"
+        run_probes "${SEL:-$GROUPS_DEFAULT}" > "$_f"
+        summarise "$_f"
+    fi ;;
 esac
