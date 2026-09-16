@@ -1349,6 +1349,26 @@ class Orchestrator:
             self._cids[service] = cid
         return cid
 
+    def _resolve_cid(self, service: str, wd=None) -> str:
+        """Container id for one service: the engine's labels first, `compose ps -q` second.
+
+        Everything that needs an id used to ask `compose ps -q <service>` alone, and on
+        podman-compose that is the same provider that cannot resolve a service to a container
+        name — it answers 0 with an empty stdout, which reads as "there is no such container".
+        Asking the engine first can only find containers the compose path would have missed, so
+        this never turns a working lookup into a failing one.
+        """
+        cid = self.container_id(service)
+        if cid:
+            return cid
+        try:
+            r = subprocess.run([*self._dc, "ps", "-q", service],
+                               cwd=str(wd or self.workdir or "."), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return ""
+        return next((ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()), "")
+
     def exec_argv(self, service: str, env: dict | None = None) -> list:
         """argv to run a command inside one service, without a TTY.
 
@@ -1391,7 +1411,9 @@ class Orchestrator:
         # the launch dies on somebody else's leftovers.
         stale = self._purge()
         if stale:
-            _status_note(f"removed {stale} container(s) left over from an earlier launch")
+            shown = ", ".join(stale[:6]) + (" …" if len(stale) > 6 else "")
+            _status_note(f"cleared {len(stale)} container(s) from a previous launch "
+                         f"before starting this one: {shown}")
 
         ok, msg = self._compose("up", "--build", "-d", "--remove-orphans")
         if ok:
@@ -1465,6 +1487,7 @@ class Orchestrator:
         if not config.faas:
             return False, "no Functions on the canvas to deploy"
         write_project(config, self.workdir, self.runtime_dir, auto_internet)
+        self._cids.pop("faas", None)                # --force-recreate gives it a new id
         # --no-deps: don't touch the function's dependencies (queues/DBs stay up);
         # --force-recreate: pick up the new FAAS_CONFIG even though the image is cached.
         return self._compose("up", "-d", "--no-deps", "--force-recreate", "--build", "faas")
@@ -1665,35 +1688,49 @@ class Orchestrator:
         # So ask the engine directly. `rm -f` does not care about netns bookkeeping.
         gone = self._purge()
         if gone and not self._status_by_label(self.workdir):
-            return True, f"compose down failed ({msg}); removed {gone} container(s) directly"
+            return True, (f"compose down failed ({msg}); "
+                          f"removed {len(gone)} container(s) directly")
         return False, msg
 
-    def _purge(self) -> int:
-        """Force-remove every container carrying this project's label. Returns how many.
+    def _purge(self) -> list:
+        """Force-remove every container carrying this project's label. Returns their NAMES.
 
         Safe because the project name is FIXED (`COMPOSE_PROJECT`) while each launch gets a fresh
         temporary workdir — so anything still wearing the label when a launch begins is debris from
         a previous one, and adopting it is never what anybody wanted. Two gBuilders on one machine
         would already collide on those same container names long before this.
+
+        Names, not just a count, because of how the count reads on screen. "removed 4 container(s)
+        left over from an earlier launch", arriving next to a launch that then went wrong, was
+        reported as "four machines are lost" — the message was taken as gBuilder deleting the
+        machines it was supposed to be starting. Saying WHICH ones settles that at a glance: they
+        carry the names of the previous run, and the ones starting now are not in the list.
         """
         project = self.project or COMPOSE_PROJECT
         try:
             r = subprocess.run(
-                [*_engine_argv(), "ps", "-aq",
-                 "--filter", f"label=com.docker.compose.project={project}"],
+                [*_engine_argv(), "ps", "-a",
+                 "--filter", f"label=com.docker.compose.project={project}",
+                 "--format", "{{.ID}}\t{{.Names}}"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return 0
-        ids = [i for i in (r.stdout or "").split() if i]
+            return []
+        ids, names = [], []
+        for line in (r.stdout or "").splitlines():
+            cid, _, name = line.strip().partition("\t")
+            if cid:
+                ids.append(cid)
+                names.append(name.strip() or cid[:12])
         if not ids:
-            return 0
+            return []
         try:
             subprocess.run([*_engine_argv(), "rm", "-f", *ids],
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=120)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return 0
-        return len(ids)
+            return []
+        self._cids.clear()                      # those ids are gone
+        return names
 
     def status(self, workdir: str | Path | None = None) -> dict[str, str]:
         """Map service -> state ('running' / 'exited' / ...) via `docker compose ps`."""
@@ -1843,12 +1880,10 @@ class Orchestrator:
         if not wd:
             return False, "not running"
         try:
-            r = subprocess.run([*self._dc, "ps", "-q", service],
-                               cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
-            ids = (r.stdout or "").strip().splitlines()
-            if not ids or not ids[0]:
+            cid = self._resolve_cid(service, wd)
+            if not cid:
                 return False, f"{service}: no running container"
-            u = subprocess.run([*_engine_argv(), "update", "--cpus", f"{cpus:g}", ids[0]],
+            u = subprocess.run([*_engine_argv(), "update", "--cpus", f"{cpus:g}", cid],
                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             if u.returncode != 0:
                 why = compose_error(u.stderr, limit=4000) or (u.stdout or "").strip() or (
@@ -1869,11 +1904,10 @@ class Orchestrator:
         if not wd:
             return None
         try:
-            r = subprocess.run([*self._dc, "ps", "-q", service],
-                               cwd=str(wd), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
-            ids = (r.stdout or "").strip().splitlines()
-            if not ids or not ids[0]:
+            cid = self._resolve_cid(service, wd)
+            if not cid:
                 return None
+            ids = [cid]
             s = subprocess.run(
                 [*_engine_argv(), "stats", "--no-stream", "--format",
                  "{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}", ids[0]],
@@ -2223,6 +2257,12 @@ class Orchestrator:
                 for n in (rt.get(key) or []) if n.get("name")]
         missing = []
         for svc in want:
+            # The engine's labels are authoritative and, on podman-compose, the only thing that
+            # answers at all: `compose ps -q <svc>` returns 0 with nothing on stdout, and this
+            # method then reported EVERY service as "did not start" one second after a launch
+            # that worked. Same ground as `_status_by_label`, which had to learn this already.
+            if self.container_id(svc):
+                continue
             try:
                 r = subprocess.run([*self._dc, "ps", "-q", svc], cwd=str(self.workdir),
                                    capture_output=True, text=True, encoding="utf-8",
