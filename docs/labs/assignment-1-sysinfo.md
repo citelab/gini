@@ -22,13 +22,14 @@ Open your topology in gBuilder and press **Run**. Double-click the xv6 machine t
 ```
 ~/.gini/xv6-lab/<machine-name>/
     syscall.h      syscall.c      sysproc.c      defs.h
-    kalloc.c       proc.c         sysinfo.h
+    kalloc.c       sysinfo.h
     user.h         usys.pl        sysinfotest.c
 ```
 
-Part A touches five of these; Part B adds `kalloc.c`, `proc.c` and `defs.h`, because the free
-list and the process table are private to the files that own them — you cannot reach them from
-`sysproc.c` without adding a function where they live.
+Part A touches five of these. Part B adds `kalloc.c` and `defs.h`, because the free list is a chain
+of `struct run` — a type declared inside `kalloc.c` and nowhere else, so there is no way to walk it
+from another file. The process table is different: `proc[]` is reachable from `sysproc.c` with an
+`extern`, so `proc.c` is not yours to edit in this assignment.
 
 Edit them in whatever editor you like. They are the real kernel files — GINI links them into the
 kernel source tree inside the machine, so what you write is what gets compiled. They survive
@@ -185,12 +186,17 @@ can be allocating while you count.
 Add a function here that returns the number of free bytes, and declare it in `kernel/defs.h` so
 `sysproc.c` can call it.
 
-### B2. Counting processes — `kernel/proc.c`
+### B2. Counting processes — `kernel/sysproc.c`
 
-The process table is a fixed array, `struct proc proc[NPROC]`, with `NPROC` = 64. A slot is in use
-when its `state` is not `UNUSED`. Take each `p->lock` before reading its state.
+The process table is a fixed array, `struct proc proc[NPROC]`, with `NPROC` = 64, and unlike the
+free list it is reachable from outside the file that owns it. Declare it and walk it:
 
-Add a function here that returns the count, and declare it in `defs.h` too.
+```c
+extern struct proc proc[NPROC];
+```
+
+A slot is in use when its `state` is not `UNUSED`. Take each `p->lock` before reading its state —
+a process can be exiting while you look at it.
 
 ### B3. Returning a struct to user space — `kernel/sysproc.c`
 

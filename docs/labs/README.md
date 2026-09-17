@@ -102,24 +102,81 @@ They answer different questions and the student needs both:
 That is why the handout's check table has three rows rather than two: nothing in the histogram is a
 wiring problem, `sys23` is a `#define` problem, and the name appearing means both faces agree.
 
-### The one open question
+### The checklist is always visible, and it is a tracker
 
-**How much should the wiring check give away?** Telling a student that `entry("sysinfo")` is
-missing is scaffolding; it names the gap, not the fix, and it replaces a link error most of them
-cannot read. But the five sites *are* the lesson of Part A, and a checklist that ticks itself off
-as they type makes it a fill-in-the-blanks exercise.
+Decided: show it. A student should be able to see what the assignment requires and how far they
+have got. The five sites are still the lesson — the checklist names the *gap*, never the fix, and
+"you have not written `entry("sysinfo")` yet" is a better teacher than a linker error most of them
+cannot read.
 
-Options, in increasing order of restraint: always visible; revealed after the first failed Load;
-or behind a "Check my wiring" button they have to choose to press. **Leaning: after the first
-failed Load** — they meet the real error first, and get help once it has actually cost them
-something.
+**It is a tracker, not the grade, and the difference is load-bearing.** Every check is a pattern
+over the student's own source, so it answers "have you written the line" and never "does it work".
+A line that is present but wrong passes. Comments are stripped before matching, so commenting
+something out does not tick it off. What is actually graded is measured while their code runs —
+see `grade:` below.
 
-### Where LAB_FILES comes from
+### An assignment is a YAML file
 
-The mission YAML, which ships in `gini-core`. So a new assignment is a `gini-core` release — not a
-container image, and not a `gini-toolkit` release either. That is the whole point of
-`docs/design/xv6-student-code.md`: the image is a toolchain and a pristine tree, and an assignment
-is data.
+`lab-spec-example.yaml` in this directory is the real shape. Nothing in it is special-cased in
+GINI: the Machine Lab reads it to know which files the student owns, what to seed, what to register
+in the build, what the tracker shows, and what is graded.
+
+```yaml
+files:
+  - name: syscall.h          # in the lab folder, on the student's machine
+    tree: kernel/syscall.h   # where it is linked into the kernel source
+  - name: sysinfo.h
+    tree: kernel/sysinfo.h
+    seed: |                  # xv6 has no sysinfo.h — the assignment carries it
+      struct sysinfo { uint64 freemem; uint64 nproc; };
+  - name: sysinfotest.c
+    tree: user/sysinfotest.c
+    uprog: sysinfotest       # registered in UPROGS from HERE, so they never edit the Makefile
+
+checks:
+  - id: usys
+    part: A
+    label: "Generate the trampoline"
+    where: user/usys.pl
+    match: 'entry\s*\(\s*"sysinfo"\s*\)'
+    hint: "Miss this and nothing fails until the LINKER."
+
+grade:
+  - id: freemem_agrees
+    metric: sysinfo_freemem_vs_free_pages
+    tolerance_pages: 2
+```
+
+Three things this buys. A new assignment is **a file, not a code change**. The same framework
+covers the shadow labs, which today have their own bespoke bar. And the handout, the tracker and
+the grader stop being three descriptions of an assignment that can disagree — `where:` and
+`hint:` are the handout's words, and if the assignment changes they change in one place.
+
+It ships in `gini-core`, so a new assignment is a `gini-core` release — not a container image, and
+not a `gini-toolkit` release. That is the whole point of `docs/design/xv6-student-code.md`: the
+image is a toolchain and a pristine tree, and an assignment is data.
+
+### Why `kalloc.c` is in the file list, and `proc.c` is not
+
+Checked against the pinned kernel rather than assumed.
+
+**`kalloc.c` is unavoidable.** The free list is a chain of `struct run`, and that type is declared
+at `kernel/kalloc.c:17` and nowhere else — not in `defs.h`, not in a header. There is no way to
+walk `kmem.freelist` from another file, because the type that makes it walkable does not exist
+outside this one. That is not an obstacle to route around; it *is* part B1's lesson, and it is what
+makes the cross-check real: the student counts by walking the list, GINI counts from its page
+bitmap, and the two agreeing means something precisely because they are different methods.
+
+**`proc.c` is not needed.** `struct proc proc[NPROC]` at `proc.c:11` has external linkage and
+`struct proc` is in `proc.h`, which `sysproc.c` already includes. A student can write
+`extern struct proc proc[NPROC];` and walk it from `sysproc.c`. Putting the accessor where the data
+lives is better style, but it is a style point — and `proc.c` is the largest file in the set and
+the one carrying GINI's scheduler shadow dispatcher.
+
+So Assignment 1 hands over **nine files, not ten**, and the one removed is the riskiest. The
+earlier claim that Assignment 1 and Assignment 2 have the same blast radius was wrong in the other
+direction: Assignment 2 does need `proc.c`, because `trace` has to hook `fork()`, and there is no
+way to do that from outside.
 
 ## What GINI must do that it does not do yet
 
