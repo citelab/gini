@@ -36,9 +36,17 @@ files:
     tree: kernel/sysinfo.h
     seed: |
       // The contract between your program and your kernel.
+      //
+      // The first two are worked through in the handout. The rest are yours: same walk, same
+      // struct, different question — which is the point. Nothing here is stored by the kernel;
+      // every number is derived by walking something.
       struct sysinfo {
-        uint64 freemem;   // bytes of free memory
-        uint64 nproc;     // processes whose state is not UNUSED
+        uint64 freemem;     // bytes of free memory
+        uint64 nproc;       // processes whose state is not UNUSED
+        uint64 nrunnable;   // ready to run but not running — the run queue
+        uint64 nsleeping;   // blocked, waiting for something
+        uint64 memused;     // bytes the processes are holding
+        uint64 uptime;      // ticks since boot (a tick is about half a second here)
       };
 
   - name: sysinfotest.c
@@ -57,7 +65,12 @@ files:
           printf("sysinfo failed\n");
           exit(1);
         }
-        printf("free bytes: %d\nprocesses:  %d\n", (int)info.freemem, (int)info.nproc);
+        printf("free bytes:  %d\n", (int)info.freemem);
+        printf("processes:   %d\n", (int)info.nproc);
+        printf("runnable:    %d\n", (int)info.nrunnable);
+        printf("sleeping:    %d\n", (int)info.nsleeping);
+        printf("mem in use:  %d\n", (int)info.memused);
+        printf("uptime:      %d ticks\n", (int)info.uptime);
         exit(0);
       }
 
@@ -134,6 +147,25 @@ checks:
     match: 'extern\s+struct\s+proc\s+proc\s*\[|proc\s*\[\s*NPROC\s*\]'
     hint: "proc[] is reachable from here: extern struct proc proc[NPROC];"
 
+  - id: runqueue
+    part: B
+    label: "Count the run queue (RUNNABLE) and the blocked ones (SLEEPING)"
+    where: kernel/sysproc.c
+    file: sysproc.c
+    match: 'RUNNABLE'
+    hint: "Same walk as nproc — you are already holding each p->lock. One pass, several counters."
+
+  - id: uptime
+    part: B
+    label: "Report uptime in ticks"
+    where: kernel/sysproc.c
+    file: sysproc.c
+    # NOT `tickslock`: sys_sleep already takes it in the untouched file, so that pattern is
+    # green before the student starts. The declaration they have to add is the honest signal.
+    match: 'extern\s+uint\s+ticks'
+    hint: "`extern uint ticks;` at the top — and take tickslock while you read it, the way
+      sys_sleep just above you does, because the timer writes it."
+
   - id: copyout
     part: B
     label: "Return the struct with copyout"
@@ -167,3 +199,13 @@ grade:
     describe: "nproc matches the process table GINI reads"
     metric: sysinfo_nproc_vs_procs
     tolerance: 0
+  - id: states_agree
+    part: B
+    describe: "nrunnable and nsleeping match the states GINI reads from the same table"
+    metric: sysinfo_states_vs_procs
+    tolerance: 1
+  - id: uptime_agrees
+    part: B
+    describe: "uptime advances with the kernel's own tick"
+    metric: sysinfo_uptime_advances
+    tolerance: 1

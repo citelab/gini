@@ -21,10 +21,17 @@ GOOD = {
                   "  [SYS_sync]    = sys_sync,\n"
                   "  [SYS_sysinfo] sys_sysinfo,\n};\n"),
     "sysproc.c": ("extern struct proc proc[NPROC];\n"
+                  "extern uint ticks;\n"
                   "uint64\nsys_sysinfo(void)\n{\n"
                   "  struct sysinfo info;\n"
                   "  uint64 addr;\n  argaddr(0, &addr);\n"
+                  "  for (struct proc *q = proc; q < &proc[NPROC]; q++) {\n"
+                  "    acquire(&q->lock);\n"
+                  "    if (q->state == RUNNABLE) info.nrunnable++;\n"
+                  "    else if (q->state == SLEEPING) info.nsleeping++;\n"
+                  "    release(&q->lock);\n  }\n"
                   "  info.freemem = freemem();\n"
+                  "  acquire(&tickslock); info.uptime = ticks; release(&tickslock);\n"
                   "  if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)\n"
                   "    return -1;\n  return 0;\n}\n"),
     "user.h": "int sync(void);\nint sysinfo(struct sysinfo *info);\n",
@@ -66,7 +73,7 @@ def test_a_correct_solution_passes_every_check(spec):
     res = _ev(spec, GOOD)
     failed = [r.check.id for r in res if not r.passed]
     assert failed == [], f"a correct solution failed: {failed}"
-    assert L.progress(res)["parts"] == {"A": (6, 6), "B": (4, 4)}
+    assert L.progress(res)["parts"] == {"A": (6, 6), "B": (6, 6)}
 
 
 def test_the_commonest_mistake_fails_exactly_one_check(spec):
@@ -126,6 +133,7 @@ def test_progress_counts_by_part(spec):
     part_a_only = {k: v for k, v in GOOD.items() if k in ("syscall.h", "syscall.c", "sysproc.c",
                                                           "user.h", "usys.pl")}
     part_a_only["sysproc.c"] = "uint64\nsys_sysinfo(void)\n{\n  return 0;\n}\n"
+    part_a_only["kalloc.c"] = PRISTINE["kalloc.c"]
     res = _ev(spec, part_a_only)
     p = L.progress(res)
     assert p["parts"]["A"] == (6, 6), "part A is finishable without touching part B's files"

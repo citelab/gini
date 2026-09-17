@@ -160,13 +160,25 @@ This is your check for Part A, and it is precise:
 
 ## Part B — Make it tell the truth
 
-Now the call does something. Two numbers:
+Now the call does something. Open `kernel/sysinfo.h` and look at what it promises:
 
-- **`freemem`** — bytes of free memory
-- **`nproc`** — processes whose `state` is not `UNUSED`
+```c
+struct sysinfo {
+  uint64 freemem;     // bytes of free memory
+  uint64 nproc;       // processes whose state is not UNUSED
+  uint64 nrunnable;   // ready to run but not running — the run queue
+  uint64 nsleeping;   // blocked, waiting for something
+  uint64 memused;     // bytes the processes are holding
+  uint64 uptime;      // ticks since boot (a tick is about half a second here)
+};
+```
 
-Neither is stored anywhere. The kernel works both out by walking its own structures, and that is
-the point of this part.
+**Not one of those is stored by the kernel.** There is no variable holding "free memory" and none
+holding "how many processes". The kernel derives every one of them by walking something it already
+has — and that is the lesson, not the arithmetic.
+
+The first two are worked through below, in full. The rest are yours, and they are deliberately the
+same two walks asking different questions.
 
 ### B1. Counting free memory — `kernel/kalloc.c`
 
@@ -198,7 +210,26 @@ extern struct proc proc[NPROC];
 A slot is in use when its `state` is not `UNUSED`. Take each `p->lock` before reading its state —
 a process can be exiting while you look at it.
 
-### B3. Returning a struct to user space — `kernel/sysproc.c`
+### B3. Now the rest — same walks, different questions
+
+You have written both walks. Everything else in the struct comes from one of them, and the point
+of doing them yourself is that you will find each one is a single line in a loop you already have.
+
+| Field | What it is | Where it comes from |
+|---|---|---|
+| `nrunnable` | the **run queue**: processes ready but not on a CPU | the process walk — count `state == RUNNABLE` |
+| `nsleeping` | processes blocked on something | the same walk — `state == SLEEPING` |
+| `memused` | bytes the processes are holding between them | the same walk — add up `p->sz` |
+| `uptime` | ticks since boot | `extern uint ticks;` — and take `tickslock` to read it, the way `sys_sleep` does a few lines above you |
+
+One pass over `proc[]` fills four of the six fields. Do not write four loops; you are already
+holding each `p->lock` once, and taking it four times is both slower and a good way to deadlock.
+
+> **`nrunnable` is the interesting one.** It is the number every operating system reports as its
+> load, and it is the queue the scheduler picks from — the one you watched move in the Process
+> Scheduler face. Run `spin &` three times and look at it again.
+
+### B4. Returning a struct to user space — `kernel/sysproc.c`
 
 This is the part worth slowing down for.
 
@@ -221,6 +252,21 @@ For a worked example already in the tree, read `filestat` in `kernel/file.c` —
 
 Build the struct on the kernel stack, fill it in, copy it out, and return 0 — or -1 if `copyout`
 fails, because a program is allowed to pass you a bad pointer and that must not be your problem.
+
+### Stretch — an average, not a snapshot
+
+`nrunnable` tells you the queue length **at the instant you asked**, which is noise. Every Unix
+reports it averaged over the last minute, five minutes and fifteen — because what you want to know
+is whether the machine is busy, not whether it happened to be busy during one function call.
+
+Doing that needs something that samples on a schedule and keeps a decaying average, which means a
+hook in code that runs periodically: the timer interrupt (`clockintr` in `kernel/trap.c`, which is
+where `ticks` is incremented) or the scheduler itself (`scheduler()` in `kernel/proc.c`, which sees
+the whole table on every pass). Linux does exactly this — `calc_load()` runs from the timer and
+applies an exponential decay.
+
+Neither of those files is yours in this lab. If you want to try it, ask — it is one more file, and
+it is the real mechanism rather than an imitation of it.
 
 ### Check yourself — this is the good part
 
