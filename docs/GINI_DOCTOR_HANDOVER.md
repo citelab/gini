@@ -14,8 +14,8 @@ merged with them yet.
 ## Before anything else
 
 ```bash
-python3 -m pytest -q doctor/tests    # 103 passed, 1 skipped on this Mac
-python3 doctor/tools/bundle.py       # after ANY change under stage1/, in the same commit
+python3 -m pytest -q doctor/tests healthcenter/tests   # 135 passed, 1 skipped on this Mac
+python3 doctor/tools/bundle.py                         # after ANY change under stage1/, same commit
 ```
 
 **The test count depends on the machine, not the tree.** `test_stage0.py` parametrises five tests
