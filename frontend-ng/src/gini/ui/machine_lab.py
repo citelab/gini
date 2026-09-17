@@ -437,9 +437,9 @@ class MachineLab(QDialog):
         _lab_spec = _active_lab()
         if _lab_spec is not None:
             col.addWidget(self._layer_band("THIS ASSIGNMENT", [
-                ("compile", "My Code",
+                ("compile", "User Code",
                  f"{_lab_spec.title} — the files you own, what you have changed, and Load.",
-                 "amber", self._open_my_code)]))
+                 "amber", self._open_user_code)]))
         col.addWidget(self._layer_band("USER SPACE", [
             ("programs", "Programs & Shell", "The processes you launch — running in user mode.",
              "green", self._open_console),
@@ -718,15 +718,15 @@ class MachineLab(QDialog):
         self._storage.show()
         self._storage.raise_()
 
-    def _open_my_code(self) -> None:
+    def _open_user_code(self) -> None:
         """The assignment's own face: files, what is changed, the wiring checklist, and Load."""
-        self._retire("_mycode")
-        self._rec("note_lab_open", self._dev_name(), "My Code")
+        self._retire("_usercode")
+        self._rec("note_lab_open", self._dev_name(), "User Code")
         from ..services.xv6_lab import active_spec
-        from .my_code import MyCode
-        self._mycode = MyCode(self, self.theme, device=self.device,
+        from .user_code import UserCode
+        self._usercode = UserCode(self, self.theme, device=self.device,
                               provider=self.state.provider, spec=active_spec(), live=self.live)
-        self._mycode.show(); self._mycode.raise_()
+        self._usercode.show(); self._usercode.raise_()
 
     def _open_syscall_builder(self) -> None:
         self._retire("_syscalls")

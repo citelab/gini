@@ -1,4 +1,4 @@
-"""My Code — the student's own kernel files: what they own, what they have changed, and Load.
+"""User Code — the student's own kernel files: what they own, what they have changed, and Load.
 
 Every other face in the Machine Lab looks at a layer of the machine. This one looks at the
 student's work, which is not a layer of anything — so it sits above USER SPACE on the home page
@@ -63,7 +63,7 @@ def reveal(path) -> bool:
         return False
 
 
-class MyCode(QDialog):
+class UserCode(QDialog):
     load_result = Signal(bool, str)       # (ok, log) from the Load worker thread
 
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
@@ -78,8 +78,8 @@ class MyCode(QDialog):
         self._checks: list[tuple] = []
 
         t = theme.theme
-        title = getattr(self.spec, "title", "My Code")
-        self.setWindowTitle(f"My Code — {getattr(device, 'name', 'xv6')}")
+        title = getattr(self.spec, "title", "User Code")
+        self.setWindowTitle(f"User Code — {getattr(device, 'name', 'xv6')}")
         self.resize(760, 720)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
         root = QVBoxLayout(self)
@@ -94,7 +94,7 @@ class MyCode(QDialog):
         root.addWidget(scroll, 1)
         self._build_build_bar(root)
         self.load_result.connect(self._on_load_result)
-        standalone(self, f"My Code — {getattr(device, 'name', 'xv6')}")
+        standalone(self, f"User Code — {getattr(device, 'name', 'xv6')}")
         self.refresh()
 
     # -- header ----------------------------------------------------------- #
@@ -236,7 +236,8 @@ class MyCode(QDialog):
                    "missing": t.danger}.get(st, t.faint)
             lab.setStyleSheet(_scss(f"color:{col};font-size:11px;"))
 
-        results = _ls.evaluate(self.spec, _lab.reader_for(self.spec, machine))
+        results = _ls.evaluate(self.spec, _lab.reader_for(self.spec, machine),
+                               _lab.pristine_reader_for(self.spec, machine))
         by_id = {r.check.id: r for r in results}
         for c, mark, hint in self._checks:
             r = by_id.get(c.id)

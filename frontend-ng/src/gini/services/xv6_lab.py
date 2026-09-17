@@ -131,6 +131,19 @@ def reader_for(spec, machine_name: str):
     return lambda name: read_file(machine_name, name, folder)
 
 
+def pristine_reader_for(spec, machine_name: str):
+    """The image's untouched copy of each file — what a `kind: edited` check compares against."""
+    folder = getattr(spec, "machine_folder", "xv6-lab")
+
+    def read(name):
+        try:
+            return pristine_path(machine_name, name, folder).read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+    return read
+
+
 def digest(text: str) -> str:
     """What the chain records and a marker checks. Bytes, UTF-8, no normalisation — the hash is a
     statement about the file as it sits on disk, not about a cleaned-up version of it."""

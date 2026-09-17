@@ -44,9 +44,9 @@ KIND = {
     "MachineLab": WINDOW, "Xv6Console": WINDOW, "TrapLab": WINDOW, "MemoryLab": WINDOW,
     "StorageLab": WINDOW, "SyscallLab": WINDOW, "LockLab": WINDOW, "RouterLab": WINDOW,
     "ZooLab": WINDOW, "CpuJourney": WINDOW, "TerminalView": WINDOW, "MarkDialog": WINDOW,
-    # My Code is the one a student keeps open the LONGEST: it is what they alt-tab back to from
+    # User Code is the one a student keeps open the LONGEST: it is what they alt-tab back to from
     # their editor after every edit, to see the checklist move.
-    "MyCode": WINDOW,
+    "UserCode": WINDOW,
 }
 
 #: The other side of the rule, with the reason spelled out for each.

@@ -62,7 +62,8 @@ checks:
     where: kernel/syscall.h
     file: syscall.h
     match: '#define\s+SYS_sysinfo\s+\d+'
-    hint: "The last one is SYS_sync 22, so yours is 23."
+    hint: "Add  #define SYS_sysinfo 23  — the name has to be sysinfo, because that is what your
+      program and user.h call. The last one is SYS_sync 22."
 
   - id: extern
     part: A
@@ -101,13 +102,16 @@ checks:
     match: 'entry\s*\(\s*"sysinfo"\s*\)'
     hint: "Miss this and nothing fails until the LINKER: undefined reference to 'sysinfo'."
 
+  # `edited`, not a pattern. Every pattern that would describe this work — kmem.freelist,
+  # acquire(&kmem.lock) — is already in the untouched kalloc.c, because kalloc and kfree both use
+  # them. A tick that is green before the student starts is worse than no tick at all.
   - id: freelist
     part: B
-    label: "Count free memory by walking kmem.freelist"
+    kind: edited
+    label: "Add a free-memory counter to kalloc.c"
     where: kernel/kalloc.c
     file: kalloc.c
-    match: 'kmem\s*\.\s*freelist'
-    hint: "Free memory is a linked list, not a counter. Hold kmem.lock while you walk it."
+    hint: "Free memory is a linked list, not a counter — walk kmem.freelist and hold kmem.lock."
 
   - id: declare_helper
     part: B

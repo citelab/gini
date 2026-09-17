@@ -52,11 +52,22 @@ class LabFile:
 
 @dataclass(frozen=True)
 class Check:
-    """One line in the progress tracker: a pattern over one of the student's files."""
+    """One line in the progress tracker.
+
+    `kind` is how it is decided:
+
+    * `match` — a regular expression over the student's file. Most checks.
+    * `edited` — the file differs from the image's copy. For work whose SHAPE is the student's
+      own: "add a function that counts the free list" cannot be a pattern, because every useful
+      pattern for it (`kmem.freelist`, `acquire(&kmem.lock)`) already appears in the untouched
+      `kalloc.c` — `kalloc` and `kfree` both use them. A check that is green before the student
+      starts is worse than no check, so that one asks a different question.
+    """
     id: str
     label: str
     file: str
-    match: str
+    match: str = ""
+    kind: str = "match"
     part: str = ""
     where: str = ""          # the path as the handout names it, e.g. "kernel/syscall.h"
     hint: str = ""
@@ -107,10 +118,12 @@ def from_dict(d: dict) -> LabSpec:
                           seed=str(f.get("seed", "") or ""), uprog=str(f.get("uprog", "") or ""))
                   for f in (d.get("files") or []) if f.get("name") and f.get("tree"))
     checks = tuple(Check(id=str(c.get("id", "")), label=str(c.get("label", "")),
-                         file=str(c.get("file", "")), match=str(c.get("match", "")),
+                         file=str(c.get("file", "")), match=str(c.get("match", "") or ""),
+                         kind=str(c.get("kind", "") or "match"),
                          part=str(c.get("part", "") or ""), where=str(c.get("where", "") or ""),
                          hint=str(c.get("hint", "") or ""))
-                   for c in (d.get("checks") or []) if c.get("id") and c.get("match"))
+                   for c in (d.get("checks") or [])
+                   if c.get("id") and (c.get("match") or c.get("kind") == "edited"))
     grade = tuple(GradeItem(id=str(g.get("id", "")), describe=str(g.get("describe", "") or ""),
                             metric=str(g.get("metric", "") or ""),
                             part=str(g.get("part", "") or ""),
@@ -174,24 +187,37 @@ class CheckResult:
     missing_file: bool = False
 
 
-def evaluate(spec: LabSpec, read) -> tuple[CheckResult, ...]:
-    """Run every check. `read(name)` returns the text of one of the student's files, or None.
+def evaluate(spec: LabSpec, read, pristine=None) -> tuple[CheckResult, ...]:
+    """Run every check.
 
-    A file that cannot be read fails its checks rather than raising: on a machine that is not
-    running, or before the folder is seeded, "not done yet" is the honest answer and an exception
-    would take the whole face down with it.
+    `read(name)` returns the text of one of the student's files, or None. `pristine(name)` returns
+    the image's untouched copy, and is only needed by `kind: edited` checks — without it those
+    report not-done rather than guessing, because a green tick for work nobody has started is the
+    one wrong answer here.
+
+    A file that cannot be read fails its checks rather than raising: before the folder is seeded,
+    or with the machine down, "not done yet" is honest, and an exception would take the face down.
     """
     out = []
     cache: dict[str, str | None] = {}
-    for c in spec.checks:
-        if c.file not in cache:
+    orig: dict[str, str | None] = {}
+
+    def _get(store, fn, name):
+        if name not in store:
             try:
-                cache[c.file] = read(c.file)
+                store[name] = fn(name) if fn else None
             except Exception:                      # noqa: BLE001
-                cache[c.file] = None
-        text = cache[c.file]
+                store[name] = None
+        return store[name]
+
+    for c in spec.checks:
+        text = _get(cache, read, c.file)
         if text is None:
             out.append(CheckResult(c, False, missing_file=True))
+            continue
+        if c.kind == "edited":
+            was = _get(orig, pristine, c.file)
+            out.append(CheckResult(c, was is not None and text != was))
             continue
         try:
             ok = re.search(c.match, strip_comments(text, c.file)) is not None

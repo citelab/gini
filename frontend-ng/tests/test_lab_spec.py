@@ -48,6 +48,11 @@ def _read(files):
     return lambda name: files.get(name)
 
 
+def _ev(spec, files):
+    """Evaluate against PRISTINE, so `kind: edited` checks can be decided the way the face does."""
+    return L.evaluate(spec, _read(files), pristine=_read(PRISTINE))
+
+
 def test_the_shipped_assignment_loads_with_everything_it_needs(spec):
     assert spec.parts() == ("A", "B")
     assert spec.uprogs() == ("sysinfotest",)
@@ -58,7 +63,7 @@ def test_the_shipped_assignment_loads_with_everything_it_needs(spec):
 
 
 def test_a_correct_solution_passes_every_check(spec):
-    res = L.evaluate(spec, _read(GOOD))
+    res = _ev(spec, GOOD)
     failed = [r.check.id for r in res if not r.passed]
     assert failed == [], f"a correct solution failed: {failed}"
     assert L.progress(res)["parts"] == {"A": (6, 6), "B": (4, 4)}
@@ -67,7 +72,7 @@ def test_a_correct_solution_passes_every_check(spec):
 def test_the_commonest_mistake_fails_exactly_one_check(spec):
     """Forgetting entry() in usys.pl — nothing fails until the linker."""
     files = dict(GOOD, **{"usys.pl": 'entry("sync");\n'})
-    res = L.evaluate(spec, _read(files))
+    res = _ev(spec, files)
     assert [r.check.id for r in res if not r.passed] == ["usys"]
     assert L.next_step(res).id == "usys"
     assert "LINKER" in L.next_step(res).hint
@@ -76,16 +81,16 @@ def test_the_commonest_mistake_fails_exactly_one_check(spec):
 def test_a_missing_dispatch_row_is_distinguishable_from_a_missing_define(spec):
     """These two produce completely different failures — one at compile, one at runtime."""
     no_row = dict(GOOD, **{"syscall.c": "extern uint64 sys_sysinfo(void);\n"})
-    assert [r.check.id for r in L.evaluate(spec, _read(no_row)) if not r.passed] == ["dispatch"]
+    assert [r.check.id for r in _ev(spec, no_row) if not r.passed] == ["dispatch"]
     no_def = dict(GOOD, **{"syscall.h": "#define SYS_sync 22\n"})
-    assert [r.check.id for r in L.evaluate(spec, _read(no_def)) if not r.passed] == ["number"]
+    assert [r.check.id for r in _ev(spec, no_def) if not r.passed] == ["number"]
 
 
 def test_commenting_a_line_out_does_not_tick_its_box(spec):
     files = dict(GOOD, **{"syscall.h": "// #define SYS_sysinfo 23\n"})
-    assert [r.check.id for r in L.evaluate(spec, _read(files)) if not r.passed] == ["number"]
+    assert [r.check.id for r in _ev(spec, files) if not r.passed] == ["number"]
     files = dict(GOOD, **{"usys.pl": '# entry("sysinfo");\n'})
-    assert [r.check.id for r in L.evaluate(spec, _read(files)) if not r.passed] == ["usys"]
+    assert [r.check.id for r in _ev(spec, files) if not r.passed] == ["usys"]
 
 
 def test_a_hash_in_C_is_a_directive_and_must_not_be_stripped():
@@ -121,7 +126,7 @@ def test_progress_counts_by_part(spec):
     part_a_only = {k: v for k, v in GOOD.items() if k in ("syscall.h", "syscall.c", "sysproc.c",
                                                           "user.h", "usys.pl")}
     part_a_only["sysproc.c"] = "uint64\nsys_sysinfo(void)\n{\n  return 0;\n}\n"
-    res = L.evaluate(spec, _read(part_a_only))
+    res = _ev(spec, part_a_only)
     p = L.progress(res)
     assert p["parts"]["A"] == (6, 6), "part A is finishable without touching part B's files"
     assert p["parts"]["B"][0] < p["parts"]["B"][1]
@@ -132,3 +137,65 @@ def test_an_empty_spec_is_harmless():
     assert s.files == () and s.checks == ()
     assert L.progress(L.evaluate(s, lambda _n: "")) == {"passed": 0, "total": 0, "parts": {}}
     assert L.next_step(()) is None
+
+
+# --------------------------------------------------------------------------- #
+# The check that would have caught it.
+#
+# Reported from a real run: "Count free memory by walking kmem.freelist" showed a green tick on a
+# machine where the student had edited nothing but syscall.h. The pattern was `kmem.freelist`, and
+# the UNTOUCHED kalloc.c contains it — `kalloc` and `kfree` both use it. A tick that is green
+# before the student starts is worse than no tick: it tells them work is done that is not, and it
+# is the one failure a tracker must not have.
+# --------------------------------------------------------------------------- #
+
+PRISTINE = {
+    # Just enough of the real files to carry what a check might wrongly match. Every line here is
+    # from the stock kernel, not invented.
+    "syscall.h": "#define SYS_close  21\n#define SYS_sync   22\n",
+    "syscall.c": ("extern uint64 sys_sync(void);\n"
+                  "static uint64 (*syscalls[])(void) = {\n  [SYS_sync] = sys_sync,\n};\n"
+                  "void syscall(void){ num = p->trapframe->a7; }\n"),
+    "sysproc.c": ("uint64 sys_exit(void){ int n; argint(0, &n); exit(n); return 0; }\n"
+                  "uint64 sys_sbrk(void){ uint64 addr; argaddr(0, &addr); return 0; }\n"),
+    "user.h": "int sync(void);\nint uptime(void);\nchar* sbrk(int);\n",
+    "usys.pl": 'entry("sync");\nentry("uptime");\n',
+    "defs.h": "void*           kalloc(void);\nvoid            kfree(void *);\n",
+    # the one that actually caused this
+    "kalloc.c": ("void kfree(void *pa){ struct run *r = (struct run*)pa;\n"
+                 "  acquire(&kmem.lock); r->next = kmem.freelist; kmem.freelist = r;\n"
+                 "  release(&kmem.lock); }\n"
+                 "void* kalloc(void){ struct run *r; acquire(&kmem.lock);\n"
+                 "  r = kmem.freelist; if(r) kmem.freelist = r->next;\n"
+                 "  release(&kmem.lock); return (void*)r; }\n"),
+}
+
+
+def test_no_check_is_green_before_the_student_starts(spec):
+    """Every check must detect something the student ADDED, not something that was always there."""
+    read = lambda n: PRISTINE.get(n) or next((f.seed for f in spec.files if f.name == n), None)
+    res = L.evaluate(spec, read, pristine=read)      # untouched == pristine, so nothing is edited
+    green = [r.check.id for r in res if r.passed]
+    assert green == [], f"these are green on an untouched tree: {green}"
+
+
+def test_an_edited_check_needs_the_original_to_compare_against(spec):
+    """Without a pristine reader it reports not-done rather than guessing. A green tick for work
+    nobody has started is the one wrong answer a tracker can give."""
+    read = lambda n: PRISTINE.get(n) or ""
+    res = L.evaluate(spec, read)                     # no pristine
+    assert not any(r.passed for r in res if r.check.kind == "edited")
+
+
+def test_an_edited_check_goes_green_when_the_file_changes(spec):
+    edited = dict(PRISTINE, **{"kalloc.c": PRISTINE["kalloc.c"] + "\nuint64 freemem(void){...}\n"})
+    res = L.evaluate(spec, lambda n: edited.get(n, ""), pristine=lambda n: PRISTINE.get(n))
+    assert next(r for r in res if r.check.id == "freelist").passed
+
+
+def test_the_pack_has_at_least_one_check_per_part_that_is_a_real_pattern(spec):
+    """`edited` is a weaker signal than a pattern, so a part made only of `edited` checks would
+    tick over on any stray keystroke. Each part keeps at least one real pattern."""
+    for part in spec.parts():
+        kinds = {c.kind for c in spec.checks if c.part == part}
+        assert "match" in kinds, f"part {part} has no pattern-based check"

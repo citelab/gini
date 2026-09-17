@@ -32,7 +32,7 @@ The handouts tell students to press **Load**, press **Revert**, and read a compi
 those have a home: Load and Revert exist as endpoints, but their only UI is the shadow bar bolted
 onto the Scheduler face, where it ended up because shadows began as a scheduler feature.
 
-**The plan is one new face — `My Code` — and it is where student-authored kernel code lives for
+**The plan is one new face — `User Code` — and it is where student-authored kernel code lives for
 every lab type, shadows included.**
 
 ### Where it goes
@@ -41,7 +41,7 @@ The Machine Lab's home page is a stack of layer bands — USER SPACE, the `ecall
 SYSTEM-CALL INTERFACE, the KERNEL, the HARDWARE — an architecture diagram you can click. Each band
 is a place *in the machine*.
 
-A student's own code is not a layer of the machine; it is an overlay on it. So `My Code` gets its
+A student's own code is not a layer of the machine; it is an overlay on it. So `User Code` gets its
 own band above USER SPACE, labelled for the assignment rather than for a layer. That also keeps it
 honest when the lab is about paging or the file system: the face does not move, only its file list
 changes.
@@ -49,7 +49,7 @@ changes.
 ### What it shows
 
 ```
-┌ My Code ───────────────────────────────────────────────────────────┐
+┌ User Code ───────────────────────────────────────────────────────────┐
 │  Assignment 1 — sysinfo          ~/.gini/xv6-lab/M1      [ Reveal ] │
 │                                                                     │
 │  FILES YOU OWN                                                      │
@@ -96,7 +96,7 @@ They answer different questions and the student needs both:
 
 | | |
 |---|---|
-| **My Code** | *Is it wired?* — static, read from their files, before anything runs |
+| **User Code** | *Is it wired?* — static, read from their files, before anything runs |
 | **System Calls Lab** | *Is it running?* — live, read from the kernel, as their program executes |
 
 That is why the handout's check table has three rows rather than two: nothing in the histogram is a
@@ -194,7 +194,7 @@ Grouped by what each unblocks. Nothing here is started.
 - `_touch_sources` in the agent must walk `LAB_FILES`, or the stale-build fix does not cover
   these files and a Load can silently load the previous kernel.
 
-### The `My Code` face (see above)
+### The `User Code` face (see above)
 - The face itself: file list with per-file state, Revert, Load, the scoped compile log, and the
   wiring check. New band on the Machine Lab home page.
 - Lift the shadow bar's Load/Revert/log out of `machine_lab.py`'s Scheduler face into a reusable
