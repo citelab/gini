@@ -1,0 +1,159 @@
+# Assignment 1 — a system call that reports system information.
+# The handout is docs/labs/assignment-1-sysinfo.md; `where` and `hint` are its words.
+id: syscall-sysinfo
+title: "Assignment 1 — sysinfo"
+machine_folder: xv6-lab
+syscall_number: 23          # stock xv6 ends at SYS_sync = 22
+
+files:
+  - name: syscall.h
+    tree: kernel/syscall.h
+  - name: syscall.c
+    tree: kernel/syscall.c
+  - name: sysproc.c
+    tree: kernel/sysproc.c
+  - name: user.h
+    tree: user/user.h
+  - name: usys.pl
+    tree: user/usys.pl
+  - name: defs.h
+    tree: kernel/defs.h
+
+  # The free list is a chain of `struct run`, a type declared inside kalloc.c and nowhere else.
+  # There is no way to walk kmem.freelist from another file, which is the lesson, not an obstacle.
+  - name: kalloc.c
+    tree: kernel/kalloc.c
+
+  # xv6-riscv has no sysinfo.h — MIT's 6.1810 supplies it. The assignment carries it instead of
+  # the image, so the header travels with the lab.
+  - name: sysinfo.h
+    tree: kernel/sysinfo.h
+    seed: |
+      // The contract between your program and your kernel.
+      struct sysinfo {
+        uint64 freemem;   // bytes of free memory
+        uint64 nproc;     // processes whose state is not UNUSED
+      };
+
+  - name: sysinfotest.c
+    tree: user/sysinfotest.c
+    uprog: sysinfotest
+    seed: |
+      #include "kernel/types.h"
+      #include "kernel/sysinfo.h"
+      #include "user/user.h"
+
+      int
+      main(void)
+      {
+        struct sysinfo info;
+        if (sysinfo(&info) < 0) {
+          printf("sysinfo failed\n");
+          exit(1);
+        }
+        printf("free bytes: %d\nprocesses:  %d\n", (int)info.freemem, (int)info.nproc);
+        exit(0);
+      }
+
+checks:
+  - id: number
+    part: A
+    label: "Give the call a number"
+    where: kernel/syscall.h
+    file: syscall.h
+    match: '#define\s+SYS_sysinfo\s+\d+'
+    hint: "The last one is SYS_sync 22, so yours is 23."
+
+  - id: extern
+    part: A
+    label: "Declare the kernel function"
+    where: kernel/syscall.c
+    file: syscall.c
+    match: 'extern\s+uint64\s+sys_sysinfo\s*\('
+
+  - id: dispatch
+    part: A
+    label: "Add a row to syscalls[]"
+    where: kernel/syscall.c
+    file: syscall.c
+    match: '\[\s*SYS_sysinfo\s*\]'
+    hint: "Without this it builds, then fails at runtime with 'unknown sys call 23'."
+
+  - id: impl
+    part: A
+    label: "Write the kernel side"
+    where: kernel/sysproc.c
+    file: sysproc.c
+    match: 'sys_sysinfo\s*\(\s*void\s*\)'
+
+  - id: prototype
+    part: A
+    label: "Declare it for your program"
+    where: user/user.h
+    file: user.h
+    match: '\bsysinfo\s*\('
+
+  - id: usys
+    part: A
+    label: "Generate the trampoline"
+    where: user/usys.pl
+    file: usys.pl
+    match: 'entry\s*\(\s*"sysinfo"\s*\)'
+    hint: "Miss this and nothing fails until the LINKER: undefined reference to 'sysinfo'."
+
+  - id: freelist
+    part: B
+    label: "Count free memory by walking kmem.freelist"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: 'kmem\s*\.\s*freelist'
+    hint: "Free memory is a linked list, not a counter. Hold kmem.lock while you walk it."
+
+  - id: declare_helper
+    part: B
+    label: "Declare your counter in defs.h"
+    where: kernel/defs.h
+    file: defs.h
+    match: 'freemem|free_bytes|nfree|freebytes'
+
+  - id: proc_table
+    part: B
+    label: "Walk the process table"
+    where: kernel/sysproc.c
+    file: sysproc.c
+    match: 'extern\s+struct\s+proc\s+proc\s*\[|proc\s*\[\s*NPROC\s*\]'
+    hint: "proc[] is reachable from here: extern struct proc proc[NPROC];"
+
+  - id: copyout
+    part: B
+    label: "Return the struct with copyout"
+    where: kernel/sysproc.c
+    file: sysproc.c
+    match: 'copyout\s*\('
+    hint: "Five arguments in this xv6: copyout(pagetable, p->sz, dstva, src, len)."
+
+grade:
+  - id: named
+    part: A
+    describe: "sysinfo appears by name in the System Calls Lab"
+    metric: syscall_named
+    expect: sysinfo
+  # The DELTA, not the absolute. Measured on a live machine: the two counts sit a few dozen pages
+  # apart (they account for the edges of memory differently) but they move together exactly —
+  # allocate 18 pages and both drop by 18. A delta is also immune to anything happening between
+  # the two reads, which an absolute comparison is not.
+  - id: freemem_tracks
+    part: B
+    describe: "freemem moves with allocation, by the amount GINI independently observes"
+    metric: sysinfo_freemem_delta_vs_free_pages_delta
+    tolerance: 2
+  - id: freemem_plausible
+    part: B
+    describe: "freemem is a real count, not a constant"
+    metric: sysinfo_freemem_vs_free_pages
+    tolerance: 512
+  - id: nproc_agrees
+    part: B
+    describe: "nproc matches the process table GINI reads"
+    metric: sysinfo_nproc_vs_procs
+    tolerance: 0

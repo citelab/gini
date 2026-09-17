@@ -227,18 +227,25 @@ fails, because a program is allowed to pass you a bad pointer and that must not 
 The kernel is not the only thing that knows these numbers, and **GINI works them out a completely
 different way**: it keeps a bitmap of every physical page rather than walking a free list.
 
-So you have an independent answer to check against:
+So you have an independent answer to check against — and the thing to check is **the change**,
+not the absolute number:
 
-1. Open the **Memory Lab**. Note the free page count.
-2. Run `sysinfotest`.
-3. Your `freemem` divided by 4096 should equal it.
+1. Open the **Memory Lab** and note the free page count. Run `sysinfotest` and note yours.
+2. At the **Keyboard**, run `alloc 20 &` — a program that allocates memory and holds it.
+3. Look at both numbers again.
 
-Do the same with the process count and the **Process** face while running `spin &` a few times to
-change it.
+**Both should have dropped by the same amount.** That is the check. A measurement you can move
+predictably is a measurement you understand; a number that happens to look plausible once is not.
 
-If the two disagree, one of you is wrong, and finding out which is the exercise. Two independent
-methods agreeing is how you know a number is real — it is also, roughly, how operating systems
-are tested.
+Do the same with the process count and the **Process** face, using `spin &` to add processes.
+
+The two *absolute* numbers will not be identical, and that is worth understanding rather than
+worrying about. They count slightly different things at the edges of memory. Yours — walking the
+free list — is the allocator's own answer to "what could I hand out right now", which is what
+`freemem` is supposed to mean.
+
+Two independent methods moving together is how you know a number is real. It is also, roughly,
+how operating systems are tested.
 
 ---
 

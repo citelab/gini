@@ -929,8 +929,16 @@ void
 gini_kadump(void)
 {
   uint64 npages = (PHYSTOP - KERNBASE) / PGSIZE;
+  // Start where the ALLOCATOR starts, not where physical memory starts. kinit() does
+  // freerange(end, PHYSTOP), so the pages below PGROUNDUP(end) are the kernel's own image: they
+  // are never kfree'd, so gini_page_clear never runs on them, so their bits stay 0 — and a 0 bit
+  // means "free". This counted the kernel itself as free memory, about 50 pages of it, on every
+  // machine since the bitmap was added. Found while building the sysinfo assignment, where a
+  // student walks kmem.freelist and gets the right answer: the two disagreed by exactly the size
+  // of the kernel image, and the student's number was the correct one.
+  uint64 first = (PGROUNDUP((uint64)end) - KERNBASE) / PGSIZE;
   uint64 free = 0, run = 0, best = 0;
-  for(uint64 i = 0; i < npages; i++){
+  for(uint64 i = first; i < npages; i++){
     if(gini_page_isset(KERNBASE + i * PGSIZE)){
       run = 0;
     } else {

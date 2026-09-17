@@ -117,7 +117,8 @@ see `grade:` below.
 
 ### An assignment is a YAML file
 
-`lab-spec-example.yaml` in this directory is the real shape. Nothing in it is special-cased in
+The real one is `core/src/gini/domain/labs/syscall-sysinfo.yaml` — read that rather than a
+copy here, because a second copy of a spec is a second thing to keep in step. Nothing in it is special-cased in
 GINI: the Machine Lab reads it to know which files the student owns, what to seed, what to register
 in the build, what the tracker shows, and what is graded.
 

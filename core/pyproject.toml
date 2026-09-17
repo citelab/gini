@@ -31,7 +31,7 @@ where = ["src"]
 include = ["gini", "gini.domain*"]
 
 [tool.setuptools.package-data]
-"gini.domain" = ["missions/**/*.yaml"]
+"gini.domain" = ["missions/**/*.yaml", "labs/*.yaml"]
 
 [tool.setuptools_scm]
 root = ".."

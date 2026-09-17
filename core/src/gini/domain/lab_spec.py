@@ -1,0 +1,220 @@
+"""A kernel assignment, as data.
+
+The xv6 labs all have the same shape: a handful of kernel files become the student's, they edit
+them, GINI rebuilds the kernel, and something is checked. What differs between assignments is
+*which* files, *what* to look for, and *what* to measure — so those are data, and this module is
+the reader.
+
+The point is that a new assignment is a YAML file rather than a code change. It also stops the
+handout, the progress tracker and the grader being three descriptions of one assignment that can
+drift apart: `where` and `hint` are the words the handout uses, written once.
+
+**A check is not a grade, and the distinction is load-bearing.** Every check here is a pattern
+over the student's own source, so it answers "have you written the line" and never "does it
+work" — a line that is present but wrong passes. That is on purpose: the tracker exists so a
+student can see what the assignment requires and how far they have got, which is a different job
+from marking. What is actually graded is measured while their code runs, and lives under `grade`.
+
+Pure, like the rest of `gini.domain`: `evaluate` takes a callable that returns file text, so the
+filesystem, the container and the mount are all somebody else's problem.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+LABS_DIR = Path(__file__).parent / "labs"
+
+# Comment syntax per file kind. C files must NOT have `#` lines stripped — `#define SYS_sysinfo`
+# is the single most important line in a syscall lab, and it starts with a hash.
+_C_LIKE = (".c", ".h")
+_HASH_LIKE = (".pl", ".pm", ".sh", ".mk")
+
+
+@dataclass(frozen=True)
+class LabFile:
+    """One file the student owns.
+
+    `name` is what it is called in their lab folder; `tree` is where GINI links it into the kernel
+    source. `seed` is the text to write when the folder is empty — used for files xv6 does not
+    have (`kernel/sysinfo.h`) and for starter programs. Files with no seed are copied from the
+    image's pristine copy instead. `uprog` registers a user program in the build, so the student
+    never edits the Makefile.
+    """
+    name: str
+    tree: str
+    seed: str = ""
+    uprog: str = ""
+
+
+@dataclass(frozen=True)
+class Check:
+    """One line in the progress tracker: a pattern over one of the student's files."""
+    id: str
+    label: str
+    file: str
+    match: str
+    part: str = ""
+    where: str = ""          # the path as the handout names it, e.g. "kernel/syscall.h"
+    hint: str = ""
+
+
+@dataclass(frozen=True)
+class GradeItem:
+    """One thing measured while the student's code RUNS. Read by the runner, not by this module."""
+    id: str
+    describe: str
+    metric: str
+    part: str = ""
+    expect: object = None
+    tolerance: object = None
+
+
+@dataclass(frozen=True)
+class LabSpec:
+    id: str
+    title: str
+    machine_folder: str = "xv6-lab"
+    syscall_number: int = 0
+    files: tuple[LabFile, ...] = ()
+    checks: tuple[Check, ...] = ()
+    grade: tuple[GradeItem, ...] = ()
+
+    def file(self, name: str) -> LabFile | None:
+        return next((f for f in self.files if f.name == name), None)
+
+    def parts(self) -> tuple[str, ...]:
+        """The parts, in the order they first appear — an assignment decides its own naming."""
+        seen: list[str] = []
+        for c in self.checks:
+            if c.part and c.part not in seen:
+                seen.append(c.part)
+        return tuple(seen)
+
+    def uprogs(self) -> tuple[str, ...]:
+        return tuple(f.uprog for f in self.files if f.uprog)
+
+
+# --------------------------------------------------------------------------- #
+# loading
+# --------------------------------------------------------------------------- #
+def from_dict(d: dict) -> LabSpec:
+    d = d or {}
+    files = tuple(LabFile(name=str(f.get("name", "")), tree=str(f.get("tree", "")),
+                          seed=str(f.get("seed", "") or ""), uprog=str(f.get("uprog", "") or ""))
+                  for f in (d.get("files") or []) if f.get("name") and f.get("tree"))
+    checks = tuple(Check(id=str(c.get("id", "")), label=str(c.get("label", "")),
+                         file=str(c.get("file", "")), match=str(c.get("match", "")),
+                         part=str(c.get("part", "") or ""), where=str(c.get("where", "") or ""),
+                         hint=str(c.get("hint", "") or ""))
+                   for c in (d.get("checks") or []) if c.get("id") and c.get("match"))
+    grade = tuple(GradeItem(id=str(g.get("id", "")), describe=str(g.get("describe", "") or ""),
+                            metric=str(g.get("metric", "") or ""),
+                            part=str(g.get("part", "") or ""),
+                            expect=g.get("expect"), tolerance=g.get("tolerance"))
+                  for g in (d.get("grade") or []) if g.get("id"))
+    return LabSpec(id=str(d.get("id", "")), title=str(d.get("title", "")),
+                   machine_folder=str(d.get("machine_folder", "xv6-lab")),
+                   syscall_number=int(d.get("syscall_number", 0) or 0),
+                   files=files, checks=checks, grade=grade)
+
+
+def from_yaml(text: str) -> LabSpec:
+    return from_dict(yaml.safe_load(text) or {})
+
+
+def load(path) -> LabSpec:
+    return from_yaml(Path(path).read_text(encoding="utf-8"))
+
+
+def catalog() -> tuple[LabSpec, ...]:
+    """Every assignment shipped with gini-core, sorted by id."""
+    if not LABS_DIR.is_dir():
+        return ()
+    out = []
+    for p in sorted(LABS_DIR.glob("*.yaml")):
+        try:
+            out.append(load(p))
+        except Exception:      # noqa: BLE001 — one malformed pack must not hide the rest
+            continue
+    return tuple(out)
+
+
+def get(spec_id: str) -> LabSpec | None:
+    return next((s for s in catalog() if s.id == spec_id), None)
+
+
+# --------------------------------------------------------------------------- #
+# evaluating
+# --------------------------------------------------------------------------- #
+def strip_comments(text: str, filename: str = "") -> str:
+    """Remove comments, so commenting a line out does not tick its box.
+
+    Deliberately naive: it does not know about string literals, so `"// not a comment"` would be
+    cut. That is acceptable here — these patterns look for declarations and table rows, not for
+    text inside strings — and the alternative is a C parser to answer a question the compiler
+    answers properly a second later.
+    """
+    ext = Path(filename).suffix.lower()
+    if ext in _HASH_LIKE:
+        return re.sub(r"#.*", "", text or "")
+    if ext in _C_LIKE or not ext:
+        out = re.sub(r"/\*.*?\*/", " ", text or "", flags=re.S)
+        return re.sub(r"//.*", "", out)
+    return text or ""
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    check: Check
+    passed: bool
+    missing_file: bool = False
+
+
+def evaluate(spec: LabSpec, read) -> tuple[CheckResult, ...]:
+    """Run every check. `read(name)` returns the text of one of the student's files, or None.
+
+    A file that cannot be read fails its checks rather than raising: on a machine that is not
+    running, or before the folder is seeded, "not done yet" is the honest answer and an exception
+    would take the whole face down with it.
+    """
+    out = []
+    cache: dict[str, str | None] = {}
+    for c in spec.checks:
+        if c.file not in cache:
+            try:
+                cache[c.file] = read(c.file)
+            except Exception:                      # noqa: BLE001
+                cache[c.file] = None
+        text = cache[c.file]
+        if text is None:
+            out.append(CheckResult(c, False, missing_file=True))
+            continue
+        try:
+            ok = re.search(c.match, strip_comments(text, c.file)) is not None
+        except re.error:                           # a bad pattern in a pack is not a crash
+            ok = False
+        out.append(CheckResult(c, ok))
+    return tuple(out)
+
+
+def progress(results) -> dict:
+    """`{"passed": n, "total": n, "parts": {"A": (passed, total), …}}` for the tracker."""
+    rs = tuple(results)
+    parts: dict[str, list[int]] = {}
+    for r in rs:
+        p = r.check.part or ""
+        slot = parts.setdefault(p, [0, 0])
+        slot[1] += 1
+        if r.passed:
+            slot[0] += 1
+    return {"passed": sum(1 for r in rs if r.passed), "total": len(rs),
+            "parts": {k: (v[0], v[1]) for k, v in parts.items()}}
+
+
+def next_step(results) -> Check | None:
+    """The first check not yet passed — what the face nudges toward. None when all are done."""
+    return next((r.check for r in results if not r.passed), None)
