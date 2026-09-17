@@ -1160,6 +1160,19 @@ class RuntimeCompiler:
                 _shadows_host.mkdir(parents=True, exist_ok=True)   # exists + user-owned before `up`
             except OSError:
                 pass
+            # The second mount: the files a LAB hands over. One flat folder, symlinked into the
+            # tree at Run (services/xv6_lab.link_script). Separate from shadows because a shadow is
+            # always the same three files in one directory, while a lab's file list belongs to the
+            # assignment and is spread across kernel/ and user/. Mounted even with no assignment
+            # armed, so arming one later does not need the machine restarted.
+            from .xv6_lab import MOUNT as _lab_mount
+            from .xv6_lab import active_spec as _active_spec
+            from .xv6_lab import lab_dir as _lab_dir
+            _lab_host = _lab_dir(d.name, getattr(_active_spec(), "machine_folder", "xv6-lab"))
+            try:
+                _lab_host.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
             cfg.services.append(ServiceSpec(
                 name=d.name, type_key="xv6", image="gini-xv6:latest",
                 summary="xv6 teaching kernel (QEMU-RISC-V); in-container agent serves live state.",
@@ -1170,7 +1183,8 @@ class RuntimeCompiler:
                         "web": False, "path": ""},
                        {"container": 4444, "host": host_port + 1, "label": "serial",
                         "web": False, "path": ""}],
-                volumes=[f"{_shadows_host}:/opt/xv6-riscv/kernel/shadows"],
+                volumes=[f"{_shadows_host}:/opt/xv6-riscv/kernel/shadows",
+                         f"{_lab_host}:{_lab_mount}"],
                 cpus=_cpus_for(d), networks=["gini"]))
             host_port += 2
 

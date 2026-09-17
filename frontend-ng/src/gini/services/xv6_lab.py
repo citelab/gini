@@ -28,8 +28,12 @@ from pathlib import Path
 
 #: Where the tree's files are linked from, inside the container.
 MOUNT = "/opt/xv6-lab"
-#: Where the image's untouched copy of each linked file is kept, so Revert has something true.
-PRISTINE = "/opt/gini_lab_orig"
+#: The image's untouched copy of each linked file, kept INSIDE the mount — so it lands on the
+#: host, where "have I changed this?" and Revert are a file comparison and a file copy rather than
+#: an exec into a container that may not be running. A student who has stopped their machine can
+#: still see what they changed and put it back.
+PRISTINE = "/opt/xv6-lab/.pristine"
+PRISTINE_DIR = ".pristine"
 
 #: Insert one `$U/_<prog>` row into the Makefile's UPROGS list, after `UPROGS=\`.
 _UPROG_AWK = r'{print} /^UPROGS=\\$/{print "\t$U/_" p "\\"}'
@@ -60,6 +64,27 @@ def lab_dir(machine_name: str, folder: str = "xv6-lab") -> Path:
     return _gini_home() / sane_name(folder or "xv6-lab") / sane_name(machine_name)
 
 
+def active_spec():
+    """The assignment this machine is doing, or None.
+
+    For now: `GINI_LAB` names one, otherwise the single shipped pack. When missions come back from
+    the Teaching Center this is where the armed activity will be read instead — the rest of the
+    module already takes a spec rather than looking one up, so only this function changes.
+    """
+    try:
+        from ..domain import lab_spec as _ls
+    except Exception:                              # noqa: BLE001 — a lab must never block a Run
+        return None
+    try:
+        wanted = os.environ.get("GINI_LAB", "").strip()
+        if wanted:
+            return _ls.get(wanted)
+        packs = _ls.catalog()
+        return packs[0] if len(packs) == 1 else None
+    except Exception:                              # noqa: BLE001
+        return None
+
+
 def seed_host_files(spec, machine_name: str) -> list[str]:
     """Write the files the assignment CARRIES, if they are not there yet. Returns what was written.
 
@@ -72,10 +97,18 @@ def seed_host_files(spec, machine_name: str) -> list[str]:
     """
     d = lab_dir(machine_name, getattr(spec, "machine_folder", "xv6-lab"))
     d.mkdir(parents=True, exist_ok=True)
+    (d / PRISTINE_DIR).mkdir(exist_ok=True)
     written = []
     for f in getattr(spec, "files", ()):
         if not f.seed:
             continue
+        # The seed IS the pristine copy for these. Without this, the two files the assignment
+        # carries — the header xv6 lacks and the starter program — are the only ones a student
+        # cannot Revert, which is backwards: the starter program is the likeliest thing they
+        # break while working out what the call should print.
+        orig = d / PRISTINE_DIR / f.name
+        if not orig.exists():
+            orig.write_text(f.seed, encoding="utf-8")
         p = d / f.name
         if p.exists():
             continue
@@ -150,10 +183,10 @@ def link_script(spec) -> str:
             f"if [ ! -f {MOUNT}/{name} ]; then",
             f"  if [ -f {tree} ]; then cp {tree} {MOUNT}/{name}; fi",
             "fi",
-            f"if [ ! -L {tree} ]; then",
-            f"  if [ -f {tree} ]; then cp {tree} {PRISTINE}/{name}; fi",
-            f"  ln -sf {MOUNT}/{name} {tree}",
+            f"if [ ! -L {tree} ] && [ -f {tree} ] && [ ! -f {PRISTINE}/{name} ]; then",
+            f"  cp {tree} {PRISTINE}/{name}",
             "fi",
+            f"if [ ! -L {tree} ]; then ln -sf {MOUNT}/{name} {tree}; fi",
         ]
     for prog in getattr(spec, "uprogs", lambda: ())():
         # `awk -v` rather than splicing the name into the awk program: unquoted in awk source
@@ -170,12 +203,42 @@ def link_script(spec) -> str:
     return "\n".join(lines)
 
 
-def revert_script(spec, name: str) -> str:
-    """Put ONE file back to the image's copy. Per file, because throwing away a broken kalloc.c
-    should not cost a student the syscall.c they finally got working."""
-    f = next((x for x in getattr(spec, "files", ()) if x.name == name), None)
-    if f is None:
-        return ""
-    q = shlex.quote(name)
-    return (f"set -e\n[ -f {PRISTINE}/{q} ] && cp {PRISTINE}/{q} {MOUNT}/{q} && "
-            f"echo reverted || echo 'no pristine copy'")
+def pristine_path(machine_name: str, name: str, folder: str = "xv6-lab") -> Path:
+    return lab_dir(machine_name, folder) / PRISTINE_DIR / name
+
+
+def state_of(spec, machine_name: str, name: str) -> str:
+    """`"edited"` | `"untouched"` | `"missing"` | `"unknown"` — what the file list shows.
+
+    "unknown" is honest rather than tidy: before the first Run there is no pristine copy, so
+    whether the file differs from the image's cannot be answered, and guessing "untouched" would
+    show a student a green tick for work they have not started.
+    """
+    folder = getattr(spec, "machine_folder", "xv6-lab")
+    mine = read_file(machine_name, name, folder)
+    if mine is None:
+        return "missing"
+    orig = pristine_path(machine_name, name, folder)
+    try:
+        return "edited" if mine != orig.read_text(encoding="utf-8", errors="replace") else "untouched"
+    except OSError:
+        return "unknown"
+
+
+def revert(spec, machine_name: str, name: str) -> tuple[bool, str]:
+    """Put ONE file back to the image's copy — a host-side copy, so it works with the machine down.
+
+    Per file, because throwing away a broken kalloc.c should not cost a student the syscall.c they
+    finally got working. The kernel does not change until they press Load, which is the same rule
+    as every other edit.
+    """
+    folder = getattr(spec, "machine_folder", "xv6-lab")
+    orig = pristine_path(machine_name, name, folder)
+    if not orig.is_file():
+        return False, f"no original of {name} yet — press Run once so GINI can take a copy"
+    try:
+        (lab_dir(machine_name, folder) / name).write_text(
+            orig.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    except OSError as e:
+        return False, f"could not revert {name}: {e}"
+    return True, f"{name} put back — press Load to build it"

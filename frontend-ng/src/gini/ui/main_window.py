@@ -2646,6 +2646,7 @@ class MainWindow(QMainWindow):
                                  "board: `set server <this Mac's IP>`."
                                  + (f"  ({why})" if why else ""), "warn")
             self._wire_xv6_providers()          # attach live GDB bridges to any xv6 kernels
+            self._attach_xv6_labs()             # link the student's kernel files into the tree
             self._populate_overlay_hosts()      # names resolve over gini0, not the Docker bridge
             for s in getattr(self, "_last_services", []):   # surface web consoles
                 for p in s.ports:
@@ -2952,6 +2953,69 @@ class MainWindow(QMainWindow):
         self._recompute_addressing()
         self._revalidate()
         self._rebill()
+
+    def _attach_xv6_labs(self) -> None:
+        """Seed the student's lab folder and symlink the kernel tree at it, once per Run.
+
+        Off the GUI thread: it is one exec per xv6 machine, and the container may not be accepting
+        them for a moment after `up` returns. Idempotent on both sides — the host seeds only files
+        that are absent, and the in-container script checks `[ -L ]` before saving a pristine copy,
+        which is the one guard that stops a second Run replacing the original with a link to the
+        student's own edited file.
+
+        Failure here must never fail a Run. A lab that did not attach means Load rebuilds the
+        image's kernel instead of theirs, which is visible and recoverable; a launch that died
+        because an assignment could not be linked is neither.
+        """
+        import subprocess
+
+        from ..services.compiler import _role, _svc
+        from ..services.orchestrator import exec_argv_for
+        from ..services.xv6_lab import active_spec, link_script, seed_host_files
+        orch = getattr(self.ctx, "orchestrator", None)
+        spec = active_spec()
+        if orch is None or spec is None:
+            return
+        devs = [d for d in self.ctx.topology.devices.values() if _role(d.type_key) == "xv6"]
+        if not devs:
+            return
+        # Built HERE, on the GUI thread: `spec` is GUI-thread data and the worker has no business
+        # reading it — only finished strings cross the boundary. Same rule as the hosts file.
+        script = link_script(spec)
+        names = [d.name for d in devs]
+        wd = getattr(orch, "workdir", None)
+
+        def work():
+            import time
+            done, failed = [], []
+            for name in names:
+                try:
+                    seed_host_files(spec, name)
+                except OSError as e:
+                    failed.append(f"{name}: {e}")
+                    continue
+                cmd = [*exec_argv_for(orch, _svc(name)), "sh", "-c", script]
+                err = ""
+                for attempt in range(4):        # the container may not take execs yet
+                    try:
+                        r = subprocess.run(cmd, cwd=str(wd) if wd else None,
+                                           capture_output=True, timeout=30)
+                        if r.returncode == 0:
+                            err = ""
+                            break
+                        err = _runtime.compose_error(r.stderr) or f"exit {r.returncode}"
+                    except Exception as e:      # noqa: BLE001 — best-effort
+                        err = str(e)[:120]
+                    time.sleep(0.75 * (attempt + 1))
+                (failed.append(f"{name}: {err}") if err else done.append(name))
+            if done:
+                self.ctx.log(f"{spec.title} — your files are linked into "
+                             f"{', '.join(done)}. Edit them, then press Load.", "ok")
+            if failed:
+                self.ctx.log("Could not attach the assignment on: " + ", ".join(failed[:3]),
+                             "warn")
+
+        run_off_gui(self, work)
 
     def _populate_overlay_hosts(self) -> None:
         """Write peer name→overlay-IP lines into each machine's /etc/hosts, so name resolution

@@ -429,6 +429,17 @@ class MachineLab(QDialog):
         self._ov_cards: dict = {}
 
         # top of the stack: what the student's programs are, running in user mode
+        # The student's own code. Deliberately not inside one of the layer bands below: those
+        # describe places IN the machine, and an assignment is an overlay on all of them. Keeping
+        # it here also means the face does not move when the lab is about paging instead of
+        # system calls — only its file list changes.
+        from ..services.xv6_lab import active_spec as _active_lab
+        _lab_spec = _active_lab()
+        if _lab_spec is not None:
+            col.addWidget(self._layer_band("THIS ASSIGNMENT", [
+                ("compile", "My Code",
+                 f"{_lab_spec.title} — the files you own, what you have changed, and Load.",
+                 "amber", self._open_my_code)]))
         col.addWidget(self._layer_band("USER SPACE", [
             ("programs", "Programs & Shell", "The processes you launch — running in user mode.",
              "green", self._open_console),
@@ -706,6 +717,16 @@ class MachineLab(QDialog):
                                    state=self.state)
         self._storage.show()
         self._storage.raise_()
+
+    def _open_my_code(self) -> None:
+        """The assignment's own face: files, what is changed, the wiring checklist, and Load."""
+        self._retire("_mycode")
+        self._rec("note_lab_open", self._dev_name(), "My Code")
+        from ..services.xv6_lab import active_spec
+        from .my_code import MyCode
+        self._mycode = MyCode(self, self.theme, device=self.device,
+                              provider=self.state.provider, spec=active_spec(), live=self.live)
+        self._mycode.show(); self._mycode.raise_()
 
     def _open_syscall_builder(self) -> None:
         self._retire("_syscalls")
