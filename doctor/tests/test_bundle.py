@@ -116,3 +116,25 @@ def test_something_that_is_not_the_bundle_is_never_run(kind, tmp_path, served):
     assert "could not be fetched" in facts["stage0.verdict"]["value"]
     assert "could not fetch" in facts["stage0.stage1.fetch"]["value"]
     assert "captive portal" not in proc.stdout
+
+
+def test_the_bundle_is_pure_ascii_so_no_machine_has_to_guess_its_encoding():
+    """macOS + Python 3.8 refused a UTF-8 bundle with
+
+        SyntaxError: Non-UTF-8 code starting with '\\xe2' ... but no encoding declared
+
+    about a file that decodes as UTF-8 perfectly well. `BUFSIZ` is 1024 there against 8192 on
+    glibc, and the pre-3.9 tokenizer decoded a twenty-thousand-byte line in `BUFSIZ` pieces, so an
+    em-dash straddling the boundary came apart. Linux, Windows and 3.12 were all fine, which is how
+    this passed CI on one commit and failed on the next, when a new module moved the em-dashes.
+
+    `ascii()` removes the class rather than the character: the file now reads the same under any
+    ASCII superset, whatever curl, wget or Invoke-WebRequest wrote it down as.
+    """
+    raw = BUNDLE.read_bytes()
+    assert [b for b in raw if b > 127] == [], "the bundle has non-ASCII bytes again"
+    # The escapes must still reconstruct every module byte for byte, or the doctor inside the
+    # bundle is not the doctor that was tested.
+    ns = {"__name__": "_bundle_under_test"}
+    exec(compile(raw.decode("ascii"), str(BUNDLE), "exec"), ns)      # noqa: S102
+    assert ns["FILES"] == dict(bundle.sources())
