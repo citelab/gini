@@ -1,7 +1,7 @@
 # Publishes gini-doctor to PyPI.
 #
 # Independent of the other three: it depends on nothing, so unlike teaching-center.yml there is no
-# ordering to respect on a first release.
+# ordering to respect on a first release. Tests on all three platforms are gini-doctor-tests.yml.
 name: publish gini-doctor
 
 on:
@@ -25,28 +25,38 @@ jobs:
       - run: python -m pip install --upgrade build
       - run: python -m build --sdist --wheel --outdir dist/ doctor/
 
-      # The shell script IS the package. Left out of the wheel this installs cleanly and then the
-      # command fails on first use, on the machine least able to work out why — so it is checked
-      # here rather than discovered in a lab.
-      - name: the wheel carries the script it runs
+      # A wheel that installs cleanly and fails on first use fails on the machine least able to work
+      # out why, so what the doctor needs at run time is checked here rather than found in a lab.
+      - name: the wheel carries everything the doctor runs, and depends on nothing
         run: |
           python - <<'PY'
           import glob, zipfile
           w = glob.glob("dist/gini_doctor-*.whl")[0]
           z = zipfile.ZipFile(w)
-          names = z.namelist()
-          assert "gini_doctor/gini-doctor.sh" in names, f"the probe script is missing: {names}"
-          body = z.read("gini_doctor/gini-doctor.sh").decode()
-          assert body.lstrip().startswith("#!/bin/sh"), "not the shell script we expect"
-          assert "GROUPS_DEFAULT" in body, "the script in the wheel is not the doctor"
+          names = set(z.namelist())
+          for need in ("gini_doctor/cli.py", "gini_doctor/stage1/cli.py", "gini_doctor/stage1/remedies.json",
+                       "gini_doctor/stage1/probes/engine.py", "gini_doctor/stage0/stage0.sh",
+                       "gini_doctor/stage0/stage0.ps1", "gini_doctor/stage0/stage1-bundle.py",
+                       "gini_doctor/gini-doctor.sh"):
+              assert need in names, f"{need} is missing from the wheel"
+          assert z.read("gini_doctor/stage0/stage0.sh").decode().startswith("#!/bin/sh")
+          assert "# gini-doctor stage1 bundle" in z.read("gini_doctor/stage0/stage1-bundle.py").decode()
 
           # Zero dependencies is this package's entire point: a diagnostic that has to install
           # something first can be unavailable for the same reason as its patient. PySide6 in
-          # particular must never arrive here — an admin checking thirty machines is not
+          # particular must never arrive here: an admin checking thirty machines is not
           # installing Qt on them.
           meta = z.read([n for n in names if n.endswith("METADATA")][0]).decode()
           reqs = [l for l in meta.splitlines() if l.startswith("Requires-Dist:")]
           assert not reqs, f"gini-doctor must depend on nothing, got: {reqs}"
           print(w, "ok")
           PY
+      - name: the committed single-file bundle matches the sources
+        run: python doctor/tools/bundle.py --check
+      - name: the installed command runs the doctor
+        run: |
+          python -m venv /tmp/doctor-venv
+          /tmp/doctor-venv/bin/pip install dist/gini_doctor-*.whl
+          /tmp/doctor-venv/bin/gini-doctor run --only system,engine --offline --stdout > /tmp/report.json
+          python -c "import json; r = json.load(open('/tmp/report.json')); assert r['doctor']['engine'] == 'python', r"
       - uses: pypa/gh-action-pypi-publish@release/v1

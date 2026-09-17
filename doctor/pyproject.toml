@@ -7,7 +7,7 @@ name = "gini-doctor"
 dynamic = ["version"]
 description = "Diagnose a machine that should be able to run GINI: engine, compose, rootless, Qt, images, performance"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "GINI Toolkit" }]
 
@@ -19,9 +19,11 @@ authors = [{ name = "GINI Toolkit" }]
 # and emphatically not on gini-toolkit, which carries PySide6 — an admin checking thirty lab
 # machines should not be installing Qt to do it.
 #
-# The engine is a POSIX shell script shipped inside the wheel. `gini-doctor` is a three-line
-# console script that hands it to `sh`, so the same file runs from a pipx install, from a git
-# checkout, or piped over ssh by --fanout onto a machine with nothing installed at all.
+# The doctor is Stage 1 (gini_doctor/stage1, standard library only, Python 3.8+), run in-process by
+# `gini-doctor`. Stage 0 (gini_doctor/stage0: POSIX sh and PowerShell) exists for machines with
+# nothing installed: it finds a usable Python and runs Stage 1 next to it, installed, or fetched as
+# the single-file stage1-bundle.py. The legacy shell engine (gini-doctor.sh) still ships, reachable
+# as `gini-doctor legacy`, until the Python doctor has matched it on the lab's Linux machines.
 dependencies = []
 
 [project.urls]
@@ -36,10 +38,10 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# The script IS the package; a wheel without it installs a command that cannot run.
-# The publish workflow asserts it is in there.
+# Data the code needs at run time; a wheel without it installs a command that fails on first use.
+# The publish workflow asserts each one is in there.
 [tool.setuptools.package-data]
-gini_doctor = ["*.sh", "stage0/*.sh", "stage0/*.ps1", "stage1/*.json"]
+gini_doctor = ["*.sh", "stage0/*.sh", "stage0/*.ps1", "stage0/*.py", "stage1/*.json"]
 
 [tool.setuptools_scm]
 root = ".."

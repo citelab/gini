@@ -27,8 +27,8 @@ from .report import ABSENT, ERROR, NA, OK, Report
 MAP: List[Tuple[str, str, str]] = [
     (r"kernel", "system.kernel", "suffix"),
     (r"arch", "system.arch", "text"),
-    (r"os\.id", "system.os.id", "text"),
-    (r"os\.version", "system.os.version", "text"),
+    (r"os\.id", "system.os.id", "os_id"),
+    (r"os\.version", "system.os.version", "os_version"),
     (r"os\.pretty", "system.os.name", "text"),
     (r"cpus", "system.cpus", "int"),
     (r"mem\.total\.kb", "system.memory.total_mb", "kb_to_mb"),
@@ -38,6 +38,7 @@ MAP: List[Tuple[str, str, str]] = [
     (r"podman\.(network\.backend|cgroups\.version|cgroup\.manager|oci\.runtime|conmon|slirp4netns"
      r"|storage\.driver|storage\.graphroot|storage\.runroot|idmap\.inuse|idmap\.subuid)", "engine.{0}", "text"),
     (r"podman\.images\.count", "engine.podman.images.count", "int"),
+    (r"podman\.info\.ok", "engine.podman.info", "answering"),
     (r"podman\.idmap\.matches", "engine.podman.idmap.matches", "bool"),
     (r"compose\.(provider|provider\.path|podman_compose\.version|docker_compose\.version|docker\.plugin)",
      "{0}", "text"),
@@ -93,7 +94,10 @@ DROPPED: List[Tuple[str, str]] = [
     (r"live\.skipped|perf\.xv6", "run-state, not a machine fact"),
 ]
 
-LEGACY_ABSENT = re.compile(r"^(absent|\(empty\)|\(unset\)|MISSING.*|n/a.*|unknown|\?)$")
+LEGACY_ABSENT = re.compile(r"^(absent( @ -)?|\(empty\)|\(unset\)|MISSING.*|n/a.*|unknown|\?"
+                           r"|no /etc/os-release|cgroup v1 or unreadable|unreadable)$")
+# The legacy doctor printed real home paths; Stage 1 reduces them to ~ on purpose.
+LEGACY_HOME = re.compile(r"(?:/Users|/home)/[^/\s]+")
 
 
 class Row(NamedTuple):
@@ -111,6 +115,7 @@ class Parity(NamedTuple):
     dropped: List[Tuple[str, str]]
     skipped: List[Row]
     explained: List[Row]
+    improved: List[Row]     # the legacy doctor could not read this here; Stage 1 can, or knows it is n/a
 
 
 # Where gBuilder is not installed, the legacy doctor fell back to PATH's python3 and reported that
@@ -155,10 +160,11 @@ def _truthy(text: str) -> Optional[bool]:
     return None
 
 
-def agrees(kind: str, legacy: str, fact: Optional[dict]) -> bool:
+def agrees(kind: str, legacy: str, fact: Optional[dict], report: Optional[Report] = None) -> bool:
     status = (fact or {}).get("status")
     value = (fact or {}).get("value")
     shown = render(fact) if fact else ""
+    legacy = LEGACY_HOME.sub("~", legacy)
     legacy_absent = bool(LEGACY_ABSENT.match(legacy)) or legacy.startswith("ERROR(")
     if fact is not None and status != OK and legacy == fact.get("detail"):
         return True
@@ -185,6 +191,14 @@ def agrees(kind: str, legacy: str, fact: Optional[dict]) -> bool:
         return legacy.startswith(shown) or shown.startswith(legacy.split(" (")[0])
     if kind == "pkg":
         return legacy.split(" @ ", 1)[0] == str(value).split(" ", 1)[0]
+    if kind == "answering":
+        return _truthy(legacy) is True
+    if kind == "os_id":
+        return legacy.lower() == str(value).lower() or (legacy == "Darwin" and value == "macos")
+    if kind == "os_version":
+        # On macOS the legacy doctor fell back to `uname -r`, the Darwin kernel version.
+        kernel = report.value("system.kernel") if report is not None else None
+        return legacy == str(value) or (report is not None and report.platform == "macos" and legacy == kernel)
     if kind == "via_gbuilder":
         return legacy == shown
     if kind == "config_engine":
@@ -192,12 +206,18 @@ def agrees(kind: str, legacy: str, fact: Optional[dict]) -> bool:
     if kind == "found":
         return legacy.startswith("found") == (value == "found")
     if kind == "image":
-        return all(tag in legacy for tag in (value if isinstance(value, list) else [value]))
+        # Legacy listed tags space-separated and cut the line at 120 characters, so its last tag may
+        # be partial; every complete legacy tag must be in the new list (or beyond its cap, counted).
+        tags = legacy.split()
+        if len(legacy) >= 120 and tags:
+            tags = tags[:-1]
+        new_tags = value if isinstance(value, list) else [value]
+        return all(t in new_tags for t in tags) or len(new_tags) >= 12
     return legacy == shown
 
 
 def parity(legacy: Dict[str, str], report: Report) -> Parity:
-    agree, disagree, missing, unmapped, dropped, skipped, explained = [], [], [], [], [], [], []
+    agree, disagree, missing, unmapped, dropped, skipped, explained, improved = [], [], [], [], [], [], [], []
     no_gbuilder = (report.facts.get("qt.gbuilder.python") or {}).get("status") == ABSENT
     for key in sorted(legacy):
         value = legacy[key]
@@ -218,16 +238,21 @@ def parity(legacy: Dict[str, str], report: Report) -> Parity:
             explained.append(row)
         elif fact is None:
             missing.append(row)
-        elif agrees(kind, value, fact):
+        elif agrees(kind, value, fact, report):
             agree.append(row)
+        elif fact.get("status") == NA or (fact.get("status") == OK and LEGACY_ABSENT.match(value)):
+            # The legacy doctor ran a Linux probe on another platform (and got "?" or a Linux-shaped
+            # non-answer), or could not read something Stage 1 reads. Not a regression.
+            improved.append(row)
         else:
             disagree.append(row)
-    return Parity(agree, disagree, missing, unmapped, dropped, skipped, explained)
+    return Parity(agree, disagree, missing, unmapped, dropped, skipped, explained, improved)
 
 
 def format_text(p: Parity) -> str:
-    out = ["", "parity: %d agree, %d disagree, %d explained, %d not collected by the new doctor, %d unmapped"
-           % (len(p.agree), len(p.disagree), len(p.explained), len(p.missing_new), len(p.unmapped)), ""]
+    out = ["", "parity: %d agree, %d disagree, %d improved, %d explained, %d not collected by the new doctor, %d unmapped"
+           % (len(p.agree), len(p.disagree), len(p.improved), len(p.explained), len(p.missing_new),
+              len(p.unmapped)), ""]
     if p.disagree:
         out.append("DISAGREE (these block S3 until explained):")
         for r in p.disagree:
@@ -241,6 +266,10 @@ def format_text(p: Parity) -> str:
     if p.unmapped:
         out.append("legacy keys with no mapping (add one to parity.MAP or DROPPED):")
         out.extend("  " + k for k in p.unmapped)
+        out.append("")
+    if p.improved:
+        out.append("improved (the legacy doctor could not read these on this platform):")
+        out.extend("  %s   legacy: %s   new: %s" % (r.legacy_key, r.legacy, r.new) for r in p.improved)
         out.append("")
     if p.explained:
         out.append("explained (%s):" % NO_GBUILDER)

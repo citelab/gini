@@ -66,5 +66,8 @@ teaching-center/example/data/
 *.db-wal
 *.db-shm
 
-# gini-doctor reports (machine-specific, collected ad hoc)
+# gini-doctor reports (machine-specific, collected ad hoc). The legacy engine writes text and the
+# Python doctor JSON, so both patterns belong here: `commit.sh` does `git add -A`, and a report
+# carries the hostname of whichever machine someone was diagnosing.
 gini-doctor-*.txt
+gini-doctor-*.json

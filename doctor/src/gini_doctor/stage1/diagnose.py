@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import pkgutil
 import re
 from typing import Any, Dict, List, NamedTuple, Optional
 
@@ -28,9 +29,16 @@ class Finding(NamedTuple):
     evidence: List[str]
 
 
-def load_table(path: str = TABLE) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+def load_table(path: Optional[str] = None) -> Dict[str, Any]:
+    """The built-in table is read through the package's loader, not a file path, so the same code
+    works from a checkout, an installed wheel, and the single-file bundle Stage 0 can fetch."""
+    if path is not None:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    data = pkgutil.get_data(__package__ or "gini_doctor.stage1", "remedies.json")
+    if data is None:
+        raise OSError("remedies.json is not available from this installation")
+    return json.loads(data.decode("utf-8"))
 
 
 def _matches(report: Report, cond: Dict[str, Any]) -> bool:
@@ -76,6 +84,8 @@ def diagnose(report: Report, table: Optional[Dict[str, Any]] = None) -> List[Fin
             command = command.get(report.platform)
             if command is None:
                 continue          # the rule has no fix on this platform, so it does not apply here
+        if command:
+            command = _fill(command, report)
         evidence = []
         for key in [c["fact"] for c in conds] + list(rule.get("verify") or []):
             line = "%s = %s" % (key, render(report.facts.get(key)))

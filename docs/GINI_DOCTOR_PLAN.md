@@ -52,7 +52,7 @@ Each stage ends green and usable on its own. The legacy shell engine and the cur
 - First group ported: `system`, on all three platforms.
 - Runs on Python **3.8+**; tested on 3.8 and 3.12.
 
-### S2 — Probe parity with the shell engine  ← built; parity on real machines outstanding
+### S2 — Probe parity with the shell engine  ← done (macOS); Linux lab and Windows outstanding
 
 - All nine legacy groups ported, each declaring its platforms: `engine`, `compose`, `rootless`
   (Linux only), `registry`, `qt`, `gini`, `live`, `perf`, `xv6`. Legacy default set restored;
@@ -62,26 +62,39 @@ Each stage ends green and usable on its own. The legacy shell engine and the cur
 - **Read-only registry:** the legacy real pull is gone. `registry` checks Docker Hub anonymously
   over HTTPS and via `<engine> manifest inspect`, and flags a stored credential that blocks pulls
   without ever opening a credential file. `live` uses only images already present.
-- **Local diagnosis:** `docs/LAB_DIAGNOSIS.md` is now `stage1/remedies.json` (18 rules, per-platform
-  commands). `run` prints findings after the facts; `diagnose report.json` does it offline. Each
-  finding is command + reason + side effects + what to re-check. Shown, never run.
-- **Parity tool:** `parity legacy.txt new.json` maps legacy keys and spellings onto Stage 1's and
-  lists agreements, disagreements, facts dropped on purpose, and the documented change where the
-  legacy doctor probed PATH's python3 instead of gBuilder's. Sandbox run (no engine): 46 agree,
-  0 disagree.
-- **Outstanding before S3:** parity runs on a real macOS machine with Docker, a lab Linux machine
-  with rootless Podman, and a Windows machine; then move
-  `frontend-ng/tests/test_doctor_matches_the_code.py` onto the Stage 1 sources (it still guards the
-  legacy script, which exists until S3).
+- **Runtime image names:** `gini.image.<name>.runtime` is a read-only `image inspect` of
+  `gini-<name>:latest`, the name GINI resolves, so "listed but does not resolve" (seen on Docker
+  Desktop 27.4.0) and "pulled but never tagged" are facts with remedies.
+- **Local diagnosis:** `docs/LAB_DIAGNOSIS.md` is now `stage1/remedies.json` (26 rules, per-platform
+  commands with facts filled in). `run` prints findings after the facts; `diagnose report.json`
+  does it offline. Each finding is command + reason + side effects + what to re-check. Shown, never
+  run.
+- **Parity:** `parity legacy.txt new.json` maps legacy keys and spellings onto Stage 1's. First real
+  machine, macOS + Docker Desktop (2026-09-17): 13 disagreements → one real gap fixed (image tags
+  hidden by an alphabetical cut of six) and twelve legacy-on-macOS artefacts now classed `improved`;
+  rerun: **54 agree, 0 disagree, 3 improved, 0 unmapped**.
+- **Outstanding:** the same run on a lab Linux machine with rootless Podman, and on Windows; then
+  the legacy half of `frontend-ng/tests/test_doctor_matches_the_code.py` goes.
 
-### S3 — Cut over
+### S3 — Cut over  ← first half done; removal waits for Linux parity
 
-- `gini-doctor` console script runs Stage 1 in-process; `curl … | sh` and `irm … | iex` run
-  Stage 0, which fetches or unpacks Stage 1.
-- Single-file Stage 1 build for the no-install path (so Stage 0 can hand it to Python on stdin);
-  a drift test asserts the build matches the sources.
-- Lower `requires-python` to the Stage 1 floor; update `gini-doctor.yml` wheel assertions; delete
-  the legacy shell engine and `--fanout`; update `README.md`, `LAB_DIAGNOSIS.md`, `scripts/`.
+Done:
+- `gini-doctor` runs Stage 1 in-process; `gini-doctor legacy …` runs the shell engine, and its
+  `--fanout`/`--compare`/`--report`/`--menu` options are routed there automatically.
+- `doctor/tools/bundle.py` builds `stage0/stage1-bundle.py`, all of Stage 1 in one file imported from
+  memory (stdlib only). Stage 0 (sh and PowerShell) fetches and runs it when Stage 1 is neither
+  next to it nor installed, refuses anything without the bundle marker, and removes it afterwards.
+  A test and the publish workflow both fail if the committed bundle is stale.
+- `requires-python = ">=3.8"`; the publish workflow checks the wheel carries Stage 0, Stage 1, the
+  remedy table and the bundle, still has no dependencies, and that the installed command runs; the
+  test workflow installs and runs the command on Linux, macOS and Windows at 3.8 and 3.12.
+- `frontend-ng/tests/test_doctor_matches_the_code.py` holds BOTH engines to the codebase contract.
+- `doctor/README.md` describes the Python doctor.
+
+After a clean Linux parity run:
+- Delete `gini-doctor.sh`, the `legacy` subcommand and `--fanout`; point `scripts/gini-doctor.sh`
+  at Stage 0; update `scripts/README.md` and `docs/LAB_DIAGNOSIS.md`; drop the legacy half of the
+  coupling test.
 
 ### S4 — gini-healthcenter server
 

@@ -8,7 +8,8 @@
 #   powershell -ExecutionPolicy Bypass -File stage0.ps1 [stage 1 arguments…]
 #   irm <url>/stage0.ps1 | iex
 #
-# Environment: GINI_DOCTOR_PYTHON, GINI_DOCTOR_MIN_PYTHON, GINI_HEALTHCENTER (see stage0.sh).
+# Environment: GINI_DOCTOR_PYTHON, GINI_DOCTOR_MIN_PYTHON, GINI_HEALTHCENTER, GINI_DOCTOR_BUNDLE_URL,
+# GINI_DOCTOR_NO_FETCH (see stage0.sh).
 #
 # Never blocks. Every interpreter is started with stdin closed and a 15 s limit, and the Microsoft
 # Store "python" alias (a stub under WindowsApps that offers to install Python) is recorded and
@@ -159,6 +160,24 @@ if ($Chosen) {
     elseif ($null -ne (Invoke-Bounded $Chosen @('-c', 'import gini_doctor.stage1; print(1)'))) { $Stage1 = 'installed' }
 }
 
+# Nothing local (`irm … | iex` on a bare machine): fetch the single-file Stage 1 into a temporary
+# file and run it with the chosen Python, then remove it.
+$BundleUrl = if ($env:GINI_DOCTOR_BUNDLE_URL) { $env:GINI_DOCTOR_BUNDLE_URL } else {
+    'https://raw.githubusercontent.com/citelab/gini/master/doctor/src/gini_doctor/stage0/stage1-bundle.py' }
+$Stage1Bundle = $null
+if ($Chosen -and -not $Stage1 -and $env:GINI_DOCTOR_NO_FETCH -ne '1') {
+    $tmp = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'gini-doctor-stage1-' + [Guid]::NewGuid().ToString('N') + '.py')
+    try {
+        Invoke-WebRequest -Uri $BundleUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop | Out-Null
+        $head = @(Get-Content -LiteralPath $tmp -TotalCount 2 -ErrorAction Stop)
+        if ($head -contains '# gini-doctor stage1 bundle') { $Stage1 = 'fetched'; $Stage1Bundle = $tmp }
+    } catch { }
+    if (-not $Stage1Bundle) {
+        Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+        Add-Fact 'stage1.fetch' "could not fetch Stage 1 from $BundleUrl"
+    }
+}
+
 $StageArgs = @($args)
 if ($Chosen -and $Stage1) {
     Add-Fact 'python.chosen' "$Chosen ($ChosenVersion)"
@@ -168,8 +187,16 @@ if ($Chosen -and $Stage1) {
         $sep = [IO.Path]::PathSeparator
         $env:PYTHONPATH = if ($env:PYTHONPATH) { $Stage1Path + $sep + $env:PYTHONPATH } else { $Stage1Path }
     }
-    & $Chosen -m gini_doctor.stage1 @StageArgs
-    $code = $LASTEXITCODE
+    if ($Stage1Bundle) {
+        Add-Fact 'stage1.source' $BundleUrl
+        $env:GINI_DOCTOR_STAGE0 = ($Facts | ForEach-Object { $_.Key + "`t" + $_.Value }) -join "`n"
+        & $Chosen $Stage1Bundle @StageArgs
+        $code = $LASTEXITCODE
+        Remove-Item -LiteralPath $Stage1Bundle -ErrorAction SilentlyContinue
+    } else {
+        & $Chosen -m gini_doctor.stage1 @StageArgs
+        $code = $LASTEXITCODE
+    }
     # Under `irm … | iex` there is no script file, and `exit` would close the person's own
     # PowerShell window; set the status and stop instead.
     if ($PSCommandPath) { exit $code } else { $global:LASTEXITCODE = $code; return }
@@ -180,7 +207,7 @@ if (-not $Chosen) {
     $Verdict = "no usable Python: GINI needs Python $MinPython or newer, and none of the $n interpreter(s) found qualifies"
 } else {
     Add-Fact 'python.chosen' "$Chosen ($ChosenVersion)"
-    $Verdict = "a usable Python was found, but the doctor's Stage 1 is not available to it (install gini-doctor, or run stage0.ps1 from a checkout)"
+    $Verdict = "a usable Python was found, but the doctor's Stage 1 is not available to it and could not be fetched (pipx install gini-doctor, or run stage0.ps1 from a checkout)"
 }
 Add-Fact 'verdict' $Verdict
 

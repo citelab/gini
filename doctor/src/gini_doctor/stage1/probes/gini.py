@@ -1,6 +1,12 @@
 """``gini`` — what GINI itself is installed as: package versions in gBuilder's interpreter, whether
 the core imports, the user's GINI settings, and which GINI images are present locally.
 
+For images, the question that matters is the one the runtime asks. GINI resolves plain
+``gini-<name>:latest`` (``gini.setup.images.local_name``), and a pull is re-tagged to that name.
+Listing tags is not enough: GINI's own ``repair_tag`` documents Docker Desktop 27.4.0 listing
+``gini-grouter latest`` while ``docker image inspect gini-grouter`` answers "No such image". So each
+image gets ``image.<name>.runtime``: a read-only ``image inspect`` of exactly that name.
+
 Different GINI versions, or one machine on an editable checkout and the rest on PyPI, are worth
 ruling out before anyone blames the operating system.
 """
@@ -8,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from .. import platforms
 from . import probe
@@ -40,6 +47,22 @@ for name in sys.argv[1:]:
 print(json.dumps(out))
 """
 IMPORT_CHECK = "import gini.domain, gini.services.bootstrap; print('ok')"
+MAX_TAGS = 12
+
+
+def _version_key(tag: str):
+    """Natural order on the part after ':' so 6.11.2 sorts after 6.11.1 and 6.10.0."""
+    return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", tag.rsplit(":", 1)[-1])]
+
+
+def order_tags(tags):
+    """Plain local tags first (``gini-xv6:latest``, what a local build produces), then registry tags
+    newest first. Capped, so a machine with many versions cannot hide the ones that matter.
+    First real macOS parity run (2026-09-17): an alphabetical cut of 6 hid both
+    ``gini-xv6:latest`` and the newest 6.11.2 tags."""
+    local = sorted(t for t in tags if "/" not in t.split(":", 1)[0])
+    remote = sorted((t for t in tags if t not in local), key=_version_key, reverse=True)
+    return (local + remote)[:MAX_TAGS]
 
 
 @probe("gini", platforms=platforms.ALL,
@@ -95,14 +118,29 @@ def gini(ctx):
         for img in IMAGES:
             ctx.absent("image.%s" % img, "no engine answering")
         return
+    ctx.ok("image.engine", engine)
     res = ctx.run([engine, "images", "--format", "{{.Repository}}:{{.Tag}}"], timeout=30)
     names = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()] if res.ok else None
     for img in IMAGES:
         if names is None:
             ctx.error("image.%s" % img, res.evidence())
             continue
-        tags = sorted(n for n in names if img in n)
+        tags = [n for n in names if img in n]
         if tags:
-            ctx.ok("image.%s" % img, tags[:6])
+            ordered = order_tags(tags)
+            ctx.ok("image.%s" % img, ordered)
+            ctx.ok("image.%s.count" % img, len(tags))
+            pulled = [t for t in ordered if "/" in t.split(":", 1)[0]]
+            if pulled:
+                ctx.ok("image.%s.newest_pull" % img, pulled[0])
         else:
             ctx.absent("image.%s" % img)
+        runtime_name = "%s:latest" % img
+        inspect = ctx.run([engine, "image", "inspect", "--format", "{{.Id}}", runtime_name], timeout=30)
+        if inspect.ok:
+            ctx.ok("image.%s.runtime" % img, "resolves")
+        elif runtime_name in (names or []):
+            ctx.error("image.%s.runtime" % img, "listed, but %s does not resolve: %s"
+                      % (runtime_name, inspect.evidence()))
+        else:
+            ctx.absent("image.%s.runtime" % img, "no %s, the name the runtime resolves" % runtime_name)

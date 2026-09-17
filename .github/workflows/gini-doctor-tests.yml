@@ -35,3 +35,11 @@ jobs:
       - name: doctor tests
         shell: bash
         run: uv run --no-project --python ${{ matrix.python }} --with pytest python -m pytest -q -rs doctor/tests
+      - name: the installed command works on this platform
+        shell: bash
+        run: |
+          uv venv --python ${{ matrix.python }} .doctor-venv
+          uv pip install --python .doctor-venv ./doctor
+          if [ -x .doctor-venv/Scripts/gini-doctor.exe ]; then bin=.doctor-venv/Scripts/gini-doctor.exe; else bin=.doctor-venv/bin/gini-doctor; fi
+          "$bin" run --only system,engine,perf --offline --stdout > report.json
+          python -c "import json; r = json.load(open('report.json')); assert r['doctor']['engine'] == 'python', r; print(r['platform'], len(r['facts']), 'facts')"

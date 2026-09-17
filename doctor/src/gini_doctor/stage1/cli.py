@@ -132,6 +132,8 @@ def _cmd_compare(args) -> int:
     try:
         reports = [Report.load(p) for p in args.reports]
         print(format_text(compare(reports, include_noisy=args.all)))
+    except BrokenPipeError:
+        raise
     except (OSError, ValueError) as e:
         print("gini-doctor: %s" % e, file=sys.stderr)
         return 2
@@ -141,6 +143,8 @@ def _cmd_compare(args) -> int:
 def _cmd_show(args) -> int:
     try:
         print(summary(Report.load(args.report)))
+    except BrokenPipeError:
+        raise
     except (OSError, ValueError) as e:
         print("gini-doctor: %s" % e, file=sys.stderr)
         return 2
@@ -150,6 +154,8 @@ def _cmd_show(args) -> int:
 def _cmd_diagnose(args) -> int:
     try:
         print(_diagnose.format_text(_diagnose.diagnose(Report.load(args.report))))
+    except BrokenPipeError:
+        raise
     except (OSError, ValueError) as e:
         print("gini-doctor: %s" % e, file=sys.stderr)
         return 2
@@ -162,6 +168,8 @@ def _cmd_parity(args) -> int:
         with open(args.legacy, "r", encoding="utf-8", errors="replace") as fh:
             legacy = _parity.parse_legacy(fh.read())
         result = _parity.parity(legacy, Report.load(args.report))
+    except BrokenPipeError:
+        raise
     except (OSError, ValueError) as e:
         print("gini-doctor: %s" % e, file=sys.stderr)
         return 2

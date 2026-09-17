@@ -13,6 +13,8 @@
 #   GINI_DOCTOR_PYTHON      try this interpreter first
 #   GINI_DOCTOR_MIN_PYTHON  override the floor (e.g. 3.10)
 #   GINI_HEALTHCENTER       fetch the floor from <url>/doctor/policy.txt (5 s timeout; offline is fine)
+#   GINI_DOCTOR_BUNDLE_URL  where to fetch Stage 1 when it is neither next to this file nor installed
+#                           (default: the bundle in the GINI repository); GINI_DOCTOR_NO_FETCH=1 never fetches
 #
 # POSIX sh (dash, busybox ash, bash). Never blocks: stdin is closed for every command it runs,
 # and on macOS /usr/bin/python3 is not touched without Command Line Tools, because there it is a
@@ -219,6 +221,7 @@ case "$0" in
 esac
 
 STAGE1=""
+STAGE1_BUNDLE=""
 if [ -n "$CHOSEN" ]; then
     if [ -n "$STAGE1_PATH" ]; then
         STAGE1=checkout
@@ -227,11 +230,41 @@ if [ -n "$CHOSEN" ]; then
     fi
 fi
 
+# Nothing local (`curl … | sh` on a bare machine): fetch the single-file Stage 1 into a temporary
+# file and run it with the chosen Python. A file, not a pipe into python: the doctor may need the
+# terminal to ask before it starts a container. It is removed afterwards.
+BUNDLE_URL=${GINI_DOCTOR_BUNDLE_URL:-https://raw.githubusercontent.com/citelab/gini/master/doctor/src/gini_doctor/stage0/stage1-bundle.py}
+if [ -n "$CHOSEN" ] && [ -z "$STAGE1" ] && [ "${GINI_DOCTOR_NO_FETCH:-}" != 1 ]; then
+    _tmp=$(mktemp "${TMPDIR:-/tmp}/gini-doctor-stage1.XXXXXX" 2>/dev/null) || _tmp=""
+    if [ -n "$_tmp" ]; then
+        if have curl; then
+            curl -fsSL --max-time 30 "$BUNDLE_URL" -o "$_tmp" </dev/null 2>/dev/null || : > "$_tmp"
+        elif have wget; then
+            wget -q -T 30 -O "$_tmp" "$BUNDLE_URL" </dev/null 2>/dev/null || : > "$_tmp"
+        fi
+        if head -n 2 "$_tmp" 2>/dev/null | grep -q '^# gini-doctor stage1 bundle$'; then
+            STAGE1=fetched
+            STAGE1_BUNDLE=$_tmp
+        else
+            rm -f "$_tmp"
+            fact stage1.fetch "could not fetch Stage 1 from $BUNDLE_URL"
+        fi
+    fi
+fi
+
 if [ -n "$CHOSEN" ] && [ -n "$STAGE1" ]; then
     fact python.chosen "$CHOSEN ($CHOSEN_VERSION)"
     fact stage1 "$STAGE1"
     GINI_DOCTOR_STAGE0=$FACTS
     export GINI_DOCTOR_STAGE0
+    if [ -n "$STAGE1_BUNDLE" ]; then
+        fact stage1.source "$BUNDLE_URL"
+        GINI_DOCTOR_STAGE0=$FACTS
+        "$CHOSEN" "$STAGE1_BUNDLE" "$@"
+        _rc=$?
+        rm -f "$STAGE1_BUNDLE"
+        exit $_rc
+    fi
     if [ -n "$STAGE1_PATH" ]; then
         PYTHONPATH="$STAGE1_PATH${PYTHONPATH:+:$PYTHONPATH}"
         export PYTHONPATH
@@ -244,7 +277,7 @@ if [ -z "$CHOSEN" ]; then
     VERDICT="no usable Python: GINI needs Python $MIN_PYTHON or newer, and none of the $_n interpreter(s) found qualifies"
 else
     fact python.chosen "$CHOSEN ($CHOSEN_VERSION)"
-    VERDICT="a usable Python was found, but the doctor's Stage 1 is not available to it (install gini-doctor, or run stage0.sh from a checkout)"
+    VERDICT="a usable Python was found, but the doctor's Stage 1 is not available to it and could not be fetched (pipx install gini-doctor, or run stage0.sh from a checkout)"
 fi
 fact verdict "$VERDICT"
 

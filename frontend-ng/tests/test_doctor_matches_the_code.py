@@ -1,4 +1,7 @@
-"""scripts/gini-doctor.sh describes THIS codebase, so it has to be checked against it.
+"""The doctor describes THIS codebase, so it has to be checked against it.
+
+Both engines are held to it while both ship: the legacy shell script and the Python doctor
+(``doctor/src/gini_doctor/stage1``) that replaces it. Every contract test below runs against each.
 
 The doctor is a mirror of GINI's runtime contract: the four image names, the three distributions,
 the `gbuilder` launcher, `GINI_ENGINE`, `~/.gini`, and the compose labels container lookups filter
@@ -23,13 +26,29 @@ ROOT = Path(__file__).resolve().parents[2]
 # The script lives in the gini-doctor distribution, which ships it inside its wheel;
 # scripts/gini-doctor.sh is a wrapper so a checkout can still run it by the documented path.
 DOCTOR_PATH = ROOT / "doctor" / "src" / "gini_doctor" / "gini-doctor.sh"
+STAGE1_DIR = ROOT / "doctor" / "src" / "gini_doctor" / "stage1"
+
+
+def _stage1_text() -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(STAGE1_DIR.rglob("*.py")))
 
 
 @pytest.fixture(scope="module")
-def doctor() -> str:
+def legacy_doctor() -> str:
     if not DOCTOR_PATH.exists():
-        pytest.skip("scripts/gini-doctor.sh not present")
+        pytest.skip("the legacy gini-doctor.sh is not present")
     return DOCTOR_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module", params=["legacy", "stage1"])
+def doctor(request) -> str:
+    if request.param == "legacy":
+        if not DOCTOR_PATH.exists():
+            pytest.skip("the legacy gini-doctor.sh is not present")
+        return DOCTOR_PATH.read_text(encoding="utf-8")
+    if not STAGE1_DIR.exists():
+        pytest.skip("the Python doctor is not present")
+    return _stage1_text()
 
 
 def test_it_checks_for_every_image_gini_actually_builds(doctor):
@@ -88,10 +107,10 @@ def test_it_looks_in_the_directory_gini_actually_uses(doctor):
     assert default.group(1) in doctor, "the doctor looks for a GINI home that is not GINI's"
 
 
-def test_the_readme_documents_the_probe_groups_it_offers(doctor):
+def test_the_readme_documents_the_probe_groups_it_offers(legacy_doctor):
     """`--list` is the discoverable surface; scripts/README.md is where somebody looks first."""
     readme = (ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
-    groups = re.search(r'GROUPS_DEFAULT="([^"]+)"', doctor)
+    groups = re.search(r'GROUPS_DEFAULT="([^"]+)"', legacy_doctor)
     assert groups, "the doctor no longer declares a default group set"
     assert "--list" in readme, "the README never mentions how to see the groups"
 
@@ -110,5 +129,8 @@ def test_the_distribution_carries_the_script_and_nothing_else():
     pyproject = (ROOT / "doctor" / "pyproject.toml").read_text(encoding="utf-8")
     assert re.search(r"^dependencies\s*=\s*\[\s*\]", pyproject, re.M), \
         "gini-doctor has grown a dependency"
-    assert 'gini_doctor = ["*.sh"]' in pyproject, "the wheel would not carry the script"
+    data = re.search(r'^gini_doctor\s*=\s*\[([^\]]*)\]', pyproject, re.M)
+    assert data, "doctor/pyproject.toml declares no package data"
+    for pattern in ('"*.sh"', '"stage0/*.sh"', '"stage0/*.ps1"', '"stage0/*.py"', '"stage1/*.json"'):
+        assert pattern in data.group(1), f"the wheel would not carry {pattern}"
     assert "gini-doctor = \"gini_doctor.cli:main\"" in pyproject

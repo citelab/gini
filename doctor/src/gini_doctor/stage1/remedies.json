@@ -193,6 +193,86 @@
       "command": null,
       "side_effects": "",
       "verify": ["live.exec.compose"]
+    },
+    {
+      "id": "image.gini-grouter.runtime-missing",
+      "when": [{"fact": "gini.image.gini-grouter.runtime", "status": "absent"}, {"fact": "gini.image.gini-grouter.newest_pull", "status": "ok"}],
+      "title": "gini-grouter has been downloaded but not under the name GINI runs (gini-grouter:latest)",
+      "reason": "GINI resolves gini-grouter:latest; this machine only has registry tags ({gini.image.gini-grouter}). Every topology using this element fails at Run until the plain tag exists.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag {gini.image.gini-grouter.newest_pull} gini-grouter:latest", "macos": "{gini.image.engine} tag {gini.image.gini-grouter.newest_pull} gini-grouter:latest", "windows": "{gini.image.engine} tag {gini.image.gini-grouter.newest_pull} gini-grouter:latest"},
+      "side_effects": "Adds a tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-grouter.runtime"]
+    },
+    {
+      "id": "image.gini-grouter.runtime-unresolvable",
+      "when": [{"fact": "gini.image.gini-grouter.runtime", "status": "error"}],
+      "title": "gini-grouter:latest is listed but does not resolve (the engine's tag index lost it)",
+      "reason": "{gini.image.gini-grouter.runtime}. Docker Desktop has been seen doing this straight after a pull and re-tag; gBuilder repairs it when Run asks for the image, and this command does the same by hand.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-grouter:latest | head -n 1)\" gini-grouter:latest", "macos": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-grouter:latest | head -n 1)\" gini-grouter:latest", "windows": "{gini.image.engine} tag ({gini.image.engine} images --no-trunc -q gini-grouter:latest | Select-Object -First 1) gini-grouter:latest"},
+      "side_effects": "Re-applies an existing tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-grouter.runtime"]
+    },
+    {
+      "id": "image.gini-pox.runtime-missing",
+      "when": [{"fact": "gini.image.gini-pox.runtime", "status": "absent"}, {"fact": "gini.image.gini-pox.newest_pull", "status": "ok"}],
+      "title": "gini-pox has been downloaded but not under the name GINI runs (gini-pox:latest)",
+      "reason": "GINI resolves gini-pox:latest; this machine only has registry tags ({gini.image.gini-pox}). Every topology using this element fails at Run until the plain tag exists.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag {gini.image.gini-pox.newest_pull} gini-pox:latest", "macos": "{gini.image.engine} tag {gini.image.gini-pox.newest_pull} gini-pox:latest", "windows": "{gini.image.engine} tag {gini.image.gini-pox.newest_pull} gini-pox:latest"},
+      "side_effects": "Adds a tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-pox.runtime"]
+    },
+    {
+      "id": "image.gini-pox.runtime-unresolvable",
+      "when": [{"fact": "gini.image.gini-pox.runtime", "status": "error"}],
+      "title": "gini-pox:latest is listed but does not resolve (the engine's tag index lost it)",
+      "reason": "{gini.image.gini-pox.runtime}. Docker Desktop has been seen doing this straight after a pull and re-tag; gBuilder repairs it when Run asks for the image, and this command does the same by hand.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-pox:latest | head -n 1)\" gini-pox:latest", "macos": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-pox:latest | head -n 1)\" gini-pox:latest", "windows": "{gini.image.engine} tag ({gini.image.engine} images --no-trunc -q gini-pox:latest | Select-Object -First 1) gini-pox:latest"},
+      "side_effects": "Re-applies an existing tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-pox.runtime"]
+    },
+    {
+      "id": "image.gini-oszoo.runtime-missing",
+      "when": [{"fact": "gini.image.gini-oszoo.runtime", "status": "absent"}, {"fact": "gini.image.gini-oszoo.newest_pull", "status": "ok"}],
+      "title": "gini-oszoo has been downloaded but not under the name GINI runs (gini-oszoo:latest)",
+      "reason": "GINI resolves gini-oszoo:latest; this machine only has registry tags ({gini.image.gini-oszoo}). Every topology using this element fails at Run until the plain tag exists.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag {gini.image.gini-oszoo.newest_pull} gini-oszoo:latest", "macos": "{gini.image.engine} tag {gini.image.gini-oszoo.newest_pull} gini-oszoo:latest", "windows": "{gini.image.engine} tag {gini.image.gini-oszoo.newest_pull} gini-oszoo:latest"},
+      "side_effects": "Adds a tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-oszoo.runtime"]
+    },
+    {
+      "id": "image.gini-oszoo.runtime-unresolvable",
+      "when": [{"fact": "gini.image.gini-oszoo.runtime", "status": "error"}],
+      "title": "gini-oszoo:latest is listed but does not resolve (the engine's tag index lost it)",
+      "reason": "{gini.image.gini-oszoo.runtime}. Docker Desktop has been seen doing this straight after a pull and re-tag; gBuilder repairs it when Run asks for the image, and this command does the same by hand.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-oszoo:latest | head -n 1)\" gini-oszoo:latest", "macos": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-oszoo:latest | head -n 1)\" gini-oszoo:latest", "windows": "{gini.image.engine} tag ({gini.image.engine} images --no-trunc -q gini-oszoo:latest | Select-Object -First 1) gini-oszoo:latest"},
+      "side_effects": "Re-applies an existing tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-oszoo.runtime"]
+    },
+    {
+      "id": "image.gini-xv6.runtime-missing",
+      "when": [{"fact": "gini.image.gini-xv6.runtime", "status": "absent"}, {"fact": "gini.image.gini-xv6.newest_pull", "status": "ok"}],
+      "title": "gini-xv6 has been downloaded but not under the name GINI runs (gini-xv6:latest)",
+      "reason": "GINI resolves gini-xv6:latest; this machine only has registry tags ({gini.image.gini-xv6}). Every topology using this element fails at Run until the plain tag exists.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag {gini.image.gini-xv6.newest_pull} gini-xv6:latest", "macos": "{gini.image.engine} tag {gini.image.gini-xv6.newest_pull} gini-xv6:latest", "windows": "{gini.image.engine} tag {gini.image.gini-xv6.newest_pull} gini-xv6:latest"},
+      "side_effects": "Adds a tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-xv6.runtime"]
+    },
+    {
+      "id": "image.gini-xv6.runtime-unresolvable",
+      "when": [{"fact": "gini.image.gini-xv6.runtime", "status": "error"}],
+      "title": "gini-xv6:latest is listed but does not resolve (the engine's tag index lost it)",
+      "reason": "{gini.image.gini-xv6.runtime}. Docker Desktop has been seen doing this straight after a pull and re-tag; gBuilder repairs it when Run asks for the image, and this command does the same by hand.",
+      "who": "you",
+      "command": {"linux": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-xv6:latest | head -n 1)\" gini-xv6:latest", "macos": "{gini.image.engine} tag \"$({gini.image.engine} images --no-trunc -q gini-xv6:latest | head -n 1)\" gini-xv6:latest", "windows": "{gini.image.engine} tag ({gini.image.engine} images --no-trunc -q gini-xv6:latest | Select-Object -First 1) gini-xv6:latest"},
+      "side_effects": "Re-applies an existing tag; nothing is downloaded or removed.",
+      "verify": ["gini.image.gini-xv6.runtime"]
     }
   ]
 }
