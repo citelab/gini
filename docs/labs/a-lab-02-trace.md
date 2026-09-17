@@ -1,4 +1,4 @@
-# Assignment 2 — Adding a system call: `trace`
+# A-Lab 02 — Adding a system call: `trace`
 
 **xv6 · GINI Machine Lab · two parts**
 
@@ -34,7 +34,7 @@ write is what gets compiled, and your work survives Stop/Run.
 the xv6 shell. A kernel that does not compile leaves the machine running the one it already had.
 
 > This assignment hands you `kernel/proc.c` and `kernel/proc.h`, which is more rope than
-> Assignment 1. Those files also contain GINI's own machinery — the scheduler shadow dispatcher
+> A-Lab 01. Those files also contain GINI's own machinery — the scheduler shadow dispatcher
 > lives in `proc.c`. You can break things the Machine Lab depends on. Revert is per-file and
 > always works; use it early rather than fighting a kernel that will not boot.
 

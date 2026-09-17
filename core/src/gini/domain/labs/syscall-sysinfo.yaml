@@ -1,7 +1,13 @@
-# Assignment 1 — a system call that reports system information.
-# The handout is docs/labs/assignment-1-sysinfo.md; `where` and `hint` are its words.
+# A-Lab 01 — a system call that reports system information.
+# The handout is docs/labs/a-lab-01-sysinfo.md; `where` and `hint` are its words.
 id: syscall-sysinfo
-title: "Assignment 1 — sysinfo"
+title: "A-Lab 01 — sysinfo"
+
+# What each part IS. The face shows these beside the counts, because "A: 0/6" on
+# its own tells a student nothing, and the handout already calls them Part A and B.
+parts:
+  A: "Add the system call"
+  B: "Make it tell the truth"
 machine_folder: xv6-lab
 syscall_number: 23          # stock xv6 ends at SYS_sync = 22
 

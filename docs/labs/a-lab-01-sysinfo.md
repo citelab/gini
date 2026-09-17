@@ -1,4 +1,4 @@
-# Assignment 1 — Adding a system call: `sysinfo`
+# A-Lab 01 — Adding a system call: `sysinfo`
 
 **xv6 · GINI Machine Lab · two parts**
 

@@ -151,9 +151,17 @@ class UserCode(QDialog):
     # -- the wiring checklist ------------------------------------------------ #
     def _build_wiring(self, col) -> None:
         t = self.theme.theme
-        self._wire_head = self._section("WIRING")
-        col.addWidget(self._wire_head)
+        col.addWidget(self._section("WIRING"))
+        # Grouped by part, with the part's own title. A flat list under two bare letters made a
+        # reader ask what A and B were — reasonably, since nothing on the face said.
+        seen_part = None
         for c in getattr(self.spec, "checks", ()):
+            if c.part and c.part != seen_part:
+                seen_part = c.part
+                head = QLabel(f"Part {c.part} — {self.spec.part_title(c.part) or ''}".rstrip(" —"))
+                head.setStyleSheet(_scss(f"color:{t.text};font-size:12px;font-weight:600;"
+                                         f"padding-top:8px;padding-left:4px;"))
+                col.addWidget(head)
             row = QFrame(); lay = QHBoxLayout(row); lay.setContentsMargins(8, 2, 8, 2)
             mark = QLabel("·"); mark.setMinimumWidth(18)
             mark.setStyleSheet(_scss(f"color:{t.muted};font-size:13px;font-weight:600;"))
@@ -247,11 +255,11 @@ class UserCode(QDialog):
                 f"color:{t.success if passed else t.faint};font-size:13px;font-weight:600;"))
             hint.setVisible(bool(c.hint) and not passed)
         p = _ls.progress(results)
-        parts = "   ".join(f"{k}: {v[0]}/{v[1]}" for k, v in sorted(p["parts"].items()))
+        parts = "   ".join(f"Part {k} {v[0]}/{v[1]}" for k, v in sorted(p["parts"].items()))
         nxt = _ls.next_step(results)
         self._progress.setText(
-            f"{p['passed']}/{p['total']} done      {parts}"
-            + (f"      next: {nxt.label}" if nxt else "      — all wired"))
+            f"{p['passed']}/{p['total']} wired      {parts}"
+            + (f"      next: {nxt.label}" if nxt else "      — all wired, press Load"))
 
     def _say(self, text: str, tone: str = "muted") -> None:
         t = self.theme.theme

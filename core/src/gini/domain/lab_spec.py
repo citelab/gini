@@ -93,6 +93,13 @@ class LabSpec:
     files: tuple[LabFile, ...] = ()
     checks: tuple[Check, ...] = ()
     grade: tuple[GradeItem, ...] = ()
+    #: part id -> what that part IS. "A: 0/6" means nothing on its own; the handout calls them
+    #: Part A and Part B and the face has to use the same words, or a student is reading two
+    #: different documents about one assignment.
+    part_titles: dict = field(default_factory=dict)
+
+    def part_title(self, part: str) -> str:
+        return str(self.part_titles.get(part, "") or "")
 
     def file(self, name: str) -> LabFile | None:
         return next((f for f in self.files if f.name == name), None)
@@ -132,7 +139,8 @@ def from_dict(d: dict) -> LabSpec:
     return LabSpec(id=str(d.get("id", "")), title=str(d.get("title", "")),
                    machine_folder=str(d.get("machine_folder", "xv6-lab")),
                    syscall_number=int(d.get("syscall_number", 0) or 0),
-                   files=files, checks=checks, grade=grade)
+                   files=files, checks=checks, grade=grade,
+                   part_titles={str(k): str(v) for k, v in (d.get("parts") or {}).items()})
 
 
 def from_yaml(text: str) -> LabSpec:
