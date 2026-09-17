@@ -1,4 +1,5 @@
-# Tests gini-doctor on all three platforms, at its Python floor and at a current Python.
+# Tests gini-doctor on all three platforms, at its Python floor and at a current Python, and the
+# Health Center's pure half alongside it, because that half imports the doctor.
 #
 # Separate from tests.yml on purpose. That suite installs Qt and runs on Linux only; the doctor
 # depends on nothing and its whole point is to run on every platform, including the Windows
@@ -11,9 +12,9 @@ name: gini-doctor tests
 
 on:
   push:
-    paths: ["doctor/**", ".github/workflows/gini-doctor-tests.yml"]
+    paths: ["doctor/**", "healthcenter/**", ".github/workflows/gini-doctor-tests.yml"]
   pull_request:
-    paths: ["doctor/**", ".github/workflows/gini-doctor-tests.yml"]
+    paths: ["doctor/**", "healthcenter/**", ".github/workflows/gini-doctor-tests.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -35,6 +36,19 @@ jobs:
       - name: doctor tests
         shell: bash
         run: uv run --no-project --python ${{ matrix.python }} --with pytest python -m pytest -q -rs doctor/tests
+      # The Health Center's pure half imports the doctor's report model, its comparison, its policy
+      # validator and its case codes, so a change on the doctor's side is what breaks it — and
+      # nothing else in CI would notice. It runs here rather than in tests.yml because that suite is
+      # Qt and Linux only, and one of these tests drives the real stage0.sh over a real socket.
+      #
+      # On the current Python only, deliberately: the 3.8 floor exists for the DOCTOR, which has to
+      # run on whatever a lab machine has. A server has no reason to promise it, and testing there
+      # would be asserting a floor nobody has chosen.
+      - name: health center tests (they import the doctor)
+        if: matrix.python == '3.12'
+        shell: bash
+        run: uv run --no-project --python ${{ matrix.python }} --with pytest python -m pytest -q -rs healthcenter/tests
+
       - name: the installed command works on this platform
         shell: bash
         run: |

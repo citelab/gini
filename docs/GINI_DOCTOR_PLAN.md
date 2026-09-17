@@ -96,20 +96,73 @@ After a clean Linux parity run:
   at Stage 0; update `scripts/README.md` and `docs/LAB_DIAGNOSIS.md`; drop the legacy half of the
   coupling test.
 
-### S4 — gini-healthcenter server
+### S4 — gini-healthcenter server  ← the pure half is done; the server is next
 
-- Derived from `teaching-center/` as a separate instance (own data root, TLS identity, secrets,
-  port). Decide in S4 whether that is a second profile of `gini_teaching_center` or a small
-  distribution that imports it.
-- Cases: open → vend code → reports attach → tasks → results → diagnosis → close.
-- Policy endpoints: `GET /doctor/policy.txt` (Stage 0) and `GET /doctor/policy.json` (Stage 1).
-- Upload endpoint for reports (live or saved offline); case record of every task and answer.
+Done — `healthcenter/src/gini_healthcenter/`, pure in the same way `core/src/gini/domain/` is (no
+SQLite, no HTTP, no model), plus `healthcenter/tests/` (24 tests, no dependencies beyond pytest):
+
+- `cases.py` — a case and the rules it will not break. Open vends the code in the same breath, so
+  there is no moment at which a case exists and cannot be joined. A CLOSED case accepts nothing; a
+  STALLED one accepts everything, because stalled means the agent stopped and not the machines, and
+  refusing a report then would throw away the one thing a stall is promised to keep. A task names a
+  participant that has already appeared, so nothing can be pushed at a machine the case never met.
+  A refusal is a terminal outcome distinct from a timeout. A diagnosis with empty evidence is
+  refused, and `Diagnosis` has no field that could record having acted.
+- `policy.py` — one document, two renderings. `document()` validates what it builds through the
+  doctor's own `policy.validate` and refuses anything that would not survive, because a field the
+  doctor drops would otherwise be served, accepted and ignored on thirty machines with nothing
+  saying so. A patch-level floor is refused outright: Stage 0's `sed` and PowerShell regex capture
+  `major.minor`, so `3.8.1` would be enforced as `3.8` by the stage that picks an interpreter and
+  recorded as `3.8.1` by the stage that does not.
+- `stage1/casecode.py` — in the DOCTOR, not here. Both sides need the rule (the server mints, the
+  doctor tells a typo from a wrong case before opening a connection) and only one of the two may
+  not take a dependency, so the shared rule lives on the doctor's side. Crockford base32, twelve
+  symbols, hash-derived check symbol, its own salt — sharing `ticket.py`'s would make a lab code
+  validate as a case code, turning a local "that is not a case code" into a round trip and a
+  confusing answer. `test_doctor_matches_the_code.py` holds the two formats to the same folding
+  rules and to different salts.
+- `test_policy_reaches_both_stages.py` runs the real `sh stage0.sh` against a real server serving
+  both endpoints: Stage 0 takes the floor from `policy.txt`, hands off, and Stage 1 takes the
+  version from `policy.json`. It reads the matching pattern out of `stage0.ps1` rather than
+  restating it.
+
+**The derivation decision, and what it rests on.** The Health Center takes its shared vocabulary
+from **gini-doctor**, not from `gini_teaching_center` and not from `gini-core`. What settled it:
+
+1. `accounts.Accounts(root)` constructs a `Store(root)`, and that `Store` owns the course schema.
+   Reusing the Teaching Center's identity therefore means carrying `course`, `activity` and
+   `material` tables into the health database — empty, but there, in the one database the design
+   says must never hold the other kind of data.
+2. `server.py` binds `ROOT`, `PORT`, `_ACCTS` and `_STORE` at import time from the environment, so
+   two profiles cannot share a process. "A separate instance" is a separate process with a
+   different environment whichever way this is packaged, so the profile option buys nothing there.
+3. `certs.py` is the one module with no coupling at all — 91 lines, no `Store`, no course concepts.
+   It is worth reusing, and it is reusable as it stands.
+4. The doctor depends on nothing, so depending on it costs nothing and cannot cycle. It is also the
+   package that already owns the report schema, the comparison and the policy validator — the three
+   things this server must agree with exactly.
+
+**Still open, and outward-facing: whether `healthcenter/` becomes a fifth published distribution.**
+There is deliberately no `pyproject.toml` yet. `test_packaging.py::_distributions()` enumerates
+every top-level directory that has one, so a pyproject cannot land alone: it needs a publish
+workflow carrying `outdir dist/ healthcenter/`, a line in `scripts/release.sh`'s confirmation list,
+and trusted publishing configured on PyPI for a new project name. Tests import through
+`healthcenter/tests/conftest.py` until that is decided, the way the doctor's tests do.
+
+Outstanding:
+- `store.py` — SQLite persistence for cases, storage-shaped like the Teaching Center's, wrapping
+  `cases.py` rather than re-deciding anything it settles.
+- `server.py` — the endpoints: `GET /doctor/policy.txt`, `GET /doctor/policy.json`, join with a
+  case code, upload a report (live or gathered offline), poll for tasks, post results.
+- Staff identity and TLS for the portal (reuse `certs.py`; decide whether to reuse `accounts.py`
+  given 1 above, or write the smaller thing this needs).
 - Portal view of a case for a person to follow or take over.
 
 ### S5 — Doctor ↔ Health Center
 
 - `gini-doctor run --case CODE` joins, uploads, polls for tasks; `gini-doctor upload --case CODE
-  report.json` for an offline report.
+  report.json` for an offline report. The code format is already in `stage1/casecode.py`, so the
+  doctor can refuse a typo offline, before it opens a connection.
 - Server-pushed probes: read-only by default; anything that executes shows command + reason and
   needs Y. Proposed actions displayed, never run; affected fields re-probed afterwards.
 - TLS with the Health Center identity pinned.

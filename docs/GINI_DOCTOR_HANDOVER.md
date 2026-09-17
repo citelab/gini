@@ -41,6 +41,13 @@ The tests need no dependencies beyond pytest and run on Python 3.8 and 3.12. To 
 - `doctor/tests/` — 111 tests. Probes are tested against a scripted machine (`fakes.FakeMachine`),
   so no Docker, Podman or Qt is needed to run them.
 - `doctor/src/gini_doctor/gini-doctor.sh` — the LEGACY shell engine, untouched, still shipped.
+- `healthcenter/src/gini_healthcenter/` — S4's pure half: `cases.py` (the case and its rules) and
+  `policy.py` (one policy document, two renderings). No SQLite, no HTTP, no model yet.
+  `healthcenter/tests/` — 24 tests; one of them runs the real `stage0.sh` against a real server.
+  **No `pyproject.toml` on purpose** — see §S4 of the plan; adding one obliges a publish workflow,
+  a line in `release.sh` and a new PyPI project, and `test_packaging.py` enforces exactly that.
+- `doctor/src/gini_doctor/stage1/casecode.py` — the case-code format, on the DOCTOR's side because
+  the doctor is the one that may not take a dependency. The Health Center imports it.
 
 ## Known state and traps
 
@@ -77,7 +84,11 @@ The tests need no dependencies beyond pytest and run on Python 3.8 and 3.12. To 
 ## Next
 
 1. Parity on a lab Linux machine with rootless Podman, and on a real Windows machine (the three
-   commands are above). This is the only gate on the rest of S3.
+   commands are above). This is the only gate on the rest of S3, and it needs hardware rather
+   than work.
 2. The rest of S3: delete the shell engine, `legacy` and `--fanout`; point `scripts/gini-doctor.sh`
    at Stage 0; update `scripts/README.md` and `docs/LAB_DIAGNOSIS.md`.
-3. S4: the Health Center server, derived from `teaching-center/`.
+3. S4, the rest: a SQLite store wrapping `cases.py`, the endpoints (policy × 2, join, upload,
+   poll, results), staff identity and TLS for the portal, and the portal itself. The derivation
+   decision and its evidence are written up in §S4; the one part still open is whether
+   `healthcenter/` becomes a fifth published distribution.

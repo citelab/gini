@@ -134,3 +134,55 @@ def test_the_distribution_carries_the_script_and_nothing_else():
     for pattern in ('"*.sh"', '"stage0/*.sh"', '"stage0/*.ps1"', '"stage0/*.py"', '"stage1/*.json"'):
         assert pattern in data.group(1), f"the wheel would not carry {pattern}"
     assert "gini-doctor = \"gini_doctor.cli:main\"" in pyproject
+
+
+# -- the case code a person types into both systems ---------------------------- #
+#
+# `gini.domain.ticket` and the doctor's `stage1/casecode.py` are two code formats read off a screen
+# and typed by hand by the same people. They are deliberately separate — see casecode's docstring —
+# but they must stay separate in the one way that matters and identical in the other.
+
+def _casecode():
+    """The doctor's case-code module, loaded from this checkout by path.
+
+    By path and not by import: `gini-doctor` is a separate distribution that this suite does not
+    install, and what is being asserted is the code in THIS tree.
+    """
+    import importlib.util
+    path = ROOT / "doctor" / "src" / "gini_doctor" / "stage1" / "casecode.py"
+    if not path.exists():
+        pytest.skip("the Python doctor's case codes are not present")
+    spec = importlib.util.spec_from_file_location("_gini_casecode_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_case_code_is_typed_by_the_same_rules_as_an_assignment_code():
+    """Same alphabet, same length, same folding. A student who types O for 0 must not be corrected
+    by one system and refused by the other — and the reason the alphabet skips I, L, O and U is a
+    property of hands, not of what the code is for."""
+    from gini.domain import ticket
+    cc = _casecode()
+    assert (cc.ALPHABET, cc.LENGTH, cc.PAYLOAD_LEN, cc.GROUP) == \
+           (ticket.ALPHABET, ticket.LENGTH, ticket.PAYLOAD_LEN, ticket.GROUP)
+    typed = " abcd-efgh-JKM0 \tOIL1o "
+    assert cc.normalize(typed) == ticket.normalize(typed)
+
+
+def test_a_lab_code_is_usually_refused_as_a_case_code_and_the_other_way_round():
+    """The two use different check salts, so each mostly rejects the other's codes.
+
+    Mostly, not always, and that is the honest claim: any twelve symbols validate under a given
+    salt with probability 1/32, so separation is 31/32 per code. It is enough for the thing it is
+    for — a student pasting a lab code into `--case` is told locally that it is not a case code,
+    instead of being sent to a server to be told no such case exists. Sharing the salt would make
+    that answer impossible; this test fails if anyone ever does.
+    """
+    from gini.domain import ticket
+    cc = _casecode()
+    n = 256
+    lab_accepted = sum(cc.valid(ticket.mint().code) for _ in range(n))
+    case_accepted = sum(ticket.valid(cc.mint()) for _ in range(n))
+    assert lab_accepted < 0.15 * n, f"{lab_accepted}/{n} lab codes validated as case codes"
+    assert case_accepted < 0.15 * n, f"{case_accepted}/{n} case codes validated as lab codes"
