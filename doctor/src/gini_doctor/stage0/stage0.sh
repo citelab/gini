@@ -122,8 +122,11 @@ $1
 "
 }
 
-# The interpreter that actually runs gBuilder. Reading the launcher's shebang is how the legacy
-# doctor stopped reporting "No module named PySide6" on every machine from the wrong Python.
+# The interpreter that actually runs gBuilder. Reading the launcher is how the legacy doctor
+# stopped reporting "No module named PySide6" on every machine from the wrong Python. Two shapes:
+# a plain `#!/path/to/python`, or pipx's trampoline, which is `#!/bin/sh` followed by
+#     '''exec' "/.../pipx/venvs/gini-toolkit/bin/python" "$0" "$@"
+# where the quoted path can contain spaces ("Application Support" on macOS).
 gbuilder_python() {
     _g=$(command -v gbuilder 2>/dev/null) || return 0
     [ -r "$_g" ] || return 0
@@ -131,15 +134,32 @@ gbuilder_python() {
     case "$_line" in '#!'*) ;; *) return 0 ;; esac
     set -- $(printf '%s' "${_line#\#!}")
     [ $# -ge 1 ] || return 0
-    case "$1" in
-        */env) [ $# -ge 2 ] && command -v "$2" 2>/dev/null ;;
-        *) printf '%s\n' "$1" ;;
+    _i=$1
+    if [ "${1##*/}" = env ]; then
+        [ $# -ge 2 ] || return 0
+        _i=$(command -v "$2" 2>/dev/null) || return 0
+    fi
+    case "${_i##*/}" in
+        python*) printf '%s\n' "$_i" ;;
+        *)
+            _p=$(sed -n 's|.*exec[^"]*"\([^"]*/bin/python[0-9.]*\)".*|\1|p' "$_g" 2>/dev/null | head -n 1)
+            [ -n "$_p" ] || _p=$(sed -n 's|.*[^A-Za-z0-9_./-]\(/[A-Za-z0-9_./+-]*/bin/python[0-9.]*\).*|\1|p' "$_g" 2>/dev/null | head -n 1)
+            printf '%s\n' "$_p" ;;
     esac
 }
 
+GBUILDER=$(command -v gbuilder 2>/dev/null || true)
+GBUILDER_PY=$(gbuilder_python)
+if [ -z "$GBUILDER" ]; then
+    fact gbuilder.launcher "not on PATH"
+else
+    fact gbuilder.launcher "$GBUILDER ($(head -n 1 "$GBUILDER" 2>/dev/null | cut -c1-80))"
+    fact gbuilder.python "${GBUILDER_PY:-not identified from the launcher}"
+fi
+
 add_candidate "${GINI_DOCTOR_PYTHON:-}"
-add_candidate "$(gbuilder_python)"
-for _venv in "${PIPX_HOME:-}" "$HOME/.local/share/pipx" "$HOME/.local/pipx"; do
+add_candidate "$GBUILDER_PY"
+for _venv in "${PIPX_HOME:-}" "$HOME/.local/share/pipx" "$HOME/.local/pipx" "$HOME/Library/Application Support/pipx"; do
     [ -n "$_venv" ] && [ -x "$_venv/venvs/gini-toolkit/bin/python" ] && add_candidate "$_venv/venvs/gini-toolkit/bin/python"
 done
 for _name in python3 python; do

@@ -52,19 +52,27 @@ Each stage ends green and usable on its own. The legacy shell engine and the cur
 - First group ported: `system`, on all three platforms.
 - Runs on Python **3.8+**; tested on 3.8 and 3.12.
 
-### S2 — Probe parity with the shell engine
+### S2 — Probe parity with the shell engine  ← built; parity on real machines outstanding
 
-- Port `engine`, `compose`, `rootless`, `registry`, `qt`, `gini`, `live`, `perf`, `xv6`, each with
-  platform declarations (Docker Desktop / WSL2 facts on Windows and macOS; subuid, lingering,
-  cgroup delegation on Linux only).
-- `registry` must not write to the image store (manifest check rather than a pull, or the pull
-  moved behind Y).
-- Local diagnosis: `docs/LAB_DIAGNOSIS.md` becomes a machine-readable remedy table
-  (`gini_doctor/stage1/remedies.json`): pattern over facts → command, reason, side effects,
-  verification. Shown, never run.
-- Parity harness: run old and new side by side on real Linux/macOS machines, map old keys to new,
-  and agree before S3.
-- Move `frontend-ng/tests/test_doctor_matches_the_code.py` assertions onto the Stage 1 sources.
+- All nine legacy groups ported, each declaring its platforms: `engine`, `compose`, `rootless`
+  (Linux only), `registry`, `qt`, `gini`, `live`, `perf`, `xv6`. Legacy default set restored;
+  `xv6` stays opt-in.
+- **Consent:** `live` and `xv6` start containers, so they declare what they will run and why, and
+  run only on Y at the prompt or `--yes`. With no terminal they are skipped, never assumed.
+- **Read-only registry:** the legacy real pull is gone. `registry` checks Docker Hub anonymously
+  over HTTPS and via `<engine> manifest inspect`, and flags a stored credential that blocks pulls
+  without ever opening a credential file. `live` uses only images already present.
+- **Local diagnosis:** `docs/LAB_DIAGNOSIS.md` is now `stage1/remedies.json` (18 rules, per-platform
+  commands). `run` prints findings after the facts; `diagnose report.json` does it offline. Each
+  finding is command + reason + side effects + what to re-check. Shown, never run.
+- **Parity tool:** `parity legacy.txt new.json` maps legacy keys and spellings onto Stage 1's and
+  lists agreements, disagreements, facts dropped on purpose, and the documented change where the
+  legacy doctor probed PATH's python3 instead of gBuilder's. Sandbox run (no engine): 46 agree,
+  0 disagree.
+- **Outstanding before S3:** parity runs on a real macOS machine with Docker, a lab Linux machine
+  with rootless Podman, and a Windows machine; then move
+  `frontend-ng/tests/test_doctor_matches_the_code.py` onto the Stage 1 sources (it still guards the
+  legacy script, which exists until S3).
 
 ### S3 — Cut over
 

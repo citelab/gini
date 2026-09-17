@@ -13,6 +13,11 @@ declared facts as ``n/a`` instead (see ``na_keys``), so a comparison across plat
 A probe that raises is caught: the group records ``<group>.probe_error`` with the exception and
 the run continues. A doctor that dies on the first surprise is useless on exactly the machine
 that needs it.
+
+A probe that goes beyond looking — starts a container, boots a kernel — declares ``consent``: a
+plain statement of what it will run and why. The doctor shows that text and runs the probe only
+when the person says yes (Y at the prompt, or ``--yes``). Declined or unanswerable (no terminal),
+the group records ``<group>.skipped`` and moves on. Everything else is read-only by rule.
 """
 from __future__ import annotations
 
@@ -27,12 +32,15 @@ from ..redact import Redactor
 
 class Context:
     def __init__(self, report: "_report.Report", group: str, platform: str,
-                 redactor: Redactor, timeout: float = 20.0):
+                 redactor: Redactor, timeout: float = 20.0, shared: Optional[Dict[str, Any]] = None):
         self.report = report
         self.group = group
         self.platform = platform
         self.redactor = redactor
         self.timeout = timeout
+        # One dict per run, shared by every group: answers that are expensive to get (which
+        # engine is answering) are asked once, not once per group.
+        self.shared = shared if shared is not None else {}
 
     def key(self, name: str) -> str:
         return "%s.%s" % (self.group, name)
@@ -76,6 +84,16 @@ class Probe(NamedTuple):
     platforms: FrozenSet[str]
     describe: str
     na_keys: Sequence[str]
+    consent: str
+
+
+# approve(group, consent_text) -> bool. The default refuses: nothing that goes beyond looking
+# runs unless someone said so.
+Approver = Callable[[str, str], bool]
+
+
+def refuse(group: str, text: str) -> bool:
+    return False
 
 
 _REGISTRY: Dict[str, List[Probe]] = {}
@@ -83,14 +101,15 @@ _DESCRIPTIONS: Dict[str, str] = {}
 
 
 def probe(group: str, platforms: Iterable[str] = _platforms.ALL, describe: str = "",
-          na_keys: Sequence[str] = ()):
+          na_keys: Sequence[str] = (), consent: str = ""):
     plats = frozenset(platforms)
     unknown = plats - _platforms.ALL
     if unknown:
         raise ValueError("unknown platform(s) %s" % sorted(unknown))
 
     def register(func: Callable[[Context], None]) -> Callable[[Context], None]:
-        _REGISTRY.setdefault(group, []).append(Probe(group, func, plats, describe, tuple(na_keys)))
+        _REGISTRY.setdefault(group, []).append(
+            Probe(group, func, plats, describe, tuple(na_keys), consent.strip()))
         if describe and group not in _DESCRIPTIONS:
             _DESCRIPTIONS[group] = describe
         return func
@@ -100,7 +119,7 @@ def probe(group: str, platforms: Iterable[str] = _platforms.ALL, describe: str =
 
 def load_builtin() -> None:
     """Import the modules that register the built-in probes."""
-    from . import system  # noqa: F401
+    from . import compose, engine, gini, live, perf, qt, registry, rootless, system, xv6  # noqa: F401
 
 
 def groups() -> List[str]:
@@ -113,17 +132,27 @@ def describe(group: str) -> str:
     return _DESCRIPTIONS.get(group, "")
 
 
+def consent_text(group: str) -> str:
+    load_builtin()
+    return "\n".join(p.consent for p in _REGISTRY.get(group, []) if p.consent)
+
+
 def run_group(group: str, report: "_report.Report", platform: str, redactor: Redactor,
-              timeout: float = 20.0) -> bool:
+              timeout: float = 20.0, approve: Approver = refuse,
+              shared: Optional[Dict[str, Any]] = None) -> bool:
     load_builtin()
     probes = _REGISTRY.get(group)
     if not probes:
         return False
+    shared = shared if shared is not None else {}
     for p in probes:
-        ctx = Context(report, group, platform, redactor, timeout)
+        ctx = Context(report, group, platform, redactor, timeout, shared)
         if platform not in p.platforms:
             for k in p.na_keys:
                 ctx.na(k)
+            continue
+        if p.consent and not approve(group, p.consent):
+            ctx.ok("skipped", "not run: it needs your consent (answer Y, or run with --yes)")
             continue
         try:
             p.func(ctx)

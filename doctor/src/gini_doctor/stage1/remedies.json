@@ -1,0 +1,198 @@
+{
+  "version": "remedies-1",
+  "about": "docs/LAB_DIAGNOSIS.md as data. Each rule matches facts in ONE report and proposes a fix the person runs. The doctor never runs these. 'when' is all-of; ops: equals, not_equals, in, contains, not_contains, status, gt. 'who' is 'you' (no admin) or 'admin'. A null command means there is nothing to run, only something to know.",
+  "rules": [
+    {
+      "id": "stage0.no-python",
+      "when": [{"fact": "stage0.verdict", "contains": "no usable Python"}],
+      "title": "No Python on this machine is new enough to run GINI",
+      "reason": "GINI and the doctor both need Python {stage0.min_python} or newer; every interpreter Stage 0 found is older, or does not run.",
+      "who": "you",
+      "command": {
+        "macos": "brew install python@3.12    (or the installer from python.org)",
+        "linux": "sudo apt install python3 python3-venv pipx    (Debian/Ubuntu; use your distribution's package manager otherwise)",
+        "windows": "winget install Python.Python.3.12"
+      },
+      "side_effects": "Installs a new Python alongside any existing one; nothing is replaced.",
+      "verify": ["stage0.python.chosen"]
+    },
+    {
+      "id": "engine.none",
+      "when": [{"fact": "engine.gini.engine.effective", "equals": "none"}],
+      "title": "No container engine is installed",
+      "reason": "Every GINI element runs in a container; with neither Docker nor Podman there is nothing for gBuilder to start.",
+      "who": "admin",
+      "command": {
+        "macos": "Install Docker Desktop from docker.com, start it once, and allow it 6-8 GB of memory.",
+        "windows": "Install Docker Desktop from docker.com (WSL 2 backend), start it once, and allow it 6-8 GB of memory.",
+        "linux": "sudo apt install podman    (or Docker Engine from docs.docker.com)"
+      },
+      "side_effects": "Docker Desktop reserves the memory you give its VM whenever it is running.",
+      "verify": ["engine.gini.engine.effective"]
+    },
+    {
+      "id": "engine.docker-silent",
+      "when": [{"fact": "engine.gini.engine.effective", "equals": "docker (present but not answering)"}],
+      "title": "Docker is installed but its engine is not answering",
+      "reason": "docker info failed: {engine.docker.info}. gBuilder prefers Docker whenever the binary exists, so a stopped daemon blocks everything even if Podman would work.",
+      "who": "you",
+      "command": {
+        "macos": "Start Docker Desktop and wait for it to say it is running.",
+        "windows": "Start Docker Desktop and wait for it to say it is running.",
+        "linux": "sudo systemctl start docker    (or set GINI_ENGINE=podman to use Podman instead)"
+      },
+      "side_effects": "None beyond the engine starting.",
+      "verify": ["engine.docker.info", "engine.gini.engine.effective"]
+    },
+    {
+      "id": "podman.idmap-stale",
+      "when": [{"fact": "engine.podman.idmap.matches", "equals": false}],
+      "title": "Podman's storage uses an old user-id mapping",
+      "reason": "/etc/subuid grants {engine.podman.idmap.subuid}, but Podman's storage was created with {engine.podman.idmap.inuse}. Everything looks fine until an image needs a high uid, and then pulls fail with 'insufficient UIDs or GIDs available in user namespace'. The range is fine; the storage is stale.",
+      "who": "you",
+      "command": {"linux": "podman system migrate"},
+      "side_effects": "Stops every running Podman container for your user, including an open GINI lab. Images are kept.",
+      "verify": ["engine.podman.idmap.matches"]
+    },
+    {
+      "id": "rootless.subuid-missing",
+      "when": [{"fact": "engine.podman.path", "status": "ok"}, {"fact": "rootless.subuid", "status": "absent"}],
+      "title": "This account has no subordinate user ids, so rootless Podman cannot start containers",
+      "reason": "Rootless Podman maps container users onto a range from /etc/subuid and /etc/subgid; without an entry every container fails at start. Different ranges on different machines are normal, a missing one is not.",
+      "who": "admin",
+      "command": {"linux": "sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 \"$USER\" && podman system migrate"},
+      "side_effects": "podman system migrate stops your running Podman containers.",
+      "verify": ["rootless.subuid", "rootless.subgid", "engine.podman.idmap.matches"]
+    },
+    {
+      "id": "rootless.no-runtime-dir",
+      "when": [{"fact": "engine.podman.path", "status": "ok"}, {"fact": "rootless.xdg.runtime.exists", "equals": false}],
+      "title": "No user runtime directory (usually an ssh login without a systemd user session)",
+      "reason": "Podman keeps its socket and auth file under XDG_RUNTIME_DIR; without it, behaviour changes with how you logged in.",
+      "who": "admin",
+      "command": {"linux": "sudo loginctl enable-linger \"$USER\"    then log out and back in"},
+      "side_effects": "Your user services keep running after you log out.",
+      "verify": ["rootless.xdg.runtime.exists", "rootless.linger"]
+    },
+    {
+      "id": "rootless.no-linger",
+      "when": [{"fact": "engine.podman.path", "status": "ok"}, {"fact": "rootless.linger", "equals": "no"}],
+      "title": "Lingering is off, so your containers are killed when you log out",
+      "reason": "Without lingering systemd tears down the user session, and every container in it, at logout.",
+      "who": "admin",
+      "command": {"linux": "sudo loginctl enable-linger \"$USER\""},
+      "side_effects": "Your user services keep running after you log out.",
+      "verify": ["rootless.linger"]
+    },
+    {
+      "id": "rootless.no-cpu-delegation",
+      "when": [{"fact": "rootless.cgroup2.user.controllers", "status": "ok"}, {"fact": "rootless.cgroup2.user.controllers", "not_contains": "cpu"}],
+      "title": "CPU limits cannot be applied to your containers",
+      "reason": "The cpu controller is not delegated to your user slice ({rootless.cgroup2.user.controllers}), so a sized GINI element's CPU cap has nowhere to go.",
+      "who": "admin",
+      "command": {"linux": "sudo mkdir -p /etc/systemd/system/user@.service.d && printf '[Service]\\nDelegate=cpu cpuset io memory pids\\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf && sudo systemctl daemon-reload    then log out and back in"},
+      "side_effects": "Applies to every user on the machine.",
+      "verify": ["rootless.cgroup2.user.controllers"]
+    },
+    {
+      "id": "podman.vfs-storage",
+      "when": [{"fact": "engine.podman.storage.driver", "equals": "vfs"}],
+      "title": "Podman is using the slow vfs storage driver",
+      "reason": "vfs copies every layer in full: far slower and much larger on disk than overlay. It usually means fuse-overlayfs is missing ({rootless.tool.fuse-overlayfs}).",
+      "who": "admin",
+      "command": {"linux": "sudo apt install fuse-overlayfs    then: podman system reset"},
+      "side_effects": "podman system reset DELETES all your Podman images, containers and volumes; they are re-pulled on next use.",
+      "verify": ["engine.podman.storage.driver"]
+    },
+    {
+      "id": "registry.stored-credential",
+      "when": [{"fact": "registry.credential_blocks", "equals": true}],
+      "title": "A stored registry credential is blocking image pulls",
+      "reason": "The registry answers anonymously, but {engine.gini.engine.effective} is refused when it uses its stored login: {registry.engine}. On shared home directories this breaks every machine at once.",
+      "who": "you",
+      "command": {"linux": "podman logout docker.io; docker logout", "macos": "docker logout", "windows": "docker logout"},
+      "side_effects": "Pulls become anonymous; any private registry you use will need docker login again.",
+      "verify": ["registry.engine", "registry.credential_blocks"]
+    },
+    {
+      "id": "registry.unreachable",
+      "when": [{"fact": "registry.anonymous", "status": "error"}],
+      "title": "The image registry cannot be reached from this machine",
+      "reason": "An anonymous request to Docker Hub failed: {registry.anonymous}. That is network, proxy or TLS, not GINI.",
+      "who": "you",
+      "command": null,
+      "side_effects": "",
+      "verify": ["registry.anonymous"]
+    },
+    {
+      "id": "qt.no-gbuilder-python",
+      "when": [{"fact": "qt.gbuilder.python", "status": "absent"}],
+      "title": "gBuilder is not installed for this user",
+      "reason": "No gbuilder launcher or pipx environment for gini-toolkit was found.",
+      "who": "you",
+      "command": {"linux": "pipx install gini-toolkit", "macos": "pipx install gini-toolkit", "windows": "pipx install gini-toolkit"},
+      "side_effects": "Installs gBuilder into its own environment; nothing else changes.",
+      "verify": ["qt.gbuilder.python", "qt.pyside6"]
+    },
+    {
+      "id": "qt.pyside6-broken",
+      "when": [{"fact": "qt.pyside6", "status": "error"}],
+      "title": "Qt (PySide6) does not import in gBuilder's Python",
+      "reason": "Importing PySide6 failed: {qt.pyside6}. gBuilder cannot open a window until it does.",
+      "who": "you",
+      "command": {"linux": "pipx reinstall gini-toolkit", "macos": "pipx reinstall gini-toolkit", "windows": "pipx reinstall gini-toolkit"},
+      "side_effects": "Rebuilds gBuilder's environment; your projects and settings are not touched.",
+      "verify": ["qt.pyside6", "qt.pyside6.offscreen"]
+    },
+    {
+      "id": "qt.libxcb-cursor",
+      "when": [{"fact": "qt.lib.libxcb-cursor", "equals": 0}],
+      "title": "A library Qt needs to draw windows is missing (libxcb-cursor)",
+      "reason": "Without libxcb-cursor gBuilder will not start at all, and the error names a Qt platform plugin rather than a package.",
+      "who": "admin",
+      "command": {"linux": "sudo apt install libxcb-cursor0    (Debian/Ubuntu)"},
+      "side_effects": "None.",
+      "verify": ["qt.lib.libxcb-cursor", "qt.pyside6.offscreen"]
+    },
+    {
+      "id": "perf.powersave",
+      "when": [{"fact": "perf.cpu.governor", "equals": "powersave"}],
+      "title": "The CPU governor is 'powersave', the most likely cause of a stuttering Machine Lab feed",
+      "reason": "xv6 is emulated in software on one core; a governor that keeps deciding the load is not worth ramping up for produces a feed that is fine and then is not.",
+      "who": "admin",
+      "command": {"linux": "sudo cpupower frequency-set -g performance    (or your distribution's tuned profile)"},
+      "side_effects": "More power use and heat while the machine is busy.",
+      "verify": ["perf.cpu.governor", "perf.host.cpu.spread_pct"]
+    },
+    {
+      "id": "perf.throttling",
+      "when": [{"fact": "perf.cpu.throttle.count", "gt": 0}],
+      "title": "The CPU has been thermally throttled",
+      "reason": "The kernel counted {perf.cpu.throttle.count} throttling events. That is proof, not a theory, and nothing in GINI can fix it.",
+      "who": "admin",
+      "command": null,
+      "side_effects": "",
+      "verify": ["perf.cpu.throttle.count"]
+    },
+    {
+      "id": "perf.user-cpu-cap",
+      "when": [{"fact": "perf.cgroup.user.cpu_max", "status": "ok"}, {"fact": "perf.cgroup.user.cpu_max", "not_contains": "max"}],
+      "title": "Your user session has a hard CPU cap",
+      "reason": "The user slice is limited to {perf.cgroup.user.cpu_max}; a container inside it cannot exceed that however its own limits are written.",
+      "who": "admin",
+      "command": null,
+      "side_effects": "",
+      "verify": ["perf.cgroup.user.cpu_max"]
+    },
+    {
+      "id": "live.compose-exec-only",
+      "when": [{"fact": "live.exec.engine", "status": "ok"}, {"fact": "live.exec.compose", "status": "error"}],
+      "title": "The compose provider cannot exec into its own service (fine for current GINI)",
+      "reason": "Running a command in the container works the way gBuilder does it; only the compose provider's route fails. This explains older failures and needs no fix.",
+      "who": "you",
+      "command": null,
+      "side_effects": "",
+      "verify": ["live.exec.compose"]
+    }
+  ]
+}

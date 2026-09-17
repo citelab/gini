@@ -39,7 +39,7 @@ where = ["src"]
 # The script IS the package; a wheel without it installs a command that cannot run.
 # The publish workflow asserts it is in there.
 [tool.setuptools.package-data]
-gini_doctor = ["*.sh", "stage0/*.sh", "stage0/*.ps1"]
+gini_doctor = ["*.sh", "stage0/*.sh", "stage0/*.ps1", "stage1/*.json"]
 
 [tool.setuptools_scm]
 root = ".."

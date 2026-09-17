@@ -10,6 +10,9 @@
 Offline is the normal case: nothing here needs the Health Center. When ``GINI_HEALTHCENTER`` (or
 ``--healthcenter``) is set, the doctor fetches its policy from there and falls back to the cached
 or built-in policy if it cannot. It never uploads anything on its own.
+
+Groups that do more than look (``live``, ``xv6``) show what they will run and why, and run only on
+Y at the prompt or with ``--yes``. With no terminal to ask on, they are skipped, never assumed.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ import sys
 from typing import List, Optional
 
 from . import ENGINE_VERSION, platforms, policy as _policy, probes
+from . import diagnose as _diagnose
 from .compare import compare, format_text, render
 from .redact import Redactor
 from .report import Report
@@ -45,7 +49,8 @@ def ingest_stage0(report: Report, text: Optional[str], redactor: Redactor) -> No
 
 
 def collect(groups: List[str], pol: "_policy.Policy", platform: Optional[str] = None,
-            redactor: Optional[Redactor] = None, stage0: Optional[str] = None) -> Report:
+            redactor: Optional[Redactor] = None, stage0: Optional[str] = None,
+            approve: "probes.Approver" = probes.refuse) -> Report:
     plat = platform or platforms.current()
     red = redactor or Redactor()
     report = Report(plat, pol.source, pol.version)
@@ -57,8 +62,9 @@ def collect(groups: List[str], pol: "_policy.Policy", platform: Optional[str] = 
     if "system" not in wanted:
         wanted.insert(0, "system")
     timeout = float(pol.get("probe_timeout_s", 20))
+    shared: dict = {}
     for g in wanted:
-        if not probes.run_group(g, report, plat, red, timeout=timeout):
+        if not probes.run_group(g, report, plat, red, timeout=timeout, approve=approve, shared=shared):
             report.set("doctor.unknown_group.%s" % g, "error", detail="no such probe group")
     return report
 
@@ -81,10 +87,34 @@ def summary(report: Report) -> str:
     return "\n".join(out)
 
 
+def make_approver(assume_yes: bool, stdin=None, stdout=None) -> "probes.Approver":
+    """Y at a prompt, or --yes. No terminal and no --yes means no: a pipe or a cron job never
+    waits for an answer and never gets a container started on its behalf."""
+    stdin = stdin or sys.stdin
+    stdout = stdout or sys.stderr
+
+    def approve(group: str, text: str) -> bool:
+        if assume_yes:
+            return True
+        try:
+            interactive = stdin.isatty()
+        except (AttributeError, ValueError):
+            interactive = False
+        if not interactive:
+            return False
+        stdout.write("\n[%s] wants to run something on this machine:\n%s\n\nRun it? [y/N] " % (group, text))
+        stdout.flush()
+        answer = stdin.readline().strip().lower()
+        return answer in ("y", "yes")
+
+    return approve
+
+
 def _cmd_run(args) -> int:
     pol = _policy.load(healthcenter=args.healthcenter, offline=args.offline)
     groups = [g for g in (args.only.split(",") if args.only else pol.get("groups_default")) if g]
-    report = collect(groups, pol, stage0=os.environ.get(STAGE0_ENV))
+    report = collect(groups, pol, stage0=os.environ.get(STAGE0_ENV),
+                     approve=make_approver(args.yes))
     if args.stdout:
         sys.stdout.write(report.to_json())
         return 0
@@ -92,7 +122,8 @@ def _cmd_run(args) -> int:
     report.save(path)
     if not args.quiet:
         print(summary(report))
-        print("\n  report saved: %s" % path)
+        print(_diagnose.format_text(_diagnose.diagnose(report)))
+        print("  report saved: %s" % path)
         print("  compare with: gini-doctor compare <working-machine>.json %s\n" % path)
     return 0
 
@@ -116,9 +147,32 @@ def _cmd_show(args) -> int:
     return 0
 
 
+def _cmd_diagnose(args) -> int:
+    try:
+        print(_diagnose.format_text(_diagnose.diagnose(Report.load(args.report))))
+    except (OSError, ValueError) as e:
+        print("gini-doctor: %s" % e, file=sys.stderr)
+        return 2
+    return 0
+
+
+def _cmd_parity(args) -> int:
+    from . import parity as _parity
+    try:
+        with open(args.legacy, "r", encoding="utf-8", errors="replace") as fh:
+            legacy = _parity.parse_legacy(fh.read())
+        result = _parity.parity(legacy, Report.load(args.report))
+    except (OSError, ValueError) as e:
+        print("gini-doctor: %s" % e, file=sys.stderr)
+        return 2
+    print(_parity.format_text(result))
+    return 1 if result.disagree else 0
+
+
 def _cmd_groups(args) -> int:
-    for g in probes.groups():
-        print("  %-10s %s" % (g, probes.describe(g)))
+    default = set(_policy.BUILTIN["groups_default"])
+    for g in sorted(probes.groups()):
+        print("  %-10s %s%s" % (g, probes.describe(g), "" if g in default else "  [not default]"))
     return 0
 
 
@@ -135,6 +189,8 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--quiet", action="store_true")
     r.add_argument("--healthcenter", help="Health Center URL (default: $GINI_HEALTHCENTER)")
     r.add_argument("--offline", action="store_true", help="do not contact the Health Center")
+    r.add_argument("--yes", action="store_true",
+                   help="run the groups that start containers without asking (live, xv6)")
     r.set_defaults(func=_cmd_run)
 
     c = sub.add_parser("compare", help="show only the facts on which reports differ")
@@ -145,6 +201,15 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("show", help="print a saved report in human form")
     s.add_argument("report")
     s.set_defaults(func=_cmd_show)
+
+    d = sub.add_parser("diagnose", help="what a saved report points to, and what to run about it")
+    d.add_argument("report")
+    d.set_defaults(func=_cmd_diagnose)
+
+    pa = sub.add_parser("parity", help="does this doctor agree with the legacy shell doctor's report?")
+    pa.add_argument("legacy", help="report from gini-doctor.sh --report")
+    pa.add_argument("report", help="report from this doctor, same machine")
+    pa.set_defaults(func=_cmd_parity)
 
     g = sub.add_parser("groups", help="list the probe groups")
     g.set_defaults(func=_cmd_groups)
@@ -159,4 +224,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "compare" and len(args.reports) < 2:
         print("gini-doctor: compare needs at least two reports", file=sys.stderr)
         return 2
-    return args.func(args)
+    try:
+        return args.func(args)
+    except BrokenPipeError:
+        # `gini-doctor compare a b | head` closed the pipe early; that is not an error.
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        return 0

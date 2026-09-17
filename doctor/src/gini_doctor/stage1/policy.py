@@ -23,7 +23,8 @@ BUILTIN: Dict[str, Any] = {
     "version": "builtin-1",
     # The oldest Python Stage 1 is written for and tested on.
     "min_python": "3.8",
-    "groups_default": ["system"],
+    # The legacy default set. xv6 is left out on purpose: it boots a kernel for about a minute.
+    "groups_default": ["system", "engine", "compose", "rootless", "registry", "qt", "gini", "live", "perf"],
     "probe_timeout_s": 20,
 }
 

@@ -23,10 +23,12 @@ PY = os.environ.get("GINI_DOCTOR_TEST_FLOOR_PYTHON") or shutil.which("python" + 
 def test_stage1_runs_on_the_floor_python(tmp_path):
     env = dict(os.environ, PYTHONPATH=str(SRC))
     env.pop("GINI_HEALTHCENTER", None)
-    proc = subprocess.run([PY, "-m", "gini_doctor.stage1", "run", "--stdout", "--offline"],
+    # Every group except registry, which needs the network; none of them may crash on the floor.
+    groups = "system,engine,compose,rootless,qt,gini,live,perf"
+    proc = subprocess.run([PY, "-m", "gini_doctor.stage1", "run", "--stdout", "--offline", "--only", groups],
                           cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           universal_newlines=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
     assert data["facts"]["system.doctor.python.version"]["value"].startswith(FLOOR + ".")
-    assert "system.probe_error" not in data["facts"]
+    assert not [k for k in data["facts"] if k.endswith("probe_error")], data["facts"]

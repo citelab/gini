@@ -18,6 +18,7 @@ from .report import NA, OK, Report
 NOISY = frozenset({
     "system.disk.home.free_gb",
     "system.doctor.python.executable",
+    "engine.podman.images.count",
 })
 
 

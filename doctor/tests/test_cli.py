@@ -17,7 +17,7 @@ def test_run_to_stdout_is_a_loadable_report(capsys, monkeypatch):
 def test_default_command_is_run_and_it_saves_a_file(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(policy.HEALTHCENTER_ENV, raising=False)
-    assert cli.main(["--offline", "--quiet"]) == 0
+    assert cli.main(["--offline", "--quiet", "--only", "system"]) == 0
     saved = list(tmp_path.glob("gini-doctor-*.json"))
     assert len(saved) == 1 and Report.load(str(saved[0])).facts
 
