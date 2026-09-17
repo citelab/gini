@@ -4,6 +4,8 @@ Two handouts, written **before** the implementation on purpose. They are student
 and they double as the specification: every instruction in them is a claim about what GINI does,
 so a promise here that GINI cannot keep is a bug in the plan rather than a disappointment in a lab.
 
+- [`a-lab-01-TA-notes.md`](a-lab-01-TA-notes.md) — the companion: what a finished lab looks
+  like, setup traps, and six questions with model answers. **Not for students.**
 - [`a-lab-01-sysinfo.md`](a-lab-01-sysinfo.md) — Part A (add a system call) + Part B
   (`sysinfo`: free memory and process count). **This year.**
 - [`a-lab-02-trace.md`](a-lab-02-trace.md) — Part A + Part C (`trace`: per-process system
