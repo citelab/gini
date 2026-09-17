@@ -57,11 +57,18 @@ The tests need no dependencies beyond pytest and run on Python 3.8 and 3.12. To 
   ```
   A disagreement is either a real gap in the new doctor or a missing rule in `parity.MAP`; the macOS
   run produced one of each, and `doctor/tests/test_parity_macos.py` replays it so it cannot regress.
-- **CI has never run.** `.github/workflows/gini-doctor-tests.yml` (Linux/macOS/Windows × 3.8/3.12)
-  and the updated publish workflow are written but unexercised; the first push will be their first
-  run. Everything in them passed locally on Linux.
-- **Windows is untested on real Windows.** `stage0.ps1` has only run under pwsh 7 on Linux. Windows
-  PowerShell 5.1 is what students have.
+- **CI is green on all three platforms.** `gini-doctor-tests.yml` (Linux/macOS/Windows × 3.8/3.12)
+  has passed on every doctor commit. Windows reports `85 passed, 5 skipped` at S2, and the five
+  skips are the three POSIX-only `test_stage0.py` cases plus the 3.8 floor test — so the PowerShell
+  half really ran. `find_powershell()` prefers `powershell` over `pwsh`, and on a GitHub Windows
+  runner that is **Windows PowerShell 5.1**, which is what students have. The publish workflow has
+  still never run: it fires on a `v*` tag.
+- **What Windows CI does NOT cover.** The runner has uv and a normal PATH, so the parts of
+  `stage0.ps1` that exist for a student's machine are untried: the `py` launcher's registered
+  installs, pipx under `%LOCALAPPDATA%`, and the Microsoft Store stub under `WindowsApps` that the
+  script skips by name. CI also runs only `--only system,engine,perf`, so `registry`, `gini` and
+  `live` have never met Docker Desktop on Windows. A real Windows box is still wanted; it is no
+  longer the blank it was.
 - `doctor/pyproject.toml` now says `requires-python = ">=3.8"`, and the wheel carries Stage 0,
   Stage 1, the remedy table and the bundle.
 - `frontend-ng/tests/test_doctor_matches_the_code.py` now holds BOTH engines to GINI's runtime
@@ -69,9 +76,8 @@ The tests need no dependencies beyond pytest and run on Python 3.8 and 3.12. To 
 
 ## Next
 
-1. Push, which is the first time either workflow runs and the first time `stage0.ps1` meets Windows
-   PowerShell 5.1 (windows-latest) rather than pwsh on Linux.
-2. Parity on Linux and Windows (the three commands are above).
-3. The rest of S3: delete the shell engine, `legacy` and `--fanout`; point `scripts/gini-doctor.sh`
+1. Parity on a lab Linux machine with rootless Podman, and on a real Windows machine (the three
+   commands are above). This is the only gate on the rest of S3.
+2. The rest of S3: delete the shell engine, `legacy` and `--fanout`; point `scripts/gini-doctor.sh`
    at Stage 0; update `scripts/README.md` and `docs/LAB_DIAGNOSIS.md`.
-4. S4: the Health Center server, derived from `teaching-center/`.
+3. S4: the Health Center server, derived from `teaching-center/`.
