@@ -8,6 +8,7 @@ title: "A-Lab 01 — sysinfo"
 parts:
   A: "Add the system call"
   B: "Make it tell the truth"
+  C: "Make it remember"
 machine_folder: xv6-lab
 syscall_number: 23          # stock xv6 ends at SYS_sync = 22
 
@@ -30,6 +31,13 @@ files:
   - name: kalloc.c
     tree: kernel/kalloc.c
 
+  # Part C only. The timer is the one thing in the kernel that happens on its own, so it is the
+  # only place a running average can be kept from. clockintr already walks the process table
+  # under each p->lock — wakeup(&ticks) does it one line up — so the pattern is precedented in
+  # the very function the student edits.
+  - name: trap.c
+    tree: kernel/trap.c
+
   # xv6-riscv has no sysinfo.h — MIT's 6.1810 supplies it. The assignment carries it instead of
   # the image, so the header travels with the lab.
   - name: sysinfo.h
@@ -47,6 +55,12 @@ files:
         uint64 nsleeping;   // blocked, waiting for something
         uint64 memused;     // bytes the processes are holding
         uint64 uptime;      // ticks since boot (a tick is about half a second here)
+        // Part C. Averages of nrunnable over the last 5, 15 and 30 seconds — scaled by 100,
+        // because the kernel has no floating point (it does not save FP registers on a context
+        // switch, so it cannot use them). 250 means 2.50.
+        uint64 load5;
+        uint64 load15;
+        uint64 load30;
       };
 
   - name: sysinfotest.c
@@ -56,6 +70,12 @@ files:
       #include "kernel/types.h"
       #include "kernel/sysinfo.h"
       #include "user/user.h"
+
+      static void
+      print_load(char *name, uint64 v)
+      {
+        printf("%s: %d.%d%d\n", name, (int)(v / 100), (int)(v / 10) % 10, (int)(v % 10));
+      }
 
       int
       main(void)
@@ -71,6 +91,11 @@ files:
         printf("sleeping:    %d\n", (int)info.nsleeping);
         printf("mem in use:  %d\n", (int)info.memused);
         printf("uptime:      %d ticks\n", (int)info.uptime);
+        // Part C. Printed a digit at a time: xv6's printf has no width or zero-padding, so
+        // "%d.%d" turns 306 into 3.6 rather than 3.06 — a wrong number, quietly.
+        print_load("load  5s", info.load5);
+        print_load("load 15s", info.load15);
+        print_load("load 30s", info.load30);
         exit(0);
       }
 
@@ -174,6 +199,37 @@ checks:
     match: 'copyout\s*\('
     hint: "Five arguments in this xv6: copyout(pagetable, p->sz, dstva, src, len)."
 
+  - id: sampler
+    part: C
+    label: "Sample the run queue from the timer"
+    where: kernel/trap.c
+    file: trap.c
+    match: 'load_sample\s*\('
+    hint: "Call it from clockintr, AFTER release(&tickslock) — and define it at the end of the file."
+
+  - id: ring
+    part: C
+    label: "Keep the samples in a ring buffer"
+    where: kernel/trap.c
+    file: trap.c
+    match: 'loadring|load_ring'
+    hint: "A fixed array plus an index that only ever goes up; % LOADN turns it into a ring."
+
+  - id: average
+    part: C
+    label: "Average the last N samples"
+    where: kernel/trap.c
+    file: trap.c
+    match: 'load_avg\s*\('
+    hint: "x100 and integer division — the kernel has no floating point."
+
+  - id: load_declared
+    part: C
+    label: "Declare the sampler and the average in defs.h"
+    where: kernel/defs.h
+    file: defs.h
+    match: 'load_avg|load_sample'
+
 grade:
   - id: named
     part: A
@@ -208,4 +264,9 @@ grade:
     part: B
     describe: "uptime advances with the kernel's own tick"
     metric: sysinfo_uptime_advances
+    tolerance: 1
+  - id: load_responds
+    part: C
+    describe: "the 5s average rises when processes are made runnable, and the 30s average lags it"
+    metric: sysinfo_load_responds
     tolerance: 1

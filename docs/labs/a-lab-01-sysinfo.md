@@ -22,7 +22,7 @@ Open your topology in gBuilder and press **Run**. Double-click the xv6 machine t
 ```
 ~/.gini/xv6-lab/<machine-name>/
     syscall.h      syscall.c      sysproc.c      defs.h
-    kalloc.c       sysinfo.h
+    kalloc.c       trap.c         sysinfo.h
     user.h         usys.pl        sysinfotest.c
 ```
 
@@ -253,21 +253,6 @@ For a worked example already in the tree, read `filestat` in `kernel/file.c` —
 Build the struct on the kernel stack, fill it in, copy it out, and return 0 — or -1 if `copyout`
 fails, because a program is allowed to pass you a bad pointer and that must not be your problem.
 
-### Stretch — an average, not a snapshot
-
-`nrunnable` tells you the queue length **at the instant you asked**, which is noise. Every Unix
-reports it averaged over the last minute, five minutes and fifteen — because what you want to know
-is whether the machine is busy, not whether it happened to be busy during one function call.
-
-Doing that needs something that samples on a schedule and keeps a decaying average, which means a
-hook in code that runs periodically: the timer interrupt (`clockintr` in `kernel/trap.c`, which is
-where `ticks` is incremented) or the scheduler itself (`scheduler()` in `kernel/proc.c`, which sees
-the whole table on every pass). Linux does exactly this — `calc_load()` runs from the timer and
-applies an exponential decay.
-
-Neither of those files is yours in this lab. If you want to try it, ask — it is one more file, and
-it is the real mechanism rather than an imitation of it.
-
 ### Check yourself — this is the good part
 
 The kernel is not the only thing that knows these numbers, and **GINI works them out a completely
@@ -295,13 +280,190 @@ how operating systems are tested.
 
 ---
 
+## Part C — Make it remember
+
+Everything so far reads the kernel at the instant you ask. `nrunnable` is the queue length *now* —
+run `sysinfotest` twice in a row and you will get two different answers, neither of them wrong and
+neither of them useful.
+
+What you actually want to know is whether the machine has *been* busy. Every Unix answers that
+with a **load average**: the run queue, averaged over the last few minutes. `uptime` on any Linux
+machine prints three of them.
+
+That needs something this kernel has not done yet — **state that is maintained over time, by
+something that happens on its own, and read later by somebody else.** The producer is the timer
+interrupt; the consumer is your system call. That split is the whole point of this part, and it is
+one of the most common shapes in an operating system.
+
+### C1. The one thing that happens on its own — `kernel/trap.c`
+
+Open it and find `clockintr()`:
+
+```c
+void
+clockintr()
+{
+  if (cpuid() == 0) {
+    acquire(&tickslock);
+    ticks++;
+    wakeup(&ticks);
+    release(&tickslock);
+  }
+  w_stimecmp(r_time() + 5000000);   // the next tick, about half a second
+}
+```
+
+This runs on every timer interrupt — twice a second in GINI's xv6. It is the kernel's heartbeat,
+and `ticks` is the only thing it currently maintains.
+
+Two things worth noticing before you add to it:
+
+- **The `cpuid() == 0` test.** Every hart takes a timer interrupt; only hart 0 keeps the clock, so
+  the others do not each count the same tick. Your sampling belongs inside that test for exactly
+  the same reason.
+- **`wakeup(&ticks)` walks the entire process table**, taking and releasing every `p->lock` as it
+  goes — read it in `kernel/proc.c` if you do not believe it. So taking `p->lock` from a timer
+  interrupt is not a daring thing to do here; it is what the line above you already does.
+
+### C2. Somewhere to keep the samples — `kernel/trap.c`
+
+Add this at the **end** of the file:
+
+```c
+// A-Lab: the run queue, sampled once a tick, for the last LOADN ticks.
+int loadring[LOADN];
+int loadi;
+
+void
+load_sample(void)
+{
+  extern struct proc proc[NPROC];
+  struct proc *q;
+  int n = 0;
+
+  for(q = proc; q < &proc[NPROC]; q++){
+    acquire(&q->lock);
+    if(q->state == RUNNABLE || q->state == RUNNING)
+      n++;
+    release(&q->lock);
+  }
+  loadring[loadi % LOADN] = n;
+  loadi++;
+}
+```
+
+A **ring buffer**: a fixed array and an index that only ever goes up. `loadi % LOADN` wraps it
+round, so the array always holds the last `LOADN` samples and the oldest is quietly overwritten.
+No allocation, no bookkeeping, and nothing to free — which is why kernels use this shape
+constantly.
+
+Note it counts `RUNNABLE` **and** `RUNNING`: a process using a CPU right now is part of the load,
+it simply is not queued.
+
+### C3. Averaging it — `kernel/trap.c`
+
+Underneath:
+
+```c
+// average of the last `want` samples, x100
+uint64
+load_avg(int want)
+{
+  int i, n = 0, have = loadi < LOADN ? loadi : LOADN;
+  uint64 sum = 0;
+
+  if(want > have)
+    want = have;
+  if(want <= 0)
+    return 0;
+  for(i = 1; i <= want; i++){
+    sum += loadring[(loadi - i + LOADN) % LOADN];
+    n++;
+  }
+  return (sum * 100) / n;
+}
+```
+
+**Why `x100` and not a `float`.** The kernel does not save floating-point registers on a context
+switch, so it cannot use them — a `float` in kernel code is a bug that shows up as another
+process's arithmetic going wrong. Scaling an integer by 100 and dividing at the end is how kernels
+carry fractions. Linux does the same thing with a 2048x fixed point in `calc_load()`.
+
+`have` matters: for the first thirty seconds after boot there are not thirty seconds of history,
+and averaging over empty slots would report a load of zero on a busy machine.
+
+### C4. Calling it — `kernel/trap.c`
+
+One line, inside the `cpuid() == 0` test, **after** `release(&tickslock)`:
+
+```c
+    release(&tickslock);
+    load_sample();
+```
+
+After the release, not before: `wakeup` already takes `p->lock` while holding `tickslock`, and
+there is no reason for you to hold two locks when one will do.
+
+### C5. Declaring them — `kernel/defs.h`
+
+In the `// trap.c` section:
+
+```c
+#define LOADN 60
+void            load_sample(void);
+uint64          load_avg(int);
+```
+
+Sixty samples at half a second each is thirty seconds of history.
+
+### C6. Reading it out — `kernel/sysproc.c`
+
+In `sys_sysinfo`, beside the others:
+
+```c
+  info.load5  = load_avg(10);   // 10 samples  = 5 seconds
+  info.load15 = load_avg(30);   // 30 samples  = 15 seconds
+  info.load30 = load_avg(60);   // 60 samples  = 30 seconds
+```
+
+The interrupt handler does the cheap part (one sample) and your system call does the arithmetic.
+That is the right way round: whatever runs in an interrupt handler delays everything else on that
+CPU.
+
+### Watch it work
+
+```
+sysinfotest
+spin 40 &
+spin 40 &
+spin 40 &
+```
+
+then run `sysinfotest` every few seconds and watch the three numbers separate and come back
+together. Measured on a real machine:
+
+| | 5s | 15s | 30s |
+|---|---|---|---|
+| idle | 0.00 | 0.04 | 0.04 |
+| 12 seconds into three spinners | **3.30** | 2.80 | 1.57 |
+| 26 seconds in | 3.20 | 3.06 | 3.13 |
+
+**That separation is the whole idea.** The short average reacts at once; the long one is still
+remembering a machine that was idle. Twenty-six seconds in they agree again, because by then the
+machine really has been busy for half a minute. It is also why a real `uptime` prints three
+numbers instead of one: the shape of the three tells you whether load is arriving or leaving.
+
 ## What is graded
 
 **Part A** — `sysinfo` appears by name in the System Calls Lab when your program runs, and your
 program receives the value your kernel returned.
 
 **Part B** — `freemem` and `nproc` agree with what GINI reads independently, before and after
-processes start and memory is allocated. Your kernel builds cleanly and the machine boots.
+processes start and memory is allocated, and the other four fields are right.
+
+**Part C** — the 5-second average rises within a few seconds of processes becoming runnable, and
+the 30-second average lags behind it and then catches up. Your kernel builds cleanly and the
+machine boots.
 
 Both parts: **no busy-waiting, and no reading `kmem` or `proc[]` without their locks.**
 

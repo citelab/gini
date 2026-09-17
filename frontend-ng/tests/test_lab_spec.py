@@ -36,10 +36,16 @@ GOOD = {
                   "    return -1;\n  return 0;\n}\n"),
     "user.h": "int sync(void);\nint sysinfo(struct sysinfo *info);\n",
     "usys.pl": 'entry("sync");\nentry("sysinfo");\n',
-    "defs.h": "// kalloc.c\nvoid* kalloc(void);\nuint64 freemem(void);\n",
+    "defs.h": ("// kalloc.c\nvoid* kalloc(void);\nuint64 freemem(void);\n"
+               "// trap.c\n#define LOADN 60\nvoid load_sample(void);\nuint64 load_avg(int);\n"),
     "kalloc.c": ("uint64\nfreemem(void)\n{\n  acquire(&kmem.lock);\n"
                  "  struct run *r = kmem.freelist;\n  release(&kmem.lock);\n  return 0;\n}\n"),
-    "sysinfo.h": "struct sysinfo { uint64 freemem; uint64 nproc; };\n",
+    "sysinfo.h": "struct sysinfo { uint64 freemem; uint64 nproc; uint64 load5; };\n",
+    "trap.c": ("void clockintr(){ acquire(&tickslock); ticks++; wakeup(&ticks);\n"
+               "  release(&tickslock); load_sample(); }\n"
+               "int loadring[LOADN]; int loadi;\n"
+               "void load_sample(void){ loadring[loadi % LOADN] = 0; loadi++; }\n"
+               "uint64 load_avg(int want){ return 0; }\n"),
     "sysinfotest.c": '#include "user/user.h"\nint main(void){ return 0; }\n',
 }
 
@@ -61,7 +67,10 @@ def _ev(spec, files):
 
 
 def test_the_shipped_assignment_loads_with_everything_it_needs(spec):
-    assert spec.parts() == ("A", "B")
+    assert spec.parts() == ("A", "B", "C")
+    assert spec.part_title("C") == "Make it remember"
+    # Part C's producer is the timer, so it needs trap.c — and nothing else does.
+    assert spec.file("trap.c") is not None
     assert spec.uprogs() == ("sysinfotest",)
     assert spec.file("kalloc.c") is not None, "part B cannot be done without it"
     assert spec.file("proc.c") is None, "proc[] is reachable with an extern; proc.c stays the image's"
@@ -73,7 +82,7 @@ def test_a_correct_solution_passes_every_check(spec):
     res = _ev(spec, GOOD)
     failed = [r.check.id for r in res if not r.passed]
     assert failed == [], f"a correct solution failed: {failed}"
-    assert L.progress(res)["parts"] == {"A": (6, 6), "B": (6, 6)}
+    assert L.progress(res)["parts"] == {"A": (6, 6), "B": (6, 6), "C": (4, 4)}
 
 
 def test_the_commonest_mistake_fails_exactly_one_check(spec):
@@ -169,6 +178,11 @@ PRISTINE = {
     "user.h": "int sync(void);\nint uptime(void);\nchar* sbrk(int);\n",
     "usys.pl": 'entry("sync");\nentry("uptime");\n',
     "defs.h": "void*           kalloc(void);\nvoid            kfree(void *);\n",
+    # clockintr already walks proc[] under p->lock via wakeup(&ticks) — so any pattern about
+    # "sampling the process table from the timer" is green here unless it names the student's
+    # own function.
+    "trap.c": ("void clockintr(){ if (cpuid() == 0) { acquire(&tickslock); ticks++;\n"
+               "  wakeup(&ticks); release(&tickslock); } w_stimecmp(r_time() + 5000000); }\n"),
     # the one that actually caused this
     "kalloc.c": ("void kfree(void *pa){ struct run *r = (struct run*)pa;\n"
                  "  acquire(&kmem.lock); r->next = kmem.freelist; kmem.freelist = r;\n"
