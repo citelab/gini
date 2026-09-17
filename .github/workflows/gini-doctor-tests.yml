@@ -1,0 +1,37 @@
+# Tests gini-doctor on all three platforms, at its Python floor and at a current Python.
+#
+# Separate from tests.yml on purpose. That suite installs Qt and runs on Linux only; the doctor
+# depends on nothing and its whole point is to run on every platform, including the Windows
+# machines students bring. Stage 0 is tested here in its native shell on each runner: the POSIX
+# script on Linux and macOS, the PowerShell script under Windows PowerShell 5.1 on Windows.
+#
+# uv provides the interpreters so the floor (3.8) is available on every runner image, including
+# macOS on Apple silicon, where setup-python has no 3.8.
+name: gini-doctor tests
+
+on:
+  push:
+    paths: ["doctor/**", ".github/workflows/gini-doctor-tests.yml"]
+  pull_request:
+    paths: ["doctor/**", ".github/workflows/gini-doctor-tests.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: doctor-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: doctor tests
+        shell: bash
+        run: uv run --no-project --python ${{ matrix.python }} --with pytest python -m pytest -q -rs doctor/tests
