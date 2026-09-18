@@ -175,3 +175,30 @@ def test_a_dark_theme_gets_a_stronger_wash_than_a_light_one(app):
         return int(css.split("rgba(", 1)[1].split(")", 1)[0].split(",")[-1])
 
     assert alpha_of(T.DARK) > alpha_of(T.LIGHT)
+
+
+def test_a_label_is_text_and_not_a_filled_box(app):
+    """QLabel is a QFrame subclass, so a card styled with a bare `QFrame{background:...}` type
+    selector paints that background behind every label inside it. Invisible on a pale panel;
+    the moment the cards were tinted, every title and every line of body text appeared in its
+    own darker rectangle and an empty label showed as a grey bar.
+
+    Fixed once, in the application stylesheet, rather than at each of the call sites — a
+    stylesheet on the widget itself still wins, so a label that wants a fill can ask for one.
+    """
+    from gini.ui.theme import ThemeManager
+    tm = ThemeManager(app)
+    tm.apply()
+    assert "QLabel { background: transparent; }" in app.styleSheet()
+
+
+def test_the_band_styles_itself_and_not_everything_inside_it(app):
+    """The other half: `QFrame{...}` set on the band reaches the cards, the separators and every
+    label. Naming the frame stops the cascade at its source."""
+    import inspect
+
+    from gini.ui.machine_lab import MachineLab
+    src = inspect.getsource(MachineLab._layer_band)
+    assert 'setObjectName("LayerBand")' in src
+    assert "QFrame#LayerBand{" in src, "an unscoped QFrame rule cascades to its children"
+    assert 'f"QFrame{{background' not in src

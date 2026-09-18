@@ -198,6 +198,20 @@ QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus {{ border-color: {t.accent}; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
 
+/* A label is text on whatever it sits on, never a filled box.
+ *
+ * QLabel is a QFrame subclass, so a panel styled with a TYPE selector — `QFrame{{background:
+ * ...}}`, which is how most of this codebase styles a card — cascades that background onto every
+ * label inside it. On a pale panel nobody noticed; the moment a card was given a tinted
+ * background, every title and every line of body text appeared in its own darker rectangle, and
+ * an empty label showed as a bare grey bar. The call sites had been half-fighting it for a while:
+ * `border:none` is written on nearly every label in the Machine Lab, because the border came from
+ * the same place and was visible sooner.
+ *
+ * Set here rather than at each of them: a stylesheet on the widget itself still wins, so a label
+ * that genuinely wants a fill just asks for one. */
+QLabel {{ background: transparent; }}
+
 QLabel#PanelHead {{ color: {t.faint}; font-size: {small}px; font-weight: 600;
                     letter-spacing: 1px; text-transform: uppercase; }}
 QLabel#Muted {{ color: {t.muted}; }}

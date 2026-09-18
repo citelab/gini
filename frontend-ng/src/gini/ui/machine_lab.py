@@ -556,8 +556,13 @@ class MachineLab(QDialog):
     def _layer_band(self, name, cards) -> QFrame:
         t = self.theme.theme
         band = QFrame()
+        # Named, so the rule matches THIS frame and not every QFrame inside it. A bare
+        # `QFrame{...}` here is a type selector: it reaches the cards, the separators and — since
+        # QLabel is a QFrame — every piece of text in the band.
+        band.setObjectName("LayerBand")
         band.setStyleSheet(
-            f"QFrame{{background:{t.panel2};border:1px solid {t.line};border-radius:12px;}}")
+            f"QFrame#LayerBand{{background:{t.panel2};border:1px solid {t.line};"
+            "border-radius:12px;}")
         v = QVBoxLayout(band); v.setContentsMargins(12, 8, 12, 12); v.setSpacing(8)
         lbl = QLabel(name)
         lbl.setStyleSheet(_scss(f"color:{t.faint};font-size:10px;font-weight:700;"
