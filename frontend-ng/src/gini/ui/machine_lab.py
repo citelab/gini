@@ -725,7 +725,8 @@ class MachineLab(QDialog):
         from ..services.xv6_lab import active_spec
         from .user_code import UserCode
         self._usercode = UserCode(self, self.theme, device=self.device,
-                              provider=self.state.provider, spec=active_spec(), live=self.live)
+                                  provider=self.state.provider, spec=active_spec(),
+                                  live=self.live, recorder=self._recorder)
         self._usercode.show(); self._usercode.raise_()
 
     def _open_syscall_builder(self) -> None:

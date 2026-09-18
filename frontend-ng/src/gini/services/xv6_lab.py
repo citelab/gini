@@ -167,6 +167,46 @@ def hashes_for(spec, machine_name: str) -> dict:
     return out
 
 
+def collect(spec, machine_names) -> dict:
+    """`{"<machine>/<file>": {sha256, lines, bytes, text}}` — what a submission carries.
+
+    The assignment's OWN file list. `xv6_shadows.collect` gathers a fixed three, which are the
+    deliverable of a shadow lab and of nothing else: an A-Lab submission going through that path
+    hands a marker three files the student never opened and none of the ten they did. That is the
+    exact failure `xv6_shadows`'s own docstring was written about — "an OS submission did not
+    contain the assignment" — arriving a second time by a different door.
+
+    Every file the student owns, edited or not. An untouched `kalloc.c` is evidence too: it says
+    Part B was not attempted, which a marker wants to know and cannot infer from an absence.
+
+    Scoped to the machines passed in, because lab folders are per-machine and outlive the topology
+    that made them — a student who has done three assignments has three folders, and gathering the
+    lot would put one lab's work into another lab's submission.
+    """
+    out: dict = {}
+    if spec is None:
+        return out
+    folder = getattr(spec, "machine_folder", "xv6-lab")
+    for machine in machine_names or []:
+        d = lab_dir(machine, folder)
+        for f in getattr(spec, "files", ()):
+            path = d / f.name
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            rec = {"sha256": digest(text), "lines": len(text.splitlines()), "bytes": int(size)}
+            if size <= MAX_SOURCE_BYTES:
+                rec["text"] = text
+            else:
+                rec["omitted"] = "too large to submit"
+            out[f"{sane_name(machine)}/{f.name}"] = rec
+    return out
+
+
 def link_script(spec) -> str:
     """The shell that runs INSIDE the container, once per Run, to attach the lab to the tree.
 

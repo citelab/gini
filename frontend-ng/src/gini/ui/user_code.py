@@ -67,12 +67,17 @@ class UserCode(QDialog):
     load_result = Signal(bool, str)       # (ok, log) from the Load worker thread
 
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
-                 spec=None, live: bool = True) -> None:
+                 spec=None, live: bool = True, recorder=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.provider = provider
         self.live = live
+        # The chain. A student's Loads — the failures especially — ARE the assignment: an hour
+        # spent on a kernel that would not compile is an hour of work, and a record showing only
+        # successes cannot tell "never tried" from "tried nine times". Same reason the shadow bar
+        # records its builds.
+        self._recorder = recorder
         self.spec = spec or _lab.active_spec()
         self._rows: dict[str, QLabel] = {}
         self._checks: list[tuple] = []
@@ -145,8 +150,40 @@ class UserCode(QDialog):
 
     def _revert(self, name: str) -> None:
         ok, msg = _lab.revert(self.spec, str(getattr(self.device, "name", "") or ""), name)
+        self._record_build(ok, msg, f"revert {name}")
         self._say(msg, "ok" if ok else "warn")
         self.refresh()
+
+    def _record_build(self, ok: bool, log: str, action: str) -> None:
+        """One chain entry per Load or Revert, carrying the files AS THEY STOOD when it ran.
+
+        Hashed here rather than at submission time: a marker opens the code that travels with the
+        submission, and these hashes are what bind it to the build that was actually attempted.
+        The lab's OWN file list, so an assignment's ten files are recorded rather than the three
+        a shadow lab happens to have.
+
+        The progress line goes in too — how far the checklist had got at that moment — because a
+        chain of builds with no sense of progress cannot distinguish a student converging on an
+        answer from one thrashing.
+        """
+        from .lab_record import record
+        machine = str(getattr(self.device, "name", "") or "")
+        try:
+            sources = _lab.hashes_for(self.spec, machine)
+        except Exception:                          # noqa: BLE001 — never block a build on this
+            sources = {}
+        try:
+            res = _ls.evaluate(self.spec, _lab.reader_for(self.spec, machine),
+                               _lab.pristine_reader_for(self.spec, machine))
+            p = _ls.progress(res)
+            done = f"wiring {p['passed']}/{p['total']}"
+        except Exception:                          # noqa: BLE001
+            done = ""
+        tail = [ln for ln in str(log or "").splitlines() if ln.strip()][-6:]
+        if done:
+            tail = [done, *tail]
+        record(self._recorder, "note_build", machine,
+               getattr(self.spec, "id", "lab"), bool(ok), sources, tail, action)
 
     # -- the wiring checklist ------------------------------------------------ #
     def _build_wiring(self, col) -> None:
@@ -219,6 +256,7 @@ class UserCode(QDialog):
 
     def _on_load_result(self, ok: bool, log: str) -> None:
         self._load_btn.setEnabled(bool(self.live and self.provider is not None))
+        self._record_build(ok, log, "load")
         if ok:
             self._log.setPlainText("Loaded — the machine is running your kernel.\n"
                                    "Run your program at the Keyboard, then look at the "

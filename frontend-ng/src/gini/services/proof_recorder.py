@@ -646,9 +646,32 @@ class ProofRecorder:
                 "message": f"Proof written to {path}"}
 
     def _collect_shadows(self, topology: dict) -> dict:
+        """Every kernel file the student owns on the xv6 machines in THIS topology.
+
+        Two sources, one dict. The shadow directory is the deliverable of a shadow lab; the lab
+        folder is the deliverable of an A-Lab, and its file list belongs to the assignment rather
+        than being fixed at three. A syscall assignment submitted through the shadow path alone
+        arrives with three files the student never opened and none of the ten they did.
+
+        The key is still "shadows" on the wire because the server reads it, and because what it
+        has always meant is "the student's kernel source". Filenames do not collide between the
+        two — a shadow is gini_*.c and nothing else is.
+
+        Never fatal, either half: a proof that could not be written is a failure, a proof whose
+        sources could not be read is still a proof.
+        """
+        out: dict = {}
         try:
             from .xv6_shadows import collect, xv6_machines
-            return collect(xv6_machines(topology))
+            machines = xv6_machines(topology)
+            out.update(collect(machines))
         except Exception as e:                              # noqa: BLE001
             self._complain(e)
-            return {}
+            return out
+        try:
+            from .xv6_lab import active_spec
+            from .xv6_lab import collect as collect_lab
+            out.update(collect_lab(active_spec(), machines))
+        except Exception as e:                              # noqa: BLE001
+            self._complain(e)
+        return out
