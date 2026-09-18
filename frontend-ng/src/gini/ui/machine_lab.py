@@ -15,6 +15,8 @@ Mirror of the Router Lab: there you step a *packet* through a pipeline; here you
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
@@ -219,6 +221,79 @@ class GanttStrip(QWidget):
         if h >= 40 and last.name:
             who += f" {last.name}"
         p.drawText(self.width() - right + 6, 0, right - 8, h, Qt.AlignVCenter | Qt.AlignLeft, who)
+
+
+@dataclass(frozen=True)
+class Face:
+    """One sub-lab on the Machine Lab home page."""
+    key: str
+    icon: str
+    title: str
+    blurb: str
+    hue: str
+    opens: str          # the MachineLab method that opens it
+
+
+@dataclass(frozen=True)
+class Band:
+    name: str
+    faces: tuple
+    boundary: str = ""  # the rule drawn ABOVE this band, if any
+
+
+# The hues, and why these ones.
+#
+# There are eleven category accents, and they are NOT eleven distinguishable colours. Measured as
+# CIE76 ΔE across all seven themes, `teal`/`cyan` come within 6.1 of each other in Brand and
+# `blue`/`indigo` within 10.0 in Dark — two faces wearing those would be the same colour to a
+# student on the wrong theme. The largest set that stays apart (ΔE >= 26) in every theme is eight:
+# blue, green, purple, amber, pink, slate, orange, red.
+#
+# Eight hues and twelve faces, so some must repeat, and the bands decide where. A band is a layer
+# of the machine and is what a student navigates by, so the rule is: **distinct within a band, and
+# never repeated in an adjacent one**. Every repeat here is at least two bands apart — far enough
+# that they are never on screen as neighbours. test_machine_lab_hues.py enforces all of it,
+# including that every theme actually defines every hue used rather than silently falling back to
+# its primary accent.
+LAYERS = (
+    Band("THIS ASSIGNMENT", (
+        Face("usercode", "compile", "User Code",
+             "the files you own, what you have changed, and Load.",
+             "orange", "_open_user_code"),
+    )),
+    Band("USER SPACE", (
+        Face("programs", "programs", "Programs & Shell",
+             "The processes you launch — running in user mode.", "green", "_open_console"),
+        Face("games", "games", "Games",
+             "Diagnose-from-the-signature challenges.", "pink", "_open_games"),
+    )),
+    Band("SYSTEM-CALL INTERFACE", (
+        Face("syscalls", "syscalls", "System Calls",
+             "Live histogram (last 60s) + strace-style trace.", "blue", "_open_syscall_lab"),
+        Face("builder", "builder", "Syscall Builder",
+             "Add your own syscall — real kernel edits generated.",
+             "purple", "_open_syscall_builder"),
+        Face("fingerprints", "fingerprints", "Process Fingerprints",
+             "Each process's behavioral signature + a classify game.",
+             "amber", "_open_fingerprints"),
+    ), boundary="ecall  ▾  trap into the kernel  ·  sret  ▴  back to user"),
+    Band("KERNEL", (
+        Face("scheduler", "scheduler", "Process Scheduler",
+             "Watch the CPU move between processes.", "red", "_show_scheduler"),
+        Face("memory", "memory", "Virtual Memory",
+             "Page tables, the allocator, and page faults.", "green", "_open_memory_lab"),
+        Face("storage", "storage", "File System",
+             "Inodes, buffer cache, and the write-ahead log.", "slate", "_open_storage_lab"),
+        Face("journey", "journey", "Traps & Interrupts",
+             "Live trap mix (syscall/fault/timer) + step one.", "orange", "_open_trap_lab"),
+        Face("locks", "locks", "Locks & Contention",
+             "Which locks cores are spinning on, live.", "pink", "_open_lock_lab"),
+    ), boundary="supervisor mode  ·  the kernel"),
+    Band("HARDWARE", (
+        Face("cpu", "cpu", "CPU & Registers",
+             "Per-core registers, satp, and the kernel stack.", "blue", "_open_cpu"),
+    ), boundary="registers · trapframe · timer interrupts"),
+)
 
 
 class MachineLab(QDialog):
@@ -429,50 +504,24 @@ class MachineLab(QDialog):
         self._ov_cards: dict = {}
 
         # top of the stack: what the student's programs are, running in user mode
-        # The student's own code. Deliberately not inside one of the layer bands below: those
-        # describe places IN the machine, and an assignment is an overlay on all of them. Keeping
-        # it here also means the face does not move when the lab is about paging instead of
-        # system calls — only its file list changes.
+        # The home page is LAYERS, drawn top-down as the machine is built: what you run, the
+        # door into the kernel, the kernel, the hardware under it. `LAYERS` is the whole table —
+        # see the note beside it for why the hues are what they are.
         from ..services.xv6_lab import active_spec as _active_lab
         _lab_spec = _active_lab()
-        if _lab_spec is not None:
-            col.addWidget(self._layer_band("THIS ASSIGNMENT", [
-                ("compile", "User Code",
-                 f"{_lab_spec.title} — the files you own, what you have changed, and Load.",
-                 "amber", self._open_user_code)]))
-        col.addWidget(self._layer_band("USER SPACE", [
-            ("programs", "Programs & Shell", "The processes you launch — running in user mode.",
-             "green", self._open_console),
-            ("games", "Games", "Diagnose-from-the-signature challenges.",
-             "purple", self._open_games)]))
-        col.addWidget(self._boundary("ecall  ▾  trap into the kernel  ·  sret  ▴  back to user"))
-        # the system-call interface: the door between user and kernel
-        col.addWidget(self._layer_band("SYSTEM-CALL INTERFACE", [
-            ("syscalls", "System Calls", "Live histogram (last 60s) + strace-style trace.",
-             "blue", self._open_syscall_lab),
-            ("builder", "Syscall Builder", "Add your own syscall — real kernel edits generated.",
-             "red", self._open_syscall_builder),
-            ("fingerprints", "Process Fingerprints",
-             "Each process's behavioral signature + a classify game.",
-             "purple", self._open_fingerprints)]))
-        col.addWidget(self._boundary("supervisor mode  ·  the kernel"))
-        # the kernel's core subsystems
-        col.addWidget(self._layer_band("KERNEL", [
-            ("scheduler", "Process Scheduler", "Watch the CPU move between processes.",
-             "red", self._show_scheduler),
-            ("memory", "Virtual Memory", "Page tables, the allocator, and page faults.",
-             "purple", self._open_memory_lab),
-            ("storage", "File System", "Inodes, buffer cache, and the write-ahead log.",
-             "cyan", self._open_storage_lab),
-            ("journey", "Traps & Interrupts", "Live trap mix (syscall/fault/timer) + step one.",
-             "amber", self._open_trap_lab),
-            ("locks", "Locks & Contention", "Which locks cores are spinning on, live.",
-             "green", self._open_lock_lab)]))
-        col.addWidget(self._boundary("registers · trapframe · timer interrupts"))
-        # the hardware the kernel drives
-        col.addWidget(self._layer_band("HARDWARE", [
-            ("cpu", "CPU & Registers", "Per-core registers, satp, and the kernel stack.",
-             "red", self._open_cpu)]))
+        for band in LAYERS:
+            if band.boundary:
+                col.addWidget(self._boundary(band.boundary))
+            entries = []
+            for f in band.faces:
+                blurb = f.blurb
+                if f.key == "usercode":
+                    if _lab_spec is None:
+                        continue              # no assignment armed: no face for it
+                    blurb = f"{_lab_spec.title} — {f.blurb}"
+                entries.append((f.icon, f.title, blurb, f.hue, getattr(self, f.opens)))
+            if entries:
+                col.addWidget(self._layer_band(band.name, entries))
         col.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
