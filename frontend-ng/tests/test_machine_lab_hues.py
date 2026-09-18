@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from gini.ui.machine_lab import LAYERS
 from gini.ui.theme import tokens as T
@@ -52,6 +56,18 @@ def delta_e(a: str, b: str) -> float:
 
 def _faces():
     return [(b, f) for b in LAYERS for f in b.faces]
+
+
+@pytest.fixture(scope="module")
+def app():
+    return QApplication.instance() or QApplication([])
+
+
+class _TM:
+    """The theme manager as a LayerCard uses it: it is only ever asked for `.theme`."""
+
+    def __init__(self, theme):
+        self.theme = theme
 
 
 def test_every_theme_actually_defines_every_hue_a_face_uses():
@@ -113,3 +129,49 @@ def test_the_layers_read_from_user_space_down_to_hardware():
     assert [b.name for b in LAYERS] == [
         "THIS ASSIGNMENT", "USER SPACE", "SYSTEM-CALL INTERFACE", "KERNEL", "HARDWARE"]
     assert all(b.boundary for b in LAYERS[2:]), "each kernel-ward step is marked by a rule"
+
+
+# --------------------------------------------------------------------------- #
+# A hue nobody can see is not a hue.
+#
+# Reported from a real screen: "no colors in the machine lab". Every face WAS carrying its
+# assigned accent — as an eleven-pixel dot, plus a stat line that is empty on half the cards.
+# Twelve carefully-chosen hues read as one grey wall. The assignment was right and the card was
+# not wearing it.
+# --------------------------------------------------------------------------- #
+
+def test_a_card_carries_its_accent_where_it_can_be_seen(app):
+    """The edge and the wash, not a dot. Checked per theme, because both are derived from the
+    theme's own accent rather than listed anywhere."""
+    from gini.ui.machine_lab import LayerCard, tint
+
+    for name, theme in THEMES:
+        for _band, f in _faces():
+            card = LayerCard(_TM(theme), f.title, f.blurb, f.hue)
+            css = card.styleSheet()
+            acc = theme.accent_for(f.hue)
+            assert f"border-left:4px solid {acc}" in css, (
+                f"{name}/{f.title}: no accent edge")
+            assert tint(acc, 34 if theme.dark else 22) in css, (
+                f"{name}/{f.title}: no accent wash")
+
+
+def test_the_wash_is_derived_from_the_accent_and_not_a_second_table():
+    """Two places to change a colour is one too many — the wash must follow the accent."""
+    from gini.ui.machine_lab import tint
+    assert tint("#4c8dff", 34) == "rgba(76,141,255,34)"
+    assert tint("4c8dff", 22) == "rgba(76,141,255,22)"
+    assert tint("", 30) == "transparent", "a missing colour must not produce broken CSS"
+    assert tint("#nothex", 30) == "transparent"
+    assert tint("#4c8dff", 999).endswith(",255)"), "alpha is clamped to Qt's range"
+
+
+def test_a_dark_theme_gets_a_stronger_wash_than_a_light_one(app):
+    """The same alpha over a dark ground reads fainter; the card compensates."""
+    from gini.ui.machine_lab import LayerCard
+
+    def alpha_of(theme):
+        css = LayerCard(_TM(theme), "t", "d", "red").styleSheet()
+        return int(css.split("rgba(", 1)[1].split(")", 1)[0].split(",")[-1])
+
+    assert alpha_of(T.DARK) > alpha_of(T.LIGHT)

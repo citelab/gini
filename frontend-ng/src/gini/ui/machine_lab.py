@@ -82,6 +82,22 @@ def _pid_color(pid) -> str:
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
+def tint(hex_colour: str, alpha: int) -> str:
+    """`#4c8dff` -> `rgba(76,141,255,30)` — the theme's own hue, washed.
+
+    Derived rather than listed, so a card's tint cannot drift from its accent and a new theme
+    needs no extra table. Alpha is Qt's 0-255, matching the `*_soft` tokens in theme/tokens.py.
+    """
+    h = (hex_colour or "").lstrip("#")
+    if len(h) != 6:
+        return "transparent"
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return "transparent"
+    return f"rgba({r},{g},{b},{max(0, min(255, int(alpha)))})"
+
+
 class LayerCard(QFrame):
     """A clickable card in the layered overview: title + one-line description + a live mini-stat.
     Cards are grouped into OS layers (user / syscall interface / kernel / hardware) so the front
@@ -99,15 +115,25 @@ class LayerCard(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMinimumHeight(92)
+        # The hue has to be visible from across the page, not on inspection. A dot eleven pixels
+        # wide was the whole of it, so twelve faces carefully given twelve hues read as one grey
+        # wall — and a card with no live stat showed no colour at all.
+        #
+        # A thick left edge plus a wash of the same hue: the same treatment the course handouts
+        # use for a callout, which is why it reads as belonging here. Both are derived from the
+        # theme's own accent, so this follows a theme change rather than fighting it. A dark
+        # theme takes a stronger wash because the same alpha over a dark ground reads fainter.
+        wash = tint(acc, 34 if getattr(t, "dark", False) else 22)
         self.setStyleSheet(
-            f"LayerCard{{background:{t.panel};border:1px solid {t.line};border-radius:12px;}}"
-            f"LayerCard:hover{{border-color:{acc};background:{t.panel2};}}")
+            f"LayerCard{{background:{wash};border:1px solid {t.line};"
+            f"border-left:4px solid {acc};border-radius:10px;}}"
+            f"LayerCard:hover{{background:{t.panel2};border:1px solid {acc};"
+            f"border-left:4px solid {acc};}}")
         v = QVBoxLayout(self); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(3)
         row = QHBoxLayout(); row.setSpacing(6)
-        dot = QLabel("●"); dot.setStyleSheet(f"color:{acc};font-size:11px;border:none;")
         ttl = QLabel(title)
         ttl.setStyleSheet(_scss(f"color:{t.text};font-size:14px;font-weight:600;border:none;"))
-        row.addWidget(dot); row.addWidget(ttl); row.addStretch(1)
+        row.addWidget(ttl); row.addStretch(1)
         v.addLayout(row)
         d = QLabel(desc); d.setWordWrap(True)
         d.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;border:none;"))
