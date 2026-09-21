@@ -1,0 +1,10 @@
+# A-Lab 02 — per-process system call tracing.
+#
+# PLACEHOLDER. The handout is written (docs/labs/a-lab-02-trace.md) and the spec is not, so this
+# carries the tile and nothing else: `released: false` shows it in the User Code Lab and refuses
+# to arm it, rather than arming to an empty panel that reads as broken. Fill in `files`, `checks`,
+# `parts` and `grade` from the handout, drop the `released` line, and it goes live.
+id: syscall-trace
+title: "A-Lab 02 — trace"
+summary: "Add a system call that traces every call a process makes, inherited across fork."
+released: false

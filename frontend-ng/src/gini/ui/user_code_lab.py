@@ -205,6 +205,8 @@ class UserCodeLab(QDialog):
 
     def _stat_for(self, spec, machine: str) -> str:
         """`A 6/6 · B 3/6`, or a word when there is nothing to count yet."""
+        if not getattr(spec, "released", True):
+            return "not released yet"
         try:
             p = _lab.progress_for(spec, machine)
         except Exception:                          # noqa: BLE001 — a tile must never raise
@@ -228,6 +230,12 @@ class UserCodeLab(QDialog):
         choice on exactly the machines where it is least obvious that anything went wrong.
         """
         machine = self._machine()
+        if not getattr(spec, "released", True):
+            # Shown but not armable. A course puts the whole term's tiles up from the start so
+            # students can see what is coming; arming one with no files and no checks would open
+            # an empty panel, which reads as GINI being broken rather than the lab being unwritten.
+            self._log("info", f"{spec.title} is not released yet.")
+            return
         already = _lab.armed_id(machine) == spec.id
         if not already:
             if not _lab.arm(machine, spec.id):

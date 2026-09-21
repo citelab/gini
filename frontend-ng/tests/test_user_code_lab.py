@@ -306,3 +306,73 @@ def test_the_face_opens_the_hub_and_not_one_assignments_panel(two_labs, app):
     lab = MachineLab(None, ThemeManager(app), _Dev(), state=None)
     lab._open_user_code()
     assert isinstance(lab._usercode, UserCodeLab)
+
+
+# --------------------------------------------------------------------------- #
+# A term's worth of tiles, most of them not written yet.
+#
+# The course ships every A-Lab's tile from day one so students can see the shape of the term.
+# An assignment with no files and no checks would arm to an empty panel, and a student cannot
+# tell that from GINI being broken — so an unreleased one is shown and refused.
+# --------------------------------------------------------------------------- #
+
+UNRELEASED = """
+id: lab-later
+title: A-Lab 09 — later
+summary: Something we have not written yet.
+released: false
+"""
+
+
+@pytest.fixture
+def with_unreleased(tmp_path, monkeypatch):
+    monkeypatch.setenv("GINI_HOME_DIR", str(tmp_path / "home"))
+    monkeypatch.delenv("GINI_LAB", raising=False)
+    labs = tmp_path / "labs"
+    labs.mkdir()
+    (labs / "1.yaml").write_text(ONE, encoding="utf-8")
+    (labs / "9.yaml").write_text(UNRELEASED, encoding="utf-8")
+    monkeypatch.setattr(L, "LABS_DIR", labs)
+    return L.get("lab-one"), L.get("lab-later")
+
+
+def test_an_unreleased_assignment_still_gets_a_tile(with_unreleased, app):
+    hub = _hub(app)
+    assert "lab-later" in hub._cards
+    assert hub._cards["lab-later"].stat.text() == "not released yet"
+
+
+def test_it_cannot_be_armed(with_unreleased, app):
+    _ready, later = with_unreleased
+    said = []
+    hub = _hub(app, on_log=lambda lvl, msg: said.append(msg))
+    hub._choose(later)
+    assert X.armed_id("M1") == "", "an unwritten assignment must not arm"
+    assert hub._cards["lab-later"]._live is False
+    assert any("not released" in m for m in said), said
+
+
+def test_arming_a_released_one_still_works_beside_it(with_unreleased, app):
+    ready, _later = with_unreleased
+    hub = _hub(app)
+    hub._choose(ready)
+    assert X.armed_id("M1") == "lab-one"
+
+
+def test_released_defaults_to_true_so_existing_packs_are_unaffected():
+    assert L.from_yaml("id: x\ntitle: X\n").released is True
+    assert L.get("syscall-sysinfo").released is True
+
+
+def test_the_shipped_labs_are_in_course_order():
+    """`catalog()` sorts by FILENAME — the ids are topic slugs, so sorting on those would put
+    A-Lab 03 (sched-*) before A-Lab 01 (syscall-*)."""
+    titles = [s.title for s in L.catalog()]
+    assert titles == sorted(titles), titles
+    assert titles[0].startswith("A-Lab 01")
+
+
+def test_only_the_first_lab_is_released_so_far():
+    """A reminder in test form: filling in a placeholder means dropping its `released` line."""
+    live = [s.id for s in L.catalog() if s.released]
+    assert live == ["syscall-sysinfo"], f"newly released: {live}"

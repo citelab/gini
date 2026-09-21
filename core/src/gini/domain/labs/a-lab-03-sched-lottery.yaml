@@ -1,0 +1,9 @@
+# A-Lab 03 — a scheduler the student writes.
+#
+# PLACEHOLDER — title and topic are a PLACEHOLDER TOO, chosen to match the Machine Lab's Process
+# Scheduler face rather than from a handout. Rename freely; only `id` is load-bearing, because it
+# is the folder name a student's work lives in once anyone has armed it.
+id: sched-lottery
+title: "A-Lab 03 — lottery"
+summary: "Replace round-robin with a lottery scheduler, and measure that it is fair."
+released: false

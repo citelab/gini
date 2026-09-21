@@ -95,6 +95,11 @@ class LabSpec:
     #: is captured into the proof. Left empty it is the assignment's first user program, which is
     #: what a single-program lab wants; name it when a lab ships more than one.
     test_program: str = ""
+    #: Whether students can arm it yet. A course ships the whole term's tiles from the start so
+    #: the shape of it is visible, but an assignment with no files and no checks would arm to an
+    #: empty panel and look broken rather than unwritten — so an unreleased one is shown and
+    #: refused. Set it true (or drop the line) when the real content lands.
+    released: bool = True
     #: The accent this assignment wears in the hub. Optional: left empty, the hub assigns one
     #: from its own palette by position, which is enough while assignments are added at the end.
     #: Pin it here if a lab should keep its colour when another is added before it alphabetically.
@@ -157,6 +162,7 @@ def from_dict(d: dict) -> LabSpec:
     return LabSpec(id=str(d.get("id", "")), title=str(d.get("title", "")),
                    summary=str(d.get("summary", "") or ""), hue=str(d.get("hue", "") or ""),
                    test_program=str(d.get("test_program", "") or ""),
+                   released=bool(d.get("released", True)),
                    syscall_number=int(d.get("syscall_number", 0) or 0),
                    files=files, checks=checks, grade=grade,
                    part_titles={str(k): str(v) for k, v in (d.get("parts") or {}).items()})
@@ -171,7 +177,12 @@ def load(path) -> LabSpec:
 
 
 def catalog() -> tuple[LabSpec, ...]:
-    """Every assignment shipped with gini-core, sorted by id."""
+    """Every assignment shipped with gini-core, in the order a course runs them.
+
+    Sorted by FILENAME, which is why they carry a numeric prefix: the id is a slug about the
+    topic (`syscall-sysinfo`) and sorting on it would put A-Lab 03 before A-Lab 01 the moment a
+    scheduler lab shipped. The hub hands hues out by position, so the order is visible.
+    """
     if not LABS_DIR.is_dir():
         return ()
     out = []
