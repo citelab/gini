@@ -28,9 +28,25 @@ MAX_LINES = 10
 MAX_LINE = 200
 MAX_COMMAND = 200
 
-#: CSI/OSC escapes, and the carriage returns a shell uses to redraw. Stripped so a recorded line
-#: reads as a person would have seen it, not as the terminal drew it.
-_ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+#: Escapes, and the carriage returns a shell uses to redraw. Stripped so a recorded line reads as
+#: a person would have seen it, not as the terminal drew it.
+#:
+#: The parameter class is the FULL ECMA-48 range — 0x30-0x3F, so digits plus `: ; < = > ?` — and
+#: not just `[0-9;?]`. Sequences with a PRIVATE parameter begin with one of `< = > ?`, and tmux
+#: sends `ESC [ > c` (device attributes) and `ESC [ > q` (XTVERSION) at startup on every single
+#: session. Unmatched, the introducer was swallowed by the control-character pass below and the
+#: remainder survived into the recorded output as literal text: `[>c[>q` in a student's proof.
+#:
+#: The last two alternatives close the same kind of gap for non-CSI escapes. `ESC ( B` (select
+#: character set) left `(B` behind for the same reason, and the old single-character class ran
+#: from `@` to `_`, which misses `ESC =` and `ESC >` (keypad mode) and `ESC 7` / `ESC 8`.
+_ANSI = re.compile(
+    rb"\x1b\[[0-?]*[ -/]*[@-~]"                  # CSI: ESC [ params intermediates final
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"       # OSC: ESC ] ... BEL | ST
+    rb"|\x1b[P^_X][^\x1b]*(?:\x1b\\|\x07)"        # DCS/PM/APC/SOS: ESC P ... ST
+    rb"|\x1b[()*+][A-Za-z0-9]"                    # charset designation, e.g. ESC ( B
+    rb"|\x1b[0-~]"                                # any other single-character escape
+)
 _CTRL = re.compile(rb"[\x00-\x08\x0b-\x1f\x7f]")
 
 _ENTER = (b"\r", b"\n", b"\r\n")

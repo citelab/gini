@@ -105,3 +105,43 @@ def test_a_command_with_no_output_is_still_a_command():
     t.flush()
     (rec,) = t.take()
     assert rec["cmd"] == "true" and rec["out"] == []
+
+
+# -- escapes that used to survive into a student's proof --------------------- #
+#
+# Found while chasing a different bug: `[>c[>q` appeared as literal text in a recorded session.
+# The parameter class was `[0-9;?]`, which does not cover a PRIVATE parameter — `< = > ?` — so
+# tmux's startup queries went unmatched, the ESC was eaten by the control pass, and the rest was
+# recorded as though the student had typed it.
+
+def test_a_private_parameter_sequence_is_not_left_as_text():
+    """tmux sends both of these on every session: device attributes and XTVERSION."""
+    assert clean(b"\x1b[>c\x1b[>qM1:/app# ") == "M1:/app# "
+    assert clean(b"\x1b[?1000h\x1b[?1006l") == ""
+    assert clean(b"\x1b[<0;1;1M") == "", "an SGR mouse report is not output either"
+
+
+def test_a_charset_designation_is_not_left_as_text():
+    """`ESC ( B` — select ASCII — left `(B` behind."""
+    assert clean(b"\x1b(Bhello") == "hello"
+    assert clean(b"\x1b)0\x1b*Bworld") == "world"
+
+
+def test_the_keypad_and_cursor_save_escapes_go_too():
+    """The old single-character class ran @ to _, missing these."""
+    assert clean(b"\x1b=on\x1b>off") == "onoff"
+    assert clean(b"\x1b7saved\x1b8") == "saved"
+
+
+def test_a_device_control_string_is_removed_whole():
+    """tmux answers XTVERSION with a DCS. Only the introducer was stripped before, so the
+    version banner landed in the transcript."""
+    assert clean(b"\x1bP>|tmux 3.3a\x1b\\ready") == "ready"
+
+
+def test_ordinary_text_is_untouched():
+    """The widening must not eat output. ESC is only ever an escape; a bare `>` is not."""
+    assert clean(b"64 bytes from M2 (10.0.4.10): icmp_seq=1 ttl=61 time=2.50 ms") == (
+        "64 bytes from M2 (10.0.4.10): icmp_seq=1 ttl=61 time=2.50 ms")
+    assert clean(b"cat < in > out; test 2>&1 [ok]") == "cat < in > out; test 2>&1 [ok]"
+    assert clean(b" 1  R1 (10.0.3.1)  1.271 ms") == " 1  R1 (10.0.3.1)  1.271 ms"

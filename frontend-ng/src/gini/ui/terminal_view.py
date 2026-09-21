@@ -83,6 +83,59 @@ DEFAULT_COLS, DEFAULT_ROWS = 80, 24
 SCROLLBACK = 5000
 
 
+def _emulator(columns: int, lines: int):
+    """pyte, plus the two scroll sequences it does not implement.
+
+    `CSI Ps S` (SU, scroll up) and `CSI Ps T` (SD, scroll down) are absent from pyte's CSI
+    dispatch table outright — not mis-handled, not stubbed, simply not there — so pyte ignores
+    them and the screen does not move.
+
+    That is fatal here, because **tmux scrolls with SU**. Every Terminal session runs through
+    `tmux new -A` (see `orchestrator._persist`), and a captured session of a few pings and
+    traceroutes contained `\x1b[2S` **130 times**. Each one asked for a two-line scroll that
+    never happened; tmux then drew the next lines at the bottom assuming it had, so the new
+    text landed on top of output that was still there. Lines a student had already read
+    disappeared, and nothing reached the scrollback either, because a scroll that does not
+    happen appends nothing to history.
+
+    Routing SU through `index()` rather than moving the buffer directly is the whole point:
+    `HistoryScreen.index()` is what pushes the departing line into the scrollback, so the
+    output scrolls AND stays reachable. SD mirrors it through `reverse_index()`.
+    """
+    import pyte                          # local, as it was: pyte is only needed here
+
+    class _Screen(pyte.HistoryScreen):
+        def _region(self):
+            m = self.margins
+            return (m.top, m.bottom) if m else (0, self.lines - 1)
+
+        def scroll_up(self, count=None) -> None:
+            # Driven from the BOTTOM margin, because `index()` only scrolls when the cursor is
+            # already there and otherwise just steps the cursor down a row. SU must move the
+            # region wherever the cursor happens to be — and it must leave the cursor where it
+            # found it, which is the part of the spec that makes `index()` alone wrong.
+            top, bottom = self._region()
+            was = self.cursor.y
+            self.cursor.y = bottom
+            for _ in range(max(1, int(count or 1))):
+                self.index()
+            self.cursor.y = was
+
+        def scroll_down(self, count=None) -> None:
+            top, bottom = self._region()
+            was = self.cursor.y
+            self.cursor.y = top
+            for _ in range(max(1, int(count or 1))):
+                self.reverse_index()
+            self.cursor.y = was
+
+    class _Stream(pyte.ByteStream):
+        csi = {**pyte.ByteStream.csi, "S": "scroll_up", "T": "scroll_down"}
+
+    screen = _Screen(columns, lines, history=SCROLLBACK, ratio=0.2)
+    return screen, _Stream(screen)
+
+
 class TerminalView(QWidget):
     """Renders a pyte screen and emits the bytes a key press should send."""
 
@@ -105,11 +158,15 @@ class TerminalView(QWidget):
         self._override_pt = None                     # set only by an explicit set_font_size()
         self._apply_font()
 
-        import pyte
-        self._screen = pyte.HistoryScreen(DEFAULT_COLS, DEFAULT_ROWS, history=SCROLLBACK,
-                                          ratio=0.2)
-        self._stream = pyte.ByteStream(self._screen)   # BYTE stream: it holds partial UTF-8
+        # BYTE stream: it holds partial UTF-8 across frames. See `_emulator` for the two CSI
+        # sequences pyte is missing and why tmux makes them mandatory.
+        self._screen, self._stream = _emulator(DEFAULT_COLS, DEFAULT_ROWS)
         self._scroll = 0                               # lines scrolled back from the live screen
+        # Wheel remainders. A trackpad sends a stream of SMALL deltas, so a fixed step per
+        # event ignores the magnitude entirely and scrolls in lurches; these carry the
+        # leftover between events so a slow drag moves a line at a time.
+        self._wheel_px = 0.0
+        self._wheel_deg = 0
         self._sel_anchor = None                        # (doc_row, col) where the drag started
         self._sel_head = None                          # (doc_row, col) where it is now
         self._selecting = False
@@ -177,6 +234,44 @@ class TerminalView(QWidget):
         for line in doomed:
             screen.history.top.append(line)
 
+    def _scroll_in(self, rows: int) -> None:
+        """Pull lines back out of the scrollback when the screen GROWS — the other half.
+
+        `_scroll_off` stopped a shrink DESTROYING lines by moving them to the scrollback first.
+        That left the second half of the same bug: nothing ever brought them back. A dock that
+        briefly collapses and returns — a tab switch, a splitter nudge, a text-size change —
+        therefore empties the live screen for good. Measured before this existed: six hops of a
+        traceroute on screen, collapse to MIN_ROWS and back to 24, and the pane is blank with all
+        six in the scrollback. Nothing was lost, and a student reading the pane has no way to
+        tell that from output that never arrived.
+
+        Every real terminal reflows this way: shrink pushes the top into history, grow pulls it
+        back. pyte's `resize` only ever adds blank rows at the bottom, so this is the half it
+        does not implement.
+        """
+        screen = self._screen
+        top = screen.history.top
+        take = min(int(rows), len(top))
+        if take <= 0:
+            return
+        # Move what is on screen DOWN by `take`, high row first so a row is read before it is
+        # overwritten. A row absent from pyte's sparse buffer must clear its destination rather
+        # than leave the old contents there — the same trap `_scroll_off` densifies around.
+        for y in range(screen.lines - 1, take - 1, -1):
+            src = y - take
+            if src in screen.buffer:
+                screen.buffer[y] = screen.buffer[src]
+            else:
+                screen.buffer.pop(y, None)
+        # Newest history line lands at the BOTTOM of the restored block, so order is preserved.
+        for i in range(take):
+            screen.buffer[take - 1 - i] = top.pop()
+        screen.cursor.y = min(screen.lines - 1, screen.cursor.y + take)
+        screen.dirty.update(range(screen.lines))
+        if self._scroll > 0:
+            # The document just got shorter by `take`; hold the reader on the same text.
+            self._scroll = max(0, self._scroll - take)
+
     def _refit(self) -> None:
         """Recompute the grid and tell the PTY if it changed.
 
@@ -185,8 +280,11 @@ class TerminalView(QWidget):
         """
         cols, rows = self.cols_rows()
         if (cols, rows) != (self._screen.columns, self._screen.lines):
+            was = self._screen.lines
             self._scroll_off(rows)                    # a shrink must scroll, never truncate
             self._screen.resize(rows, cols)           # pyte takes (lines, columns)
+            if rows > was:
+                self._scroll_in(rows - was)           # ...and a grow must scroll BACK
             self.size_changed.emit(cols, rows)
         self.update()
 
@@ -220,8 +318,25 @@ class TerminalView(QWidget):
         pyte's ByteStream is what carries that partial state."""
         if not data:
             return
+        before = len(self._screen.history.top)
         self._stream.feed(data)
-        self._scroll = 0                              # new output jumps back to the live screen
+        if self._scroll > 0:
+            # READING BACK. Two things have to NOT happen here, and both of them did.
+            #
+            # 1. The view must not snap to the live screen. It used to: every chunk reset
+            #    `_scroll` to 0, so a once-a-second ping gave a student one second of
+            #    scrollback before yanking them back to the bottom. That is the terminal
+            #    fighting the person using it.
+            #
+            # 2. The view must not DRIFT either, which is subtler and survives fixing (1).
+            #    `_doc_top` is `len(history.top) - _scroll`, so every line that scrolls off
+            #    the live screen into history moves the viewport one line further down the
+            #    document. Holding `_scroll` still therefore does NOT hold the CONTENT still —
+            #    the page slides upward out from under the reader at exactly the rate output
+            #    arrives. Growing `_scroll` by what history grew pins the text instead.
+            grew = len(self._screen.history.top) - before
+            if grew > 0:
+                self._scroll = min(len(self._screen.history.top), self._scroll + grew)
         self.update()
 
     def reset(self) -> None:
@@ -301,10 +416,40 @@ class TerminalView(QWidget):
                    QColor(fg))
 
     # -- scrollback ---------------------------------------------------------- #
-    def wheelEvent(self, e) -> None:                  # noqa: N802 - Qt naming
-        step = 3 if e.angleDelta().y() > 0 else -3
-        self._scroll = max(0, min(len(self._screen.history.top), self._scroll + step))
+    def _set_scroll(self, lines: int) -> None:
+        """Clamp to what there is: 0 is the live screen, `len(history.top)` is the oldest line."""
+        self._scroll = max(0, min(len(self._screen.history.top), int(lines)))
         self.update()
+
+    def to_bottom(self) -> None:
+        """Back to the live screen — what Shift+End and any keypress do."""
+        self._set_scroll(0)
+
+    def scrolled_back(self) -> int:
+        """How far back the view is. 0 when following the output."""
+        return self._scroll
+
+    def wheelEvent(self, e) -> None:                  # noqa: N802 - Qt naming
+        """One wheel notch is three lines; a trackpad moves by pixels.
+
+        The old version took a fixed ±3 lines per EVENT and ignored the delta. A mouse sends one
+        event per notch so that looked right, but a trackpad sends a stream of small ones — so a
+        gentle two-finger drag jumped three lines per event and the scrollback felt unusable.
+        Both kinds are accumulated and the remainder carried, so a slow drag moves one line.
+        """
+        px = e.pixelDelta().y()
+        lines = 0
+        if px and self._ch:
+            self._wheel_px += px
+            lines = int(self._wheel_px // self._ch)
+            self._wheel_px -= lines * self._ch
+        else:
+            self._wheel_deg += e.angleDelta().y()
+            lines = int(self._wheel_deg // 40)        # 120 units = one notch = three lines
+            self._wheel_deg -= lines * 40
+        if lines:
+            self._set_scroll(self._scroll + lines)
+        e.accept()
 
     # -- selection ----------------------------------------------------------- #
     # Positions are DOCUMENT rows, not screen rows: index 0 is the oldest line still in
@@ -466,6 +611,18 @@ class TerminalView(QWidget):
                 self.paste(); return
             if key == Qt.Key_A:
                 self.select_all(); return
+        # Shift+PageUp/PageDown/Home/End move the SCROLLBACK, as in xterm and every terminal
+        # since. Unshifted they still go to the program, which is what a pager expects.
+        if mods & Qt.ShiftModifier:
+            page = max(1, self._screen.lines - 1)
+            if key == Qt.Key_PageUp:
+                self._set_scroll(self._scroll + page); return
+            if key == Qt.Key_PageDown:
+                self._set_scroll(self._scroll - page); return
+            if key == Qt.Key_Home:
+                self._set_scroll(len(self._screen.history.top)); return
+            if key == Qt.Key_End:
+                self.to_bottom(); return
         data = encode_key(key, mods, e.text())
         if data:
             self._scroll = 0                          # typing returns to the live screen

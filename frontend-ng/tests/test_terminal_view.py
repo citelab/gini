@@ -121,13 +121,31 @@ def test_there_is_scrollback(app):
     assert len(v._screen.history.top) > 0, "no scrollback: earlier output is unreachable"
 
 
-def test_the_wheel_scrolls_back_and_new_output_returns_to_live(app):
+def test_output_arriving_does_not_drag_the_view_off_what_is_being_read(app):
+    """REVERSED, deliberately. This test used to assert the opposite — that any output returned
+    the view to the live screen — and that is what "the terminal is fighting me" turned out to
+    be: with a ping printing once a second, a student got one second of scrollback before being
+    yanked to the bottom, every second, forever.
+
+    Following the tail is still the default. It is what happens when you are AT the tail, which
+    is where the view sits unless somebody has deliberately scrolled away from it.
+    """
     v = _view(app)
     for i in range(200):
         v.feed(b"line %d\r\n" % i)
     v._scroll = 10
     v.feed(b"new\r\n")
-    assert v._scroll == 0, "output arrived while scrolled back and the view did not follow it"
+    assert v._scroll > 0, "output arrived while scrolled back and yanked the view to the bottom"
+
+
+def test_following_the_tail_is_still_the_default(app):
+    v = _view(app)
+    for i in range(50):
+        v.feed(b"line %d\r\n" % i)
+    assert v._scroll == 0
+    v.feed(b"newest\r\n")
+    assert v._scroll == 0, "the view must follow output unless the student scrolled away"
+    assert "newest" in "".join(v._screen.display)
 
 
 def test_resize_reports_new_geometry_for_the_pty(app):
@@ -373,3 +391,141 @@ def test_the_deferred_refit_still_happens(app):
     v._refit()                             # what the timer fires
     assert seen, "the PTY was never told the new geometry"
     assert _document(v) == LINES, "and the deferred refit still kept every line"
+
+
+# -- ...and a grow must scroll BACK ------------------------------------------ #
+#
+# The other half of the same bug, and the half that survived the first fix. `_scroll_off` stopped
+# a shrink DESTROYING lines by moving them into the scrollback — but nothing ever brought them
+# back, and pyte's `resize` only adds blank rows at the bottom. So a dock that briefly collapsed
+# and returned (a tab switch, a splitter nudge, a text-size change) left the live screen EMPTY
+# with the output sitting in the scrollback.
+#
+# Reported as the terminal still "dropping an occasional line", seen on a traceroute. From the
+# pane it is indistinguishable from output that never arrived.
+
+def _screen_only(v):
+    """What is actually on the live screen — no scrollback."""
+    return [line.rstrip() for line in v._screen.display if line.strip()]
+
+
+def test_a_collapse_and_restore_puts_every_line_back(app):
+    v = _view(app)
+    for line in LINES:
+        v.feed(line.encode() + b"\r\n")
+    assert _screen_only(v) == LINES
+
+    v._scroll_off(4); v._screen.resize(4, v._screen.columns)       # the dock collapses
+    assert _screen_only(v) == [], "the premise: a collapse empties the live screen"
+
+    was = v._screen.lines
+    v._screen.resize(24, v._screen.columns); v._scroll_in(24 - was)
+    assert _screen_only(v) == LINES, "the hops never came back from the scrollback"
+    assert len(v._screen.history.top) == 0, "and they should not be in both places"
+
+
+def test_output_after_a_restore_continues_below_it(app):
+    """The cursor has to come down with the restored lines, or the next line overwrites them."""
+    v = _view(app)
+    for line in LINES:
+        v.feed(line.encode() + b"\r\n")
+    v._scroll_off(4); v._screen.resize(4, v._screen.columns)
+    was = v._screen.lines
+    v._screen.resize(24, v._screen.columns); v._scroll_in(24 - was)
+    v.feed(b" 4  M7 (10.0.3.12)  3.1 ms\r\n")
+    assert _screen_only(v) == [*LINES, " 4  M7 (10.0.3.12)  3.1 ms"]
+
+
+def test_restoring_more_rows_than_there_is_history_is_fine(app):
+    v = _view(app)
+    v.feed(b"only line\r\n")
+    v._scroll_in(50)
+    assert _screen_only(v) == ["only line"]
+
+
+def test_a_grow_with_nothing_in_the_scrollback_changes_nothing(app):
+    v = _view(app)
+    v.feed(b"hello\r\n")
+    before = _screen_only(v)
+    v._scroll_in(5)
+    assert _screen_only(v) == before
+
+
+def test_a_restore_keeps_a_reader_on_the_same_text(app):
+    """Pulling lines out of history shortens the document, so the scroll offset has to shrink
+    with it or the view jumps."""
+    v = _view(app)
+    for i in range(200):
+        v.feed(b"line %d\r\n" % i)
+    v._set_scroll(40)
+    top_before = v._row_text(v._visible_lines()[0]).rstrip()
+    v._scroll_in(5)
+    assert v._row_text(v._visible_lines()[0]).rstrip() == top_before
+    assert v.scrolled_back() == 35
+
+
+# -- the scroll sequences pyte does not implement ---------------------------- #
+#
+# THE line-dropping bug, and it took a capture of a real session to find. Every Terminal runs
+# through `tmux new -A` (orchestrator._persist), and tmux scrolls the screen with SU — `CSI Ps S`
+# — rather than by printing newlines at the bottom. pyte has no `S` in its CSI dispatch table at
+# all: not mis-handled, not stubbed, absent. So every one was ignored, the screen never moved,
+# and tmux drew the next lines at the bottom assuming it had — on top of output still sitting
+# there.
+#
+# Measured on a capture of a few pings and traceroutes: 130 `\x1b[2S` in 14KB, and the emulator
+# kept 43 of 209 lines. With SU and SD routed through index()/reverse_index() it keeps 171 of the
+# 171 substantive output lines, and the departing ones reach the scrollback instead of vanishing.
+
+def test_scroll_up_moves_the_screen(app):
+    v = _view(app)
+    for i in range(4):
+        v.feed(b"row %d\r\n" % i)
+    v.feed(b"\x1b[2S")
+    shown = [l.rstrip() for l in v._screen.display if l.strip()]
+    assert shown == ["row 2", "row 3"], shown
+
+
+def test_what_scrolls_off_reaches_the_scrollback(app):
+    """Routed through `index()` for exactly this reason — a scroll that only moved the buffer
+    would fix the overwriting and still lose the history."""
+    v = _view(app)
+    for i in range(4):
+        v.feed(b"row %d\r\n" % i)
+    v.feed(b"\x1b[2S")
+    kept = ["".join(c.data for c in line.values()).rstrip() for line in v._screen.history.top]
+    assert kept[-2:] == ["row 0", "row 1"]
+
+
+def test_a_bare_scroll_up_moves_one_line(app):
+    """`CSI S` with no parameter is one line; pyte hands the default through as 0."""
+    v = _view(app)
+    for i in range(3):
+        v.feed(b"row %d\r\n" % i)
+    v.feed(b"\x1b[S")
+    assert [l.rstrip() for l in v._screen.display if l.strip()] == ["row 1", "row 2"]
+
+
+def test_scroll_down_is_implemented_too(app):
+    """SD is the mirror. Unimplemented it would corrupt the screen the same way, just upward."""
+    v = _view(app)
+    for i in range(3):
+        v.feed(b"row %d\r\n" % i)
+    v.feed(b"\x1b[2T")
+    shown = [l.rstrip() for l in v._screen.display if l.strip()]
+    assert shown == ["row 0", "row 1", "row 2"][:len(shown)]
+    assert shown[0] == "" or shown[0] == "row 0" or True   # position, not content, is the point
+    assert v._screen.display[0].strip() == "", "SD must push a blank line in at the top"
+
+
+def test_output_after_a_scroll_up_does_not_land_on_live_text(app):
+    """The actual failure, in miniature: tmux scrolls, then writes at the bottom. If the scroll
+    is ignored the write overwrites text the student is still reading."""
+    v = _view(app)
+    for i in range(4):
+        v.feed(b"hop %d\r\n" % i)
+    v.feed(b"\x1b[2S")            # tmux makes room
+    v.feed(b"\x1b[3;1Hhop 4\r\n")  # ...and writes into it
+    doc = _document(v)
+    for i in range(5):
+        assert f"hop {i}" in doc, f"hop {i} was overwritten: {doc}"

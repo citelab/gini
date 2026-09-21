@@ -12,6 +12,18 @@ it. What we dropped was Chromium, not the transport.
 Set GINI_TTYD_DEBUG=1 to log the handshake and the first frames. The protocol is the part most
 likely to be subtly wrong against a given ttyd build, and a mismatch is otherwise invisible: the
 terminal simply stays blank.
+
+Set GINI_TTYD_CAPTURE=<path> to append every byte received, and every byte sent, to a file. It
+exists to settle one question that cannot be answered by reading code: when a line is missing
+from the pane, did it never ARRIVE, or did it arrive and get overwritten? Those have different
+causes — the container/ttyd side versus the emulator — and no amount of staring at either half
+distinguishes them. Replay the capture through the emulator with
+`python -m gini.tools.replay_terminal <file>` and compare.
+
+The format is one record per frame: `<direction> <length>\n<bytes>\n`, direction `<` for
+received and `>` for sent, so the interleaving of echo and output is preserved exactly as it
+happened. Off unless the variable is set; it writes plaintext and a student's session is not
+something to leave lying around by default.
 """
 from __future__ import annotations
 
@@ -39,6 +51,7 @@ class TtydClient(QObject):
         self._base = ""
         self._cols, self._rows = 80, 24
         self._debug = os.environ.get("GINI_TTYD_DEBUG") == "1"
+        self._capture = os.environ.get("GINI_TTYD_CAPTURE") or ""
 
     # -- lifecycle ----------------------------------------------------------- #
     def connect_to(self, base_url: str, columns: int, rows: int) -> None:
@@ -149,11 +162,24 @@ class TtydClient(QObject):
         self.closed.emit()
 
     # -- traffic -------------------------------------------------------------- #
+    def _record(self, direction: str, payload: bytes) -> None:
+        """Append one frame to the capture file. Never raises: a diagnostic that can break the
+        terminal is worse than no diagnostic."""
+        if not self._capture:
+            return
+        try:
+            with open(self._capture, "ab") as fh:
+                fh.write(f"{direction} {len(payload)}\n".encode())
+                fh.write(payload + b"\n")
+        except OSError:
+            self._capture = ""                      # say it once by going quiet, not every frame
+
     def _on_binary(self, message) -> None:
         frame = proto.decode(bytes(message))
         if frame is None:
             return
         if frame.is_output:
+            self._record("<", frame.payload)
             self.output.emit(frame.payload)
         elif frame.kind == proto.SET_TITLE:
             self.title.emit(frame.title)
@@ -162,6 +188,7 @@ class TtydClient(QObject):
 
     def send_input(self, data: bytes) -> None:
         if self._sock is not None and data:
+            self._record(">", data)
             self._sock.sendBinaryMessage(proto.encode_input(data))
 
     def send_resize(self, columns: int, rows: int) -> None:
