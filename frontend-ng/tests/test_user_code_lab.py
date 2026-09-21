@@ -316,10 +316,10 @@ def test_the_face_opens_the_hub_and_not_one_assignments_panel(two_labs, app):
 # tell that from GINI being broken — so an unreleased one is shown and refused.
 # --------------------------------------------------------------------------- #
 
+#: A placeholder as the shipped ones actually are: a number, and nothing about the topic.
 UNRELEASED = """
 id: lab-later
-title: A-Lab 09 — later
-summary: Something we have not written yet.
+title: A-Lab 09
 released: false
 """
 
@@ -376,3 +376,28 @@ def test_only_the_first_lab_is_released_so_far():
     """A reminder in test form: filling in a placeholder means dropping its `released` line."""
     live = [s.id for s in L.catalog() if s.released]
     assert live == ["syscall-sysinfo"], f"newly released: {live}"
+
+
+def test_a_placeholder_announces_nothing_about_itself():
+    """What an assignment turns out to be is a teaching decision that may not be made yet, and a
+    guess in the YAML is announced to every student who opens the hub. So a placeholder carries a
+    number and no topic — not in the title, not in a summary, and not in the id either.
+
+    The id is the LAB NUMBER for a second reason: it is the folder name a student's work lives in
+    once anyone arms it, so naming it after a subject would mean renaming it later and orphaning
+    the work.
+    """
+    import re
+    for spec in L.catalog():
+        if spec.released:
+            continue
+        assert re.fullmatch(r"A-Lab \d\d", spec.title), f"{spec.id}: title names a topic"
+        assert re.fullmatch(r"a-lab-\d\d", spec.id), f"{spec.id}: id names a topic"
+        assert spec.summary == "", f"{spec.id}: summary describes an unwritten assignment"
+
+
+def test_the_card_for_one_says_it_is_coming_rather_than_what_it_is(with_unreleased, app):
+    hub = _hub(app)
+    card = hub._cards["lab-later"]
+    texts = [c.text() for c in card.findChildren(type(card.stat))]
+    assert any("Details when this one is released." in t for t in texts), texts

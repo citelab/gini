@@ -172,8 +172,13 @@ class UserCodeLab(QDialog):
                 row = QHBoxLayout()
                 row.setSpacing(8)
                 v.addLayout(row)
-            card = LayerCard(self.theme, spec.title,
-                             spec.summary or "An xv6 assignment.", hue_for(spec, i))
+            # A placeholder has no summary on purpose — what the assignment turns out to be is
+            # a teaching decision, and a guess in the YAML would be announced to every student
+            # who opened this. So it says it is coming rather than inventing what it is.
+            blurb = spec.summary or (
+                "Details when this one is released."
+                if not getattr(spec, "released", True) else "An xv6 assignment.")
+            card = LayerCard(self.theme, spec.title, blurb, hue_for(spec, i))
             card.clicked.connect(lambda s=spec: self._choose(s))
             self._cards[spec.id] = card
             row.addWidget(card)

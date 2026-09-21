@@ -1,8 +1,0 @@
-# A-Lab 04 — allocation that waits until the page is touched.
-#
-# PLACEHOLDER, topic included — chosen to match the Machine Lab's Virtual Memory face. See the
-# note in a-lab-03 about renaming.
-id: vm-lazy
-title: "A-Lab 04 — lazy"
-summary: "Allocate pages only when the program actually touches them, and watch the faults."
-released: false

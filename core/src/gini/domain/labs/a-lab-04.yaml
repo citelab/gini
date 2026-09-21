@@ -1,0 +1,15 @@
+# A-Lab 04 — a placeholder, on purpose.
+#
+# It carries a TILE and nothing else. No topic and no description: what an assignment turns out
+# to be is a teaching decision that is not made yet, and a guess here would be announced to every
+# student the moment they opened the hub. `released: false` shows the card and refuses to arm it.
+#
+# The id is deliberately the LAB NUMBER rather than the topic. It is the folder name a student's
+# work lives in once anyone has armed it, so naming it after a subject would mean either renaming
+# it later — orphaning the work — or keeping a name the assignment outgrew.
+#
+# To release: add `summary`, `files`, `checks` and `grade`, extend the title with the topic,
+# and delete the `released` line.
+id: a-lab-04
+title: "A-Lab 04"
+released: false
