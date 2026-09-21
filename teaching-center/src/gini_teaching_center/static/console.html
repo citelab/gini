@@ -946,9 +946,46 @@ async function openReceipt(receipt){
              sent by a gBuilder that only uploaded the proof.</span>`}
       </div>
       ${qBlock(r.questions)}
+      ${measBlock(r.measurements, r.measurement_tally)}
       ${srcBlock(r.sources)}
       <pre>${esc(r.narration)}</pre>
     </div>`;
+}
+
+// WHAT GINI MEASURED, across every kind of lab in one place — a rider's reading, a probe's
+// verdict, an objective changing state. These have been in the chain since probes and riders
+// shipped and reached a marker only as a clause inside the narration ("…3 measurement(s)"), which
+// is prose to read rather than a result to check.
+//
+// Repeats are kept and shown in order, because a probe that failed and then passed is the story of
+// the attempt. Nothing is scored: "3/5 passed" is a count of what GINI saw, not a mark, and whether
+// it is a pass is the teacher's call — the same rule the sources block follows.
+function measBlock(rows, tally){
+  if (!rows || !rows.length) return '';
+  const parts = Object.keys(tally || {}).sort().map(k => {
+    const t = tally[k], plural = t.total === 1 ? '' : 's';
+    // A kind whose rows carry no verdict — objectives — is COUNTED, not scored. Saying
+    // "1/1 objective passed" would be this section inventing a judgement out of a state change.
+    if (!t.ok && !t.pending && k === 'objective') return `${t.total} objective${plural} recorded`;
+    const pend = t.pending ? `, ${t.pending} not run` : '';
+    return `${t.ok}/${t.total} ${esc(k)}${plural} passed${pend}`;
+  });
+  return `<div style="margin-top:20px">
+    <div class="big" style="font-size:17px">What GINI measured</div>
+    <div class="note">${parts.join(' · ')} — observed while they worked, in the order it
+      happened. A repeat means they ran it again. Counts, not marks.</div>
+    ${rows.map(m => `<div class="rowb" style="margin:6px 0">
+      <span class="tag kind">${esc(m.kind)}</span>
+      <span class="mono"><b>${esc(m.name)}</b></span>
+      <span class="note" style="margin:0">${esc(m.detail || '')}</span>
+      ${m.summary ? `<span class="note" style="margin:0">${esc(m.summary)}</span>` : ''}
+      ${m.pending
+        ? `<span class="tag draft">not run</span>`
+        : m.ok === null || m.ok === undefined
+          ? ``                                   // a state change is not a verdict
+          : m.ok ? `<span class="tag live">ok</span>` : `<span class="tag warn">failed</span>`}
+    </div>`).join('')}
+  </div>`;
 }
 
 // THE KERNEL CODE a student wrote. For an OS lab this is the deliverable, and until it travelled

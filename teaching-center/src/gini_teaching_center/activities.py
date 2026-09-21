@@ -388,6 +388,84 @@ def check_sources(shadows: dict | None, proof: dict) -> list:
     return out
 
 
+def measurements(proof: dict) -> list[dict]:
+    """Everything GINI MEASURED while the work was happening, as rows a marker can scan.
+
+    The chain has carried these since the probes and riders shipped — `measure` from a Source/Sink
+    rider, `witness` from a behavioural probe, `objective` from an objective changing state — and
+    the report has never had a section for them. They reached a teacher only as a clause inside
+    the narration ("…3 measurement(s)"), which is prose to read rather than a result to check, and
+    is why a networking lab's numbers were effectively invisible at marking time.
+
+    ONE list across every kind of lab, deliberately. A C-Lab's throughput reading, a T-Lab's
+    reachability verdict and an OS lab's kernel metric are the same thing to a marker — something
+    GINI observed and stands behind — and three sections would make a teacher learn which lab
+    produces which. The `kind` column says where a row came from for anyone who cares.
+
+    IN CHAIN ORDER, and repeats are kept. A probe that failed and then passed is the story of the
+    attempt; collapsing it to its last verdict would hide the work and flatter the student, and
+    collapsing it to its first would do the opposite.
+
+    Nothing here is scored. `ok` is what GINI observed, not a mark: whether three of five probes
+    passing is a pass is the teacher's call, exactly as `check_sources` reports a mismatched file
+    and refuses to draw a conclusion from it.
+    """
+    out: list[dict] = []
+    for i, entry in enumerate(proof.get("entries") or []):
+        kind = (entry or {}).get("kind", "")
+        d = entry.get("data") or {}
+        if kind == _ev.MEASURE:
+            out.append({
+                "kind": "measurement", "name": str(d.get("name", "")),
+                "ok": bool(d.get("ok")), "pending": False,
+                "detail": ", ".join(f"{k}={v}" for k, v in sorted(
+                    (d.get("measurement") or {}).items())),
+                "summary": str(d.get("summary", "")),
+                "seq": entry.get("seq", i), "t": entry.get("t", 0.0)})
+        elif kind == _ev.WITNESS:
+            verdict = str(d.get("verdict", ""))
+            out.append({
+                "kind": "probe", "name": str(d.get("probe", "")),
+                # "pending" is recorded by the client on purpose — they pressed Check with
+                # nothing running — so it must not be reported here as a failure.
+                "ok": verdict == "ok", "pending": verdict == "pending",
+                "detail": verdict, "summary": "",
+                "seq": entry.get("seq", i), "t": entry.get("t", 0.0)})
+        elif kind == _ev.OBJECTIVE:
+            out.append({
+                # `ok` is None, not True. An objective moving from one status to another is a
+                # CHANGE, not a verdict, and the statuses are the activity's own words — calling
+                # that "passed" would be this section inventing a judgement, which is the one
+                # thing v1 does not do. The transition is reported and the teacher reads it.
+                "kind": "objective", "name": str(d.get("id", "")),
+                "ok": None, "pending": False,
+                "detail": f"{d.get('from', '')} -> {d.get('to', '')}",
+                "summary": str(d.get("say", "")),
+                "seq": entry.get("seq", i), "t": entry.get("t", 0.0)})
+    return out
+
+
+def measurement_tally(rows: list[dict] | None) -> dict:
+    """`{kind: {ok, pending, total}}` — the top of the section, so a marker sees the shape before
+    reading the rows.
+
+    Counted from the ROWS rather than recomputed from the chain, so the summary and the list can
+    never disagree about what happened.
+
+    An objective has no verdict — see `measurements` — so it only ever adds to a total, and a
+    kind whose rows carry no verdict reads as a count rather than a score.
+    """
+    tally: dict = {}
+    for r in rows or []:
+        slot = tally.setdefault(r["kind"], {"ok": 0, "pending": 0, "total": 0})
+        slot["total"] += 1
+        if r.get("pending"):
+            slot["pending"] += 1
+        elif r.get("ok") is True:                # None is "no verdict", not a failure
+            slot["ok"] += 1
+    return tally
+
+
 def artifact_hash(proof: dict) -> str:
     """The topology's fingerprint, from the chain's submit entry."""
     for entry in reversed(proof.get("entries") or []):
@@ -548,6 +626,7 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
     payload = row.get("data")
     payload = json.loads(payload) if isinstance(payload, str) and payload else (payload or {})
     proof = payload.get("proof") or {}
+    measured = measurements(proof)
     return {
         "receipt": row.get("receipt", ""),
         "activity": row.get("activity", ""),
@@ -570,6 +649,10 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
         # The kernel code, each file paired with the hash the chain says was compiled. An OS lab's
         # deliverable, which a marker could previously read nothing of.
         "sources": check_sources(payload.get("shadows"), proof),
+        # What GINI measured — probes, riders, objectives — in one list across every kind of lab.
+        # Described, never scored; see `measurements`.
+        "measurements": measured,
+        "measurement_tally": measurement_tally(measured),
         "entries": len(proof.get("entries") or []),
         "artifact": payload.get("artifact"),
         # Whether the teacher can actually OPEN this, or only read about it. An older gBuilder
