@@ -2971,24 +2971,36 @@ class MainWindow(QMainWindow):
 
         from ..services.compiler import _role, _svc
         from ..services.orchestrator import exec_argv_for
-        from ..services.xv6_lab import active_spec, link_script, seed_host_files
+        from ..services.xv6_lab import active_spec, ensure_layout, link_script, seed_host_files
         orch = getattr(self.ctx, "orchestrator", None)
-        spec = active_spec()
-        if orch is None or spec is None:
+        if orch is None:
             return
         devs = [d for d in self.ctx.topology.devices.values() if _role(d.type_key) == "xv6"]
         if not devs:
             return
-        # Built HERE, on the GUI thread: `spec` is GUI-thread data and the worker has no business
-        # reading it — only finished strings cross the boundary. Same rule as the hosts file.
-        script = link_script(spec)
-        names = [d.name for d in devs]
+        # PER MACHINE, because arming is per machine: M1 may be on A-Lab 01 while M2 is on
+        # A-Lab 02, and one script for both would wire whichever assignment was looked up first
+        # into every tree. Built HERE, on the GUI thread — `spec` is GUI-thread data and the
+        # worker has no business reading it; only finished strings cross. Same rule as the hosts
+        # file.
+        #
+        # `ensure_layout` first: a folder written before the hub existed has the student's files
+        # loose in the mount root, and they have to move down into the assignment's own
+        # subdirectory before anything reads them from there.
+        jobs = []
+        for d in devs:
+            ensure_layout(d.name)
+            spec = active_spec(d.name)
+            if spec is not None:
+                jobs.append((d.name, spec, link_script(spec)))
+        if not jobs:
+            return                       # nothing armed anywhere: the hub is where that is fixed
         wd = getattr(orch, "workdir", None)
 
         def work():
             import time
             done, failed = [], []
-            for name in names:
+            for name, spec, script in jobs:
                 try:
                     seed_host_files(spec, name)
                 except OSError as e:
@@ -3007,13 +3019,52 @@ class MainWindow(QMainWindow):
                     except Exception as e:      # noqa: BLE001 — best-effort
                         err = str(e)[:120]
                     time.sleep(0.75 * (attempt + 1))
-                (failed.append(f"{name}: {err}") if err else done.append(name))
+                (failed.append(f"{name}: {err}") if err else done.append(f"{name} ({spec.title})"))
             if done:
-                self.ctx.log(f"{spec.title} — your files are linked into "
-                             f"{', '.join(done)}. Edit them, then press Load.", "ok")
+                self.ctx.log("Your files are linked into " + ", ".join(done) +
+                             ". Edit them, then press Load.", "ok")
             if failed:
                 self.ctx.log("Could not attach the assignment on: " + ", ".join(failed[:3]),
                              "warn")
+
+        run_off_gui(self, work)
+
+    def _relink_xv6_lab(self, name: str, spec) -> None:
+        """Re-point ONE running machine's kernel tree at a newly armed assignment.
+
+        This is why the mount is the machine's whole lab directory rather than one assignment's
+        folder: the container path never changes, so switching assignments is this exec and not a
+        Stop/Run. Same script as `_attach_xv6_labs` runs at launch, which is deliberate — a
+        second way to link would be a second thing to keep correct.
+
+        Best-effort and never fatal, like the attach. Arming is already written to disk before
+        this is called, so a machine that is down or not taking execs yet still comes up on the
+        right assignment at the next Run; all that is lost is the convenience.
+        """
+        import subprocess
+
+        from ..services.compiler import _svc
+        from ..services.orchestrator import exec_argv_for
+        from ..services.xv6_lab import link_script, seed_host_files
+        orch = getattr(self.ctx, "orchestrator", None)
+        if orch is None or spec is None or not name:
+            return
+        script = link_script(spec)          # built HERE: only finished strings cross the thread
+        wd = getattr(orch, "workdir", None)
+
+        def work():
+            try:
+                seed_host_files(spec, name)
+                r = subprocess.run([*exec_argv_for(orch, _svc(name)), "sh", "-c", script],
+                                   cwd=str(wd) if wd else None, capture_output=True, timeout=30)
+                ok = r.returncode == 0
+                why = _runtime.compose_error(r.stderr) or f"exit {r.returncode}"
+            except Exception as e:          # noqa: BLE001 — a failed re-link must not take the UI
+                ok, why = False, str(e)[:120]
+            self.ctx.bus.log.emit(
+                "ok" if ok else "warn",
+                f"{name}: {spec.title} is linked — press Load to build it." if ok else
+                f"{name}: could not link {spec.title} now ({why}). It will link at the next Run.")
 
         run_off_gui(self, work)
 
@@ -4168,7 +4219,8 @@ class MainWindow(QMainWindow):
                 # `ms.live` that broke the Terminal above. Passing it read as if it did something.
                 self, self.theme, dev, state=ms, recorder=self.proof_recorder,
                 on_console=lambda: self._open_terminal(device_id),
-                on_log=lambda lvl, msg: self.ctx.bus.log.emit(lvl, msg))  # mirror to GINI Console
+                on_log=lambda lvl, msg: self.ctx.bus.log.emit(lvl, msg),  # mirror to GINI Console
+                on_relink=self._relink_xv6_lab)
         except Exception as e:
             import traceback
             tb = traceback.format_exc()

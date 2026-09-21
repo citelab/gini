@@ -45,8 +45,9 @@ KIND = {
     "StorageLab": WINDOW, "SyscallLab": WINDOW, "LockLab": WINDOW, "RouterLab": WINDOW,
     "ZooLab": WINDOW, "CpuJourney": WINDOW, "TerminalView": WINDOW, "MarkDialog": WINDOW,
     # User Code is the one a student keeps open the LONGEST: it is what they alt-tab back to from
-    # their editor after every edit, to see the checklist move.
-    "UserCode": WINDOW,
+    # their editor after every edit, to see the checklist move. The hub above it is a window for
+    # the same reason — it stays open behind the panel and is where they switch assignments.
+    "UserCode": WINDOW, "UserCodeLab": WINDOW,
 }
 
 #: The other side of the rule, with the reason spelled out for each.

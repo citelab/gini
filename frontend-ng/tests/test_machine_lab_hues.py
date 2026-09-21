@@ -140,41 +140,127 @@ def test_the_layers_read_from_user_space_down_to_hardware():
 # not wearing it.
 # --------------------------------------------------------------------------- #
 
+def _resting(card):
+    """The rule that paints the card when nobody is pointing at it.
+
+    Split off deliberately: `:hover` also names the accent, so asserting against the whole
+    stylesheet passes whether or not the resting edge is lit — which is exactly the bug that
+    hid the live-edge change from these tests the first time it was made."""
+    return card.styleSheet().split("LayerCard:hover")[0]
+
+
 def test_a_card_carries_its_accent_where_it_can_be_seen(app):
     """The edge and the wash, not a dot. Checked per theme, because both are derived from the
     theme's own accent rather than listed anywhere."""
-    from gini.ui.machine_lab import LayerCard, tint
+    from gini.ui.machine_lab import LayerCard, over, shift
 
     for name, theme in THEMES:
+        fills = set()
         for _band, f in _faces():
             card = LayerCard(_TM(theme), f.title, f.blurb, f.hue)
-            css = card.styleSheet()
+            card.set_live(True)                       # the edge is lit by a running kernel
+            css = _resting(card)
             acc = theme.accent_for(f.hue)
             assert f"border-left:4px solid {acc}" in css, (
                 f"{name}/{f.title}: no accent edge")
-            assert tint(acc, 34 if theme.dark else 22) in css, (
-                f"{name}/{f.title}: no accent wash")
+            fill = shift(over(theme.panel2, acc, 34 if theme.dark else 22),
+                         -22 if theme.dark else -14)
+            assert f"background:{fill};" in css, f"{name}/{f.title}: no accent wash"
+            fills.add(fill)
+        assert len(fills) > 1, f"{name}: every card came out the same colour"
 
 
 def test_the_wash_is_derived_from_the_accent_and_not_a_second_table():
     """Two places to change a colour is one too many — the wash must follow the accent."""
-    from gini.ui.machine_lab import tint
-    assert tint("#4c8dff", 34) == "rgba(76,141,255,34)"
-    assert tint("4c8dff", 22) == "rgba(76,141,255,22)"
-    assert tint("", 30) == "transparent", "a missing colour must not produce broken CSS"
-    assert tint("#nothex", 30) == "transparent"
-    assert tint("#4c8dff", 999).endswith(",255)"), "alpha is clamped to Qt's range"
+    from gini.ui.machine_lab import over, shift
+    assert over("#000000", "#4c8dff", 255) == "#4c8dff", "full alpha is the accent itself"
+    assert over("#000000", "#ffffff", 128) == "#808080"
+    assert over("#202020", "4c8dff", 0) == "#202020", "no alpha leaves the base alone"
+    assert over("", "#4c8dff", 30) == "transparent", "a missing colour must not break the CSS"
+    assert over("#nothex", "#4c8dff", 30) == "transparent"
+    assert over("#202020", "#nothex", 30) == "#202020", "a bad accent falls back to the floor"
+    assert over("#000000", "#ffffff", 999) == "#ffffff", "alpha is clamped to Qt's range"
+
+
+def test_a_shade_is_additive_so_it_still_moves_at_the_ends_of_the_range():
+    """A percentage of #0d0d0d is #0d0d0d. High Contrast is almost entirely at that end of the
+    range, so the recess has to be built out of steps rather than ratios."""
+    from gini.ui.machine_lab import shift
+    assert shift("#0d0d0d", 20) == "#212121", "the darkest theme still gets a lighter edge"
+    assert shift("#808080", -16) == "#707070"
+    assert shift("#000000", -20) == "#000000", "clamped, not wrapped"
+    assert shift("#ffffff", 20) == "#ffffff"
+    assert shift("", 20) == "transparent"
+    assert shift("#nothex", 20) == "transparent", "Qt drops a whole rule over one bad property"
 
 
 def test_a_dark_theme_gets_a_stronger_wash_than_a_light_one(app):
     """The same alpha over a dark ground reads fainter; the card compensates."""
+    from gini.ui.machine_lab import over, shift
+
+    def wash_strength(theme):
+        """How far the accent pulled the card away from a plain, unhued recess."""
+        acc = theme.accent_for("red")
+        fill = over(theme.panel2, acc, 34 if theme.dark else 22)
+        return delta_e(fill, shift(theme.panel2, 0))
+
+    assert wash_strength(T.DARK) > wash_strength(T.LIGHT)
+
+
+# --------------------------------------------------------------------------- #
+# Separated from the band, and measured on the pixels rather than in the stylesheet.
+#
+# A card has to be distinguishable from the band behind it, and only one of those two colours
+# is written down — the other is a blend. Reading it off the stylesheet would just re-run the
+# arithmetic the code already did, so this paints the card into its band and looks.
+#
+# It is deliberately the only thing asserted here. A literal sunken card — gradient shadow
+# under the top lip — was built, measured correct in all seven themes, and thrown away for
+# looking like a smudge. Depth is not the invariant; separation is.
+# --------------------------------------------------------------------------- #
+
+def _band_and_fill(theme, app):
+    """Paint a card inside a band of `theme`; return the two luminances as they land on screen."""
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from gini.ui.machine_lab import LayerCard
+    host = QWidget(); host.resize(320, 120)
+    host.setStyleSheet(f"QWidget{{background:{theme.panel2};}}")
+    lay = QVBoxLayout(host); lay.setContentsMargins(12, 12, 12, 12)
+    card = LayerCard(_TM(theme), "Process Scheduler", "who runs next", "red")
+    lay.addWidget(card)
+    host.show(); app.processEvents()
+    img = host.grab().toImage()
+    x = host.width() // 2                      # mid-edge, clear of the rounded corners
+
+    def lum(X, Y):
+        c = img.pixelColor(X, Y)
+        return .2126 * c.red() + .7152 * c.green() + .0722 * c.blue()
+
+    return lum(3, 3), lum(x, card.y() + card.height() // 2)
+
+
+@pytest.mark.parametrize("name,theme", THEMES)
+def test_a_card_sits_below_the_band_it_is_in(name, theme, app):
+    """Darker than its surround — in every theme, whichever direction that theme's own accent
+    happens to pull. This is why the fill is resolved to a solid colour: a translucent wash
+    composites over the band, so it could only ever go lighter in a dark theme."""
+    band, fill = _band_and_fill(theme, app)
+    assert fill < band, f"{name}: the card is level with or above its band ({fill} vs {band})"
+
+
+@pytest.mark.parametrize("name,theme", THEMES)
+def test_the_accent_edge_travels_the_whole_way_round_on_hover(name, theme, app):
+    """The left edge is the card's hue, and on hover it has to come with the rest of it. An
+    earlier bevel left the top and bottom grey, so pointing at a card lit up its right-hand
+    side and nothing else — which read as a rendering fault rather than a hover."""
     from gini.ui.machine_lab import LayerCard
 
-    def alpha_of(theme):
-        css = LayerCard(_TM(theme), "t", "d", "red").styleSheet()
-        return int(css.split("rgba(", 1)[1].split(")", 1)[0].split(",")[-1])
-
-    assert alpha_of(T.DARK) > alpha_of(T.LIGHT)
+    for _band, f in _faces():
+        acc = theme.accent_for(f.hue)
+        hover = LayerCard(_TM(theme), f.title, f.blurb, f.hue).styleSheet().split(":hover")[1]
+        assert f"border:1px solid {acc};" in hover, f"{name}/{f.title}: the edge stayed behind"
+        assert f"border-left:4px solid {acc};" in hover
 
 
 def test_a_label_is_text_and_not_a_filled_box(app):
@@ -202,3 +288,119 @@ def test_the_band_styles_itself_and_not_everything_inside_it(app):
     assert 'setObjectName("LayerBand")' in src
     assert "QFrame#LayerBand{" in src, "an unscoped QFrame rule cascades to its children"
     assert 'f"QFrame{{background' not in src
+
+
+# --------------------------------------------------------------------------- #
+# The accent edge is a live indicator.
+#
+# The Demo stand-in draws the same numbers in the same places a running kernel does — that is
+# the point of it — so a student looking at a face has no way to tell which one they are
+# reading. The edges are that tell, and a tell is only worth having if it is never wrong in the
+# reassuring direction: dark when there may be no kernel costs nothing, lit when there is none
+# is the whole failure.
+# --------------------------------------------------------------------------- #
+
+def test_an_unlit_card_shows_no_accent_edge_at_rest(app):
+    """Painted in the card's own fill rather than removed: the 4px stays in the box model, so
+    no title shifts sideways as a machine starts answering or stops."""
+    from gini.ui.machine_lab import LayerCard
+
+    for name, theme in THEMES:
+        for _band, f in _faces():
+            card = LayerCard(_TM(theme), f.title, f.blurb, f.hue)
+            acc = theme.accent_for(f.hue)
+            css = _resting(card)
+            assert f"border-left:4px solid {acc}" not in css, (
+                f"{name}/{f.title}: edge lit with nothing behind it")
+            assert "border-left:4px solid" in css, f"{name}/{f.title}: the 4px must stay"
+
+
+def test_a_card_starts_dark_because_nothing_has_proved_a_kernel_yet(app):
+    from gini.ui.machine_lab import LayerCard
+    card = LayerCard(_TM(T.DARK), "t", "d", "red")
+    dark = _resting(card)
+    card.set_live(True)
+    assert _resting(card) != dark
+    card.set_live(False)
+    assert _resting(card) == dark, "going dark again must restore the resting look exactly"
+
+
+def test_hover_shows_the_hue_even_on_a_dead_machine(app):
+    """The hue is the card's identity — which face this is — and that is true whether or not a
+    kernel is answering. Only the RESTING edge carries the liveness claim."""
+    from gini.ui.machine_lab import LayerCard
+    card = LayerCard(_TM(T.DARK), "t", "d", "red")           # never set live
+    acc = T.DARK.accent_for("red")
+    hover = card.styleSheet().split("LayerCard:hover")[1]
+    assert f"border:1px solid {acc};" in hover
+
+
+class _Dev:
+    type_key = "xv6"
+    name = "xv6-1"
+    properties = {"Timeslice": "1"}
+
+
+def _open_lab(app):
+    from gini.ui.theme import ThemeManager
+    from gini.ui.machine_lab import MachineLab
+    return MachineLab(None, ThemeManager(app), _Dev(), state=None)
+
+
+def test_demo_mode_never_lights_the_edges(app):
+    """Demo is a full plausible feed with no kernel behind it — the one case the indicator
+    exists for."""
+    lab = _open_lab(app)
+    assert lab.state.mode == "demo"
+    assert lab.showing_live_kernel() is False
+    lab._update_overview()
+    assert all(not c._live for c in lab._ov_cards.values())
+
+
+def test_real_mode_alone_does_not_light_the_edges(app):
+    """Real is selected by a click, usually BEFORE the topology is up. Mode says what the
+    student asked for; only a snapshot says what they got.
+
+    Goes through `set_mode`, which is the only supported way in: it clears the last snapshot,
+    so the demo reading the Lab opened with cannot survive the switch and pass itself off as a
+    kernel's."""
+    lab = _open_lab(app)
+    assert lab.state.latest is not None, "the demo plane has already produced a reading"
+    lab.state.set_mode("real")
+    assert lab.state.latest is None
+    assert lab.showing_live_kernel() is False
+
+
+def test_a_machine_that_stops_answering_puts_the_edges_out(app):
+    """`latest` keeps a dead kernel's final snapshot, so without the failure count the page
+    would go on presenting its last words as current."""
+    from gini.ui.machine_lab import READS_BEFORE_GONE
+    lab = _open_lab(app)
+    snap = lab.state.provider.snapshot()
+    lab.state.set_mode("real")
+    lab.state.latest = snap                               # stand in for a reading arriving
+    lab._read_fails = 0
+    assert lab.showing_live_kernel() is True
+
+    lab._read_fails = READS_BEFORE_GONE - 1
+    assert lab.showing_live_kernel() is True, "one dropped read under load is not a dead machine"
+    lab._read_fails = READS_BEFORE_GONE
+    assert lab.showing_live_kernel() is False
+
+    lab._update_overview()
+    assert all(not c._live for c in lab._ov_cards.values())
+
+
+def test_the_edges_go_dark_at_the_same_moment_the_banner_appears(app):
+    """Two renderings of one fact. They disagreed once — the banner said no live data while
+    twelve edges were still lit — and a student believes the colour, not the paragraph."""
+    lab = _open_lab(app)
+    snap = lab.state.provider.snapshot()
+    lab.state.set_mode("real")
+    for latest in (None, snap):
+        lab.state.latest = latest
+        lab._update_banner()
+        # `isHidden()` rather than `isVisible()`: nothing is shown in an offscreen test, so
+        # isVisible() is False for every widget and the assertion would hold vacuously.
+        showing = not lab._banner.isHidden()
+        assert showing is not lab.showing_live_kernel()

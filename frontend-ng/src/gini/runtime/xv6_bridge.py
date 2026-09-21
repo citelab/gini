@@ -332,16 +332,21 @@ class Xv6Bridge:
     def programs(self) -> list:
         return self.agent.get_json("/programs").get("programs", [])
 
-    def run(self, prog: str, args: str = "") -> bool:
-        """Launch a program in the background. `args` is optional and is sanitised agent-side —
-        several programs are useless without it (sgrind's whole lesson is the number K).
+    def run(self, prog: str, args: str = "", foreground: bool = False) -> bool:
+        """Launch a program. `args` is optional and is sanitised agent-side — several programs
+        are useless without it (sgrind's whole lesson is the number K).
+
+        Background by default: the Machine Lab's workloads are meant to keep running while the
+        student watches a face. `foreground=True` is for a lab's test, which prints and exits —
+        see `run_and_capture`.
 
         A refusal is recorded in `last_run_error` rather than thrown away. The agent refuses a
-        program its image was built before (it carries its own allow-list), and with nothing on
-        screen that reads exactly as the program simply not launching."""
+        program this kernel does not have, and with nothing on screen that reads exactly as the
+        program simply not launching."""
         self.last_run_error = ""
         try:
-            q = f"/run?prog={quote(prog)}" + (f"&args={quote(args)}" if args else "")
+            q = (f"/run?prog={quote(prog)}" + (f"&args={quote(args)}" if args else "")
+                 + ("&fg=1" if foreground else ""))
             r = json.loads(self.agent.post(q))
             if not r.get("ok"):
                 self.last_run_error = r.get("error") or f"could not launch {prog}"
@@ -349,6 +354,48 @@ class Xv6Bridge:
         except Exception as e:
             self.last_run_error = f"could not reach the xv6 agent: {e}"
             return False
+
+    def run_and_capture(self, prog: str, args: str = "", timeout: float = 12.0,
+                        settle: float = 0.4) -> tuple[bool, str]:
+        """Run a program in the foreground and return `(ok, the raw console delta)`.
+
+        This is the bracket. The console is one long byte stream, so output can only be
+        attributed to a program when both ends are known: the cursor is read BEFORE the command
+        is issued, which makes the start exact, and the shell's returning prompt closes it.
+
+        Neither end can be found for a program the student typed themselves or one launched into
+        the background — which is why a lab's test is prescribed, launched from the User Code Lab,
+        and run in the foreground. A transcript of everything the console ever showed would be a
+        different feature with a different privacy question; this is the one run GINI asked for
+        and waited on.
+
+        `settle` covers a program that pauses mid-output: the wait only gives up after the
+        prompt returns or `timeout` elapses, never on a quiet gap alone. On timeout the partial
+        output is returned WITH `ok` — a test that ran long still printed what it printed, and
+        discarding it would lose the evidence over a missing newline.
+
+        RAW on purpose. Stripping the escapes and capping the lines is `console_tap`'s job and
+        this layer cannot reach it: `runtime/` has never imported `services/` and starting here
+        would be the wrong place to break that. `services.xv6_lab.run_test` does that half.
+        """
+        import time
+
+        from ..domain.xv6 import run_finished
+        _, cursor = self.console_since(0)          # where the stream is BEFORE we type
+        if not self.run(prog, args, foreground=True):
+            return False, ""
+        seen, deadline = "", time.monotonic() + max(1.0, float(timeout))
+        while time.monotonic() < deadline:
+            time.sleep(settle)
+            try:
+                chunk, cursor = self.console_since(cursor)
+            except Exception as e:                 # noqa: BLE001 — a dropped read is not a failure
+                self.last_run_error = f"lost the console while {prog} ran: {e}"
+                break
+            seen += chunk or ""
+            if run_finished(seen):
+                break
+        return True, seen
 
     def kill(self, pid: int) -> None:
         self.agent.post(f"/kill?pid={int(pid)}")

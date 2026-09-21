@@ -508,10 +508,15 @@ class ProofRecorder:
                                                  before, after)))
 
     def note_spawn(self, device: str, what: str, action: str = "launch",
-                   pid: int | None = None) -> None:
-        """A program launched, or a process killed."""
+                   pid: int | None = None, out=None, test: bool = False) -> None:
+        """A program launched, or a process killed.
+
+        `out` is what it printed, when GINI ran it and waited — see `ev.spawn`. `test` marks the
+        assignment's prescribed test, which is the run a marker is looking for.
+        """
         self._guard(lambda: self._record(
-            ev.spawn(str(device or ""), str(what or ""), action, pid)))
+            ev.spawn(str(device or ""), str(what or ""), action, pid,
+                     out=list(out) if out is not None else None, test=bool(test))))
 
     def note_build(self, device: str, shadow: str, ok: bool, sources=None,
                    log=None, action: str = "load") -> None:
@@ -653,6 +658,10 @@ class ProofRecorder:
         than being fixed at three. A syscall assignment submitted through the shadow path alone
         arrives with three files the student never opened and none of the ten they did.
 
+        Which assignment each machine was carrying is resolved inside `collect`, per machine,
+        because arming is per machine: a topology with M1 on A-Lab 01 and M2 on A-Lab 02 hands in
+        both, each attributed to the machine it came from.
+
         The key is still "shadows" on the wire because the server reads it, and because what it
         has always meant is "the student's kernel source". Filenames do not collide between the
         two — a shadow is gini_*.c and nothing else is.
@@ -669,9 +678,8 @@ class ProofRecorder:
             self._complain(e)
             return out
         try:
-            from .xv6_lab import active_spec
             from .xv6_lab import collect as collect_lab
-            out.update(collect_lab(active_spec(), machines))
+            out.update(collect_lab(machines))
         except Exception as e:                              # noqa: BLE001
             self._complain(e)
         return out

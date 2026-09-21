@@ -505,6 +505,64 @@ def syscall_name(num: int, extra: dict | None = None) -> str:
     return SYSCALL_NAMES.get(num, f"sys{num}")
 
 
+def run_finished(text: str) -> bool:
+    """Has the shell handed the prompt back?
+
+    xv6's shell prints `$ ` when a foreground program exits, so that is the end of the bracket.
+    It is a heuristic and it is the only one available on a byte stream — which is exactly why a
+    test is run in the FOREGROUND and issued by GINI: a backgrounded program gets the prompt
+    back immediately and there would be no end to find.
+    """
+    return (text or "").replace("\r", "").rstrip(" \t").endswith("$")
+
+
+def run_output(text: str, cmd: str = "") -> list[str]:
+    """The program's own output, from the console delta captured around its run.
+
+    The delta opens with the shell ECHOING the command GINI typed and closes with the prompt it
+    prints when the program exits. Neither is the program's output: a marker reading
+    `sysinfotest` as the first line of that program's output would be reading GINI's keystrokes
+    back to itself.
+
+    KNOWN DUPLICATION — this is half of `services/console_tap.py`, which has done the same job
+    for the C-Labs and T-Labs since they shipped. Its half cannot be reused as it stands because
+    it is keystroke-driven and this path has no keystrokes; GINI issues the command over HTTP.
+    The OTHER half — stripping escapes and capping the output — is NOT duplicated: callers must
+    run the text through `console_tap.clean` and its caps first, which is what
+    `services.xv6_lab.run_test` does. Do not add cleaning here; that is how this path first
+    shipped with escapes intact, which then broke the echo-matching above.
+
+    See docs/design/user-code-lab.md, "Known duplication", for how to unify them properly.
+    """
+    body = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = body.split("\n")
+    if cmd and lines and lines[0].strip() == cmd.strip():
+        lines = lines[1:]
+    while lines and lines[-1].strip() in ("", "$"):
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return lines
+
+
+def parse_syscall_defines(text: str) -> dict:
+    """`#define SYS_sysinfo 23` -> `{23: "sysinfo"}` — the calls a kernel actually has.
+
+    `SYSCALL_NAMES` above is stock xv6, which ends at 22. A student doing an A-Lab adds one past
+    that, and without this the Syscall Lab labels their own call `sys23` — in the very panel the
+    handout sends them to in order to watch it work. "Your call is not there" is what that reads
+    as, and it is wrong.
+
+    Parsed from the student's own `kernel/syscall.h` rather than taken from the assignment,
+    because the two can disagree and only one of them is what the kernel is running: a student
+    who used 24 where the handout said 23 has a perfectly good system call, and the lab should
+    label what they built rather than what they were told to build.
+    """
+    return {int(m.group(2)): m.group(1)
+            for m in re.finditer(r"^[ \t]*#[ \t]*define[ \t]+SYS_(\w+)[ \t]+(\d+)",
+                                 text or "", re.M)}
+
+
 def parse_sccounts(text: str) -> dict:
     """gini_scdump `SC <num> <count>` lines -> {syscall_number: cumulative_count}."""
     return {int(m.group(1)): int(m.group(2))

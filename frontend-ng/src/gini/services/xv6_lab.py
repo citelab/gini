@@ -13,6 +13,12 @@ over the old one, which leaves the mount pointing at an inode nobody can see any
 fact is why `kernel/shadows/` is mounted as a directory (see `services/compiler.py`). A symlink
 resolves by PATH, so a rename on the other side is invisible to it.
 
+**One assignment is armed per MACHINE**, and that is forced by the kernel rather than chosen
+here: two syscall assignments both edit `syscall.h`, `syscall.c`, `sysproc.c`, `user.h` and
+`usys.pl`, so two of them wired into one tree collide in all five. Across machines there is no
+collision and none is invented — a student may arm A-Lab 01 on M1 and A-Lab 02 on M2 and work
+on both. See `docs/design/user-code-lab.md`.
+
 The split of work here is deliberate. This module owns the HOST side — the folder, the seeds, and
 reading files back for the tracker — and is testable without a container. The in-container half
 (copying pristine files, making the links, registering user programs in the build) is a script
@@ -24,15 +30,28 @@ from __future__ import annotations
 import hashlib
 import os
 import shlex
+import shutil
 from pathlib import Path
 
-#: Where the tree's files are linked from, inside the container.
+#: Where one machine's lab directory is mounted inside the container.
+#:
+#: The mount is the PARENT of the armed assignment's folder, not the folder itself, and that is
+#: load-bearing. A bind mount's host side is fixed when the compose file is written, so mounting
+#: the assignment's own folder meant arming a different one could not take effect until the next
+#: Run. Mounting the parent makes the container path constant and leaves the choice of
+#: subdirectory to the link script — so arming becomes one exec, on a machine that is already up.
 MOUNT = "/opt/xv6-lab"
-#: The image's untouched copy of each linked file, kept INSIDE the mount — so it lands on the
-#: host, where "have I changed this?" and Revert are a file comparison and a file copy rather than
-#: an exec into a container that may not be running. A student who has stopped their machine can
-#: still see what they changed and put it back.
-PRISTINE = "/opt/xv6-lab/.pristine"
+#: Names the assignment armed on this machine. One line, in the mount root.
+ARMED = ".armed"
+#: The image's untouched copy of each linked file, kept in the mount root — so it lands on the
+#: host, where "have I changed this?" and Revert are a file comparison and a file copy rather
+#: than an exec into a container that may not be running. A student who has stopped their machine
+#: can still see what they changed and put it back.
+#:
+#: One per MACHINE, shared by every assignment on it, because the image's copy of `syscall.h` is
+#: the image's copy of `syscall.h` — it does not depend on what is armed. Per assignment it also
+#: would not work: after switching, the tree's file is a symlink into the assignment just left,
+#: so there is no original left to copy from and the new folder would start empty.
 PRISTINE_DIR = ".pristine"
 
 #: Insert one `$U/_<prog>` row into the Makefile's UPROGS list, after `UPROGS=\`.
@@ -53,37 +72,147 @@ def sane_name(machine_name: str) -> str:
     return "".join(c if (c.isalnum() or c in "_.-") else "-" for c in str(machine_name or ""))
 
 
-def lab_dir(machine_name: str, folder: str = "xv6-lab") -> Path:
-    """Where one machine's editable kernel files live on the host.
+def machine_root(machine_name: str) -> Path:
+    """Everything one machine's assignments own — and the directory that is MOUNTED.
+
+    One subdirectory per assignment the machine has ever armed, plus `.armed` naming the current
+    one. Work is never deleted by switching; it is left in its own folder.
+    """
+    return _gini_home() / "xv6-lab" / sane_name(machine_name)
+
+
+def lab_dir(machine_name: str, spec_id: str) -> Path:
+    """Where ONE assignment's editable kernel files live on the host, for one machine.
 
     ONE definition of this path, like `xv6_shadows.shadow_dir`: the compiler writes the mount from
     it, the face lists it, and a submission gathers it. Two copies of a path rule is one copy too
     many — if they disagreed, GINI would show an empty folder while the student's work sat
     somewhere else, and nothing would look wrong.
     """
-    return _gini_home() / sane_name(folder or "xv6-lab") / sane_name(machine_name)
+    return machine_root(machine_name) / sane_name(spec_id)
 
 
-def active_spec():
-    """The assignment this machine is doing, or None.
+def pristine_path(machine_name: str, name: str) -> Path:
+    return machine_root(machine_name) / PRISTINE_DIR / name
 
-    For now: `GINI_LAB` names one, otherwise the single shipped pack. When missions come back from
-    the Teaching Center this is where the armed activity will be read instead — the rest of the
-    module already takes a spec rather than looking one up, so only this function changes.
+
+# --------------------------------------------------------------------------- #
+# arming
+# --------------------------------------------------------------------------- #
+
+def armed_id(machine_name: str) -> str:
+    """The assignment armed on this machine, or `""`.
+
+    A file beside the work, deliberately, rather than a key in `Settings` or a property on the
+    device. Not Settings, because Settings is per-installation and arming is per-machine. Not the
+    device, because that would put it in the `.gini` file — and the reason is the one the code
+    already gives about `claimed_boards`: a topology a student downloads from a classmate, or
+    from the course page, must not silently re-arm their assignment.
+    """
+    try:
+        return (machine_root(machine_name) / ARMED).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def arm(machine_name: str, spec_id: str) -> bool:
+    """Point this machine at an assignment. Returns whether it stuck.
+
+    Nothing is copied, moved or deleted here — the previous assignment's folder stays exactly as
+    it was. All that changes is which subdirectory the next link script will wire into the tree.
+    """
+    root = machine_root(machine_name)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ARMED).write_text(f"{sane_name(spec_id)}\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def active_spec(machine_name: str = ""):
+    """The assignment armed on this machine, or None.
+
+    `GINI_LAB` still overrides, because a developer testing a pack that is not shipped yet should
+    not have to arm it through the UI first.
+
+    The rule this replaced was "the single shipped pack, if there is exactly one" — which
+    returned None the moment a SECOND assignment shipped, and None makes the Machine Lab drop the
+    User Code face entirely. Adding an assignment made every assignment disappear, silently, with
+    the YAML sitting right there on disk. The only way back was an environment variable.
     """
     try:
         from ..domain import lab_spec as _ls
     except Exception:                              # noqa: BLE001 — a lab must never block a Run
         return None
     try:
-        wanted = os.environ.get("GINI_LAB", "").strip()
-        if wanted:
-            return _ls.get(wanted)
-        packs = _ls.catalog()
-        return packs[0] if len(packs) == 1 else None
+        wanted = os.environ.get("GINI_LAB", "").strip() or armed_id(machine_name)
+        return _ls.get(wanted) if wanted else None
     except Exception:                              # noqa: BLE001
         return None
 
+
+def ensure_layout(machine_name: str) -> str:
+    """Move a pre-hub folder down into its assignment's subdirectory. Returns the id, or `""`.
+
+    Before the hub there was one assignment and its files sat directly in the machine's
+    directory, because that directory WAS the mount. The mount is now the parent, so those files
+    need to move down one level into a folder named for the assignment they belong to.
+
+    Moved rather than copied: two copies of a student's work that drift apart is a worse outcome
+    than either copy alone, and the one they can see would be the one they are not editing.
+
+    Refuses to guess. If the loose files are there and more than one assignment is shipped, there
+    is no way to know which one they belong to, so they are left alone — filing a student's work
+    under the wrong assignment is not recoverable by them.
+    """
+    root = machine_root(machine_name)
+    try:
+        # The tell is a student's file sitting loose in the mount root. In the new layout the
+        # root holds only directories — one per assignment, plus `.pristine` — and `.armed`.
+        loose = [p for p in root.iterdir() if p.is_file() and p.name != ARMED]
+    except OSError:
+        return ""                       # nothing here yet
+    if not loose:
+        return ""
+    try:
+        from ..domain import lab_spec as _ls
+        packs = _ls.catalog()
+    except Exception:                              # noqa: BLE001
+        return ""
+    if len(packs) != 1:
+        return ""
+    spec_id = sane_name(packs[0].id)
+    dest = root / spec_id
+    try:
+        if dest.exists() and any(dest.iterdir()):
+            return ""                   # occupied — never write over an assignment's folder
+        dest.mkdir(parents=True, exist_ok=True)
+        for child in loose:
+            shutil.move(str(child), str(dest / child.name))
+    except OSError:
+        return ""
+    # They were working on it, so it stays armed — a migration should be invisible.
+    arm(machine_name, spec_id)
+    return spec_id
+
+
+# --------------------------------------------------------------------------- #
+# container-side paths
+# --------------------------------------------------------------------------- #
+
+def mount_dir(spec) -> str:
+    """Where the armed assignment's files sit INSIDE the container."""
+    return f"{MOUNT}/{sane_name(getattr(spec, 'id', '') or 'lab')}"
+
+
+def pristine_mount() -> str:
+    return f"{MOUNT}/{PRISTINE_DIR}"
+
+
+# --------------------------------------------------------------------------- #
+# the host side of one assignment
+# --------------------------------------------------------------------------- #
 
 def seed_host_files(spec, machine_name: str) -> list[str]:
     """Write the files the assignment CARRIES, if they are not there yet. Returns what was written.
@@ -95,9 +224,9 @@ def seed_host_files(spec, machine_name: str) -> list[str]:
     Never overwrites. A student who deleted a line is not asking for their file back — that is
     what Revert is for, and doing it silently on every Run would eat their work.
     """
-    d = lab_dir(machine_name, getattr(spec, "machine_folder", "xv6-lab"))
+    d = lab_dir(machine_name, getattr(spec, "id", ""))
     d.mkdir(parents=True, exist_ok=True)
-    (d / PRISTINE_DIR).mkdir(exist_ok=True)
+    (machine_root(machine_name) / PRISTINE_DIR).mkdir(parents=True, exist_ok=True)
     written = []
     for f in getattr(spec, "files", ()):
         if not f.seed:
@@ -106,7 +235,7 @@ def seed_host_files(spec, machine_name: str) -> list[str]:
         # carries — the header xv6 lacks and the starter program — are the only ones a student
         # cannot Revert, which is backwards: the starter program is the likeliest thing they
         # break while working out what the call should print.
-        orig = d / PRISTINE_DIR / f.name
+        orig = pristine_path(machine_name, f.name)
         if not orig.exists():
             orig.write_text(f.seed, encoding="utf-8")
         p = d / f.name
@@ -117,9 +246,9 @@ def seed_host_files(spec, machine_name: str) -> list[str]:
     return written
 
 
-def read_file(machine_name: str, name: str, folder: str = "xv6-lab") -> str | None:
+def read_file(machine_name: str, name: str, spec_id: str) -> str | None:
     """One of the student's files, or None. The reader `lab_spec.evaluate` wants."""
-    p = lab_dir(machine_name, folder) / name
+    p = lab_dir(machine_name, spec_id) / name
     try:
         return p.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -127,17 +256,15 @@ def read_file(machine_name: str, name: str, folder: str = "xv6-lab") -> str | No
 
 
 def reader_for(spec, machine_name: str):
-    folder = getattr(spec, "machine_folder", "xv6-lab")
-    return lambda name: read_file(machine_name, name, folder)
+    spec_id = getattr(spec, "id", "")
+    return lambda name: read_file(machine_name, name, spec_id)
 
 
 def pristine_reader_for(spec, machine_name: str):
     """The image's untouched copy of each file — what a `kind: edited` check compares against."""
-    folder = getattr(spec, "machine_folder", "xv6-lab")
-
     def read(name):
         try:
-            return pristine_path(machine_name, name, folder).read_text(
+            return pristine_path(machine_name, name).read_text(
                 encoding="utf-8", errors="replace")
         except OSError:
             return None
@@ -157,9 +284,9 @@ def hashes_for(spec, machine_name: str) -> dict:
     OS submission for any other assignment would travel with the wrong files or with none.
     """
     out: dict[str, dict] = {}
-    folder = getattr(spec, "machine_folder", "xv6-lab")
+    spec_id = getattr(spec, "id", "")
     for f in getattr(spec, "files", ()):
-        text = read_file(machine_name, f.name, folder)
+        text = read_file(machine_name, f.name, spec_id)
         if text is None:
             continue
         out[f.name] = {"sha256": digest(text), "lines": text.count("\n") + 1,
@@ -167,7 +294,75 @@ def hashes_for(spec, machine_name: str) -> dict:
     return out
 
 
-def collect(spec, machine_names) -> dict:
+def run_test(provider, prog: str, args: str = "") -> tuple[bool, list[str]]:
+    """Run an assignment's test and return `(ok, what it printed)` — cleaned, capped, recordable.
+
+    The cleaning and both caps are **`console_tap`'s, imported rather than reimplemented**. That
+    module has been turning a terminal's bytes into "they ran this, and it printed that" since
+    the C-Labs and T-Labs shipped, and it is tested and relied on. A second copy of its regexes
+    is exactly how this path first shipped with output that kept ANSI escapes and had no line cap
+    at all — the escapes then broke the echo-stripping the whole bracket exists to get right.
+
+    **Known duplication, deliberately left.** The SPLITTING half — telling the shell's echo and
+    the trailing prompt from the program's own output — still lives in `domain.xv6.run_output`
+    rather than in `ConsoleTap`, because ConsoleTap is keystroke-driven: it watches what a
+    student types into a pty and closes a record when the next command starts. This path has no
+    keystrokes at all. GINI issues the command over HTTP and waits for the prompt, so the two
+    halves cannot share a producer without reworking ConsoleTap to accept a command it was told
+    about rather than one it watched being typed — a change to code three lab families depend on,
+    for no behaviour a student would notice. Written up in `docs/design/user-code-lab.md` under
+    "Known duplication" for the next re-engineering instead.
+
+    One deliberate difference from ConsoleTap: interior blank lines are KEPT. It drops them,
+    which is right for a terminal transcript and wrong here — a blank line a student's program
+    printed between two sections is theirs, and a marker should see the output as it appeared.
+    """
+    from ..domain.xv6 import run_output
+    from .console_tap import MAX_LINE, MAX_LINES, clean
+    if provider is None or not prog or not hasattr(provider, "run_and_capture"):
+        return False, []
+    ok, raw = provider.run_and_capture(prog, args)
+    if not ok:
+        return False, []
+    cmd = (prog + (" " + args if args else "")).strip()
+    lines = run_output(clean(str(raw or "").encode("utf-8", "replace")), cmd)
+    kept = [ln[:MAX_LINE] for ln in lines[:MAX_LINES]]
+    if len(lines) > MAX_LINES:
+        # Said, not hidden — the same wording ConsoleTap uses, for the same reason: a marker
+        # reading five lines should know there were forty.
+        kept.append(f"… {len(lines) - MAX_LINES} more line(s)")
+    return True, kept
+
+
+def syscall_names(spec, machine_name: str) -> dict:
+    """`{number: name}` for the system calls this machine's assignment has wired.
+
+    Host-side, from the file the student edits, so it is right the moment they save — no rebuild
+    and no running kernel needed. Empty when nothing is armed or they have not got there yet,
+    which leaves the Syscall Lab on the stock names it has always used.
+    """
+    from ..domain.xv6 import parse_syscall_defines
+    for f in getattr(spec, "files", ()):
+        if str(getattr(f, "tree", "")).endswith("kernel/syscall.h"):
+            return parse_syscall_defines(read_file(machine_name, f.name,
+                                                   getattr(spec, "id", "")) or "")
+    return {}
+
+
+def progress_for(spec, machine_name: str) -> dict:
+    """How far the wiring checklist has got on this machine — what a hub tile shows.
+
+    Here rather than in the panel because the hub asks it for every assignment at once and the
+    panel asks it for one; one answer, two readers. Pure file reads, so it is cheap enough to
+    call on open and needs no poll.
+    """
+    from ..domain import lab_spec as _ls
+    res = _ls.evaluate(spec, reader_for(spec, machine_name),
+                       pristine_reader_for(spec, machine_name))
+    return _ls.progress(res)
+
+
+def collect(machine_names) -> dict:
     """`{"<machine>/<file>": {sha256, lines, bytes, text}}` — what a submission carries.
 
     The assignment's OWN file list. `xv6_shadows.collect` gathers a fixed three, which are the
@@ -179,16 +374,20 @@ def collect(spec, machine_names) -> dict:
     Every file the student owns, edited or not. An untouched `kalloc.c` is evidence too: it says
     Part B was not attempted, which a marker wants to know and cannot infer from an absence.
 
-    Scoped to the machines passed in, because lab folders are per-machine and outlive the topology
-    that made them — a student who has done three assignments has three folders, and gathering the
-    lot would put one lab's work into another lab's submission.
+    Resolved PER MACHINE, because arming is per machine: a topology with M1 on A-Lab 01 and M2 on
+    A-Lab 02 hands in both, each attributed to the machine that carried it. Keys are
+    `<machine>/<file>`, so nothing collides.
+
+    Scoped to the machines passed in, because lab folders outlive the topology that made them — a
+    student who has done three assignments has three folders, and gathering the lot would put one
+    lab's work into another lab's submission.
     """
     out: dict = {}
-    if spec is None:
-        return out
-    folder = getattr(spec, "machine_folder", "xv6-lab")
     for machine in machine_names or []:
-        d = lab_dir(machine, folder)
+        spec = active_spec(machine)
+        if spec is None:
+            continue
+        d = lab_dir(machine, getattr(spec, "id", ""))
         for f in getattr(spec, "files", ()):
             path = d / f.name
             try:
@@ -208,38 +407,52 @@ def collect(spec, machine_names) -> dict:
 
 
 def link_script(spec) -> str:
-    """The shell that runs INSIDE the container, once per Run, to attach the lab to the tree.
+    """The shell that runs INSIDE the container to attach one assignment to the tree.
 
-    Idempotent by construction, because it runs on every Run and the second run must be a no-op:
+    Run once per Run, and again whenever the student arms a different assignment — which is the
+    whole reason the mount is the parent directory. Re-arming is this script with a different
+    `spec`, not a new container.
 
-    * `[ -f $MOUNT/x ]` — seed from the image only when the student has nothing yet.
+    Idempotent by construction, because it runs repeatedly and every pass after the first must be
+    a no-op:
+
+    * `[ -f $LAB/x ]` — seed from the image only when the student has nothing yet.
     * `[ -L kernel/x ]` — and this one is the safety of the whole scheme. On a second pass the
       tree file is ALREADY a symlink, and copying *that* aside as the pristine copy would replace
       the only good original with a link to the student's edited file. Revert would then restore
       their own broken code, which is the one thing Revert must never do.
 
+    Note `ln -sf` is run unconditionally for a file that is already a link. It has to be: after
+    switching assignments the tree's link points into the PREVIOUS assignment's folder, and a
+    `[ -L ]` guard around the link would see a symlink, call it done, and leave the machine
+    building the lab the student just left.
+
     Registering user programs here rather than handing over the Makefile is deliberate: the build
     system is not the lab, there is no pedagogy in `UPROGS`, and a broken line-continuation
     produces an error about nothing the student was thinking about.
     """
+    lab, pristine = mount_dir(spec), pristine_mount()
     lines = [
         "set -e",
         "cd /opt/xv6-riscv",
-        f"mkdir -p {PRISTINE} {MOUNT}",
+        f"mkdir -p {shlex.quote(pristine)} {shlex.quote(lab)}",
     ]
     for f in getattr(spec, "files", ()):
-        name, tree = shlex.quote(f.name), shlex.quote(f.tree)
+        mine = shlex.quote(f"{lab}/{f.name}")
+        orig = shlex.quote(f"{pristine}/{f.name}")
+        tree = shlex.quote(f.tree)
         # Written as nested `if` blocks rather than `[ -f x ] && cp x y`: under `set -e` a false
         # test at the end of an && chain is a non-zero status, and the script would exit there —
         # silently, on the second Run, having linked only the files before it.
+        # Order matters: capture the original FIRST, then seed the student's copy from it.
+        # Seeding from the tree instead would copy a symlink into the assignment they just
+        # left, so switching assignments would carry the old one's edits into the new one.
         lines += [
-            f"if [ ! -f {MOUNT}/{name} ]; then",
-            f"  if [ -f {tree} ]; then cp {tree} {MOUNT}/{name}; fi",
+            f"if [ ! -L {tree} ] && [ -f {tree} ] && [ ! -f {orig} ]; then",
+            f"  cp {tree} {orig}",
             "fi",
-            f"if [ ! -L {tree} ] && [ -f {tree} ] && [ ! -f {PRISTINE}/{name} ]; then",
-            f"  cp {tree} {PRISTINE}/{name}",
-            "fi",
-            f"if [ ! -L {tree} ]; then ln -sf {MOUNT}/{name} {tree}; fi",
+            f"if [ ! -f {mine} ] && [ -f {orig} ]; then cp {orig} {mine}; fi",
+            f"ln -sf {mine} {tree}",
         ]
     for prog in getattr(spec, "uprogs", lambda: ())():
         # `awk -v` rather than splicing the name into the awk program: unquoted in awk source
@@ -256,10 +469,6 @@ def link_script(spec) -> str:
     return "\n".join(lines)
 
 
-def pristine_path(machine_name: str, name: str, folder: str = "xv6-lab") -> Path:
-    return lab_dir(machine_name, folder) / PRISTINE_DIR / name
-
-
 def state_of(spec, machine_name: str, name: str) -> str:
     """`"edited"` | `"untouched"` | `"missing"` | `"unknown"` — what the file list shows.
 
@@ -267,11 +476,11 @@ def state_of(spec, machine_name: str, name: str) -> str:
     whether the file differs from the image's cannot be answered, and guessing "untouched" would
     show a student a green tick for work they have not started.
     """
-    folder = getattr(spec, "machine_folder", "xv6-lab")
-    mine = read_file(machine_name, name, folder)
+    spec_id = getattr(spec, "id", "")
+    mine = read_file(machine_name, name, spec_id)
     if mine is None:
         return "missing"
-    orig = pristine_path(machine_name, name, folder)
+    orig = pristine_path(machine_name, name)
     try:
         return "edited" if mine != orig.read_text(encoding="utf-8", errors="replace") else "untouched"
     except OSError:
@@ -285,12 +494,12 @@ def revert(spec, machine_name: str, name: str) -> tuple[bool, str]:
     finally got working. The kernel does not change until they press Load, which is the same rule
     as every other edit.
     """
-    folder = getattr(spec, "machine_folder", "xv6-lab")
-    orig = pristine_path(machine_name, name, folder)
+    spec_id = getattr(spec, "id", "")
+    orig = pristine_path(machine_name, name)
     if not orig.is_file():
         return False, f"no original of {name} yet — press Run once so GINI can take a copy"
     try:
-        (lab_dir(machine_name, folder) / name).write_text(
+        (lab_dir(machine_name, spec_id) / name).write_text(
             orig.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     except OSError as e:
         return False, f"could not revert {name}: {e}"

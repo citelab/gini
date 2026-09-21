@@ -65,6 +65,7 @@ def reveal(path) -> bool:
 
 class UserCode(QDialog):
     load_result = Signal(bool, str)       # (ok, log) from the Load worker thread
+    test_result = Signal(bool, object)    # (ok, printed lines) from the Run test worker
 
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
                  spec=None, live: bool = True, recorder=None) -> None:
@@ -78,7 +79,7 @@ class UserCode(QDialog):
         # successes cannot tell "never tried" from "tried nine times". Same reason the shadow bar
         # records its builds.
         self._recorder = recorder
-        self.spec = spec or _lab.active_spec()
+        self.spec = spec or _lab.active_spec(str(getattr(device, "name", "") or ""))
         self._rows: dict[str, QLabel] = {}
         self._checks: list[tuple] = []
 
@@ -99,6 +100,7 @@ class UserCode(QDialog):
         root.addWidget(scroll, 1)
         self._build_build_bar(root)
         self.load_result.connect(self._on_load_result)
+        self.test_result.connect(self._on_test_result)
         standalone(self, f"User Code — {getattr(device, 'name', 'xv6')}")
         self.refresh()
 
@@ -121,7 +123,7 @@ class UserCode(QDialog):
 
     def _dir(self):
         return _lab.lab_dir(str(getattr(self.device, "name", "") or ""),
-                            getattr(self.spec, "machine_folder", "xv6-lab"))
+                            getattr(self.spec, "id", ""))
 
     def _reveal(self) -> None:
         if not reveal(self._dir()):
@@ -224,6 +226,16 @@ class UserCode(QDialog):
         self._load_btn.clicked.connect(self._load)
         self._load_btn.setEnabled(bool(self.live and self.provider is not None))
         bar.addWidget(self._load_btn)
+        # The assignment's own test, run from here rather than typed at the Keyboard. That is what
+        # makes its output recordable: GINI issues the command and waits for the prompt, so both
+        # ends of the run are known and what it printed can be attached to the run that printed
+        # it. A program the student types is the same program and an unattributable byte stream.
+        self._test_btn = QPushButton(f"  Run {self._test_prog() or 'test'}")
+        self._test_btn.setStyleSheet(self._btn_css())
+        self._test_btn.clicked.connect(self._run_test)
+        self._test_btn.setEnabled(bool(self.live and self.provider is not None
+                                       and self._test_prog()))
+        bar.addWidget(self._test_btn)
         self._progress = QLabel("")
         self._progress.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
         bar.addWidget(self._progress); bar.addStretch(1)
@@ -237,6 +249,54 @@ class UserCode(QDialog):
             "Press Load to compile your kernel and restart the machine with it."
             if self.live else "Start the machine to build your code.")
         root.addWidget(self._log)
+
+    def _test_prog(self) -> str:
+        return str(getattr(self.spec, "test_prog", "") or "")
+
+    def _run_test(self) -> None:
+        """Run the assignment's test and keep what it printed.
+
+        For an A-Lab the output IS the deliverable — the assignment is a program that reports
+        system information — so a chain that records the build and the launch but not the answer
+        is a record of everything except whether it worked.
+        """
+        prog = self._test_prog()
+        if self.provider is None or not prog:
+            return
+        if not hasattr(self.provider, "run_and_capture"):
+            self._log.setPlainText(
+                "This machine's agent is older than the test runner — rebuild the gini-xv6 image.")
+            return
+        self._test_btn.setEnabled(False)
+        self._log.setPlainText(f"Running {prog}…")
+        prov = self.provider
+
+        def work():
+            try:
+                ok, out = _lab.run_test(prov, prog)
+            except Exception as e:        # noqa: BLE001 — a test must not take the face down
+                ok, out = False, [f"{type(e).__name__}: {e}"]
+            self.test_result.emit(bool(ok), list(out or []))
+
+        run_off_gui(self, work)
+
+    def _on_test_result(self, ok: bool, out) -> None:
+        self._test_btn.setEnabled(bool(self.live and self.provider is not None
+                                       and self._test_prog()))
+        prog = self._test_prog()
+        lines = list(out or [])
+        if not ok:
+            why = getattr(self.provider, "last_run_error", "") or "it did not start"
+            self._log.setPlainText(f"{prog} did not run — {why}")
+        elif not lines:
+            self._log.setPlainText(f"{prog} ran and printed nothing.")
+        else:
+            self._log.setPlainText("\n".join(lines))
+        # Recorded either way. "Ran it and it printed nothing" is a result a marker wants, and so
+        # is a test that would not start — both are the student's evidence about their own code.
+        from .lab_record import record
+        record(self._recorder, "note_spawn", str(getattr(self.device, "name", "") or ""),
+               prog, "launch", None, lines, True)
 
     def _load(self) -> None:
         if self.provider is None:

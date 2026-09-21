@@ -221,17 +221,35 @@ def tune(device: str, knob: str, before, after) -> tuple[str, dict] | None:
 
 
 def spawn(device: str, what: str, action: str = "launch",
-          pid: int | None = None) -> tuple[str, dict]:
+          pid: int | None = None, out: list[str] | None = None,
+          test: bool = False) -> tuple[str, dict]:
     """A program started or a process killed on the running kernel.
 
     `alloc 8 &`, `writer`, `grind`, `forktest` — the workloads the OS labs are watched through.
     Starting one is how a student makes the phenomenon they are studying happen, so it is the act
     that gives every measurement after it its meaning.
+
+    `out` is what it PRINTED, and for an A-Lab it is the deliverable rather than context: the
+    assignment is a program that reports system information, so "it compiled and was launched"
+    without the output is a record of everything except the answer. Captured only for a run GINI
+    itself issued and waited for — the console is a byte stream, and output can only be attributed
+    to a program when we know exactly where that program's run began and ended.
+
+    `test` marks the assignment's own prescribed test rather than one of the workloads above, so
+    a marker can find the run that is supposed to demonstrate the work without knowing which
+    program each assignment names.
+
+    TRUNCATED, not summarised — the same rule as `command`, and for the same reason: guessing
+    which later line mattered would be inventing evidence.
     """
     d = {"on": clip(device, 64), "what": clip(what, 80),
          "action": "kill" if action == "kill" else "launch"}
     if pid is not None:
         d["pid"] = int(pid)
+    if out is not None:
+        d["out"] = [clip(x, 200) for x in out]
+    if test:
+        d["test"] = True
     return SPAWN, d
 
 

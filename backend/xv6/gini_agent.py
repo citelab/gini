@@ -74,6 +74,35 @@ PROGRAMS = ["spin", "busy", "walker", "toucher", "alloc", "writer", "sgrind", "m
             "grind", "forktest"]
 
 
+def _safe_prog(s):
+    """The program name, reduced to what an xv6 user program can actually be called.
+
+    Until an assignment could name its own test, `PROGRAMS` WAS the injection guard: /run writes
+    its command into a real shell, and only names on that fixed list ever reached it. Accepting a
+    lab's program means the name no longer comes from a fixed set, so it has to be filtered on its
+    own or `sysinfotest; rm -rf /` reaches the shell. Same reasoning as `_safe_args`, one field
+    over.
+    """
+    return "".join(c for c in (s or "").strip() if c.isalnum() or c == "_")[:32]
+
+
+def _runnable(prog):
+    """Can this kernel actually exec `prog`?
+
+    `PROGRAMS` is the image's own workload set, fixed when the image was built. An A-Lab's test
+    program is compiled by the STUDENT, into this tree, long afterwards — so a list can never
+    know about it, and a lab whose whole point is running the thing you just wrote would be
+    refused by the launcher.
+
+    The build leaves `user/_<name>` for every program in UPROGS, and that is exactly the set
+    `mkfs` puts into fs.img. Asking the filesystem is therefore a fact about the kernel that is
+    running rather than a list somebody has to remember to update.
+    """
+    if prog in PROGRAMS:
+        return True
+    return os.path.isfile(os.path.join(XV6_DIR, "user", "_" + prog))
+
+
 def _safe_args(s: str) -> str:
     """Sanitise the argument string for a launch.
 
@@ -963,21 +992,31 @@ class Handler(BaseHTTPRequestHandler):
                 _SERIAL.write("\x02" + str(pv) + "\n")   # Ctrl-B <digits> newline
                 out = (out + f" policy={pv}").strip()
             self._send({"ok": True, "out": out})
-        elif u.path == "/run":                       # launch a program in the background
-            prog = (q.get("prog", [""])[0] or "").strip()
+        elif u.path == "/run":                       # launch a program (background by default)
+            prog = _safe_prog(q.get("prog", [""])[0])
             args = _safe_args(q.get("args", [""])[0] or "")
-            cmd = (prog + (" " + args if args else "")) + " &\n"
+            # `fg=1` runs it in the FOREGROUND — no `&`. The Machine Lab's workloads are meant to
+            # keep running while the student watches a face, so background stays the default. A
+            # lab's test is the opposite: it prints and exits, and its output can only be attached
+            # to the run that produced it if the shell does not hand the prompt back first.
+            fg = (q.get("fg", [""])[0] or "").strip() in ("1", "true", "yes")
+            cmd = (prog + (" " + args if args else "")) + ("\n" if fg else " &\n")
             if not prog:
                 self._send({"ok": False, "prog": prog, "error": "no program named"})
-            elif prog not in PROGRAMS:
-                # Almost always a stale container: the name was added to the source but this image
-                # predates it. Say so, rather than returning a bare false that looks like a hang.
+            elif not _runnable(prog):
+                # Two causes now, and the student can only act on the right one if the message
+                # separates them. Their OWN program missing means they have not pressed Load
+                # since writing it. One of GINI's missing still means a stale container — the
+                # name was added to the source but this image predates it — which is the bug
+                # this message was written for in the first place, and it still needs saying.
                 self._send({"ok": False, "prog": prog, "error":
-                            f"this xv6 image does not know '{prog}' — it was built before the "
-                            f"program was added. Rebuild the image. Known: "
-                            f"{', '.join(PROGRAMS)}"})
+                            f"this kernel has no program called '{prog}'. If it is your own, "
+                            f"press Load to compile it in first. If it is one of GINI's, this "
+                            f"image was built before it existed. Rebuild the gini-xv6 image. "
+                            f"Built in: {', '.join(PROGRAMS)}"})
             else:
-                self._send({"ok": bool(_SERIAL.write(cmd)), "prog": prog, "args": args})
+                self._send({"ok": bool(_SERIAL.write(cmd)), "prog": prog, "args": args,
+                            "fg": fg})
         elif u.path == "/kill":                       # CONTROL-PLANE kill (init/sh guarded by UI)
             try:
                 pid = int(q.get("pid", ["0"])[0])

@@ -2,6 +2,7 @@
 # The handout is docs/labs/a-lab-01-sysinfo.md; `where` and `hint` are its words.
 id: syscall-sysinfo
 title: "A-Lab 01 — sysinfo"
+summary: "Add a system call that reports free memory, process counts and uptime."
 
 # What each part IS. The face shows these beside the counts, because "A: 0/6" on
 # its own tells a student nothing, and the handout already calls them Part A and B.
@@ -9,7 +10,6 @@ parts:
   A: "Add the system call"
   B: "Make it tell the truth"
   C: "Make it remember"
-machine_folder: xv6-lab
 syscall_number: 23          # stock xv6 ends at SYS_sync = 22
 
 files:

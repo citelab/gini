@@ -82,20 +82,58 @@ def _pid_color(pid) -> str:
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
-def tint(hex_colour: str, alpha: int) -> str:
-    """`#4c8dff` -> `rgba(76,141,255,30)` — the theme's own hue, washed.
-
-    Derived rather than listed, so a card's tint cannot drift from its accent and a new theme
-    needs no extra table. Alpha is Qt's 0-255, matching the `*_soft` tokens in theme/tokens.py.
-    """
+def _rgb(hex_colour: str) -> tuple[int, int, int] | None:
+    """`#4c8dff` -> `(76, 141, 255)`, or None for anything that is not six hex digits."""
     h = (hex_colour or "").lstrip("#")
     if len(h) != 6:
-        return "transparent"
+        return None
     try:
-        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     except ValueError:
+        return None
+
+
+def shift(hex_colour: str, delta: int) -> str:
+    """Move every channel `delta` steps toward white (+) or black (-), clamped.
+
+    Additive rather than a percentage, deliberately: a percentage of `#0d0d0d` — High
+    Contrast's band — is nothing at all, and that is the one theme where an edge has to be
+    visible on a screen that offers no other cue.
+
+    A colour that will not parse degrades to `transparent` rather than being passed through:
+    this runs inside a stylesheet f-string, and Qt discards the whole rule when one property
+    fails to parse, so echoing the bad value back would cost the card its fill AND its border.
+    """
+    rgb = _rgb(hex_colour)
+    if rgb is None:
         return "transparent"
-    return f"rgba({r},{g},{b},{max(0, min(255, int(alpha)))})"
+    return "#%02x%02x%02x" % tuple(max(0, min(255, c + delta)) for c in rgb)
+
+
+def over(base: str, top: str, alpha: int) -> str:
+    """`top` laid over `base` at `alpha` (0-255), resolved to one solid colour.
+
+    A translucent `rgba(...)` composites over whatever happens to be behind it — the band — so
+    a tinted card could only ever come out *lighter* than its surroundings in a dark theme and
+    darker in a light one. That is the wrong degree of freedom for a card that has to look sunk
+    into the band in all seven themes: resolving the blend here lets the card pick its own
+    floor first and wear the hue second.
+
+    Alpha is Qt's 0-255, matching the `*_soft` tokens in theme/tokens.py.
+    """
+    b, t = _rgb(base), _rgb(top)
+    if b is None:
+        return "transparent"
+    if t is None:
+        return base                            # no accent to wash on: the bare floor will do
+    a = max(0, min(255, int(alpha))) / 255.0
+    return "#%02x%02x%02x" % tuple(round(bc + (tc - bc) * a) for bc, tc in zip(b, t))
+
+
+#: Consecutive failed reads before the machine counts as gone. Already the threshold the log
+#: warning used; the live edges now hang off the same number so the front door goes dark at the
+#: same moment the log says readings are failing, rather than disagreeing with it.
+READS_BEFORE_GONE = 5
 
 
 class LayerCard(QFrame):
@@ -123,12 +161,28 @@ class LayerCard(QFrame):
         # use for a callout, which is why it reads as belonging here. Both are derived from the
         # theme's own accent, so this follows a theme change rather than fighting it. A dark
         # theme takes a stronger wash because the same alpha over a dark ground reads fainter.
-        wash = tint(acc, 34 if getattr(t, "dark", False) else 22)
-        self.setStyleSheet(
-            f"LayerCard{{background:{wash};border:1px solid {t.line};"
-            f"border-left:4px solid {acc};border-radius:10px;}}"
-            f"LayerCard:hover{{background:{t.panel2};border:1px solid {acc};"
-            f"border-left:4px solid {acc};}}")
+        #
+        # The card sits a shade below the band it is in, and that is ALL the depth it gets.
+        # A literal sunken treatment was built and rejected on sight. Recorded because the
+        # dead end is cheap to walk into twice: Qt stylesheets have no `box-shadow: inset`
+        # and ignore `QFrame.Sunken` on any widget carrying a stylesheet, so the only way to
+        # fake a recess is a `qlineargradient` shadow under the top lip. It works — the
+        # pixels measured exactly as intended in all seven themes — and it looks awful,
+        # because a soft shadow on a small flat card reads as a smudge, not as depth. A 1px
+        # bevel was the other attempt and is simply invisible at that size. Neither is worth
+        # having; a flat fill one step under the band already separates card from band.
+        dark = bool(getattr(t, "dark", False))
+        # Wash first, darken second. Doing it the other way round let a bright accent lift the
+        # fill back up to the band's own level — Process Scheduler's red is far lighter than a
+        # dark panel, so the card meant to sit deepest came out the flattest. Darkening the
+        # washed colour instead makes the drop the same for all twelve hues.
+        self._fill = shift(over(t.panel2, acc, 34 if dark else 22), -22 if dark else -14)
+        self._hover = over(t.panel2, acc, 26 if dark else 16)
+        # Dark until something proves otherwise. A card that lights up the moment it is built
+        # would be claiming a live kernel before a single byte has been read off one, and the
+        # whole point of the edge is that it cannot say that.
+        self._live = False
+        self._apply_style()
         v = QVBoxLayout(self); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(3)
         row = QHBoxLayout(); row.setSpacing(6)
         ttl = QLabel(title)
@@ -143,6 +197,44 @@ class LayerCard(QFrame):
         self.stat.setStyleSheet(
             _scss(f"color:{acc};font-family:monospace;font-size:12px;font-weight:600;border:none;"))
         v.addWidget(self.stat)
+
+    def _apply_style(self) -> None:
+        """The thick left edge is a LIVE INDICATOR, not decoration.
+
+        It is lit only while this face is showing data read from a running kernel: dark in Demo,
+        dark in Real before the machine has answered, and dark again once it stops answering.
+        That makes the front door readable at a glance — twelve dark edges means nothing on this
+        page is telling you about a real machine, which is the one thing a student can otherwise
+        mistake, because the Demo stand-in draws exactly the same numbers in exactly the places
+        a live kernel does.
+
+        Dark is the card's OWN fill rather than `transparent` or a grey: it keeps the 4px
+        geometry, so nothing on the card moves as the edge lights and goes out — the edge is
+        part of the box model, and swapping it for a 1px line would shuffle every title three
+        pixels sideways every time a read failed.
+        """
+        t = self.theme.theme
+        acc = t.accent_for(self._accent)
+        edge = acc if self._live else self._fill
+        self.setStyleSheet(
+            f"LayerCard{{background:{self._fill};border:1px solid {t.line};"
+            f"border-left:4px solid {edge};border-radius:10px;}}"
+            # Hover carries the accent the whole way round, so the left edge travels rather
+            # than sitting there while the other three sides change without it. The hue is the
+            # card's identity and shows on hover whether or not the machine is live; only the
+            # resting edge carries the signal.
+            f"LayerCard:hover{{background:{self._hover};"
+            f"border:1px solid {acc};border-left:4px solid {acc};}}")
+
+    def set_live(self, live: bool) -> None:
+        """Light or extinguish the edge. Cheap to call on every poll: re-applying a stylesheet
+        forces a full restyle of the widget and its children, so an unchanged value returns
+        without touching Qt at all."""
+        live = bool(live)
+        if live == self._live:
+            return
+        self._live = live
+        self._apply_style()
 
     def set_stat(self, text) -> None:
         self.stat.setText(text or "")
@@ -331,7 +423,8 @@ class MachineLab(QDialog):
     launch_failed = Signal(str)            # a refused launch, from the worker thread that tried it
 
     def __init__(self, parent, theme: ThemeManager, device, state: MachineState | None = None,
-                 live=False, on_console=None, on_log=None, recorder=None) -> None:
+                 live=False, on_console=None, on_log=None, recorder=None,
+                 on_relink=None) -> None:
         super().__init__(parent)
         # Its own window, not an owned dialog: on Windows an owned dialog gets no
         # taskbar button and Alt+Tab skips it. See ui/windowing.
@@ -340,6 +433,10 @@ class MachineLab(QDialog):
         self.device = device
         self.on_console = on_console
         self.on_log = on_log                  # (level, message) -> mirror to the GINI Console
+        # (machine, spec) -> re-run the link script in the running container. Supplied by whoever
+        # owns the orchestrator; this window does not hold the engine, the same way it does not
+        # open its own terminal. None means "no live machine to re-link", which is not an error.
+        self.on_relink = on_relink
         self._shadows: dict = {}              # last shadow manifest (name -> ShadowStatus)
         self._shadow_present_seen = False     # for the "shadow detected" one-shot console line
         self._reenable_shadow = None          # after a Load, re-run the shadow once the kernel is back
@@ -534,7 +631,7 @@ class MachineLab(QDialog):
         # door into the kernel, the kernel, the hardware under it. `LAYERS` is the whole table —
         # see the note beside it for why the hues are what they are.
         from ..services.xv6_lab import active_spec as _active_lab
-        _lab_spec = _active_lab()
+        _lab_spec = _active_lab(self._dev_name())
         for band in LAYERS:
             if band.boundary:
                 col.addWidget(self._boundary(band.boundary))
@@ -542,9 +639,12 @@ class MachineLab(QDialog):
             for f in band.faces:
                 blurb = f.blurb
                 if f.key == "usercode":
-                    if _lab_spec is None:
-                        continue              # no assignment armed: no face for it
-                    blurb = f"{_lab_spec.title} — {f.blurb}"
+                    # Shown whether or not anything is armed. It used to be dropped when
+                    # `active_spec()` returned None, which is exactly when a student most needs
+                    # it: None was also what that function returned once a SECOND assignment
+                    # shipped, so adding a lab made the door to every lab disappear.
+                    blurb = (f"{_lab_spec.title} — {f.blurb}" if _lab_spec is not None
+                             else "Pick your assignment, edit its files, and Load.")
                 entries.append((f.icon, f.title, blurb, f.hue, getattr(self, f.opens)))
             if entries:
                 col.addWidget(self._layer_band(band.name, entries))
@@ -690,11 +790,17 @@ class MachineLab(QDialog):
             return
         self._retire("_sclab")
         self._rec("note_lab_open", self._dev_name(), "System Calls")
+        from ..services.xv6_lab import active_spec, syscall_names
         from .syscall_lab import SyscallLab
         # live /sc over the serial when running; DemoScheduler.sc() offline
         src = getattr(self.state.provider, "sc", None)
+        # The names of any calls the student has added, read off their own syscall.h. Without
+        # this their `sysinfo` shows up as `sys23` in the panel the handout sends them to to
+        # watch it work — which reads as "it isn't there".
+        name = self._dev_name()
         self._sclab = SyscallLab(self, self.theme, device=self.device,
-                                 sc_source=src if callable(src) else None)
+                                 sc_source=src if callable(src) else None,
+                                 name_extra=syscall_names(active_spec(name), name))
         self._sclab.show(); self._sclab.raise_()
 
     def _open_lock_lab(self) -> None:
@@ -799,14 +905,19 @@ class MachineLab(QDialog):
         self._storage.raise_()
 
     def _open_user_code(self) -> None:
-        """The assignment's own face: files, what is changed, the wiring checklist, and Load."""
+        """The assignment hub: a tile per A-Lab, and the place this machine's one gets chosen.
+
+        The hub rather than the assignment's own panel, because "which assignment?" has to have
+        an answer before "which files?" does — and with more than one shipped, nothing else was
+        asking the question.
+        """
         self._retire("_usercode")
         self._rec("note_lab_open", self._dev_name(), "User Code")
-        from ..services.xv6_lab import active_spec
-        from .user_code import UserCode
-        self._usercode = UserCode(self, self.theme, device=self.device,
-                                  provider=self.state.provider, spec=active_spec(),
-                                  live=self.live, recorder=self._recorder)
+        from .user_code_lab import UserCodeLab
+        self._usercode = UserCodeLab(self, self.theme, device=self.device,
+                                     provider=self.state.provider, live=self.live,
+                                     recorder=self._recorder, on_log=self.on_log,
+                                     on_relink=self.on_relink)
         self._usercode.show(); self._usercode.raise_()
 
     def _open_syscall_builder(self) -> None:
@@ -1634,7 +1745,7 @@ class MachineLab(QDialog):
             # Report a run of failures once rather than every poll: a single dropped read is
             # normal under load, a sustained run means the machine is gone.
             self._read_fails = (self._read_fails + 1) if err else 0
-            if err and self._read_fails == 5:
+            if err and self._read_fails == READS_BEFORE_GONE:
                 self._log("error", f"Machine Lab: readings are failing — {err}")
         self._busy = False                      # cleared LAST: the read is now wholly accounted for
         if self._closed:
@@ -1737,6 +1848,25 @@ class MachineLab(QDialog):
                 else "Real mode is selected but no data has arrived yet — waiting for the xv6 "
                      "machine…")
 
+    def showing_live_kernel(self) -> bool:
+        """True only while this window is displaying data read from a running xv6.
+
+        Three things have to hold, and each rules out a state a student could otherwise
+        misread:
+
+        * Real mode — the Demo plane produces a full, plausible feed with no kernel behind it.
+        * a snapshot has landed — Real is selected the moment the user clicks it, which is
+          usually BEFORE the topology is up, so mode alone says nothing about a machine.
+        * reads are not failing — a machine that dies keeps `latest` at its final snapshot, so
+          without this the page would go on presenting a dead kernel's last words as current.
+
+        Deliberately the exact inverse of the banner's own test for the first two, so "no live
+        data" appears at the same instant the edges go dark instead of a beat before or after.
+        """
+        return (self.state.mode == "real"
+                and self.state.latest is not None
+                and self._read_fails < READS_BEFORE_GONE)
+
     def _configured_cores(self) -> int:
         """The number of cores QEMU was launched with (derived from the Size tier), so the count is
         correct even when cores are idle — idle cores emit no per-core dump line, which is why a
@@ -1754,6 +1884,9 @@ class MachineLab(QDialog):
         cards = getattr(self, "_ov_cards", None)
         if not cards:
             return
+        live = self.showing_live_kernel()
+        for _c in cards.values():
+            _c.set_live(live)                    # the accent edges ARE the liveness display
         snap = self.state.latest
         procs = snap.procs if snap else []
         user = [p for p in procs if p.pid and p.pid > 2]     # everything past init(1)+sh(2)

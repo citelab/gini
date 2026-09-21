@@ -1165,10 +1165,15 @@ class RuntimeCompiler:
             # always the same three files in one directory, while a lab's file list belongs to the
             # assignment and is spread across kernel/ and user/. Mounted even with no assignment
             # armed, so arming one later does not need the machine restarted.
+            #
+            # The mount is the machine's WHOLE lab directory — one subdirectory per assignment —
+            # rather than the armed assignment's folder. A bind mount's host side is fixed when
+            # this compose file is written, so mounting the folder itself would mean arming a
+            # different assignment could not take effect until the next Run. This way the
+            # container path never changes and re-arming is one exec (see xv6_lab.link_script).
             from .xv6_lab import MOUNT as _lab_mount
-            from .xv6_lab import active_spec as _active_spec
-            from .xv6_lab import lab_dir as _lab_dir
-            _lab_host = _lab_dir(d.name, getattr(_active_spec(), "machine_folder", "xv6-lab"))
+            from .xv6_lab import machine_root as _lab_root
+            _lab_host = _lab_root(d.name)
             try:
                 _lab_host.mkdir(parents=True, exist_ok=True)
             except OSError:

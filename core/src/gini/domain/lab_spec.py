@@ -88,7 +88,17 @@ class GradeItem:
 class LabSpec:
     id: str
     title: str
-    machine_folder: str = "xv6-lab"
+    #: One line for the hub tile — what this assignment IS, in the words a student would use
+    #: before they have read the handout. The title is a name; this is the sentence under it.
+    summary: str = ""
+    #: The program a student runs to demonstrate the assignment works, and the one whose output
+    #: is captured into the proof. Left empty it is the assignment's first user program, which is
+    #: what a single-program lab wants; name it when a lab ships more than one.
+    test_program: str = ""
+    #: The accent this assignment wears in the hub. Optional: left empty, the hub assigns one
+    #: from its own palette by position, which is enough while assignments are added at the end.
+    #: Pin it here if a lab should keep its colour when another is added before it alphabetically.
+    hue: str = ""
     syscall_number: int = 0
     files: tuple[LabFile, ...] = ()
     checks: tuple[Check, ...] = ()
@@ -115,6 +125,14 @@ class LabSpec:
     def uprogs(self) -> tuple[str, ...]:
         return tuple(f.uprog for f in self.files if f.uprog)
 
+    @property
+    def test_prog(self) -> str:
+        """The program the Run test button launches, or "" if the lab has none."""
+        if self.test_program:
+            return self.test_program
+        progs = self.uprogs()
+        return progs[0] if progs else ""
+
 
 # --------------------------------------------------------------------------- #
 # loading
@@ -137,7 +155,8 @@ def from_dict(d: dict) -> LabSpec:
                             expect=g.get("expect"), tolerance=g.get("tolerance"))
                   for g in (d.get("grade") or []) if g.get("id"))
     return LabSpec(id=str(d.get("id", "")), title=str(d.get("title", "")),
-                   machine_folder=str(d.get("machine_folder", "xv6-lab")),
+                   summary=str(d.get("summary", "") or ""), hue=str(d.get("hue", "") or ""),
+                   test_program=str(d.get("test_program", "") or ""),
                    syscall_number=int(d.get("syscall_number", 0) or 0),
                    files=files, checks=checks, grade=grade,
                    part_titles={str(k): str(v) for k, v in (d.get("parts") or {}).items()})
