@@ -917,7 +917,7 @@ class MachineLab(QDialog):
         self._usercode = UserCodeLab(self, self.theme, device=self.device,
                                      provider=self.state.provider, live=self.live,
                                      recorder=self._recorder, on_log=self.on_log,
-                                     on_relink=self.on_relink)
+                                     on_relink=self.on_relink, state=self.state)
         self._usercode.show(); self._usercode.raise_()
 
     def _open_syscall_builder(self) -> None:

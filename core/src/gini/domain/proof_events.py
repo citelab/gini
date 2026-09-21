@@ -305,13 +305,26 @@ def observe(device: str, kind: str, detail: str, pid: int | None = None) -> tupl
 
 
 def measure(name: str, result: dict) -> tuple[str, dict]:
-    """A Source/Sink rider's structured reading. The measurement is the point; the raw stream is
-    not recorded, because it is long, noisy and adds nothing an instructor would read."""
+    """A structured reading GINI took: a Source/Sink rider's, or an A-Lab metric's.
+
+    The measurement is the point; the raw stream is not recorded, because it is long, noisy and
+    adds nothing an instructor would read. (An A-Lab's test output IS recorded, on its `spawn`
+    entry — there the output is the deliverable rather than the means.)
+
+    `pending` marks a reading that COULD NOT BE TAKEN, and it is why this field exists at all: an
+    A-Lab metric comparing what a student's `sysinfo` reports against what GINI independently
+    measured needs something to have moved between two readings, and on an idle machine there is
+    nothing to compare. Recording that as `ok: false` would mark a student down for a workload
+    that did not run. Absent unless true, so nothing that reads an older chain changes.
+    """
     result = dict(result or {})
-    return MEASURE, {"name": clip(name, 64), "ok": bool(result.get("ok")),
-                     "measurement": {str(k): clip(v, 64)
-                                     for k, v in (result.get("measurement") or {}).items()},
-                     "summary": clip(result.get("summary", ""))}
+    d = {"name": clip(name, 64), "ok": bool(result.get("ok")),
+         "measurement": {str(k): clip(v, 64)
+                         for k, v in (result.get("measurement") or {}).items()},
+         "summary": clip(result.get("summary", ""))}
+    if result.get("pending"):
+        d["pending"] = True
+    return MEASURE, d
 
 
 def invoke(device_id: str, result_text: str) -> tuple[str, dict]:

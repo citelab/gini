@@ -529,6 +529,17 @@ class ProofRecorder:
             ev.build(str(device or ""), str(shadow or ""), bool(ok), dict(sources or {}),
                      list(log or []), action)))
 
+    def note_measure(self, name: str, result) -> None:
+        """One reading GINI took and stands behind — an A-Lab metric, or anything else measured
+        deliberately rather than observed in passing.
+
+        Separate from `_rider_ran`, which is driven off the bus and rate-limited because a rider
+        streams. A grading run happens when a student asks for it, so every metric it produces is
+        recorded: a metric that could not be measured is evidence too, and `pending` carries that
+        rather than it arriving as a failure.
+        """
+        self._guard(lambda: self._record(ev.measure(str(name or ""), dict(result or {}))))
+
     def note_observed(self, device: str, kind: str, detail: str,
                       pid: int | None = None) -> None:
         """A phenomenon the kernel showed — from MachineState's watcher, off the poll thread.

@@ -66,13 +66,18 @@ def reveal(path) -> bool:
 class UserCode(QDialog):
     load_result = Signal(bool, str)       # (ok, log) from the Load worker thread
     test_result = Signal(bool, object)    # (ok, printed lines) from the Run test worker
+    grade_result = Signal(object)         # (results,) from the grading worker
+    grade_step = Signal(str)              # progress, because a grading run takes ~15 seconds
 
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
-                 spec=None, live: bool = True, recorder=None) -> None:
+                 spec=None, live: bool = True, recorder=None, state=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.provider = provider
+        # GINI's own view of the kernel, for grading. Read through the state rather than through
+        # anything the student's program touches — that independence IS the measurement.
+        self.state = state
         self.live = live
         # The chain. A student's Loads — the failures especially — ARE the assignment: an hour
         # spent on a kernel that would not compile is an hour of work, and a record showing only
@@ -101,6 +106,8 @@ class UserCode(QDialog):
         self._build_build_bar(root)
         self.load_result.connect(self._on_load_result)
         self.test_result.connect(self._on_test_result)
+        self.grade_result.connect(self._on_grade_result)
+        self.grade_step.connect(lambda m: self._log.setPlainText(f"Checking… {m}"))
         standalone(self, f"User Code — {getattr(device, 'name', 'xv6')}")
         self.refresh()
 
@@ -236,6 +243,15 @@ class UserCode(QDialog):
         self._test_btn.setEnabled(bool(self.live and self.provider is not None
                                        and self._test_prog()))
         bar.addWidget(self._test_btn)
+        # The wiring checklist asks "did you connect it up?" and a student can pass all of it with
+        # a call that returns zero. This asks whether it tells the TRUTH, by comparing what their
+        # program prints against what GINI reads from the kernel's own structures.
+        self._grade_btn = QPushButton("  Check my work")
+        self._grade_btn.setStyleSheet(self._btn_css())
+        self._grade_btn.clicked.connect(self._grade)
+        self._grade_btn.setEnabled(bool(self.live and self.provider is not None
+                                        and getattr(self.spec, "grade", ())))
+        bar.addWidget(self._grade_btn)
         self._progress = QLabel("")
         self._progress.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
         bar.addWidget(self._progress); bar.addStretch(1)
@@ -297,6 +313,55 @@ class UserCode(QDialog):
         from .lab_record import record
         record(self._recorder, "note_spawn", str(getattr(self.device, "name", "") or ""),
                prog, "launch", None, lines, True)
+
+    def _grade(self) -> None:
+        """Measure the assignment's declared metrics against the running kernel.
+
+        Off the GUI thread and slow on purpose — it takes two readings with real work in between,
+        because half the metrics are about MOVEMENT and a single reading cannot see any of it.
+        """
+        if self.provider is None or not getattr(self.spec, "grade", ()):
+            return
+        self._grade_btn.setEnabled(False)
+        self._log.setPlainText("Checking…")
+        prov, spec = self.provider, self.spec
+        vm = getattr(self.state, "vm", None)
+        machine = str(getattr(self.device, "name", "") or "")
+
+        def work():
+            try:
+                res = _lab.grade_now(spec, machine, prov, vm, say=self.grade_step.emit)
+            except Exception as e:        # noqa: BLE001 — a check must not take the face down
+                res = e
+            self.grade_result.emit(res)
+
+        run_off_gui(self, work)
+
+    def _on_grade_result(self, res) -> None:
+        self._grade_btn.setEnabled(bool(self.live and self.provider is not None
+                                        and getattr(self.spec, "grade", ())))
+        if isinstance(res, Exception):
+            self._log.setPlainText(f"The check could not run — {type(res).__name__}: {res}")
+            return
+        from ..domain import lab_grade as _g
+        from .lab_record import record
+        t = _g.tally(res)
+        lines = [f"{t['ok']}/{t['total']} measured and agreed"
+                 + (f", {t['failed']} disagreed" if t["failed"] else "")
+                 + (f", {t['pending']} could not be measured" if t["pending"] else ""), ""]
+        for r in res:
+            mark = "·" if r.ok is None else ("✓" if r.ok else "✗")
+            lines.append(f" {mark}  {r.describe}")
+            lines.append(f"      {r.summary}")
+            # Every metric is recorded, including the ones that could not be measured: "there was
+            # nothing to compare" is evidence about the attempt, and a chain holding only the
+            # verdicts it managed to reach would read as if the rest had passed.
+            record(self._recorder, "note_measure",
+                   f"{getattr(self.spec, 'title', 'lab')} · {r.id}",
+                   {"ok": bool(r.ok), "pending": r.ok is None,
+                    "measurement": dict(r.detail or {}),
+                    "summary": f"{r.describe} — {r.summary}" if r.summary else r.describe})
+        self._log.setPlainText("\n".join(lines))
 
     def _load(self) -> None:
         if self.provider is None:

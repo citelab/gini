@@ -271,9 +271,9 @@ Filenames do not collide across machines because the collection is keyed `<machi
 
 ## What this does not do
 
-* **It does not grade.** The 7 metrics in `syscall-sysinfo.yaml` remain unimplemented — no
-  consumer of `spec.grade` exists anywhere outside `lab_spec.py`. Separate work; this hub
-  neither helps nor hinders it.
+* ~~It does not grade.~~ **Built.** `domain/lab_grade.py` measures all seven of A-Lab 01's
+  metrics; `services/xv6_lab.grade_now` takes the readings; the panel's "Check my work" runs it
+  and records each metric. See "Grading" below.
 * ~~It does not capture program output.~~ **Built.** The assignment names a `test_program`,
   the panel has a Run button for it, and what it prints is recorded on the `spawn` entry as
   `out`, marked `test: true`. See "Capturing the test's output" below.
@@ -405,3 +405,55 @@ a blank line a student printed between two sections is theirs.
   feature records the raw stream on purpose, because for an A-Lab the output *is* the
   deliverable. Both can be true — they are different kinds of evidence — but a grading path that
   uses `measure` should say which it is doing.
+
+
+---
+
+## Grading — what the student's call SAYS against what GINI SAW
+
+The wiring checklist answers "did you connect it up?" by pattern-matching source. That is
+necessary and it is not marking: **a student can pass all sixteen of A-Lab 01's checks with a
+`sysinfo` that returns zero.** The metrics answer the other question.
+
+Every one has the same shape, and it is the whole idea: **two readings of the same quantity,
+from two places that cannot see each other.** Their program calls their system call and prints a
+number. GINI reads the same quantity off the kernel's own structures over the serial dump path,
+which the student's code cannot reach. Agreement is evidence; disagreement is the bug to find.
+
+`domain/lab_grade.py` is pure — arithmetic over two `Reading`s — so every metric is testable with
+no kernel, no container and no QEMU. That is the same split `xv6_runner` uses, and for the same
+reason.
+
+### The rule that matters most
+
+**A metric that cannot be measured must not read as a pass.** `freemem` compared on an idle
+machine is zero against zero, which a `sysinfo` returning a constant satisfies perfectly. That is
+the same shape as a wiring check that is green before the student starts — worse than no check at
+all, because it credits work nobody looked at.
+
+So those come back `ok=None`, travel as `pending`, and render as "not run" rather than a tick or
+a cross. `proof_events.measure` grew a `pending` field for exactly this, and the Teaching Center's
+measurement section already had the column. Guards exist on three metrics: nothing allocated,
+nothing became runnable, the kernel's tick did not advance.
+
+An unknown metric name is also "not measured", never green — an assignment can declare a metric
+before anyone implements it, and a green tick for that would be a lie a marker cannot see.
+
+### Two readings, with real work in between
+
+`grade_now` runs the assignment's test, then `alloc 16`, then runs the test again. `alloc` grows
+the heap touching each page so it genuinely faults in and then spins, so it moves the free list
+AND stays runnable — which is what the delta metrics and the load average both need. It **waits
+for the free list to actually move** rather than sleeping a fixed time, because a tick is not a
+fixed length on a loaded machine, and it gives up honestly rather than guessing.
+
+The workload is killed afterwards. `alloc` spins forever by design, and leaving it running would
+quietly skew every later reading the student takes.
+
+### What a marker gets
+
+One `measure` entry per metric — including the ones that could not be measured, because "there
+was nothing to compare" is evidence about the attempt and a chain holding only the verdicts it
+reached would read as if the rest had passed. The numbers travel with the verdict, so "out by
+three pages" is visible and a teacher can decide what it is worth. **Nothing here computes a
+mark**, and a test asserts no word like "score" or "grade" appears in what it produces.

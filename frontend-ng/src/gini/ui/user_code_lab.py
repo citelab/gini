@@ -50,11 +50,16 @@ class UserCodeLab(QDialog):
     YAML — nothing here enumerates them."""
 
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
-                 recorder=None, live: bool = False, on_log=None, on_relink=None) -> None:
+                 recorder=None, live: bool = False, on_log=None, on_relink=None,
+                 state=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.device = device
         self.provider = provider
+        # The MachineState, when there is one. Grading needs GINI's OWN view of the kernel —
+        # the free list, the process table, the tick — and that is read through the state's vm
+        # and provider, not through anything the student's program can reach.
+        self.state = state
         self.live = bool(live)
         self._recorder = recorder
         self.on_log = on_log
@@ -271,7 +276,8 @@ class UserCodeLab(QDialog):
             except RuntimeError:
                 pass
         self._panel = UserCode(self, self.theme, device=self.device, provider=self.provider,
-                               spec=spec, live=self.live, recorder=self._recorder)
+                               spec=spec, live=self.live, recorder=self._recorder,
+                               state=self.state)
         # The tile's progress is stale the moment they edit anything, so re-read on the way back.
         self._panel.finished.connect(lambda _r=0: self.refresh())
         self._panel.show()

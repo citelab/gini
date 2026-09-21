@@ -416,8 +416,12 @@ def measurements(proof: dict) -> list[dict]:
         d = entry.get("data") or {}
         if kind == _ev.MEASURE:
             out.append({
+                # A reading that could not be TAKEN is not a failed one. An A-Lab metric needs
+                # something to have moved between two readings, and an idle machine gives it
+                # nothing to compare — reporting that as failed marks a student down for a
+                # workload that did not run.
                 "kind": "measurement", "name": str(d.get("name", "")),
-                "ok": bool(d.get("ok")), "pending": False,
+                "ok": bool(d.get("ok")), "pending": bool(d.get("pending")),
                 "detail": ", ".join(f"{k}={v}" for k, v in sorted(
                     (d.get("measurement") or {}).items())),
                 "summary": str(d.get("summary", "")),

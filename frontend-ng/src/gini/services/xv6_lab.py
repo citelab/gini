@@ -334,6 +334,120 @@ def run_test(provider, prog: str, args: str = "") -> tuple[bool, list[str]]:
     return True, kept
 
 
+#: What the grading run uses to make something happen between its two readings. `alloc N` grows
+#: the heap N pages, TOUCHING each one so it really faults in, and then spins — so it moves the
+#: free list and stays runnable, which is what the delta metrics and the load average need.
+#: Sixteen pages is comfortably past `lab_grade.MIN_ALLOC_PAGES` and costs about eight seconds,
+#: because `alloc` pauses a tick per page.
+STIR_PROG, STIR_PAGES = "alloc", 16
+#: How long to wait for the free list to actually move before giving up and reading anyway. A
+#: metric that could not be measured says so; it never guesses.
+STIR_WAIT_S = 22.0
+
+
+def take_reading(spec, machine_name: str, provider, vm=None):
+    """One moment, seen twice: run the assignment's test, and read GINI's own view beside it.
+
+    Both halves are best-effort and independently so. A test that would not run still leaves
+    GINI's numbers worth having, and a machine that stopped answering still leaves what the
+    program printed — `lab_grade` reports whichever half is missing rather than failing the
+    student for it.
+    """
+    from ..domain.lab_grade import Reading, parse_report
+    ok, lines = run_test(provider, getattr(spec, "test_prog", ""))
+    free_pages = procs = runnable = sleeping = ticks = None
+    try:
+        snap = provider.snapshot()
+        ps = [p for p in (getattr(snap, "procs", None) or [])]
+        procs = len(ps)
+        runnable = sum(1 for p in ps if getattr(p, "state", "") == "runnable")
+        sleeping = sum(1 for p in ps if getattr(p, "state", "") == "sleeping")
+        ticks = getattr(snap, "ticks", None)
+    except Exception:                              # noqa: BLE001 — half a reading is still a reading
+        pass
+    try:
+        if vm is not None:
+            free_pages = getattr(vm.snapshot(), "free_pages", None)
+    except Exception:                              # noqa: BLE001
+        pass
+    return Reading(report=parse_report(lines) if ok else {}, free_pages=free_pages,
+                   procs=procs, runnable=runnable, sleeping=sleeping, ticks=ticks)
+
+
+def _free_pages(vm):
+    try:
+        return None if vm is None else getattr(vm.snapshot(), "free_pages", None)
+    except Exception:                              # noqa: BLE001
+        return None
+
+
+def _stir(provider, vm, say=None) -> int | None:
+    """Make something happen. Returns the pid holding the memory, so it can be let go afterwards.
+
+    WAITS FOR THE EFFECT rather than sleeping a fixed time: `alloc` pauses a tick per page and a
+    tick is not a fixed length on a loaded machine. It gives up at `STIR_WAIT_S` and lets the
+    metrics report "nothing was allocated" — which is the honest outcome and not a failure.
+    """
+    import time
+
+    from ..domain.lab_grade import MIN_ALLOC_PAGES
+    before = _free_pages(vm)
+    if not provider.run(STIR_PROG, str(STIR_PAGES)):
+        return None
+    deadline = time.monotonic() + STIR_WAIT_S
+    while time.monotonic() < deadline:
+        time.sleep(0.6)
+        now = _free_pages(vm)
+        if before is None or now is None:
+            continue
+        if before - now >= MIN_ALLOC_PAGES:
+            break
+    if say:
+        say(f"{STIR_PROG} allocated "
+            f"{'?' if before is None else int(before - (_free_pages(vm) or before))} pages")
+    try:
+        for p in (getattr(provider.snapshot(), "procs", None) or []):
+            if getattr(p, "name", "") == STIR_PROG:
+                return int(getattr(p, "pid", 0)) or None
+    except Exception:                              # noqa: BLE001
+        pass
+    return None
+
+
+def grade_now(spec, machine_name: str, provider, vm=None, say=None):
+    """Measure the assignment's declared metrics against a running kernel. Returns the results.
+
+    TWO readings with real work between them, because half the metrics are about MOVEMENT: that
+    `freemem` falls by what was allocated, that `uptime` advances with the kernel's own tick, that
+    the load average rises when something becomes runnable. A single reading cannot see any of
+    that, and a constant would satisfy a comparison of one number with itself.
+
+    The workload is let go afterwards — `alloc` spins forever by design, and leaving it running
+    would quietly skew every later reading the student takes.
+    """
+    from ..domain import lab_grade as _g
+    if spec is None or not getattr(spec, "grade", ()):
+        return ()
+    if say:
+        say("reading what your program says…")
+    before = take_reading(spec, machine_name, provider, vm)
+    pid = None
+    try:
+        if say:
+            say(f"running {STIR_PROG} so there is something to measure…")
+        pid = _stir(provider, vm, say)
+        if say:
+            say("reading again…")
+        after = take_reading(spec, machine_name, provider, vm)
+    finally:
+        if pid:
+            try:
+                provider.kill(pid)
+            except Exception:                      # noqa: BLE001 — best effort, never fatal
+                pass
+    return _g.grade(spec, before, after, syscall_names(spec, machine_name))
+
+
 def syscall_names(spec, machine_name: str) -> dict:
     """`{number: name}` for the system calls this machine's assignment has wired.
 
