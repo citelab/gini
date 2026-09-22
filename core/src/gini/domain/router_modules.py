@@ -46,8 +46,9 @@ BASE: list[ModuleType] = [
 # moves packets. Every inline VNF now qualifies: classify and tap were the last two
 # illustrative entries, and the QoS and Tap work gave both a backend.
 #
-# The illustrative modules are now the CUSTOM ones below: a Lua or native VNF is real
-# only once you have written and compiled it, which is the point of that tier.
+# Of the CUSTOM ones below, Lua is real too — the router has run scripts since gr_mod_lua.c
+# landed, and the box now names one. Only `native` is still illustrative: a compiled module
+# has to be built into the image before there is anything to add.
 INLINE: list[ModuleType] = [
     ModuleType("acl", "ACL / Firewall", "firewall", "amber", "inline",
                "Stateless packet filter (drop a CIDR)", {"deny": "10.0.3.0/24"},
@@ -73,14 +74,48 @@ INLINE: list[ModuleType] = [
 # Inline VNFs you write yourself — a Lua script (interpreted per packet) or a native module you
 # compile in. Both share the same gpipe seam as the built-in native functions once implemented.
 CUSTOM: list[ModuleType] = [
+    # REAL, not illustrative, since the gRouter's data-plane Lua module (gr_mod_lua.c) has been
+    # there all along: `gpipe add lua /scripts/<name>.lua` loads a script that defines
+    # `process(pkt, ctx)` and returns DROP or CONTINUE per packet. This box used to carry an
+    # inline `script` string and no backend, so dropping it into the chain deployed nothing —
+    # "it goes nowhere" — while the console command that DID work never appeared in the editor.
+    # The parameter is now the script's container path; the file lives in ~/.gini/scripts on
+    # the host, mounted read-only at /scripts on every router. Still `custom`: the code is the
+    # student's, and `native` beside it stays illustrative until compiled in.
     ModuleType("lua", "Lua VNF", "compile", "cyan", "custom",
-               "Per-packet Lua hook — a `process(pkt, ctx)` function you write",
-               {"script": "function process(pkt, ctx)\n  return CONTINUE\nend"}),
+               "Per-packet Lua hook — a `process(pkt, ctx)` you write in ~/.gini/scripts, "
+               "given here as /scripts/<name>.lua",
+               {"path": ""}, gpipe=("lua", "path")),
     ModuleType("native", "Native VNF", "controller", "purple", "custom",
                "A native (Zig / C) data-plane module you compile in", {}),
 ]
 
 MODULE_BY_KEY: dict[str, ModuleType] = {m.key: m for m in (*BASE, *INLINE, *CUSTOM)}
+
+#: gpipe module name -> editor type key: the OTHER direction of `ModuleType.gpipe`, for turning a
+#: live `gpipe list` back into boxes. Derived, so it cannot drift from the forward mapping.
+GPIPE_TO_KEY: dict[str, str] = {m.gpipe[0]: m.key for m in MODULE_BY_KEY.values() if m.gpipe}
+
+#: Where a router sees the student's scripts. `~/.gini/scripts` on the host is bind-mounted here
+#: read-only on every gRouter (services/orchestrator), so this is the only prefix a path can have.
+SCRIPTS_MOUNT = "/scripts"
+
+
+def lua_container_path(text: str) -> str:
+    """Whatever a student typed for a Lua script, as the path the ROUTER will read it from.
+
+    Students type the name they know — `loss.lua`, or the host path they just saved to — and the
+    router knows only `/scripts/<name>`. Normalising here means "loss.lua", "scripts/loss.lua",
+    "~/.gini/scripts/loss.lua" and "/scripts/loss.lua" all deploy the same file; a path that is
+    already a container path is left exactly alone. Empty stays empty, so an unconfigured box is
+    still recognisably unconfigured.
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if t.startswith(SCRIPTS_MOUNT + "/"):
+        return t
+    return f"{SCRIPTS_MOUNT}/{t.rsplit('/', 1)[-1]}"
 
 
 @dataclass
@@ -118,10 +153,96 @@ def _ip_in_cidr(ip: str, cidr: str) -> bool:
 
 
 class RouterProgram:
+    """The chain as the student has composed it — and, when they have not touched it, as the
+    router actually has it.
+
+    Two sources feed `inline`. The palette and the parameter fields are one; the live router,
+    read back over `gpipe list`, is the other. They are reconciled with ONE flag: `dirty` is set
+    by every local edit and cleared by a deploy or a mirror. While it is clear the editor
+    follows the router, so a module a student loaded from the console appears as a box a moment
+    later. While it is set the editor is a draft and the router is left where it is, so a poll
+    cannot pull a half-built chain out from under someone mid-edit.
+
+    Before this the editor only ever showed its own draft, and the live chain was a caption
+    under it. A student who loaded loss.lua at the console and opened the Lab saw an empty
+    pipeline and the word "lua" in small grey text — and the status said "in sync".
+    """
+
     def __init__(self) -> None:
         self.mode = "legacy"             # 'legacy' | 'openflow'
         self.inline: list[ModuleInstance] = []
         self.classifier = ""             # which traffic enters the chain ("" = all)
+        self.dirty = False               # local edits not yet deployed — see the class docstring
+
+    def touch(self) -> None:
+        """A local edit happened. The editor is a draft until it is deployed."""
+        self.dirty = True
+
+    def mark_deployed(self) -> None:
+        """What is in the editor is now what the router has (or a poll will correct it)."""
+        self.dirty = False
+
+    # mirroring the live router ------------------------------------------- #
+    def matches_live(self, deployed) -> bool:
+        """Does the editor already say what the router says? Type and argument, in order."""
+        return self._live_key() == self._deployed_key(deployed)
+
+    def sync_from_live(self, deployed) -> bool:
+        """Replace the chain with what the router reports. Returns whether anything changed.
+
+        Only called while not `dirty` — the caller's job — so this never overwrites an edit.
+        A module type the editor has no box for is kept as a generic native VNF named for its
+        type, rather than dropped: the point is that the editor shows what is running, and an
+        unfamiliar module is still running.
+        """
+        if self.matches_live(deployed):
+            self.dirty = False
+            return False
+        out: list[ModuleInstance] = []
+        for d in deployed:
+            key = GPIPE_TO_KEY.get(d.type)
+            if key is None:
+                # A module the editor has no box for — `counter`, or a native VNF compiled in
+                # later. It is RUNNING, so it is not illustrative, and it must redeploy as
+                # itself or the `clear` at the top of a deploy would silently remove it. The
+                # generic native box carries its real type and argument for both reasons.
+                out.append(ModuleInstance("native", d.type, {"type": d.type, "arg": d.arg}))
+                continue
+            mt = MODULE_BY_KEY[key]
+            params = dict(mt.default_params)
+            if mt.gpipe and mt.gpipe[1]:
+                params[mt.gpipe[1]] = d.arg
+            name = mt.label
+            if key == "lua" and d.arg:
+                name = f"{mt.label} · {d.arg.rsplit('/', 1)[-1]}"
+            out.append(ModuleInstance(key, name, params))
+        self.inline = out
+        self.dirty = False
+        return True
+
+    @staticmethod
+    def _mirrored(inst) -> bool:
+        """A generic native box that came from the router, and so names a real module."""
+        return inst.type_key == "native" and bool(inst.params.get("type"))
+
+    def _live_key(self) -> list[tuple[str, str]]:
+        out = []
+        for inst in self.inline:
+            g = inst.type.gpipe
+            if g is None:
+                if self._mirrored(inst):
+                    out.append((inst.params["type"], str(inst.params.get("arg", "") or "")))
+                continue                              # illustrative: not on the router
+            name, argkey = g
+            arg = str(inst.params.get(argkey, "") or "") if argkey else ""
+            if argkey and not arg:
+                continue                              # unconfigured: not deployed either
+            out.append((name, arg))
+        return out
+
+    @staticmethod
+    def _deployed_key(deployed) -> list[tuple[str, str]]:
+        return [(d.type, d.arg or "") for d in deployed or []]
 
     # SFC: classifier + deploy to the real gRouter -------------------------- #
     def set_classifier(self, expr: str) -> None:
@@ -130,36 +251,62 @@ class RouterProgram:
     def deploy_commands(self) -> list[str]:
         """The `gpipe` argument-lines that program THIS chain into the running gRouter (each
         is sent as `gpipe <cmd>`): clear, then add each service function that has a real
-        data-plane backend, in order. Illustrative modules are skipped."""
+        data-plane backend AND something to deploy, in order.
+
+        Skipped: illustrative modules (no backend), and a module whose backend needs an
+        argument that is still blank — a Lua box with no script named. Sending `add lua` with
+        nothing after it would only come back as a usage error from the router.
+
+        `clear` first is what makes deploying idempotent rather than additive. It is no longer
+        destructive of hand-loaded modules, because while the editor is not dirty it mirrors
+        them — so they are in the chain being re-added.
+        """
         cmds = ["clear"]
         for inst in self.inline:
             g = inst.type.gpipe
             if g is None:
+                if self._mirrored(inst):              # re-add a router module we have no box for
+                    arg = str(inst.params.get("arg", "") or "").strip()
+                    cmds.append(f"add {inst.params['type']} {arg}".rstrip())
                 continue
             name, argkey = g
-            arg = inst.params.get(argkey) if argkey else None
+            arg = str(inst.params.get(argkey, "") or "").strip() if argkey else ""
+            if argkey and not arg:
+                continue
             cmds.append(f"add {name} {arg}" if arg else f"add {name}")
         return cmds
 
     def illustrative(self) -> list[ModuleInstance]:
-        """Inline functions with no real gRouter backend yet (shown, not deployed)."""
-        return [i for i in self.inline if i.type.gpipe is None]
+        """Inline functions that are shown but will not be deployed: no real gRouter backend,
+        or a backend whose required argument is still blank."""
+        out = []
+        for i in self.inline:
+            g = i.type.gpipe
+            if g is None:
+                if not self._mirrored(i):             # a mirrored module IS deployed
+                    out.append(i)
+            elif g[1] and not str(i.params.get(g[1], "") or "").strip():
+                out.append(i)
+        return out
 
     # editing -------------------------------------------------------------- #
     def add(self, type_key: str) -> ModuleInstance:
         mt = MODULE_BY_KEY[type_key]
         inst = ModuleInstance(type_key, mt.label, dict(mt.default_params))
         self.inline.append(inst)
+        self.dirty = True
         return inst
 
     def remove(self, index: int) -> None:
         if 0 <= index < len(self.inline):
             self.inline.pop(index)
+            self.dirty = True
 
     def move(self, index: int, delta: int) -> None:
         j = index + delta
         if 0 <= index < len(self.inline) and 0 <= j < len(self.inline):
             self.inline[index], self.inline[j] = self.inline[j], self.inline[index]
+            self.dirty = True
 
     def set_mode(self, mode: str) -> None:
         self.mode = "openflow" if mode == "openflow" else "legacy"

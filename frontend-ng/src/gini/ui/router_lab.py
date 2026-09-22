@@ -67,7 +67,9 @@ class RouterLab(QDialog):
                   "router": ("Router Lab", "router")}
         kind, icon_key = _faces.get(self.face, _faces["router"])
         self.setWindowTitle(f"{kind} — {device.name}")
-        self.resize(880, 720 if self.face != "router" else 560)
+        # The router face carries the whole pipeline PLUS the routing and QoS panels — the most
+        # of the three — and used to get the least height. See PIPELINE_MIN_H.
+        self.resize(880, 720 if self.face != "router" else 820)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
 
         root = QVBoxLayout(self)
@@ -140,6 +142,10 @@ class RouterLab(QDialog):
 
         self.worker_done.connect(self._round_worker_done)
         self._rebuild()
+        # "Drop loss.lua into it" — literally. A .lua file dragged onto the Lab is copied into
+        # ~/.gini/scripts (the folder every router sees at /scripts) if it is not already there,
+        # and becomes a Lua VNF box pointing at it. Deploy chain then loads it.
+        self.setAcceptDrops(True)
 
         # poll the live table (flows for an OVS, routes + queue stats otherwise) while open
         refresh = self._refresh_flows if self.sdn else self._refresh_router_live
@@ -205,7 +211,18 @@ class RouterLab(QDialog):
         self.pipe_layout.setSpacing(5)
         self.pipe_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         sc = QScrollArea(); sc.setWidgetResizable(True); sc.setWidget(self.pipe_host)
+        # Room to actually SEE the chain. The routing table and QoS panel below each carry a
+        # minimum height and this scroll area carried none, so at the default window size the
+        # pipeline got a 62-pixel strip — one row, with everything else scrolled out of sight.
+        # A student who loaded a module and opened the Lab saw an empty pipeline, and the fix
+        # that mirrors the router into the editor would have landed below the fold. Three
+        # boxes with their arrows is about this tall; the tables can shrink instead.
+        sc.setMinimumHeight(self.PIPELINE_MIN_H)
+        self.pipe_scroll = sc
         return sc
+
+    #: Enough for ingress, parse, three service functions and the base stages to show at once.
+    PIPELINE_MIN_H = 300
 
     # pipeline render -------------------------------------------------------
     def _rebuild(self) -> None:
@@ -227,6 +244,9 @@ class RouterLab(QDialog):
 
     # Friendly label for each editable parameter, keyed by (module type, param key).
     _PARAM_LABEL = {
+        ("lua", "path"):      "script  /scripts/<name>.lua",
+        ("native", "type"):   "module",              # a router module mirrored into a generic box
+        ("native", "arg"):    "argument",
         ("acl", "deny"):      "deny CIDR",
         ("nat", "ip"):        "source IP",
         ("block", "ip"):      "target IP",
@@ -236,8 +256,18 @@ class RouterLab(QDialog):
     }
 
     def _set_param(self, inst, key: str, text: str) -> None:
-        """Live-edit a dropped VNF's parameter; the deploy path and offline trace read it back."""
-        inst.params[key] = text.strip()
+        """Live-edit a dropped VNF's parameter; the deploy path and offline trace read it back.
+
+        A Lua script is normalised to the path the ROUTER reads it from, so typing `loss.lua`
+        (or the host path just saved to) deploys `/scripts/loss.lua`. An edit marks the program
+        dirty, which is what stops the next poll overwriting it.
+        """
+        from ..domain.router_modules import lua_container_path
+        value = text.strip()
+        if inst.type_key == "lua" and key == "path":
+            value = lua_container_path(value)
+        inst.params[key] = value
+        self.program.touch()
 
     def _stage_row(self, st) -> QFrame:
         t = self.theme.theme
@@ -294,6 +324,67 @@ class RouterLab(QDialog):
             else:
                 w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};"
                                 f"border:1px solid {t.line};border-radius:10px;}}")
+
+    # drag & drop -------------------------------------------------------------
+    @staticmethod
+    def _dropped_lua_files(e) -> list:
+        md = e.mimeData()
+        if md is None or not md.hasUrls():
+            return []
+        return [u.toLocalFile() for u in md.urls()
+                if u.isLocalFile() and u.toLocalFile().lower().endswith(".lua")]
+
+    def dragEnterEvent(self, e) -> None:            # noqa: N802 - Qt naming
+        if self._dropped_lua_files(e):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e) -> None:                 # noqa: N802 - Qt naming
+        files = self._dropped_lua_files(e)
+        if not files:
+            e.ignore()
+            return
+        added = [self.add_lua_file(f) for f in files]
+        e.acceptProposedAction()
+        self._set_deploy_status(
+            f"added {', '.join(n for n in added if n)} — press Deploy chain to load it")
+
+    def add_lua_file(self, host_path: str) -> str:
+        """Make a host .lua file a Lua VNF box. Returns the script name, or "" on failure.
+
+        Copies the file into ~/.gini/scripts when it lives anywhere else, because that folder is
+        the only one a router can read (mounted at /scripts). A file already in there is used in
+        place — never copied over itself, never overwritten.
+        """
+        import shutil
+        from pathlib import Path
+
+        from ..app.paths import scripts_dir
+        from ..domain.router_modules import lua_container_path
+        try:
+            src = Path(host_path).expanduser().resolve()
+            if not src.is_file():
+                return ""
+            scripts = scripts_dir()
+            scripts.mkdir(parents=True, exist_ok=True)
+            dest = scripts / src.name
+            if src.parent.resolve() != scripts.resolve():
+                if dest.exists() and dest.read_bytes() != src.read_bytes():
+                    self._set_deploy_status(
+                        f"{src.name} already exists in ~/.gini/scripts with different contents — "
+                        f"not overwritten; using the existing one")
+                elif not dest.exists():
+                    shutil.copy2(src, dest)
+        except OSError as exc:
+            self._set_deploy_status(f"could not add {host_path}: {exc}")
+            return ""
+        inst = self.program.add("lua")
+        inst.params["path"] = lua_container_path(src.name)
+        inst.name = f"Lua VNF · {src.name}"
+        self._reset()
+        self._rebuild()
+        return src.name
 
     # actions ---------------------------------------------------------------
     def _add(self, key: str) -> None:
@@ -1020,6 +1111,10 @@ class RouterLab(QDialog):
             return
         self._set_deploy_status("deploying…")
         prog = self.program
+        # Cleared BEFORE the worker returns. If the deploy fails, the next poll mirrors the
+        # router back into the editor — which is the honest outcome: the editor then shows what
+        # the router actually has, not the draft that did not take.
+        prog.mark_deployed()
         cf, qf = self.command_fn, self.query_fn
 
         def work():
@@ -1034,18 +1129,43 @@ class RouterLab(QDialog):
         run_off_gui(self, work)
 
     def _on_chain(self, text: str) -> None:
-        from ..domain.modulechain import chain_summary
+        """The router's live chain arrived (every poll, and after a deploy).
+
+        THE EDITOR FOLLOWS THE ROUTER unless the student is mid-edit. A module loaded at the
+        console — `gpipe add lua /scripts/loss.lua` — used to reach this window only as a grey
+        caption under an empty pipeline, while the status claimed "in sync"; it never compared
+        anything. Now, while the program is not `dirty`, the live chain is mirrored into the
+        boxes, so what the router runs is what the editor shows. While it IS dirty the draft is
+        left alone — a poll must not pull a half-built chain out from under someone — and the
+        status says so instead of "in sync".
+
+        "in sync" is now a real comparison, type and argument in order, and nothing else.
+        """
+        from ..domain.modulechain import chain_summary, parse_chain
         summary = "Deployed: " + chain_summary(text)
         if hasattr(self, "fw_deployed"):        # firewall face
             self.fw_deployed.setText(summary)
         if not hasattr(self, "deployed_lbl"):
             return
         self.deployed_lbl.setText(summary)
+        if not text:
+            self._set_deploy_status("")
+            return
+        live = parse_chain(text)
+        if self.program.dirty:
+            n = len(self.program.inline)
+            self._set_deploy_status(
+                "edited — press Deploy chain to apply" if n else
+                "chain cleared here — press Deploy chain to apply")
+            return
+        if self.program.sync_from_live(live):
+            self._reset()
+            self._rebuild()
         ill = self.program.illustrative()
         if ill:
-            self._set_deploy_status(f"{len(ill)} illustrative function(s) shown but not deployed")
+            self._set_deploy_status(f"{len(ill)} function(s) shown but not deployed")
         else:
-            self._set_deploy_status("in sync" if text else "")
+            self._set_deploy_status("in sync")
 
     def _set_deploy_status(self, text: str) -> None:
         if hasattr(self, "deploy_status"):

@@ -37,6 +37,12 @@ typedef struct
 typedef struct gr_module
 {
     const char  *type;        /* "acl", "nat", "rate", "lua", "native", "tap" ... */
+    /* The argument it was added with — the CIDR, the IP, the script path — verbatim.
+     * Set by gr_control at the one place modules are added, so `gpipe list` can say WHICH
+     * acl and WHICH script. Without it the Router Lab could only ever show a chain of types:
+     * a student who loaded loss.lua saw "lua", which reads as "not loaded", and two Lua
+     * modules were indistinguishable. Empty for modules that take no argument. */
+    char         params[128];
     void        *state;       /* module-private state                             */
     int          (*init)(struct gr_module *self, const char *params);
     gr_verdict_t (*process)(struct gr_module *self, gpacket_t *pkt);

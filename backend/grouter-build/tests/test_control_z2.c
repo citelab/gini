@@ -1,4 +1,6 @@
-/* Z2 control-surface test (libc only): drives gr_control() like the CLI / Router Lab. */
+/* Z2 control-surface test (libc only): drives gr_control() like the CLI / Router Lab.
+ * `list` prints [i:type:arg] for a module that took an argument and [i:type] otherwise —
+ * the arg is what lets the Router Lab show WHICH acl, and WHICH Lua script, is running. */
 #include "gr_control.h"
 #include <stdio.h>
 #include <string.h>
@@ -21,7 +23,7 @@ int main(void)
     run("list");
 
     gr_control("list", out, sizeof out);
-    if (!strstr(out, "[0:acl]") || !strstr(out, "[1:counter]")) fail = 1;
+    if (!strstr(out, "[0:acl:10.0.3.0/24]") || !strstr(out, "[1:counter]")) fail = 1;
 
     run("trace 10.0.3.10");                 /* denied -> ACL DROP, counter not reached */
     gr_control("trace 10.0.3.10", out, sizeof out);
@@ -35,7 +37,7 @@ int main(void)
     run("clear");
     run("add block 10.0.5.5");
     gr_control("list", out, sizeof out);
-    if (!strstr(out, "[0:block]")) fail = 1;
+    if (!strstr(out, "[0:block:10.0.5.5]")) fail = 1;
     run("trace 10.0.5.5");                   /* matches -> DROP */
     gr_control("trace 10.0.5.5", out, sizeof out);
     if (!strstr(out, "block") || !strstr(out, "DROP")) fail = 1;
@@ -47,7 +49,7 @@ int main(void)
     run("clear");
     run("add nat 203.0.113.1");
     gr_control("list", out, sizeof out);
-    if (!strstr(out, "[0:nat]")) fail = 1;
+    if (!strstr(out, "[0:nat:203.0.113.1]")) fail = 1;
 
     /* arg-required guard: 'add block' with no IP must be rejected, not crash */
     gr_control("add block", out, sizeof out);
@@ -57,7 +59,7 @@ int main(void)
     run("clear");
     run("add rate 1/1");
     gr_control("list", out, sizeof out);
-    if (!strstr(out, "[0:rate]")) fail = 1;
+    if (!strstr(out, "[0:rate:1/1]")) fail = 1;
     gr_control("trace 10.0.9.9", out, sizeof out);   /* bucket full -> forwards */
     if (!strstr(out, "base forwarding")) fail = 1;
     gr_control("trace 10.0.9.9", out, sizeof out);   /* immediate 2nd -> over rate -> DROP */
@@ -67,7 +69,7 @@ int main(void)
     run("clear");
     run("add classify 10.0.3.0/24:ef");
     gr_control("list", out, sizeof out);
-    if (!strstr(out, "[0:classify]")) fail = 1;
+    if (!strstr(out, "[0:classify:10.0.3.0/24:ef]")) fail = 1;
     gr_control("trace 10.0.3.10", out, sizeof out);  /* match -> mark -> CONTINUE -> base */
     if (!strstr(out, "base forwarding")) fail = 1;
 
@@ -75,7 +77,7 @@ int main(void)
     run("clear");
     run("add tap /tmp/gini_test_tap.pcap");
     gr_control("list", out, sizeof out);
-    if (!strstr(out, "[0:tap]")) fail = 1;
+    if (!strstr(out, "[0:tap:/tmp/gini_test_tap.pcap]")) fail = 1;
     gr_control("trace 10.0.1.2", out, sizeof out);
     if (!strstr(out, "base forwarding")) fail = 1;
 

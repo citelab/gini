@@ -83,6 +83,7 @@ int gr_control(const char *line, char *out, size_t outlen)
             m = gr_mod_lua(script);
             free(script);
             if (!m) { snprintf(out, outlen, "add lua: failed to load '%s'", arg); return -1; }
+            snprintf(m->params, sizeof m->params, "%s", arg);
             gr_pipeline_add(pl, m);
             snprintf(out, outlen, "added lua %s  (pipeline: %d modules)", arg, pl->count);
             return 0;
@@ -102,6 +103,9 @@ int gr_control(const char *line, char *out, size_t outlen)
         }
         m = gr_module_create(what, arg);
         if (!m) { snprintf(out, outlen, "add %s: failed", what); return -1; }
+        /* Constructors malloc without zeroing, so this is set here, unconditionally, at the
+         * only place a module enters the pipeline (the CLI's gpipeCmd routes through here). */
+        snprintf(m->params, sizeof m->params, "%s", arg ? arg : "");
         gr_pipeline_add(pl, m);
         snprintf(out, outlen, "added %s%s%s  (pipeline: %d modules)",
                  what, arg ? " " : "", arg ? arg : "", pl->count);
@@ -109,8 +113,17 @@ int gr_control(const char *line, char *out, size_t outlen)
     else if (strcmp(tok, "list") == 0)
     {
         int n = snprintf(out, outlen, "base: parse"), i;
+        /* [i:type] for a module with no argument, [i:type:arg] otherwise. The type never
+         * contains ':' and the arg is read to the closing bracket, so an arg that itself has a
+         * colon (classify's cidr:dscp) still parses on the far side. */
         for (i = 0; i < pl->count; i++)
-            n += snprintf(out + n, outlen - n, " -> [%d:%s]", i, pl->modules[i]->type);
+        {
+            const char *a = pl->modules[i]->params;
+            if (a && a[0])
+                n += snprintf(out + n, outlen - n, " -> [%d:%s:%s]", i, pl->modules[i]->type, a);
+            else
+                n += snprintf(out + n, outlen - n, " -> [%d:%s]", i, pl->modules[i]->type);
+        }
         snprintf(out + n, outlen - n, " -> route -> rewrite");
     }
     else if (strcmp(tok, "clear") == 0)
