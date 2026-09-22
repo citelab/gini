@@ -46,6 +46,27 @@ def scripts_dir() -> Path:
     return gini_home() / "scripts"
 
 
+def machine_dir(name: str) -> Path:
+    """A persistent home directory for ONE machine, bind-mounted at its container's HOME (/root).
+
+    Student exercises ask them to WRITE programs inside a host — `vi server.c`, `gcc`, `./server`
+    — and a container's own filesystem is thrown away on every restart, Reboot or Run. Their work
+    would vanish with it. This directory lives on the host, survives teardown, and is where the
+    machine's shell lands, so a file created at the prompt is simply still there next time.
+
+    Keyed by machine NAME, like `xv6-lab/<machine>`, not by project — two topologies that both
+    call a host `M1` share this home, exactly as they share the xv6 lab folder. That is the
+    established shape; a per-project home would need the project identity threaded through the
+    compiler, which nothing else here does.
+
+    Read-WRITE, unlike the routers' read-only `/scripts`: there the student authors on the host
+    and the router only reads; here the student authors INSIDE the container, so it has to write
+    back. `/shared` is already mounted read-write into machines for the same reason.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_.-") else "-" for c in str(name or "")) or "host"
+    return gini_home() / "machines" / safe
+
+
 def shared_dir() -> Path:
     """Host directory shared with every Machine container at ``/shared``. Students edit
     sources here on their own machine and compile inside the stations (the Multicast File

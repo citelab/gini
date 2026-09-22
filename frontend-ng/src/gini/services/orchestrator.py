@@ -238,6 +238,10 @@ MACHINE_LEAN, MACHINE_FULL, MACHINE_SECURITY = "lean", "full", "security"
 MACHINE_GUI = "gui"                       # a HEADFUL machine: lean tools + a light X desktop
 MACHINE_TOOLKIT_DEFAULT = MACHINE_LEAN
 
+#: Where a machine's persistent host directory (paths.machine_dir) is mounted, and the container's
+#: own HOME on every machine image — so a student's shell lands here and files they write persist.
+MACHINE_HOME = "/root"
+
 # --------------------------------------------------------------------------------------------- #
 # ttyd — the in-container terminal server the gBuilder Terminal tab connects to.
 #
@@ -321,7 +325,7 @@ def _ttyd_layers() -> str:
             "&& chmod +x /usr/local/bin/gini-term\n")
 
 
-def _persist(cmd: str = "") -> str:
+def _persist(cmd: str = "", workdir: str = "") -> str:
     """A TTYD_CMD that re-attaches instead of starting over.
 
     `new -A` is attach-or-create: the first connection starts the session, every later one joins
@@ -333,14 +337,21 @@ def _persist(cmd: str = "") -> str:
     prints tmux's "not found" and drops the student into a working shell — degraded, not broken.
     Same reason the trailing shell is there: quitting tmux leaves you in the container rather than
     killing the session under you.
+
+    `workdir` is where the shell LANDS — a machine sets it to its persistent home (/root) so a
+    student's first `pwd` is the directory that survives a restart, rather than /app (the image's
+    own code). The `cd` sets ttyd's cwd, which tmux and the fallback shell both inherit; the `-c`
+    is belt-and-suspenders for the session tmux creates. Routers pass nothing and are unchanged.
     """
+    cd = f"cd {workdir} 2>/dev/null; " if workdir else ""
+    c_opt = f" -c {workdir}" if workdir else ""
     inner = f' "{cmd}; exec /bin/sh"' if cmd else ""
     # TERM must be set or tmux refuses to start — "TERM environment variable not set." — and the
     # student silently gets the fallback shell with no persistence instead. ttyd does set TERM for
     # its PTY child, but the launcher runs `/bin/sh -c "$TTYD_CMD"` and not every sh passes it
     # through the way tmux needs; setting it here costs nothing and removes the doubt. `${TERM:-…}`
     # keeps whatever ttyd did provide.
-    return (f'TERM="${{TERM:-xterm-256color}}" tmux new -A -s {TMUX_SESSION}{inner}'
+    return (f'{cd}TERM="${{TERM:-xterm-256color}}" tmux new -A -s {TMUX_SESSION}{c_opt}{inner}'
             f"; exec /bin/sh")
 
 
@@ -817,10 +828,15 @@ def _seed_examples(scripts: Path, shared: Path) -> None:
 def write_project(config: RuntimeConfig, workdir: str | Path, runtime_dir: str | Path,
                   auto_internet: bool = True, laptop_id: str = "") -> Path:
     """Write a self-contained Docker project that runs this topology."""
-    from ..app.paths import captures_dir, scripts_dir, shared_dir
+    from ..app.paths import captures_dir, machine_dir, scripts_dir, shared_dir
     captures_dir().mkdir(parents=True, exist_ok=True)   # host dir bind-mounted for tap .pcaps
     scripts_dir().mkdir(parents=True, exist_ok=True)    # host dir bind-mounted for Lua VNFs
     shared_dir().mkdir(parents=True, exist_ok=True)     # host dir bind-mounted into machines
+    # Keyed by the SAME name the mount uses — the docker service name (`_svc`, lowercased),
+    # not the canvas label — or the created directory and the mounted one differ by case and
+    # the mount points at an empty dir Docker then invents root-owned.
+    for _m in config.to_runtime(docker=True)["machines"]:
+        machine_dir(_m["name"]).mkdir(parents=True, exist_ok=True)
     _seed_examples(scripts_dir(), shared_dir())         # ship mcast_tree.lua + the C starter kit
     work = Path(workdir)
     (work / "dataplane").mkdir(parents=True, exist_ok=True)
@@ -1165,7 +1181,9 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         # tags a separate <project>-<service> image per host and walks the build for each.
         tk = m.get("toolkit", MACHINE_TOOLKIT_DEFAULT)
         image, dockerfile = _MACHINE_IMAGE.get(tk, _MACHINE_IMAGE[MACHINE_LEAN])
-        term = _term_port(m["name"], _persist())   # a plain shell — it is a host
+        # A plain shell — it is a host — landing in its persistent home so files a student
+        # creates survive a restart. See paths.machine_dir / MACHINE_HOME.
+        term = _term_port(m["name"], _persist(workdir=MACHINE_HOME))
         lines += [
             f"  {m['name']}:",
             f"    hostname: {m.get('hostname', m['name'])}",   # `hostname` = the canvas label
@@ -1178,11 +1196,16 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             f"      NODE_CONFIG: '{json.dumps(m)}'",
             *_term_env(m["name"]),
         ]
-        from ..app.paths import captures_dir, shared_dir
-        # every station mounts ~/.gini/shared at /shared: students edit sources on the
-        # host and compile in the container (the Multicast File Distribution capstone),
-        # and a station can drop results back for the host to inspect.
-        vols = [f'      - "{_hostpath(shared_dir())}:/shared"']
+        from ..app.paths import captures_dir, machine_dir, shared_dir
+        # A per-machine PERSISTENT HOME, bind-mounted at /root (the container's HOME and where
+        # its shell lands). Student programs written inside the host live here and survive a
+        # restart / Reboot / Run, instead of dying with the container's own filesystem. Created
+        # host-side in write_project so Docker does not invent a root-owned one.
+        vols = [f'      - "{_hostpath(machine_dir(m["name"]))}:{MACHINE_HOME}"',
+                # every station mounts ~/.gini/shared at /shared: students edit sources on the
+                # host and compile in the container (the Multicast File Distribution capstone),
+                # and a station can drop results back for the host to inspect.
+                f'      - "{_hostpath(shared_dir())}:/shared"']
         if tk == MACHINE_SECURITY:               # an IDS host reads the router's Tap FIFO here
             vols.append(f'      - "{_hostpath(captures_dir())}:/captures"')
         lines += ['    volumes:'] + vols
