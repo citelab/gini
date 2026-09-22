@@ -1152,11 +1152,13 @@ class RouterLab(QDialog):
             self._set_deploy_status("")
             return
         live = parse_chain(text)
-        if self.program.dirty:
-            n = len(self.program.inline)
-            self._set_deploy_status(
-                "edited — press Deploy chain to apply" if n else
-                "chain cleared here — press Deploy chain to apply")
+        # A dirty editor is a DRAFT and the poll leaves it alone — but only while there is
+        # something in it to protect. An empty editor has no draft, and this is exactly the
+        # "I loaded a module at the console, show it to me" case, so it follows the router
+        # rather than sitting on a stale "chain cleared here". This also self-heals the state
+        # a stray click on the remove button used to leave behind.
+        if self.program.dirty and self.program.inline:
+            self._set_deploy_status("edited — press Deploy chain to apply")
             return
         if self.program.sync_from_live(live):
             self._reset()

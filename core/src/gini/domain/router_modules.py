@@ -201,11 +201,15 @@ class RouterProgram:
         out: list[ModuleInstance] = []
         for d in deployed:
             key = GPIPE_TO_KEY.get(d.type)
-            if key is None:
-                # A module the editor has no box for — `counter`, or a native VNF compiled in
-                # later. It is RUNNING, so it is not illustrative, and it must redeploy as
-                # itself or the `clear` at the top of a deploy would silently remove it. The
-                # generic native box carries its real type and argument for both reasons.
+            # A module the editor has no box for — `counter`, a native VNF — OR a `lua` with no
+            # path, which is what a router built before the argument was recorded reports for a
+            # loaded script. Either way it is RUNNING but not something we can present as an
+            # editable box: a lua box with an empty `path` reads as unconfigured, so `_live_key`
+            # would skip it and the mirror would disagree with the router on every poll and
+            # re-run forever — a visible flicker that also makes the remove button easy to
+            # misclick. The generic native box carries the real type and argument, round-trips
+            # cleanly (matches_live stays true), and still shows in the chain.
+            if key is None or (key == "lua" and not d.arg):
                 out.append(ModuleInstance("native", d.type, {"type": d.type, "arg": d.arg}))
                 continue
             mt = MODULE_BY_KEY[key]
