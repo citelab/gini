@@ -428,6 +428,13 @@ def grade_now(spec, machine_name: str, provider, vm=None, say=None):
     from ..domain import lab_grade as _g
     if spec is None or not getattr(spec, "grade", ()):
         return ()
+    if provider is None:
+        # The machine is not running, or is showing the demo feed. Grade anyway: `syscall_named`
+        # is read from their own syscall.h and needs no kernel, and the rest come back "not
+        # measured" with a reason. That is worth recording — it tells a marker the metrics were
+        # attempted and the machine was down, which is a different submission from one where
+        # nobody ever checked.
+        return _g.grade(spec, _g.Reading(), None, syscall_names(spec, machine_name))
     if say:
         say("reading what your program says…")
     before = take_reading(spec, machine_name, provider, vm)
@@ -446,6 +453,26 @@ def grade_now(spec, machine_name: str, provider, vm=None, say=None):
             except Exception:                      # noqa: BLE001 — best effort, never fatal
                 pass
     return _g.grade(spec, before, after, syscall_names(spec, machine_name))
+
+
+def record_grades(recorder, spec, results) -> None:
+    """Put a grading run into the proof chain — one entry per metric, including the unmeasurable.
+
+    ONE place, called from the panel's "Check my work" and from the hand-in. Two copies of this
+    would drift, and the way they would drift is in what gets recorded, which is the one thing a
+    marker cannot go back and re-derive.
+
+    A metric that could not be measured is recorded too: "there was nothing to compare" is
+    evidence about the attempt, and a chain holding only the verdicts it managed to reach reads as
+    if the rest had passed.
+    """
+    from ..ui.lab_record import record
+    title = getattr(spec, "title", "lab")
+    for r in results or ():
+        record(recorder, "note_measure", f"{title} · {r.id}",
+               {"ok": bool(r.ok), "pending": r.ok is None,
+                "measurement": dict(getattr(r, "detail", None) or {}),
+                "summary": f"{r.describe} — {r.summary}" if r.summary else r.describe})
 
 
 def syscall_names(spec, machine_name: str) -> dict:

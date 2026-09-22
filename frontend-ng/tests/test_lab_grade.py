@@ -390,3 +390,140 @@ def test_an_assignment_with_no_metrics_grades_to_nothing(armed):
         grade = ()
         test_prog = "x"
     assert X.grade_now(_NoGrade(), "M1", _Provider(), None) == ()
+
+
+# --------------------------------------------------------------------------- #
+# measured as part of handing in
+#
+# Before this, a metric reached a marker only if the student pressed "Check my work" — and the
+# submission most likely to skip that is exactly the one the metrics exist to catch. Nothing is
+# asked of the student: they follow the handout, finish, press Hand in, and it happens.
+# --------------------------------------------------------------------------- #
+
+def test_a_machine_that_is_not_running_is_still_graded_as_far_as_it_can_be(armed):
+    """`syscall_named` is read from their own syscall.h and needs no kernel. The rest say why
+    they could not be measured — which tells a marker the metrics were attempted against a
+    machine that was down, a different submission from one where nobody ever checked."""
+    from gini.services import xv6_lab as X
+    res = {r.id: r for r in X.grade_now(armed, "M1", None, None)}
+    assert res["named"].ok is True
+    assert all(r.ok is None for k, r in res.items() if k != "named")
+
+
+def test_every_metric_is_recorded_including_the_ones_that_could_not_be_measured(armed):
+    """A chain holding only the verdicts it managed to reach reads as if the rest had passed."""
+    from gini.services import xv6_lab as X
+    said = []
+
+    class _Rec:
+        def note_measure(self, name, result):
+            said.append((name, result))
+
+    res = X.grade_now(armed, "M1", None, None)
+    X.record_grades(_Rec(), armed, res)
+    assert len(said) == len(res) == 7
+    names = [n for n, _ in said]
+    assert all(n.startswith("A-Lab 01") for n in names), names
+    pend = [r for _n, r in said if r["pending"]]
+    assert len(pend) == 6 and all(r["ok"] is False for r in pend)
+
+
+def test_the_numbers_reach_the_chain_with_the_verdict(armed):
+    from gini.services import xv6_lab as X
+    said = {}
+
+    class _Rec:
+        def note_measure(self, name, result):
+            said[name.rsplit(" · ", 1)[-1]] = result
+
+    prov = _Provider()
+    X.record_grades(_Rec(), armed, X.grade_now(armed, "M1", prov, _VmReader(prov)))
+    got = said["freemem_tracks"]
+    assert got["ok"] is True and got["pending"] is False
+    assert got["measurement"]["gini_delta_pages"] == -20
+    assert "moves with allocation" in got["summary"]
+
+
+def test_one_bad_result_does_not_lose_the_others(armed):
+    """`record_grades` is the single place both the button and the hand-in go through, so a
+    failure here would silently cost a marker every metric rather than one."""
+    from gini.services import xv6_lab as X
+    said = []
+
+    class _Rec:
+        def note_measure(self, name, result):
+            said.append(name)
+
+    class _Odd:
+        id, describe, summary, ok, detail = "odd", "d", "s", True, None
+    X.record_grades(_Rec(), armed, [_Odd()])
+    assert said == ["A-Lab 01 — sysinfo · odd"]
+
+
+class _Recorder:
+    """Enough of a recorder for the strip to draw itself and hand in."""
+    def __init__(self, log):
+        self.log = log
+
+    def status(self):
+        return {"armed": False}
+
+    def generate_proof(self, objectives=None):
+        self.log.append("generate_proof")
+        return {"ok": False, "message": "no code"}     # stop before the network
+
+
+def _strip(log, hook=None):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from gini.ui.proof_strip import ProofStrip
+    from gini.ui.theme import ThemeManager
+    app = QApplication.instance() or QApplication([])
+    tm = ThemeManager(app)
+    st = ProofStrip(tm, _Recorder(log))
+    st.before_generate = hook
+    st._questions_checked = lambda: True               # not what this is testing
+    return app, st
+
+
+def test_the_labs_are_measured_before_the_proof_commits_to_the_chain():
+    """Order is the whole point. `generate_proof` appends the submit entry and hashes the chain,
+    so a metric recorded afterwards is not in the proof that was sent."""
+    import time
+    log = []
+    app, st = _strip(log, hook=lambda: log.append("measured"))
+    st._generate()
+    for _ in range(100):
+        app.processEvents()
+        time.sleep(0.02)
+        if "generate_proof" in log:
+            break
+    assert log == ["measured", "generate_proof"]
+    assert st._generating is False, "left mid-flight; a second press would skip the measuring"
+
+
+def test_a_strip_with_no_hook_hands_in_exactly_as_it_always_did():
+    """Tests, and anywhere without a topology. The measuring is additive."""
+    log = []
+    _app, st = _strip(log, hook=None)
+    st._generate()
+    assert log == ["generate_proof"]
+
+
+def test_a_check_that_blows_up_does_not_cost_the_student_their_hand_in():
+    import time
+    log = []
+
+    def boom():
+        raise RuntimeError("the machine went away")
+
+    app, st = _strip(log, hook=boom)
+    st._generate()
+    for _ in range(100):
+        app.processEvents()
+        time.sleep(0.02)
+        if "generate_proof" in log:
+            break
+    assert log == ["generate_proof"], "the hand-in was lost to a failed measurement"

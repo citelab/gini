@@ -450,6 +450,28 @@ fixed length on a loaded machine, and it gives up honestly rather than guessing.
 The workload is killed afterwards. `alloc` spins forever by design, and leaving it running would
 quietly skew every later reading the student takes.
 
+### It happens at hand-in, not only on request
+
+"Check my work" is there for a student who wants to know. But a metric that only ever runs when
+somebody presses a button reaches a marker only when the student chose to look — and **the
+submission most likely to skip that is exactly the one these metrics exist to catch.** A `sysinfo`
+returning zero passes every wiring check, and its author has no reason to press anything.
+
+So the metrics are taken as part of handing in. `ProofStrip.before_generate` runs first, off the
+GUI thread, and only then is the submit entry appended — order matters absolutely, because
+`generate_proof` hashes the chain, and a metric recorded afterwards is not in the proof that was
+sent.
+
+**Nothing is asked of the student.** No dialog, no warning, no "you have not checked your work".
+They follow the handout, finish the lab, press Hand in; the strip says "Checking your work…" and
+the rest is GINI's business. A failed check never costs them the hand-in, and each machine is
+measured separately so one bad machine cannot lose the metrics from the others.
+
+A machine that is not running is still graded as far as it can be: `syscall_named` is read from
+their own `syscall.h` and needs no kernel. A machine in DEMO mode is never measured live — the
+demo plane produces a full, plausible feed with no kernel behind it, so measuring it would
+manufacture agreement between two halves of the same stand-in.
+
 ### What a marker gets
 
 One `measure` entry per metric — including the ones that could not be measured, because "there

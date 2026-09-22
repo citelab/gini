@@ -344,7 +344,6 @@ class UserCode(QDialog):
             self._log.setPlainText(f"The check could not run — {type(res).__name__}: {res}")
             return
         from ..domain import lab_grade as _g
-        from .lab_record import record
         t = _g.tally(res)
         lines = [f"{t['ok']}/{t['total']} measured and agreed"
                  + (f", {t['failed']} disagreed" if t["failed"] else "")
@@ -353,14 +352,7 @@ class UserCode(QDialog):
             mark = "·" if r.ok is None else ("✓" if r.ok else "✗")
             lines.append(f" {mark}  {r.describe}")
             lines.append(f"      {r.summary}")
-            # Every metric is recorded, including the ones that could not be measured: "there was
-            # nothing to compare" is evidence about the attempt, and a chain holding only the
-            # verdicts it managed to reach would read as if the rest had passed.
-            record(self._recorder, "note_measure",
-                   f"{getattr(self.spec, 'title', 'lab')} · {r.id}",
-                   {"ok": bool(r.ok), "pending": r.ok is None,
-                    "measurement": dict(r.detail or {}),
-                    "summary": f"{r.describe} — {r.summary}" if r.summary else r.describe})
+        _lab.record_grades(self._recorder, self.spec, res)
         self._log.setPlainText("\n".join(lines))
 
     def _load(self) -> None:

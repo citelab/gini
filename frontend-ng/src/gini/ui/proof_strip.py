@@ -69,11 +69,17 @@ class ProofStrip(QWidget):
     questionsArrived = Signal()             # this lab's questions just landed from the server
     questionsFetched = Signal(dict)         # a re-ask came back ({} == still unreachable)
     answerFirst = Signal()                  # they chose to answer before handing in
+    graded = Signal()                       # pre-submit measuring finished, back on the GUI thread
 
     def __init__(self, theme, recorder, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
         self.recorder = recorder
+        # Work that must land in the chain BEFORE the submit entry commits to it — measuring the
+        # armed A-Labs. Set by MainWindow, which is the only thing that can reach a running
+        # machine; None in tests and wherever there is no topology.
+        self.before_generate = None
+        self._generating = False
         # How many times Generate has been refused for unanswered questions on THIS code. Reset
         # by arming, so a new lab starts its own count.
         self._reminders = 0
@@ -149,6 +155,7 @@ class ProofStrip(QWidget):
         if hasattr(theme, "themeChanged"):
             theme.themeChanged.connect(self._restyle)
         self.changed.connect(self._on_recorder_changed)
+        self.graded.connect(self._generate)   # measuring done -> carry on and submit
         self.armChecked.connect(self._on_arm_checked)
         self.handedIn.connect(self._on_handed_in)
         self.flushed.connect(self._on_flushed)
@@ -390,6 +397,24 @@ class ProofStrip(QWidget):
             return
         if not self._questions_checked():
             return
+        if self.before_generate is not None and not self._generating:
+            # Measure first, and OFF the GUI thread: a grading run takes about fifteen seconds
+            # because it has to watch memory actually move. The student is told what is happening
+            # in the strip, but nothing is asked of them — they follow the handout, press Hand in,
+            # and the metrics are taken as part of that.
+            self._generating = True
+            self._say("Checking your work…")
+            fn = self.before_generate
+
+            def work():
+                try:
+                    fn()
+                except Exception:              # noqa: BLE001 — a check must never cost a hand-in
+                    pass
+                self.graded.emit()
+            run_off_gui(self, work)
+            return
+        self._generating = False
         result = self.recorder.generate_proof()
         if not result.get("ok"):
             self._say(result.get("message", "Could not generate a proof."), bad=True)

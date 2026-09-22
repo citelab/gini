@@ -1908,6 +1908,11 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QTimer as _QTimer
         from .proof_strip import ProofStrip
         self.proof_strip = ProofStrip(self.theme, self.proof_recorder)
+        # Measure the armed A-Labs as part of handing in. Nothing is asked of the student: they
+        # follow the handout, finish the lab, press Hand in, and the metrics are taken. Before
+        # this, the only way a metric reached a marker was a student pressing "Check my work" —
+        # and the submission most likely to skip it is the one those metrics exist to catch.
+        self.proof_strip.before_generate = self._measure_armed_labs
         # Catch up on anything that never reached the course server. Deferred so it cannot slow
         # the window opening, and it runs on a worker thread from there — the usual recovery for
         # a student whose wifi died mid-submission is simply reopening gBuilder on campus.
@@ -3028,6 +3033,41 @@ class MainWindow(QMainWindow):
                              "warn")
 
         run_off_gui(self, work)
+
+    def _measure_armed_labs(self) -> None:
+        """Grade every armed A-Lab into the chain. Runs off the GUI thread, before the hand-in.
+
+        Graded even when the machine is not running, or is showing the demo feed: `syscall_named`
+        is read from the student's own syscall.h and needs no kernel, and the rest come back "not
+        measured" with a reason. That distinction matters to a marker — metrics attempted against
+        a machine that was down is a different submission from one where nobody ever checked.
+
+        A DEMO machine is never measured live. The demo plane produces a full, plausible feed with
+        no kernel behind it, so measuring it would manufacture agreement out of two halves of the
+        same stand-in.
+
+        Never fatal. A check that fails must not cost a student their hand-in, which is why the
+        strip wraps this and why each machine is taken separately: one bad machine must not lose
+        the metrics from the others.
+        """
+        from ..services.compiler import _role
+        from ..services.xv6_lab import active_spec, grade_now, record_grades
+        for dev in list(self.ctx.topology.devices.values()):
+            if _role(dev.type_key) != "xv6":
+                continue
+            try:
+                spec = active_spec(dev.name)
+                if spec is None or not getattr(spec, "grade", ()):
+                    continue
+                ms = self.ctx.machine_states.get(dev.id)
+                live = ms is not None and getattr(ms, "mode", "") == "real" and self._running
+                record_grades(
+                    self.proof_recorder, spec,
+                    grade_now(spec, dev.name,
+                              ms.provider if live else None,
+                              getattr(ms, "vm", None) if live else None))
+            except Exception as e:              # noqa: BLE001 — one machine must not lose the rest
+                self.ctx.bus.log.emit("warn", f"{dev.name}: could not measure the lab ({e})")
 
     def _relink_xv6_lab(self, name: str, spec) -> None:
         """Re-point ONE running machine's kernel tree at a newly armed assignment.
