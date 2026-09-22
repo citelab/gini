@@ -238,3 +238,43 @@ def test_the_pipeline_is_not_a_peephole(app):
                         if st.kind == "inline")
     assert first_inline.y() + first_inline.height() <= lab.pipe_scroll.viewport().height(), \
         "the first service function is below the fold"
+
+
+# --------------------------------------------------------------------------- #
+# the old image, and self-healing an empty editor
+# --------------------------------------------------------------------------- #
+
+OLD = "base: parse -> [0:lua] -> route -> rewrite"        # a router without the argument feature
+
+
+def test_a_lua_loaded_on_an_old_image_shows_in_the_chain_and_stays(app):
+    """The reported bug: on an un-rebuilt router the box appeared "for a moment" then the chain
+    re-synced every poll and a stray click cleared it. It must simply stay put."""
+    lab = _lab(app, live=OLD)
+    for _ in range(3):                                    # three polls that used to churn
+        lab._on_chain(OLD)
+    assert [i.name for i in lab.program.inline] == ["lua"]
+    assert lab.deploy_status.text() == "in sync"
+    assert lab.program.dirty is False
+
+
+def test_an_empty_editor_follows_the_router_even_if_flagged_dirty(app):
+    """An empty chain has no draft to protect, and this is the "show my loaded module" case.
+    It self-heals the stuck "chain cleared here" a misclick used to leave behind."""
+    lab = _lab(app, live=LIVE)
+    lab.program.add("nat")                                # make it dirty
+    lab.program.remove(0)                                 # ...and empty: the stuck state
+    assert lab.program.dirty and not lab.program.inline
+    lab._on_chain(LIVE)
+    assert [i.type_key for i in lab.program.inline] == ["acl", "lua"], "did not recover"
+    assert lab.deploy_status.text() == "in sync"
+
+
+def test_a_non_empty_draft_is_still_protected_from_the_poll(app):
+    """The other side: a real draft with modules in it must NOT be overwritten by a poll."""
+    lab = _lab(app, live=LIVE)
+    lab.program.add("nat")
+    lab.program.inline[0].params["ip"] = "198.51.100.7"
+    lab._on_chain(LIVE)
+    assert [i.type_key for i in lab.program.inline] == ["nat"], "the draft was clobbered"
+    assert "edited" in lab.deploy_status.text()

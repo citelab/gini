@@ -117,6 +117,20 @@ def test_a_fresh_program_mirrors_the_live_chain_into_boxes():
     assert p.dirty is False
 
 
+def test_a_lua_with_no_argument_mirrors_to_a_stable_box():
+    """A router built before the argument was recorded reports a loaded script as a bare
+    `[0:lua]`. Mirrored as an editable Lua box its empty `path` reads as unconfigured, so the
+    mirror disagreed with the router on every poll and re-ran forever — a visible flicker.
+    It becomes a generic box that round-trips instead."""
+    live = parse_chain("base: parse -> [0:lua] -> route -> rewrite")
+    p = RouterProgram()
+    assert p.sync_from_live(live) is True
+    assert [(i.type_key, i.name) for i in p.inline] == [("native", "lua")]
+    assert p.sync_from_live(live) is False, "second poll must be a no-op — no churn"
+    assert p.matches_live(live)
+    assert p.illustrative() == [], "it is running, so it is not illustrative"
+
+
 def test_mirroring_is_idempotent_and_round_trips_through_deploy():
     """The mirrored chain redeploys as ITSELF. That is what makes `clear` at the top of a
     deploy no longer destroy hand-loaded modules: they are in the chain being re-added."""
