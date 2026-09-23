@@ -17,6 +17,11 @@ old.*
 \#*\#
 *~
 ext/*
+# ...except GINI's own apps. Upstream POX ignores ext/ as the user's scratch space, but here
+# ext/gini/ IS the product: under the bare rule every new sample was silently left out of a
+# commit (gini.samples._l2, which four apps import, would have been) while the files that
+# had been force-added kept tracking, so nothing looked wrong until an import failed.
+!ext/gini/
 pox/lib/pxpcap/pxpcap_c/build
 pox/lib/pxpcap/pxpcap_c/WpdPack
 pox/lib/pxpcap/pxpcap.so

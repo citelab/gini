@@ -32,8 +32,9 @@
 #     "behave like an L2 switch". On a flat segment the router has no interfaces or
 #     routes to use, so NORMAL was a black hole: with it, even a client fetching a
 #     backend DIRECTLY failed, because ARP between hosts never crossed the switch.
-#     Everything that is not VIP traffic is forwarded here exactly as
-#     gini.samples.switch does it -- learn MAC -> port, flood the unknown.
+#     Everything that is not VIP traffic is forwarded the way gini.samples.switch
+#     does it -- learn MAC -> port, flood the unknown -- by gini.samples._l2, which
+#     the other samples share for the same reason.
 #
 # The backend list is matched against addresses, so it must agree with what GINI
 # actually assigned. With automatic addressing hosts are numbered .10, .11, ... in
@@ -50,7 +51,8 @@ from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from pox.lib.addresses import EthAddr, IPAddr
 from pox.lib.packet.arp import arp
-from pox.lib.packet.ethernet import ethernet
+
+from gini.samples._l2 import L2
 
 log = core.getLogger()
 
@@ -68,11 +70,10 @@ class LoadBalancer(object):
         self.backends = backends
         self.next = 0
         self.assigned = {}              # client IP -> backend IP
-        self.mac_to_port = {}           # MAC -> switch port   (the learning-switch half)
-        self.ip_to_mac = {}             # IP -> MAC            (learned from ARP and IP)
+        self.l2 = L2(connection)        # delivers everything that is not VIP traffic
         connection.addListeners(self)
         for b in backends:              # learn the pool now, not on the first request
-            self._arp_probe(b)
+            self._probe(b)
 
     def _pick(self, client):
         if client not in self.assigned:
@@ -83,36 +84,37 @@ class LoadBalancer(object):
             self.next += 1
         return self.assigned[client]
 
+    def _probe(self, ip):
+        # Asked AS the VIP, so a backend's answer comes back to the VIP's MAC and is learned
+        # from there -- see _l2.L2.probe for why the other samples ask as 0.0.0.0 instead.
+        self.l2.probe(ip, src_mac=self.vmac, src_ip=self.vip)
+
     def _handle_PacketIn(self, event):
         packet = event.parsed
-        self.mac_to_port[packet.src] = event.port
+        self.l2.learn(event)
 
         a = packet.find('arp')
         if a is not None:
-            self.ip_to_mac[a.protosrc] = a.hwsrc
             if a.opcode == arp.REQUEST and a.protodst == self.vip:
-                self._arp_reply(event, a)
+                self.l2.arp_reply(event, a, self.vmac, self.vip)
                 return
             if packet.dst == self.vmac:     # a backend answering our probe: learned above
                 return
-            self._l2(event, packet, install=False)
+            self.l2.forward(event, install=False)
             return
 
         ip = packet.find('ipv4')
-        if ip is not None:
-            self.ip_to_mac[ip.srcip] = packet.src
 
         # Client -> VIP : choose a backend and rewrite the destination.
         if ip is not None and ip.dstip == self.vip:
             client = ip.srcip
             backend = self._pick(client)
-            bmac = self.ip_to_mac.get(backend)
-            bport = self.mac_to_port.get(bmac) if bmac is not None else None
+            bmac, bport = self.l2.locate(backend)
             if bport is None:
                 # Not learned yet (backend silent since start-up). Ask, and drop this one
                 # packet -- TCP retransmits the SYN and the next one finds the backend.
                 log.info("l4_lb: %s -> VIP -> %s (locating %s first)", client, backend, backend)
-                self._arp_probe(backend)
+                self._probe(backend)
                 return
             log.info("l4_lb: %s -> VIP -> %s", client, backend)
 
@@ -136,54 +138,10 @@ class LoadBalancer(object):
             self.connection.send(rev)
             return
 
-        # Anything else: an ordinary learning switch.
-        self._l2(event, packet, install=True)
-
-    # -- the learning-switch half (same shape as gini.samples.switch) ---------- #
-    def _l2(self, event, packet, install):
-        out_port = self.mac_to_port.get(packet.dst)
-        if out_port is None or packet.dst.is_multicast:
-            self._send(event.ofp, of.OFPP_FLOOD)
-            return
-        if not install:
-            self._send(event.ofp, out_port)
-            return
-        msg = of.ofp_flow_mod()
-        msg.match = of.ofp_match(dl_dst=packet.dst)
-        msg.idle_timeout = 30
-        msg.hard_timeout = 120
-        msg.actions.append(of.ofp_action_output(port=out_port))
-        msg.data = event.ofp
-        self.connection.send(msg)
-
-    def _send(self, data, port, in_port=None):
-        # Leave in_port alone for a frame that came from a packet-in: POX then copies the
-        # real ingress port (and buffer) from it, which FLOOD needs to exclude the port the
-        # frame arrived on. Passing OFPP_NONE there broke ARP between hosts outright. Only
-        # a frame the controller BUILT (an ARP reply or probe) names a port of its own.
-        msg = (of.ofp_packet_out(data=data) if in_port is None
-               else of.ofp_packet_out(data=data, in_port=in_port))
-        msg.actions.append(of.ofp_action_output(port=port))
-        self.connection.send(msg)
-
-    # -- ARP: advertise the VIP, and locate backends ---------------------------- #
-    def _arp_reply(self, event, req):
-        r = arp()
-        r.opcode = arp.REPLY
-        r.hwsrc, r.protosrc = self.vmac, self.vip
-        r.hwdst, r.protodst = req.hwsrc, req.protosrc
-        e = ethernet(type=ethernet.ARP_TYPE, src=self.vmac, dst=req.hwsrc)
-        e.payload = r
-        self._send(e.pack(), of.OFPP_IN_PORT, in_port=event.port)
-
-    def _arp_probe(self, ip):
-        r = arp()
-        r.opcode = arp.REQUEST
-        r.hwsrc, r.protosrc = self.vmac, self.vip
-        r.hwdst, r.protodst = EthAddr("00:00:00:00:00:00"), ip
-        e = ethernet(type=ethernet.ARP_TYPE, src=self.vmac, dst=EthAddr("ff:ff:ff:ff:ff:ff"))
-        e.payload = r
-        self._send(e.pack(), of.OFPP_FLOOD)
+        # Anything else: an ordinary learning switch. Installing is safe here -- the rules
+        # above match on the VIP, whose MAC no host ever sends from, so no learned MAC rule
+        # can carry VIP traffic past the controller.
+        self.l2.forward(event, install=True)
 
 
 class l4_lb(object):

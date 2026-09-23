@@ -54,7 +54,10 @@ def test_it_answers_arp_for_the_vip():
     code = _code()
     assert "arp.REQUEST" in code and "protodst == self.vip" in code, \
         "a request for the VIP must be recognised"
-    assert "arp.REPLY" in code, "and answered — otherwise no client ever sends to the VIP"
+    assert "arp_reply(event, a, self.vmac, self.vip)" in code, \
+        "and answered as the VIP — otherwise no client ever sends to it"
+    helper = ast.unparse(ast.parse((APP.parent / "_l2.py").read_text(encoding="utf-8")))
+    assert "arp.REPLY" in helper, "the shared helper must build an actual ARP reply"
 
 
 def test_the_forward_flow_rewrites_the_mac_as_well_as_the_ip():

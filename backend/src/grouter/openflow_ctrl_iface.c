@@ -46,6 +46,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <poll.h>
 #include <arpa/inet.h>
 
 #include "gnet.h"
@@ -1627,7 +1628,17 @@ static void openflow_ctrl_iface(void *port)
 					}
 					pthread_mutex_unlock(&reconnect_mutex);
 
-					sleep(1);
+					// Nothing waiting: WAIT ON THE SOCKET, don't sleep. This was
+					// sleep(1), so every message from the controller -- each packet-out,
+					// each flow-mod -- sat unread for up to a second. An app that installs
+					// flows paid that once per conversation and nobody noticed; an app that
+					// must see every packet (ids, port_knock, redirect's unsteered traffic)
+					// paid it per PACKET: an ARP reply a second late, a SYN-ACK two, TCP
+					// retransmitting over the top, and a curl that took 3-4 s or timed out.
+					// poll() returns the moment the controller writes; the 100 ms cap is
+					// only so a reconnect request is still noticed promptly.
+					struct pollfd pfd = { .fd = ofc_socket_fd, .events = POLLIN };
+					poll(&pfd, 1, 100);
 				}
 			}
 			while (ret == 0);
