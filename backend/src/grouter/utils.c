@@ -188,6 +188,46 @@ ushort checksum(uchar *buf, int iwords)
 	return (unsigned short) (~cksum);
 }
 
+/*
+ * The TCP/UDP checksum over the IPv4 pseudo-header and the segment, returned in
+ * NETWORK byte order, ready to store straight into the header field (which the
+ * caller must have zeroed). `src`/`dst` are the 4 address bytes as they sit on the
+ * wire; `seg`/`seglen` is the whole L4 segment, header included.
+ *
+ * Summed byte-wise as big-endian words, so it is endian-safe and never reads past
+ * `seglen` -- an odd last byte is padded with zero, as RFC 1071 says.
+ *
+ * This replaced tcp_checksum()/udp_checksum() bodies that could not have worked:
+ * they stepped a typed pointer (`ip_packet + hdr_len*4` moves hdr_len*4 *structs*),
+ * summed `&tcp_packet` -- the bytes of the pointer variable on the stack, not the
+ * segment -- and mixed network- and host-order lengths. Any OpenFlow rewrite of a
+ * TCP packet's address (SET_NW_SRC/DST, gini.samples.l4_lb and redirect) therefore
+ * crashed the whole switch with SIGSEGV in checksum().
+ */
+ushort l4_checksum(const uchar *src, const uchar *dst, uchar prot,
+                   const uchar *seg, int seglen)
+{
+	unsigned long sum = 0;
+	int i;
+
+	for (i = 0; i < 4; i += 2)
+		sum += (src[i] << 8) | src[i + 1];
+	for (i = 0; i < 4; i += 2)
+		sum += (dst[i] << 8) | dst[i + 1];
+	sum += prot;
+	sum += (unsigned long) seglen;
+
+	for (i = 0; i + 1 < seglen; i += 2)
+		sum += (seg[i] << 8) | seg[i + 1];
+	if (seglen & 1)
+		sum += seg[seglen - 1] << 8;
+
+	while (sum >> 16)
+		sum = (sum & 0xFFFF) + (sum >> 16);
+
+	return htons((ushort) ~sum);
+}
+
 double subTimeVal(struct timeval *v2, struct timeval *v1)
 {
 	double val2, val1;

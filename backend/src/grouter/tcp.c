@@ -64,40 +64,19 @@
  */
 uint16_t tcp_checksum(ip_packet_t *ip_packet)
 {
-	// Derive TCP packet from IP packet and reset checksum
-	tcp_packet_type *tcp_packet = (tcp_packet_type *)
-		(ip_packet + (ip_packet->ip_hdr_len * 4));
+	// The segment starts ip_hdr_len 32-bit words in, counted in BYTES, and runs to the
+	// end of the IP datagram. A length the header cannot back up is left alone rather
+	// than summed past the buffer.
+	int hlen = ip_packet->ip_hdr_len * 4;
+	int seglen = (int) ntohs(ip_packet->ip_pkt_len) - hlen;
+	uchar *seg = (uchar *) ip_packet + hlen;
+	tcp_packet_type *tcp_packet = (tcp_packet_type *) seg;
+
+	if (hlen < 20 || seglen < (int) sizeof(tcp_packet_type) || seglen > DEFAULT_MTU)
+		return tcp_packet->checksum;
 	tcp_packet->checksum = 0;
-
-	// Create TCP pseudo-header
-	uint16_t tcp_len = ip_packet->ip_pkt_len - ip_packet->ip_hdr_len * 4;
-	tcp_pseudo_header_type pseudo_header;
-	COPY_IP(&pseudo_header.ip_src, ip_packet->ip_src);
-	COPY_IP(&pseudo_header.ip_dst, ip_packet->ip_dst);
-	pseudo_header.reserved = 0;
-	pseudo_header.ip_prot = ip_packet->ip_prot;
-	pseudo_header.tcp_length = tcp_len;
-
-	// Calculate sums of pseudo-header and TCP packet (same as taking one's
-	// complement of checksum) and store in temporary buffer
-	uint16_t buf[3];
-	buf[0] = ~checksum((uint8_t *) &pseudo_header,
-					   sizeof(tcp_pseudo_header_type) / 2);
-	buf[1] = ~checksum((uint8_t *) &tcp_packet, ntohs(tcp_len) / 2);
-	// If TCP packet length is odd, store zero-padded last byte in temporary
-	// buffer as well
-	if (tcp_len % 2 != 0)
-	{
-		uint8_t *temp = (uint8_t *) (tcp_packet + ntohs(tcp_len) - 1);
-		buf[2] = *temp << 8;
-	}
-	else
-	{
-		buf[2] = 0;
-	}
-
-	// Find checksum of the sums (plus the last byte, if applicable)
-	return checksum((uint8_t *) &buf, 3);
+	return l4_checksum(ip_packet->ip_src, ip_packet->ip_dst, ip_packet->ip_prot,
+	                   seg, seglen);
 }
 
 

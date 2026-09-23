@@ -48,9 +48,12 @@ typedef struct {
 	uint16_t	src_port;
 	// Destination port
 	uint16_t	dst_port;
-	// Sequence number
-	uint16_t	seq_num;
-	uint16_t	ack_num;
+	// Sequence and acknowledgement numbers — 32 bits each on the wire. They were
+	// declared uint16_t, which put `checksum` at byte 12 instead of 16: a rewritten TCP
+	// packet then had its checksum written over data-offset/flags/window, mangling the
+	// header of every flow an OpenFlow SET_NW_* rule touched.
+	uint32_t	seq_num;
+	uint32_t	ack_num;
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 	// Unused
 	uint8_t		reserved:4;

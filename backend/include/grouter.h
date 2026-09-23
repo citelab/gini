@@ -124,6 +124,8 @@ int gAtoi(char *str);
 unsigned char *gHtonl(uchar tval[], uchar val[]);
 unsigned char *gNtohl(uchar tval[], uchar val[]);
 ushort checksum(uchar *buf, int iwords);
+ushort l4_checksum(const uchar *src, const uchar *dst, uchar prot,
+                   const uchar *seg, int seglen);
 
 uint64_t __builtin_bswap64(uint64_t x);
 uint64_t ntohll(uint64_t arg);
