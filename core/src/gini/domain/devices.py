@@ -327,7 +327,7 @@ _DEVICES: list[DeviceType] = [
         property_choices={"App": (
             "gini.samples.switch",
             "gini.samples.packet_loss --loss=0.3",
-            "gini.samples.port_knock --server=10.0.1.10 --port=23"
+            "gini.samples.port_knock --server=10.0.1.11 --port=23"
             " --sequence=1111,2222,3333",
             "gini.samples.l4_lb --vip=10.0.1.100"
             " --backends=10.0.1.12,10.0.1.13",

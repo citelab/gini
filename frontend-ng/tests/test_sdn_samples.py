@@ -147,3 +147,17 @@ def test_redirects_defaults_are_the_server_and_the_middlebox():
 def test_a_target_that_never_answers_is_named_in_the_log(name):
     """No fixed default survives every wiring order, so being wrong must be visible."""
     assert "nothing answers at" in (SAMPLES / f"{name}.py").read_text(encoding="utf-8")
+
+
+def test_port_knocks_default_server_is_the_server():
+    """Same convention as l4_lb and redirect: the client is wired first. The old default
+    (.10) was the CLIENT — the real server's port went unguarded and the door was open."""
+    ip = _addresses(["Client", "Server"])
+    assert _launch_default("port_knock", "server") == ip["Server"]
+
+
+def test_an_unguarded_server_is_named_in_the_log():
+    """A wrong --server fails open, silently. The first sight of the protected port reached
+    at another address must say so."""
+    src = (SAMPLES / "port_knock.py").read_text(encoding="utf-8")
+    assert "is being reached, but the guarded server is" in src

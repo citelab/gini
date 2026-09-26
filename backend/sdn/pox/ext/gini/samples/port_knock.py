@@ -17,9 +17,16 @@
 # out OFPP_NORMAL, which on the GINI Flow Switch is the router's IP pipeline and delivered
 # nothing at all on a flat segment.
 #
+# The server address must agree with what GINI assigned. With automatic addressing,
+# hosts on a segment are numbered .10, .11, ... in the order they were WIRED; the
+# default assumes client first, then the server -- Client .10, Server .11 -- the same
+# convention as l4_lb and redirect. Get it wrong and the failure is the quiet kind: the
+# real server's port is never guarded, so the door is simply open to everyone. The log
+# says so the first time it sees the protected port reached at another address.
+#
 # Launch:
 #   ./pox.py openflow.of_01 --port=6633 gini.samples.port_knock \
-#       --server=10.0.1.10 --port=23 --sequence=1111,2222,3333
+#       --server=10.0.1.11 --port=23 --sequence=1111,2222,3333
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
@@ -40,6 +47,7 @@ class PortKnock(object):
         self.protected = protected      # protected TCP port
         self.sequence = sequence        # list of knock ports, in order
         self.progress = {}              # src IP -> number of correct knocks so far
+        self.warned_elsewhere = False   # said once that --server looks wrong
         self.l2 = L2(connection)        # delivers ordinary traffic, installs nothing
         connection.addListeners(self)
 
@@ -54,6 +62,14 @@ class PortKnock(object):
 
         src = ip.srcip
         dport = tcp.dstport
+
+        # The protected port reached at some OTHER address: almost always --server naming
+        # the wrong host, which leaves the real one unguarded. Say it once; still deliver.
+        if dport == self.protected and ip.dstip != self.server and not self.warned_elsewhere:
+            self.warned_elsewhere = True
+            log.warning("port_knock: %s:%d is being reached, but the guarded server is %s -- "
+                        "check --server against `ip addr` on the server", ip.dstip,
+                        self.protected, self.server)
 
         # A packet aimed at the protected service.
         if ip.dstip == self.server and dport == self.protected:
@@ -115,6 +131,6 @@ class port_knock(object):
                  "-".join(str(p) for p in self.sequence))
 
 
-def launch(server="10.0.1.10", port="23", sequence="1111,2222,3333"):
+def launch(server="10.0.1.11", port="23", sequence="1111,2222,3333"):
     seq = [int(p) for p in sequence.split(",")]
     core.registerNew(port_knock, IPAddr(server), int(port), seq)

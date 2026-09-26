@@ -75,7 +75,7 @@ in front of students is worse than leaving it out. What is needed before listing
 that are not listed, so adding `sfc` to the dropdown will not fail the suite — but if it is added
 *with* parameters, the drift tests will start covering it automatically.
 
-## Resolved — the address defaults of `redirect` and `l4_lb`
+## Resolved — the address defaults of `redirect`, `l4_lb` and `port_knock`
 
 Both defaults could not match what GINI builds. `redirect` said `--vnf=10.0.1.20`, but hosts on a
 segment are numbered from `.10` and nothing reaches `.20` short of eleven hosts. `l4_lb` said
@@ -84,30 +84,31 @@ book's own Figure 23.2 topology, built as drawn, sent Client_1 to a machine with
 
 The number a host gets is decided by **wiring order, not placement**: `compiler.py`'s address pass
 walks links in the order they were drawn, handing out `.10, .11, …`. So a default is a bet on how
-a student wires the topology, and the bet is now one convention for both apps — **clients first,
+a student wires the topology, and the bet is now one convention for all three — **clients first,
 then servers**, which is also the order the book's steps list them:
 
 | App | Topology, wired in this order | Defaults |
 |---|---|---|
 | `l4_lb` | Client_1 `.10`, Client_2 `.11`, Web_1 `.12`, Web_2 `.13` | `--backends=10.0.1.12,10.0.1.13` |
 | `redirect` | Client `.10`, Server `.11`, VNF `.12` | `--server=10.0.1.11 --vnf=10.0.1.12` |
+| `port_knock` | Client `.10`, Server `.11` | `--server=10.0.1.11` |
 
 `redirect`'s middlebox is a **machine running a proxy**, as the app's own header says — not GINI's
 VNF element. The VNF element is addressed like a router (`.1`), becomes the segment's gateway, and
 runs a firewall rather than a web server, so `10.0.1.2` (this note's earlier candidate) would point
 at nothing a curl can reach.
 
-No fixed default survives every wiring order, so both apps now also say when they are wrong
+No fixed default survives every wiring order, so each app now also says when it is wrong
 instead of failing quietly: `l4_lb` warns when a pool member is seen sending to the VIP (almost
-always a client) and both warn when their target never answers a probe. `tests/test_sdn_samples.py`
+always a client), `l4_lb` and `redirect` warn when their target never answers a probe, and
+`port_knock` warns the first time the protected port is reached at an address other than
+`--server` — its quiet failure is the worst of the three, because a wrong server leaves the real
+one unguarded and the door open to everyone. `tests/test_sdn_samples.py`
 builds each topology through the real compiler and checks the defaults against the addresses it
 assigns, so the two cannot drift apart again.
 
 **Still to reconcile outside the repo:** the book's §23.6.3 step 1 says the defaults are
 `10.0.1.11` and `10.0.1.12`.
-
-`port_knock --server=10.0.1.10` assumes the opposite convention (server wired first). It was
-not in scope for this change and is left as it was.
 
 ---
 
