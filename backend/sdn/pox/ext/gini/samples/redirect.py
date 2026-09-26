@@ -26,9 +26,17 @@
 #     NEXT client's port-80 SYN straight to the server, past the controller, and that
 #     client would never be redirected.
 #
+# The addresses must agree with what GINI assigned. With automatic addressing, hosts on
+# a segment are numbered .10, .11, ... in the order they were WIRED. The defaults assume
+# client first, then the server, then the middlebox -- Client .10, Server .11, VNF .12.
+# The middlebox is a MACHINE running a proxy, not GINI's VNF element: that one is
+# addressed like a router (.1), becomes the segment's gateway and runs a firewall, not
+# a web server. Wire it differently and pass --server/--vnf from `ip addr`; the log
+# says when the middlebox never answers rather than steering into silence.
+#
 # Launch:
 #   ./pox.py openflow.of_01 --port=6633 gini.samples.redirect \
-#       --server=10.0.1.10 --port=80 --vnf=10.0.1.20
+#       --server=10.0.1.11 --port=80 --vnf=10.0.1.12
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
@@ -41,6 +49,7 @@ log = core.getLogger()
 _ETH_IP = 0x0800
 _IP_TCP = 6
 _STEER_PRIORITY = 0x9000        # above anything else the switch might hold
+_GIVE_UP = 3                    # unanswered probes before the log says the VNF is not there
 
 
 class Redirect(object):
@@ -50,6 +59,7 @@ class Redirect(object):
         self.port = port                # destination port to intercept
         self.vnf = vnf                  # middlebox IP to steer through
         self.l2 = L2(connection)        # delivers everything that is not steered
+        self.misses = 0                 # unanswered probes for the middlebox
         connection.addListeners(self)
         self.l2.probe(vnf)              # find the middlebox before the first client asks
 
@@ -66,8 +76,14 @@ class Redirect(object):
             if vport is None:
                 # The middlebox has not been heard from yet. Ask, and drop this SYN -- the
                 # client retransmits it in a second, and the retry finds the middlebox.
-                log.info("redirect: %s -> %s:%d (locating VNF %s first)",
-                         client, self.server, self.port, self.vnf)
+                self.misses += 1
+                if self.misses == _GIVE_UP:
+                    log.warning("redirect: nothing answers at VNF %s -- no host has that "
+                                "address? check --vnf against `ip addr` on the middlebox",
+                                self.vnf)
+                else:
+                    log.info("redirect: %s -> %s:%d (locating VNF %s first)",
+                             client, self.server, self.port, self.vnf)
                 self.l2.probe(self.vnf)
                 return
             server_mac = packet.dst     # the client addressed the server; restore it on the way back
@@ -115,5 +131,5 @@ class redirect(object):
                  event.dpid, self.server, self.port, self.vnf)
 
 
-def launch(server="10.0.1.10", port="80", vnf="10.0.1.20"):
+def launch(server="10.0.1.11", port="80", vnf="10.0.1.12"):
     core.registerNew(redirect, IPAddr(server), int(port), IPAddr(vnf))

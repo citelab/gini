@@ -75,23 +75,39 @@ in front of students is worse than leaving it out. What is needed before listing
 that are not listed, so adding `sfc` to the dropdown will not fail the suite — but if it is added
 *with* parameters, the drift tests will start covering it automatically.
 
-## Deferred 2 — `redirect`'s `--vnf` default is probably wrong
+## Resolved — the address defaults of `redirect` and `l4_lb`
 
-`redirect` defaults to `vnf=10.0.1.20`. The compiler assigns VNF addresses in the same pass as
-routers — `.1`, `.2`, … — while `.10` upward belongs to hosts. So a generated topology never has
-a VNF at `.20`, and the default cannot match anything GINI builds.
+Both defaults could not match what GINI builds. `redirect` said `--vnf=10.0.1.20`, but hosts on a
+segment are numbered from `.10` and nothing reaches `.20` short of eleven hosts. `l4_lb` said
+`--backends=10.0.1.11,10.0.1.12`, which under automatic addressing is **Client_2 and Web_1**: the
+book's own Figure 23.2 topology, built as drawn, sent Client_1 to a machine with no web server.
 
-It has been that way for as long as the app has existed, and it was harmless while invisible.
-Now that the dropdown prints it, it is a wrong answer in front of every student who opens the
-list — which is an argument for fixing it, not for hiding it again.
+The number a host gets is decided by **wiring order, not placement**: `compiler.py`'s address pass
+walks links in the order they were drawn, handing out `.10, .11, …`. So a default is a bet on how
+a student wires the topology, and the bet is now one convention for both apps — **clients first,
+then servers**, which is also the order the book's steps list them:
 
-Not changed yet because the right value depends on a decision nobody has made: whether `redirect`
-should default to *the first VNF on the segment* (`10.0.1.2`, matching how the compiler numbers
-them) or keep a value that says "you must set this", in which case the default should be something
-obviously unset rather than something plausibly real.
+| App | Topology, wired in this order | Defaults |
+|---|---|---|
+| `l4_lb` | Client_1 `.10`, Client_2 `.11`, Web_1 `.12`, Web_2 `.13` | `--backends=10.0.1.12,10.0.1.13` |
+| `redirect` | Client `.10`, Server `.11`, VNF `.12` | `--server=10.0.1.11 --vnf=10.0.1.12` |
 
-To settle it, build a topology with a VNF and read the address the compiler gives it — that is the
-number the default should be, if it is to have one.
+`redirect`'s middlebox is a **machine running a proxy**, as the app's own header says — not GINI's
+VNF element. The VNF element is addressed like a router (`.1`), becomes the segment's gateway, and
+runs a firewall rather than a web server, so `10.0.1.2` (this note's earlier candidate) would point
+at nothing a curl can reach.
+
+No fixed default survives every wiring order, so both apps now also say when they are wrong
+instead of failing quietly: `l4_lb` warns when a pool member is seen sending to the VIP (almost
+always a client) and both warn when their target never answers a probe. `tests/test_sdn_samples.py`
+builds each topology through the real compiler and checks the defaults against the addresses it
+assigns, so the two cannot drift apart again.
+
+**Still to reconcile outside the repo:** the book's §23.6.3 step 1 says the defaults are
+`10.0.1.11` and `10.0.1.12`.
+
+`port_knock --server=10.0.1.10` assumes the opposite convention (server wired first). It was
+not in scope for this change and is left as it was.
 
 ---
 

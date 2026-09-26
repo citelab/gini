@@ -37,15 +37,17 @@
 #     the other samples share for the same reason.
 #
 # The backend list is matched against addresses, so it must agree with what GINI
-# actually assigned. With automatic addressing hosts are numbered .10, .11, ... in
-# the order they were placed, which is NOT the textbook's .11/.12 for the web
-# servers. Either turn on manual addressing and set them, or pass --backends with
-# the addresses `ip addr` shows on each backend. A pool member that shows up
-# sending to the VIP is logged as a warning, because it is almost always a client.
+# actually assigned. With automatic addressing, hosts on a segment are numbered .10,
+# .11, ... in the order they were WIRED (not placed). The defaults assume the order
+# the book's Figure 23.2 lists them -- Client_1 .10, Client_2 .11, Web_1 .12, Web_2
+# .13 -- so they are Web_1 and Web_2. Wire it differently and they are not: either turn
+# on manual addressing, or pass --backends with the addresses `ip addr` shows on each
+# backend. The controller log says so rather than failing quietly -- a pool member
+# seen sending to the VIP (almost always a client), or one that never answers at all.
 #
 # Launch:
 #   ./pox.py openflow.of_01 --port=6633 gini.samples.l4_lb \
-#       --vip=10.0.1.100 --backends=10.0.1.11,10.0.1.12
+#       --vip=10.0.1.100 --backends=10.0.1.12,10.0.1.13
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
@@ -60,6 +62,8 @@ _ETH_IP = 0x0800
 # Above a learned L2 rule (default 0x8000), so a reply to a client is always
 # caught by the reverse rewrite even when a plain MAC rule for that client exists.
 _LB_PRIORITY = 0x9000
+# Unanswered probes for one backend before the log says it is probably not there.
+_GIVE_UP = 3
 
 
 class LoadBalancer(object):
@@ -70,6 +74,7 @@ class LoadBalancer(object):
         self.backends = backends
         self.next = 0
         self.assigned = {}              # client IP -> backend IP
+        self.misses = {}                # backend IP -> unanswered probes
         self.l2 = L2(connection)        # delivers everything that is not VIP traffic
         connection.addListeners(self)
         for b in backends:              # learn the pool now, not on the first request
@@ -113,7 +118,13 @@ class LoadBalancer(object):
             if bport is None:
                 # Not learned yet (backend silent since start-up). Ask, and drop this one
                 # packet -- TCP retransmits the SYN and the next one finds the backend.
-                log.info("l4_lb: %s -> VIP -> %s (locating %s first)", client, backend, backend)
+                self.misses[backend] = self.misses.get(backend, 0) + 1
+                if self.misses[backend] == _GIVE_UP:
+                    log.warning("l4_lb: nothing answers at %s -- no host has that address? "
+                                "check --backends against `ip addr` on each backend", backend)
+                else:
+                    log.info("l4_lb: %s -> VIP -> %s (locating %s first)",
+                             client, backend, backend)
                 self._probe(backend)
                 return
             log.info("l4_lb: %s -> VIP -> %s", client, backend)
@@ -159,6 +170,6 @@ class l4_lb(object):
                  ", ".join(str(b) for b in self.backends))
 
 
-def launch(vip="10.0.1.100", backends="10.0.1.11,10.0.1.12", vmac="02:00:00:00:01:64"):
+def launch(vip="10.0.1.100", backends="10.0.1.12,10.0.1.13", vmac="02:00:00:00:01:64"):
     pool = [IPAddr(b) for b in backends.split(",")]
     core.registerNew(l4_lb, IPAddr(vip), EthAddr(vmac), pool)

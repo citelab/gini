@@ -92,3 +92,58 @@ def test_the_switch_waits_on_the_controller_socket_instead_of_sleeping():
     loop = re.sub(r"//[^\n]*|/\*.*?\*/", "", loop, flags=re.S)   # the comment explains sleep(1)
     assert "poll(" in loop, "the receive loop must wait on the socket"
     assert "sleep(1)" not in loop, "a sleep here delays every controller message by up to 1 s"
+
+
+# --------------------------------------------------------------------------- #
+# the address defaults must be addresses GINI actually hands out
+# --------------------------------------------------------------------------- #
+
+def _launch_default(name: str, param: str) -> str:
+    tree = ast.parse((SAMPLES / f"{name}.py").read_text(encoding="utf-8"))
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "launch")
+    names = [a.arg for a in fn.args.args]
+    defaults = dict(zip(names[len(names) - len(fn.args.defaults):], fn.args.defaults))
+    return defaults[param].value
+
+
+def _addresses(wired_in_order):
+    """Compile hosts wired to one OVS in exactly this order; name -> assigned IP.
+
+    Wiring order is the whole point: the compiler numbers hosts .10, .11, ... in the order
+    their LINKS were drawn, so this is the only honest way to say what a default points at."""
+    from gini.domain.topology import Topology
+    from gini.services.compiler import RuntimeCompiler
+    t = Topology("defaults")
+    sw = t.add_device("ovs")
+    ctl = t.add_device("controller")
+    t.add_link(ctl.id, sw.id)
+    for name in wired_in_order:
+        d = t.add_device("host")
+        d.name = name
+        t.add_link(d.id, sw.id)
+    rt = RuntimeCompiler().compile(t).to_runtime(docker=True)
+    return {m["hostname"]: m["ifaces"][0]["ip"].split("/")[0] for m in rt["machines"]}
+
+
+def test_l4_lbs_default_backends_are_the_web_servers_of_figure_23_2():
+    """Built as the book draws and lists it: two clients, then two web servers. The old
+    default (.11,.12) was Client_2 and Web_1 — Client_1 was balanced onto a machine with no
+    web server, and nothing said why."""
+    ip = _addresses(["Client_1", "Client_2", "Web_1", "Web_2"])
+    pool = _launch_default("l4_lb", "backends").split(",")
+    assert pool == [ip["Web-1"], ip["Web-2"]]
+    assert ip["Client-1"] not in pool and ip["Client-2"] not in pool
+
+
+def test_redirects_defaults_are_the_server_and_the_middlebox():
+    """Client, then the server it asks for, then the proxy it is steered to. `.20` — the old
+    VNF default — is an address no GINI segment reaches short of eleven hosts."""
+    ip = _addresses(["Client", "Server", "VNF"])
+    assert _launch_default("redirect", "server") == ip["Server"]
+    assert _launch_default("redirect", "vnf") == ip["VNF"]
+
+
+@pytest.mark.parametrize("name", ("l4_lb", "redirect"))
+def test_a_target_that_never_answers_is_named_in_the_log(name):
+    """No fixed default survives every wiring order, so being wrong must be visible."""
+    assert "nothing answers at" in (SAMPLES / f"{name}.py").read_text(encoding="utf-8")
