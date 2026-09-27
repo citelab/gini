@@ -61,6 +61,10 @@ const dom = new JSDOM(html, {
   runScripts: 'dangerously',
   url: 'http://localhost:8080/',
   beforeParse(w) {                       // must be installed BEFORE the page's script runs
+    // jsdom has no window.CSS, and every real browser does. The console builds selectors with
+    // CSS.escape (askDelete, doDelete), so without this the Delete confirm threw here — and only
+    // here — and two tests failed for a reason no teacher could ever hit.
+    if (!w.CSS) w.CSS = {escape: v => String(v).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c)};
     w.localStorage.setItem('gini_tc_session', 'tok');
     w.localStorage.setItem('gini_tc_course', 'comp535');
     w.fetch = async (p, opt) => {
@@ -145,7 +149,10 @@ setTimeout(async () => {
 
 def _drive(mode: str, *, blank: bool = False, **extra) -> dict:
     out = subprocess.run(
-        ["node", "-e", HARNESS], capture_output=True, text=True, timeout=120,
+        # The ABSOLUTE node the skip check found. The env below pins PATH to /usr/bin:/bin, and
+        # node lives elsewhere on most machines (Homebrew, nvm) — so a bare "node" passed the skip
+        # and then failed to start, and all of these reported FileNotFoundError, never a result.
+        [shutil.which("node"), "-e", HARNESS], capture_output=True, text=True, timeout=120,
         env={"PATH": "/usr/bin:/bin", "CONSOLE": str(_CONSOLE), "JSDOM_ROOT": _jsdom_root(),
              "SAVE_RESPONSE": json.dumps({"mode": mode, "blank": blank, **extra})})
     assert out.returncode == 0, f"harness failed:\n{out.stderr}"
@@ -246,3 +253,94 @@ def test_a_lab_with_submissions_offers_no_delete_button_at_all():
     teacher to distrust the console."""
     r = _drive("ok", labs=True, submitted=3, deleting=True)
     assert r["delete_offered"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Edit opens for EVERY lab — including one with an apostrophe in its data
+# --------------------------------------------------------------------------- #
+#
+# Reported from the TC server: Edit did nothing for "one or two labs", with no pattern. The button
+# carried the whole lab inline, inside a single-quoted onclick, and JSON does not escape an
+# apostrophe — so a ' anywhere in a lab (often in a question's expected answer, which the listing
+# never shows) cut the handler off mid-JSON.
+
+APOSTROPHE_LABS = [
+    {"id": "comp535/lab1", "course": "comp535", "lab": "lab1", "title": "Plain",
+     "brief": "No quotes here.", "status": "draft", "vended": 0, "submitted": 0,
+     "vend_until": 0, "session_minutes": 60},
+    {"id": "comp535/lab2", "course": "comp535", "lab": "lab2", "title": "The kernel's pages",
+     "brief": "Watch the kernel's page table; don't guess.", "status": "draft", "vended": 0,
+     "submitted": 0, "vend_until": 0, "session_minutes": 60},
+    {"id": "comp535/lab3", "course": "comp535", "lab": "lab3", "title": "Traps",
+     "brief": "Plain brief.", "status": "draft", "vended": 0, "submitted": 0,
+     "vend_until": 0, "session_minutes": 60,
+     "questions": [{"id": "q1", "prompt": "Why?", "answer": "it's the trap, isn't it"}]},
+]
+
+EDIT_HARNESS = r"""
+const fs = require('fs');
+const { JSDOM } = require(process.env.JSDOM_ROOT + '/jsdom');
+const LABS = JSON.parse(process.env.LABS);
+const ok = o => ({status: 200, ok: true, text: async () => JSON.stringify(o), json: async () => o});
+const errors = [];
+const dom = new JSDOM(fs.readFileSync(process.env.CONSOLE, 'utf8'), {
+  runScripts: 'dangerously', url: 'http://localhost:8080/',
+  beforeParse(w) {
+    if (!w.CSS) w.CSS = {escape: v => String(v).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c)};
+    w.localStorage.setItem('gini_tc_session', 'tok');
+    w.localStorage.setItem('gini_tc_course', 'comp535');
+    w.fetch = async p => {
+      if (p === '/auth/whoami') return ok({who: 'mahesh', role: 'teacher'});
+      if (p.startsWith('/api/courses')) return ok([{id: 'comp535', title: 'N', staff: ['mahesh'],
+                                                     activities: LABS.length, archived: 0}]);
+      if (p.startsWith('/api/activities?')) return ok(LABS);
+      if (p.startsWith('/api/submissions')) return ok([]);
+      return ok({ok: true});
+    };
+    w.addEventListener('error', e => errors.push(e.message));
+  }
+});
+const w = dom.window;
+setTimeout(async () => {
+  w.show('acts');
+  await new Promise(r => setTimeout(r, 150));
+  const $ = s => w.document.querySelector(s);
+  const edits = [...w.document.querySelectorAll('button')].filter(b => b.textContent.trim() === 'Edit');
+  const seen = [];
+  for (const b of edits) {
+    $('#a-lab').value = ''; $('#a-title').value = ''; $('#a-brief').value = '';
+    try { b.click(); } catch (e) { errors.push(String(e)); }
+    seen.push({lab: $('#a-lab').value, title: $('#a-title').value, brief: $('#a-brief').value});
+  }
+  console.log(JSON.stringify({buttons: edits.length, seen, errors}));
+  process.exit(0);
+}, 300);
+"""
+
+
+def _edit_run() -> dict:
+    out = subprocess.run(
+        [shutil.which("node"), "-e", EDIT_HARNESS], capture_output=True, text=True, timeout=120,
+        env={"PATH": "/usr/bin:/bin", "CONSOLE": str(_CONSOLE), "JSDOM_ROOT": _jsdom_root(),
+             "LABS": json.dumps(APOSTROPHE_LABS)})
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+@needs_jsdom
+def test_edit_opens_every_lab_even_with_an_apostrophe_in_it():
+    r = _edit_run()
+    assert r["buttons"] == 3
+    assert [s["lab"] for s in r["seen"]] == ["lab1", "lab2", "lab3"], \
+        f"an Edit did nothing: {r['seen']} {r['errors']}"
+    assert r["seen"][1]["title"] == "The kernel's pages"
+    assert r["seen"][1]["brief"] == "Watch the kernel's page table; don't guess."
+
+
+def test_no_row_button_carries_a_labs_data_inline():
+    """Always runs, node or not. The buttons carry an id in a data- attribute; the lab itself is
+    looked up. Inline JSON in an attribute is the shape that broke, so it must not come back."""
+    html = _CONSOLE.read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in html.splitlines() if not ln.lstrip().startswith("//"))
+    assert "JSON.stringify(JSON.stringify(" not in code
+    assert 'onclick="editAct(ACTS[this.dataset.lab])"' in code

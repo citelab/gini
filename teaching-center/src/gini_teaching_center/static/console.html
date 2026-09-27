@@ -596,6 +596,9 @@ async function loadActs(){
   $('#acts-sub').textContent = 'Labs in ' + COURSE;
   loadSubs();
   const rows = await api('/api/activities?course=' + encodeURIComponent(COURSE));
+  // Kept by lab id for the row buttons to look up. See ACTS for why a button carries only an id.
+  for (const k of Object.keys(ACTS)) delete ACTS[k];
+  for (const a of rows || []) ACTS[a.lab] = a;
   // The link now CARRIES the release code, and without it the server will not vend. That is
   // what stops a student who has lab3's link from reading lab4 by editing the address bar — and
   // it is why the link must be copied from here rather than typed from memory.
@@ -608,23 +611,23 @@ async function loadActs(){
         <td><span class="tag ${a.status==='released'?'live':'draft'}">${esc(a.status)}</span>
         <td class="mono">${a.vended}<td class="mono">${a.submitted}
         <td>${a.status==='released'
-              ? `<button class="flat" onclick="release('${esc(a.lab)}',false)">Close</button>`
-              : `<button class="go" onclick="release('${esc(a.lab)}',true)">Release</button>`}
+              ? `<button class="flat" data-lab="${esc(a.lab)}" onclick="release(this.dataset.lab,false)">Close</button>`
+              : `<button class="go" data-lab="${esc(a.lab)}" onclick="release(this.dataset.lab,true)">Release</button>`}
             <button class="flat" style="margin-left:10px"
-                    onclick="copyLink('${esc(a.lab)}')">Copy link</button>
+                    data-lab="${esc(a.lab)}" onclick="copyLink(this.dataset.lab)">Copy link</button>
             <a href="${link(a)}" target="_blank" style="margin-left:8px">open</a>
             <span class="mono note" style="margin-left:8px" title="release code — the link will
                   not work without it">${esc(a.release_code||'—')}</span>
             <button class="flat" style="margin-left:6px"
-                    onclick="newLink('${esc(a.lab)}')" title="Rotate the release code. Every link
+                    data-lab="${esc(a.lab)}" onclick="newLink(this.dataset.lab)" title="Rotate the release code. Every link
                     already sent stops working.">New link</button>
             <button class="flat" style="margin-left:10px"
-                    onclick='editAct(${JSON.stringify(JSON.stringify(a))})'>Edit</button>
+                    data-lab="${esc(a.lab)}" onclick="editAct(ACTS[this.dataset.lab])">Edit</button>
             ${a.submitted
               ? `<span class="note" style="margin-left:12px">${a.submitted} submitted — close it,
                  it cannot be deleted</span>`
               : `<button class="danger" style="margin-left:10px"
-                    onclick="askDelete('${esc(a.lab)}')">Delete</button>`}
+                    data-lab="${esc(a.lab)}" onclick="askDelete(this.dataset.lab)">Delete</button>`}
         <tr id="del-${esc(a.lab)}" hidden><td colspan="6" style="background:#fdf3f2">
             <b style="color:var(--red)">Delete ${esc(a.lab)}?</b>
             <span class="note" style="display:inline;margin-left:8px">${a.vended
@@ -660,6 +663,19 @@ function actBody(){
 //
 // The whole row is handed over rather than a list of positional arguments — it had grown to six and
 // the next field to arrive would have landed in the wrong slot sooner or later.
+// The labs on screen, by id. The row buttons carry ONLY the lab id, in a data- attribute, and
+// look the lab up here.
+//
+// Edit used to carry the whole lab inline — onclick='editAct(${JSON.stringify(JSON.stringify(a))})'
+// — inside a SINGLE-quoted attribute. JSON escapes double quotes, not apostrophes, so any lab
+// with a ' anywhere in its data (a brief saying "the kernel's", an answer key saying "it's")
+// ended the attribute early, the handler was cut off mid-JSON, and Edit silently did nothing.
+// Only some labs, with no pattern a teacher could see: the apostrophe was often in a question's
+// expected answer, which the listing never shows. The other row buttons had the same shape with
+// the lab id in a JS string; a data- attribute needs only esc(), and there is no JS string for
+// anything to break out of.
+const ACTS = {};
+
 function editAct(json){
   const a = typeof json === 'string' ? JSON.parse(json) : json;
   $('#a-lab').value = a.lab; $('#a-title').value = a.title || '';
