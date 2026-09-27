@@ -581,6 +581,16 @@ def narrate(proof: dict) -> str:
         return f"(could not narrate this chain: {e})"
 
 
+def cook(proof: dict, title: str, answers: list, measured: list, sources: list) -> dict:
+    """The grader's cooked view of this submission. Like `narrate`, it never takes the report
+    down with it: a chain it cannot read yields an empty view and the raw log still renders."""
+    try:
+        from gini.domain import grader_view as _g
+        return _g.cook(proof.get("entries") or [], title, answers, measured, sources)
+    except Exception as e:                      # noqa: BLE001 — a report must still render
+        return {"error": f"could not build the grader's view: {e}", "look_at": []}
+
+
 def answered(proof: dict, questions: list[dict] | None) -> list[dict]:
     """Pair what the lab asked with what the student wrote, for one marker to read.
 
@@ -631,6 +641,8 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
     payload = json.loads(payload) if isinstance(payload, str) and payload else (payload or {})
     proof = payload.get("proof") or {}
     measured = measurements(proof)
+    qa = answered(proof, questions)
+    srcs = check_sources(payload.get("shadows"), proof)
     return {
         "receipt": row.get("receipt", ""),
         "activity": row.get("activity", ""),
@@ -646,13 +658,16 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
         "started": row.get("started", 0), "finished": row.get("finished", 0),
         "minutes": round(((row.get("finished") or 0) - (row.get("started") or 0)) / 60.0, 1),
         "within_session": within_session(row, activity or {}),
+        # The COOKED view — a reading of the chain for the grader, shown first. The raw log below
+        # (`narration`) is left exactly as captured; see gini.domain.grader_view.
+        "cooked": cook(proof, (activity or {}).get("title", ""), qa, measured, srcs),
         "narration": narrate(proof),
         # Prompt, what the student wrote, and the teacher's key — side by side and unjudged.
         # There is no mark here and no auto-comparison: a person reads these.
-        "questions": answered(proof, questions),
+        "questions": qa,
         # The kernel code, each file paired with the hash the chain says was compiled. An OS lab's
         # deliverable, which a marker could previously read nothing of.
-        "sources": check_sources(payload.get("shadows"), proof),
+        "sources": srcs,
         # What GINI measured — probes, riders, objectives — in one list across every kind of lab.
         # Described, never scored; see `measurements`.
         "measurements": measured,

@@ -945,9 +945,16 @@ async function openReceipt(receipt){
           : `<span class="note" style="margin:0">No runnable copy came with this submission; it was
              sent by a gBuilder that only uploaded the proof.</span>`}
       </div>
+      <div class="big" style="font-size:19px;margin-top:26px">For the grader</div>
+      <div class="note">A reading of the log below — nothing here is a mark, and every line points
+        at recorded actions. The raw log is unchanged underneath.</div>
+      ${cookBlock(r.cooked)}
       ${qBlock(r.questions)}
       ${measBlock(r.measurements, r.measurement_tally)}
       ${srcBlock(r.sources)}
+      <div class="big" style="font-size:19px;margin-top:30px">Raw log — as captured</div>
+      <div class="note">The proof of activity exactly as recorded, ${Number(r.entries)||0}
+        events. The answers above are repeated here as they were entered.</div>
       <pre>${esc(r.narration)}</pre>
     </div>`;
 }
@@ -1024,6 +1031,55 @@ function srcBlock(src){
 // NOTHING here is scored: no tick, no cross, no percentage, and the two answers carry equal visual
 // weight on purpose. A wrong-looking answer to "why did the first ping fail?" is often a right
 // answer phrased differently, and telling those apart is exactly the marker's job.
+// THE COOKED VIEW — the few facts that decide a grade, read out of the chain by
+// gini.domain.grader_view. Shown above the raw log and never instead of it: the log is evidence and
+// is not edited. Each row appears only when the submission has something to say for it, so a
+// networking lab and an A-Lab each get their own short card rather than a form full of blanks.
+function cookBlock(c){
+  if (!c) return '';
+  if (c.error) return `<div class="note" style="color:var(--red)">${esc(c.error)}</div>`;
+  const hm = t => t ? new Date(t*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+  const row = (k, v) => `<tr><td style="color:var(--dim);padding:4px 14px 4px 0;vertical-align:top;
+    white-space:nowrap">${k}</td><td style="padding:4px 0">${v}</td></tr>`;
+  const rows = [];
+  rows.push(row('Time', `${c.minutes} min · ${c.sittings} sitting${c.sittings===1?'':'s'}`
+    + (c.submitted_t ? ` · submitted ${hm(c.submitted_t)}` : '') + ` · ${c.events} events`));
+  const g = c.grading;
+  if (g) rows.push(row('Grading', `<b>${g.passed}/${g.total}</b> measurements passed`
+    + (g.failed.length ? ` &nbsp;✗ ${g.failed.map(f => esc(f.name)).join(', ')}` : '')
+    + (g.pending.length ? ` &nbsp;· not measurable: ${g.pending.map(esc).join(', ')}` : '')
+    + (g.rounds > 1 ? ` <span class="note" style="margin:0">(checked ${g.rounds}×)</span>` : '')));
+  const w = c.wiring;
+  if (w) {
+    const parts = Object.entries(w.parts || {}).sort()
+      .map(([p, [a, b]]) => `<span style="color:${a<b?'var(--amber)':'inherit'}">Part ${esc(p)} ${a}/${b}</span>`);
+    rows.push(row('Wiring', (parts.length ? parts.join(' &nbsp;·&nbsp; ') : `${w.passed}/${w.total}`)
+      + ' <span class="note" style="margin:0">(at the last Load)</span>'));
+  }
+  const b = c.builds;
+  if (b) rows.push(row('Builds', `${b.loads} Load${b.loads===1?'':'s'} — ${b.failed} failed, ${b.built} built; `
+    + `last Load <b style="color:${b.last_ok?'var(--green)':'var(--red)'}">${b.last_ok?'BUILT':'FAILED'}</b> at ${hm(b.last_t)}`
+    + (b.first_ok_t ? `<br>first working kernel at ${hm(b.first_ok_t)} (${b.first_ok_minutes_in} min in)` : '')));
+  if ((c.reverts||[]).length) rows.push(row('Reverts',
+    c.reverts.map(v => `${esc(v.file || 'a file')} ${hm(v.t)}`).join(' &nbsp;·&nbsp; ')));
+  if ((c.changed_between_loads||[]).length) rows.push(row('Changed',
+    `<span class="mono">${c.changed_between_loads.map(esc).join('  ')}</span>
+     <span class="note" style="margin:0">(between the first and last Load)</span>`));
+  const t = c.tests;
+  if (t) rows.push(row('Test', `${esc(t.prog)} ran ${t.runs}× — last output (${hm(t.last_t)}):`
+    + `<pre style="margin:6px 0 0;max-height:180px;overflow:auto">${
+        t.last_out.length ? t.last_out.map(esc).join('\n') : '(printed nothing)'}</pre>`));
+  const n = c.network;
+  if (n) rows.push(row('Network', `${n.placed} placed, ${n.connected} connected, ${n.runs} run(s), `
+    + `${n.commands} command(s); live checks ${n.checks_passed}/${n.checks}`));
+  const look = (c.look_at||[]).length
+    ? `<div style="margin-top:12px"><b>Look at</b><ul style="margin:6px 0 0 18px;padding:0">${
+        c.look_at.map(x => `<li style="margin:3px 0">${esc(x)}</li>`).join('')}</ul></div>`
+    : `<div class="note" style="margin-top:12px">Nothing stands out in the log.</div>`;
+  return `<div class="card" style="margin-top:12px;padding:18px 20px">
+    <table style="border-collapse:collapse;width:100%">${rows.join('')}</table>${look}</div>`;
+}
+
 function qBlock(qs){
   if (!qs || !qs.length) return '';
   return `<div style="margin-top:20px">

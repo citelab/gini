@@ -111,7 +111,17 @@ def describe(entry: Entry) -> str:
     if k == ev.SPAWN:
         verb = "Killed" if d.get("action") == "kill" else "Launched"
         pid = f" (pid {d['pid']})" if d.get("pid") is not None else ""
-        return f"{verb} {d.get('what', '?')}{pid} on {d.get('on', '?')}."
+        test = " — the assignment's test" if d.get("test") else ""
+        head = f"{verb} {d.get('what', '?')}{pid} on {d.get('on', '?')}{test}."
+        # What it PRINTED, when GINI captured it. The chain has carried this since A-Labs shipped
+        # and the transcript dropped it, so a marker read "Launched sysinfotest" and never saw the
+        # one output that shows the work runs. Added, not reworded: the lines are the chain's own.
+        out = d.get("out")
+        if out is None:
+            return head
+        if not out:
+            return head + "\n            (printed nothing)"
+        return head + "".join(f"\n            | {line}" for line in out)
     if k == ev.BUILD:
         what = "Reverted" if d.get("action") == "revert" else "Built"
         src = d.get("sources") or {}

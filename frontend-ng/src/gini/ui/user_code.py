@@ -229,7 +229,12 @@ class UserCode(QDialog):
             res = _ls.evaluate(self.spec, _lab.reader_for(self.spec, machine),
                                _lab.pristine_reader_for(self.spec, machine))
             p = _ls.progress(res)
-            done = f"wiring {p['passed']}/{p['total']}"
+            # Per part as well as the total, so the grader's cooked view can say "Part C 2/4"
+            # rather than "12/16" — the parts are what the handout and the marking scheme use.
+            # The total stays first and in the same words, for anything that read it before.
+            per = " · ".join(f"{k} {v[0]}/{v[1]}" for k, v in sorted((p.get("parts") or {}).items())
+                             if k)
+            done = f"wiring {p['passed']}/{p['total']}" + (f" · {per}" if per else "")
         except Exception:                          # noqa: BLE001
             done = ""
         tail = [ln for ln in str(log or "").splitlines() if ln.strip()][-6:]
