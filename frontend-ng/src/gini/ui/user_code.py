@@ -11,8 +11,11 @@ Four things, in the order a student needs them:
    opens it in Finder or Explorer.
 2. **What they have touched.** `edited` against `untouched`, by comparing their file to the copy
    GINI took from the image on the first Run — host-side, so it still answers with the machine
-   stopped. Revert is per file: throwing away a broken kalloc.c must not cost them the syscall.c
-   they finally got working.
+   stopped. LIVE: the panel notices a save in their own editor within a second (see
+   `_poll_files`), so the list and the checklist keep up with them instead of with the moment the
+   panel was opened. Revert is per file — throwing away a broken kalloc.c must not cost them the
+   syscall.c they finally got working — and it asks first, because one misclick used to be an
+   evening's work (see `_ask_revert`).
 3. **The wiring checklist.** The handout's failure table, live, read from their own source. It
    names the GAP and never the fix — "you have not written `entry("sysinfo")` yet" teaches better
    than `undefined reference` at link time, which is where that mistake surfaces otherwise.
@@ -29,10 +32,10 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout,
-    QWidget,
+    QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
 from ..domain import lab_spec as _ls
@@ -41,6 +44,15 @@ from .theme import ThemeManager, icons
 from .theme.manager import scale_css as _scss
 from .windowing import standalone
 from .worker_host import run_off_gui
+
+#: How often the panel looks for a save made in the student's own editor.
+#:
+#: A poll of file STATS, not a QFileSystemWatcher, on purpose. Most editors save by writing a new
+#: file and renaming it over the old one (VS Code, vim, anything "atomic"), and a watcher on the
+#: file silently drops the path at the rename — it would work for the first save and never again.
+#: A stat of a dozen small local files costs microseconds, so it runs on the GUI thread with no
+#: worker at all, which keeps this face out of the widget-lifetime class in manual §17.
+WATCH_MS = 1000
 
 _STATE_WORD = {"edited": "edited", "untouched": "untouched",
                "missing": "not there", "unknown": "—"}
@@ -110,6 +122,12 @@ class UserCode(QDialog):
         self.grade_step.connect(lambda m: self._log.setPlainText(f"Checking… {m}"))
         standalone(self, f"User Code — {getattr(device, 'name', 'xv6')}")
         self.refresh()
+        # Live: re-read when a file (or its pristine copy, which appears on the first Run) changes.
+        self._seen = self._signature()
+        self._watch = QTimer(self)
+        self._watch.setInterval(WATCH_MS)
+        self._watch.timeout.connect(self._poll_files)
+        self._watch.start()
 
     # -- header ----------------------------------------------------------- #
     def _build_header(self, root, title: str) -> None:
@@ -152,10 +170,36 @@ class UserCode(QDialog):
             state.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
             state.setMinimumWidth(80)
             rev = QPushButton("Revert"); rev.setStyleSheet(self._btn_css())
-            rev.clicked.connect(lambda _c=False, n=f.name: self._revert(n))
+            rev.clicked.connect(lambda _c=False, n=f.name: self._ask_revert(n))
             lay.addWidget(name); lay.addWidget(state); lay.addWidget(where, 1); lay.addWidget(rev)
             self._rows[f.name] = state
             col.addWidget(row)
+
+    def _ask_revert(self, name: str) -> None:
+        """Revert, but only once the student has said yes.
+
+        It used to be one click. The button sits at the end of each file's row, beside the state
+        label a student is watching, and it replaced their file with the image's copy on the
+        spot — an evening's syscall.c gone on a misclick, with nothing to undo it. Revert is the
+        right tool for a file they have broken beyond repair, which is exactly when they are
+        least careful about where they click.
+
+        No question for a file that is already untouched: there is nothing to lose, and a
+        dialog that guards nothing teaches people to click through dialogs.
+        """
+        machine = str(getattr(self.device, "name", "") or "")
+        if _lab.state_of(self.spec, machine, name) == "untouched":
+            self._say(f"{name} is already the original — nothing to revert.")
+            return
+        answer = QMessageBox.question(
+            self, f"Revert {name}?",
+            f"Put {name} back to the original from the image?\n\n"
+            f"Every change you have made to {name} will be lost. Your other files are not "
+            f"touched, and the kernel does not change until you press Load.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._revert(name)
 
     def _revert(self, name: str) -> None:
         ok, msg = _lab.revert(self.spec, str(getattr(self.device, "name", "") or ""), name)
@@ -383,6 +427,30 @@ class UserCode(QDialog):
         self.refresh()
 
     # -- state --------------------------------------------------------------- #
+    def _signature(self) -> tuple:
+        """(mtime, size) of every file and its pristine copy — `None` where one is absent. Stats
+        only: nothing is read unless this changes."""
+        machine = str(getattr(self.device, "name", "") or "")
+        folder = self._dir()
+        out = []
+        for f in getattr(self.spec, "files", ()) or ():
+            for path in (folder / f.name, _lab.pristine_path(machine, f.name)):
+                try:
+                    st = path.stat()
+                    out.append((st.st_mtime_ns, st.st_size))
+                except OSError:
+                    out.append(None)
+        return tuple(out)
+
+    def _poll_files(self) -> None:
+        """Refresh when a save landed since the last look — and only then."""
+        if self.spec is None or not self.isVisible():
+            return
+        sig = self._signature()
+        if sig != self._seen:
+            self._seen = sig
+            self.refresh()
+
     def refresh(self) -> None:
         """Re-read the student's files: states, checklist, progress. Cheap — a few small files."""
         t = self.theme.theme
