@@ -1,14 +1,24 @@
 """Router Lab — the visual module-graph editor for one gRouter.
 
-Open it by double-clicking a router. You compose the data plane by adding inline
-modules onto the locked base pipeline (parse → route → rewrite), reorder/remove them,
-toggle the SDN mode (OpenFlow = flow-table front door), and step a test packet through
-to see the verdict at each stage. Today it drives a local trace; later it binds to the
-real gRouter's module graph over the control protocol.
+Open it by double-clicking a router. You compose the data plane by adding inline modules onto the
+locked base pipeline (parse → route → rewrite), reorder/remove them, deploy the chain to the real
+gRouter, and step a test packet through to see the verdict at each stage.
+
+The ROUTER face is laid out for a laptop screen (see ui/router_flow.py for the why): one compact
+band draws the pipeline left → right with the interfaces down each side — live bits per second on
+each, and, when packet watch is on, the router's own recorded packets moving through it — and
+everything else lives in ONE tabbed area below: Routes (with a form to add one), Packets, Traffic
+QoS and Link delay. It used to stack all four as always-open panels under a vertical pipeline, so
+on a 13-inch screen the routing table sat below the fold. The firewall and OVS faces keep their
+own layouts.
 """
 from __future__ import annotations
 
+import collections
+import time
+
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
@@ -29,10 +39,11 @@ class RouterLab(QDialog):
     chain_ready = Signal(str)    # live `gpipe list` output (the deployed service chain)
     delay_ready = Signal(str)    # live `delay show` output (link-delay status)
     qstats_ready = Signal(object)  # (policy, [QueueStat]) from `queue stats`
+    route_cmd_done = Signal(str)   # a `route add/del` from the Routes tab finished (router face)
 
     def __init__(self, parent, theme: ThemeManager, device, program: RouterProgram,
                  on_console=None, command_fn=None, sdn=False, query_fn=None,
-                 face=None) -> None:
+                 face=None, stream_fn=None) -> None:
         super().__init__(parent)
         # Its own window, not an owned dialog: on Windows an owned dialog gets no
         # taskbar button and Alt+Tab skips it. See ui/windowing.
@@ -43,6 +54,11 @@ class RouterLab(QDialog):
         self.on_console = on_console
         self.command_fn = command_fn   # set when running: sends `gpipe …` to the real router
         self.query_fn = query_fn       # set when running: runs a raw CLI cmd (openflow…/route/arp)
+        # set when running: () -> (argv, cwd) for a PERSISTENT console, which feeds the packet
+        # visualizer and the bandwidth meter without a `docker compose exec` per poll.
+        self.stream_fn = stream_fn
+        self._stream = None
+        self._selected = None            # inline index of the chip being edited, router face
         # role-specialized FACE of the one gRouter engine: 'router' (full pipeline), 'firewall'
         # (rules-first, pipeline under Advanced), 'ovs' (SDN flow-table dashboard).
         self.face = face or ("ovs" if sdn else "router")
@@ -56,6 +72,14 @@ class RouterLab(QDialog):
         self.chain_ready.connect(self._on_chain)
         self.delay_ready.connect(self._set_delay_status)
         self.qstats_ready.connect(self._on_qstats)
+        self.route_cmd_done.connect(self._on_route_cmd_done)
+        # the packet visualizer's and the bandwidth meter's polls, over the persistent console
+        self._since = None
+        self._pkt_times = collections.deque()
+        self._ifstat_timer = QTimer(self)
+        self._ifstat_timer.timeout.connect(lambda: self._stream and self._stream.request("ifstat"))
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._poll_watch)
         if self.sdn:
             program.set_mode("openflow")   # an OVS is an OpenFlow switch by definition
             from ..domain.flowlog import FlowLog
@@ -69,7 +93,12 @@ class RouterLab(QDialog):
         self.setWindowTitle(f"{kind} — {device.name}")
         # The router face carries the whole pipeline PLUS the routing and QoS panels — the most
         # of the three — and used to get the least height. See PIPELINE_MIN_H.
-        self.resize(880, 720 if self.face != "router" else 820)
+        # The router face's band is wide and short; everything else is one tabbed area, so the
+        # window no longer needs the height the stacked panels did.
+        if self.face == "router":
+            self.resize(1060, 760)
+        else:
+            self.resize(880, 720)
         self.setStyleSheet(f"QDialog{{background:{t.bg};}}")
 
         root = QVBoxLayout(self)
@@ -89,6 +118,23 @@ class RouterLab(QDialog):
         mode_lbl.setStyleSheet(
             f"font-weight:600; color:{t.accent_for('teal' if self.face == 'ovs' else 'blue')};")
         head.addWidget(mode_lbl)
+        if self.face == "router":
+            # live router totals, then the switch for the packet visualizer (off by default:
+            # watching costs the router a little, so it is the student's choice to turn it on)
+            self.bw_lbl = QLabel(""); self.bw_lbl.setObjectName("Muted")
+            self.bw_lbl.setToolTip("Traffic through this router: received ↓ and sent ↑, "
+                                   "summed over its interfaces.")
+            head.addSpacing(16); head.addWidget(self.bw_lbl)
+            self.watch_btn = QPushButton("  Watch packets")
+            self.watch_btn.setCheckable(True)
+            self.watch_btn.setIcon(icons.icon("play", t.accent_for("green"), 13))
+            self.watch_btn.setToolTip(
+                "Show every packet the router handles moving through the pipeline. Off by "
+                "default — recording costs the router a little — and turned off again when "
+                "you close the Lab.")
+            self.watch_btn.toggled.connect(self._toggle_watch)
+            self.watch_btn.setEnabled(stream_fn is not None)
+            head.addSpacing(12); head.addWidget(self.watch_btn)
         if on_console:
             con = QPushButton("  Console")
             con.setIcon(icons.icon("link", t.muted, 14))
@@ -100,8 +146,9 @@ class RouterLab(QDialog):
         # hide/collapse it.
         body_w = QWidget()
         body = QHBoxLayout(body_w); body.setContentsMargins(0, 0, 0, 0)
-        body.addWidget(self._build_palette(), 0)
-        body.addWidget(self._build_pipeline(), 1)
+        if self.face != "router":            # the router face draws the band instead
+            body.addWidget(self._build_palette(), 0)
+            body.addWidget(self._build_pipeline(), 1)
 
         # footer (packet step debugger) as a widget too
         foot_w = QWidget()
@@ -132,13 +179,18 @@ class RouterLab(QDialog):
             root.addWidget(self._adv_box, 1)
             root.addWidget(self._build_route_table())
             root.addWidget(self._build_qos_panel())
-        else:  # router — the full pipeline is the point
-            root.addWidget(body_w, 1)
-            root.addWidget(self._build_sfc_row())
-            root.addWidget(self._build_delay_panel())
-            root.addWidget(self._build_route_table())
-            root.addWidget(self._build_qos_panel())
-            root.addWidget(foot_w)
+        else:  # router — the band, the module bar, and one tabbed area
+            from .router_flow import FlowBand
+            self.flow = FlowBand(self.theme)
+            self.flow.chip_clicked.connect(self._select_chip)
+            root.addWidget(self.flow)
+            root.addWidget(self._build_module_bar(foot_w))
+            self.tabs = QTabWidget()
+            self.tabs.addTab(self._build_routes_tab(), "Routes")
+            self.tabs.addTab(self._build_packets_tab(), "Packets")
+            self.tabs.addTab(self._build_qos_panel(tabbed=True), "Traffic QoS")
+            self.tabs.addTab(self._build_delay_panel(tabbed=True), "Link delay")
+            root.addWidget(self.tabs, 1)
 
         self.worker_done.connect(self._round_worker_done)
         self._rebuild()
@@ -226,6 +278,15 @@ class RouterLab(QDialog):
 
     # pipeline render -------------------------------------------------------
     def _rebuild(self) -> None:
+        if self.face == "router":
+            # The band's chips ARE the stage widgets: the step debugger highlights them and the
+            # tests count them, exactly as they did the vertical cards.
+            self._stage_widgets = self.flow.set_stages(self.program.stages())
+            self._refresh_chip_details()
+            if self._selected is not None and self._selected >= len(self.program.inline):
+                self._selected = None
+            self._show_selected()
+            return
         while self.pipe_layout.count():
             item = self.pipe_layout.takeAt(0)
             w = item.widget()
@@ -255,6 +316,21 @@ class RouterLab(QDialog):
         ("tap", "path"):      "pcap path",
     }
 
+    def _refresh_chip_details(self) -> None:
+        """Each module chip's second line: what it is set to (`deny 10.0.3.0/24`), so the band
+        says what the chain DOES without opening anything."""
+        if self.face != "router":
+            return
+        for chip in self._stage_widgets:
+            st = chip.stage
+            if st.kind != "inline" or st.index is None or st.index >= len(self.program.inline):
+                continue
+            inst = self.program.inline[st.index]
+            val = next((str(v) for v in inst.params.values() if str(v).strip()), "")
+            if inst.type_key == "lua" and val:
+                val = val.rsplit("/", 1)[-1]
+            chip.sub.setText(val or "click to edit")
+
     def _set_param(self, inst, key: str, text: str) -> None:
         """Live-edit a dropped VNF's parameter; the deploy path and offline trace read it back.
 
@@ -268,6 +344,7 @@ class RouterLab(QDialog):
             value = lua_container_path(value)
         inst.params[key] = value
         self.program.touch()
+        self._refresh_chip_details()
 
     def _stage_row(self, st) -> QFrame:
         t = self.theme.theme
@@ -324,6 +401,432 @@ class RouterLab(QDialog):
             else:
                 w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};"
                                 f"border:1px solid {t.line};border-radius:10px;}}")
+
+    # router face: the module bar ------------------------------------------------
+    def _build_module_bar(self, foot_w: QWidget) -> QWidget:
+        """Under the band: add a module, edit the one you clicked, deploy, step a test packet.
+
+        The palette used to be a full-height column of buttons beside the pipeline, mostly empty
+        space on a laptop. It is a menu now — the same items, the same honest "preview" marks.
+        """
+        t = self.theme.theme
+        w = QFrame(); w.setObjectName("Card")
+        w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
+                        f"border-radius:10px;}}")
+        lay = QVBoxLayout(w); lay.setContentsMargins(10, 7, 10, 7); lay.setSpacing(5)
+
+        row = QHBoxLayout(); row.setSpacing(8)
+        add = QPushButton("  Add module")
+        add.setIcon(icons.icon("plus", t.accent_for("blue"), 13))
+        add.setMenu(self._add_menu())
+        row.addWidget(add)
+        # the clicked module's parameters and controls; hidden until a chip is clicked
+        self.sel_box = QWidget()
+        self.sel_lay = QHBoxLayout(self.sel_box); self.sel_lay.setContentsMargins(6, 0, 0, 0)
+        self.sel_lay.setSpacing(6)
+        self.sel_box.setVisible(False)
+        row.addWidget(self.sel_box, 1)
+        row.addStretch(0)
+        row.addWidget(QLabel("classifier:"))
+        self.classifier_edit = QLineEdit(self.program.classifier)
+        self.classifier_edit.setPlaceholderText("traffic that enters the chain (blank = all)")
+        self.classifier_edit.setMaximumWidth(220)
+        self.classifier_edit.textChanged.connect(self.program.set_classifier)
+        row.addWidget(self.classifier_edit)
+        self.deploy_btn = QPushButton("  Deploy chain"); self.deploy_btn.setObjectName("Accent")
+        self.deploy_btn.setIcon(icons.icon("send", "#ffffff", 13))
+        self.deploy_btn.clicked.connect(self._deploy_chain)
+        row.addWidget(self.deploy_btn)
+        lay.addLayout(row)
+
+        row2 = QHBoxLayout()
+        self.deployed_lbl = QLabel("Deployed: (press Run, then Deploy chain)")
+        self.deployed_lbl.setObjectName("Faint")
+        self.deploy_status = QLabel(""); self.deploy_status.setObjectName("Muted")
+        row2.addWidget(self.deployed_lbl, 1); row2.addWidget(self.deploy_status)
+        lay.addLayout(row2)
+        lay.addWidget(foot_w)                 # Inject packet / Step / Reset
+        return w
+
+    def _add_menu(self):
+        from PySide6.QtWidgets import QMenu
+        t = self.theme.theme
+        m = QMenu(self)
+        m.setToolTipsVisible(True)
+        for title, group in (("Native — built into the router", INLINE),
+                             ("You write — Lua or native", CUSTOM)):
+            m.addSection(title)
+            for mt in group:
+                preview = not mt.real
+                act = m.addAction(icons.icon(mt.icon, t.accent_for(mt.accent), 16),
+                                  mt.label + ("   · preview" if preview else ""))
+                act.setToolTip(mt.description + (
+                    "\n\nIllustrative — shown to learn the shape of a VNF; not yet deployable."
+                    if preview else "\n\nDeploys into the running router with Deploy chain."))
+                act.triggered.connect(lambda _=False, k=mt.key: self._add_and_select(k))
+        return m
+
+    def _add_and_select(self, key: str) -> None:
+        self._add(key)
+        if self.face == "router" and self.program.inline:
+            self._selected = len(self.program.inline) - 1
+            self._show_selected()
+
+    def _select_chip(self, chip) -> None:
+        idx = chip.stage.index
+        self._selected = None if self._selected == idx else idx
+        self._show_selected()
+
+    def _show_selected(self) -> None:
+        """Fill the editor strip for the clicked module, or hide it."""
+        if self.face != "router":
+            return
+        while self.sel_lay.count():
+            w = self.sel_lay.takeAt(0).widget()    # taken FIRST: once detached it is gone
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for chip in self._stage_widgets:
+            chip.set_selected(chip.stage.kind == "inline" and chip.stage.index == self._selected)
+        if self._selected is None or self._selected >= len(self.program.inline):
+            self.sel_box.setVisible(False)
+            return
+        i = self._selected
+        inst = self.program.inline[i]
+        name = QLabel(next((st.label for st in self.program.stages()
+                            if st.kind == "inline" and st.index == i), inst.type_key) + ":")
+        name.setStyleSheet("font-weight:600;")
+        self.sel_lay.addWidget(name)
+        for key in inst.params:
+            lbl = QLabel(self._PARAM_LABEL.get((inst.type_key, key), key))
+            lbl.setObjectName("Faint")
+            edit = QLineEdit(str(inst.params[key])); edit.setMinimumWidth(140)
+            edit.textChanged.connect(lambda text, ins=inst, k=key: self._set_param(ins, k, text))
+            self.sel_lay.addWidget(lbl); self.sel_lay.addWidget(edit)
+        for sym, tip, fn in (("◀", "move earlier", lambda: self._move_selected(-1)),
+                             ("▶", "move later", lambda: self._move_selected(1)),
+                             ("✕", "remove", self._remove_selected)):
+            b = QPushButton(sym); b.setFixedWidth(28); b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, f=fn: f())
+            self.sel_lay.addWidget(b)
+        self.sel_box.setVisible(True)
+
+    def _move_selected(self, d: int) -> None:
+        i = self._selected
+        if i is None:
+            return
+        j = i + d
+        self._move(i, d)
+        if 0 <= j < len(self.program.inline):
+            self._selected = j
+        self._show_selected()
+
+    def _remove_selected(self) -> None:
+        i = self._selected
+        self._selected = None
+        if i is not None:
+            self._remove(i)
+
+    # router face: Routes tab -----------------------------------------------------
+    def _build_routes_tab(self) -> QWidget:
+        """The live route table, a form to add a route, and a delete on each row.
+
+        The form sends the SAME `route add` line a student would type, and shows it before it
+        does — the visual way in teaches the textual one rather than hiding it. Routes added here
+        are live only, exactly like the console: Stop and Run rebuilds the router from GINI's
+        generated configuration.
+        """
+        from PySide6.QtWidgets import QCheckBox, QSpinBox
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(8, 8, 8, 6); lay.setSpacing(6)
+        form = QHBoxLayout(); form.setSpacing(6)
+        form.addWidget(QLabel("Add route to"))
+        self.rt_dest = QLineEdit(); self.rt_dest.setPlaceholderText("10.0.3.0")
+        self.rt_dest.setMaximumWidth(130)
+        form.addWidget(self.rt_dest)
+        form.addWidget(QLabel("/"))
+        self.rt_prefix = QSpinBox(); self.rt_prefix.setRange(0, 32); self.rt_prefix.setValue(24)
+        form.addWidget(self.rt_prefix)
+        self.rt_host = QCheckBox("one host (/32)")
+        self.rt_host.toggled.connect(self._route_host_toggled)
+        form.addWidget(self.rt_host)
+        form.addWidget(QLabel("via"))
+        self.rt_via = QLineEdit(); self.rt_via.setPlaceholderText("next hop — blank if direct")
+        self.rt_via.setMaximumWidth(180)
+        form.addWidget(self.rt_via)
+        form.addWidget(QLabel("out"))
+        self.rt_iface = QComboBox(); self.rt_iface.setEditable(True)
+        self.rt_iface.setMinimumWidth(130)
+        self.rt_iface.lineEdit().setPlaceholderText("tun1")
+        form.addWidget(self.rt_iface)
+        # A plain button, not "Accent": the theme draws no disabled state for accent buttons, so
+        # an Add that cannot be pressed (no destination yet) looked live.
+        self.rt_add = QPushButton("  Add route")
+        self.rt_add.clicked.connect(self._add_route)
+        form.addWidget(self.rt_add)
+        form.addStretch(1)
+        lay.addLayout(form)
+        self.rt_preview = QLabel(""); self.rt_preview.setObjectName("Faint")
+        self.rt_preview.setWordWrap(True)
+        self.rt_preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(self.rt_preview)
+        for wdg in (self.rt_dest, self.rt_via):
+            wdg.textChanged.connect(self._route_preview)
+        self.rt_prefix.valueChanged.connect(self._route_preview)
+        self.rt_iface.currentTextChanged.connect(self._route_preview)
+        lay.addWidget(self._build_route_table(tabbed=True), 1)
+        self._route_preview()
+        return w
+
+    def _route_host_toggled(self, on: bool) -> None:
+        if on:
+            self.rt_prefix.setValue(32)
+        self.rt_prefix.setEnabled(not on)
+        self._route_preview()
+
+    def _route_iface_name(self) -> str:
+        """`tun2 · 10.0.2.1` in the menu; the router wants just `tun2`."""
+        return self.rt_iface.currentText().split("·")[0].strip()
+
+    def _route_spec(self):
+        from ..domain.routetable import route_add_command
+        return route_add_command(self.rt_dest.text(), self.rt_prefix.value(),
+                                 self._route_iface_name(), self.rt_via.text())
+
+    def _route_preview(self, *_a) -> None:
+        if not self.rt_dest.text().strip():
+            self.rt_preview.setText("The form builds the same `route add` command you would type "
+                                    "at the console, and shows it here before sending it.")
+            self.rt_add.setEnabled(False)
+            return
+        r = self._route_spec()
+        if r.ok:
+            self.rt_preview.setText(f"will send:   {r.command}"
+                                    + (f"\n{r.note}" if r.note else ""))
+        else:
+            self.rt_preview.setText("  ·  ".join(r.errors))
+        self.rt_add.setEnabled(r.ok)
+
+    def _add_route(self) -> None:
+        r = self._route_spec()
+        if not r.ok:
+            return
+        if self.query_fn is None:
+            self._set_route_status("not running — press Run, then add the route")
+            return
+        self._set_route_status("adding the route…")
+        qf, cmd = self.query_fn, r.command
+
+        def work():
+            out = qf(cmd)
+            self._emit(self.route_cmd_done, f"added — {cmd}" if "error" not in (out or "").lower()
+                       else f"the router said: {(out or '').strip().splitlines()[-1:]}")
+        run_off_gui(self, work)
+
+    def _delete_route(self, entry) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from ..domain.routetable import route_del_command
+        if self.query_fn is None:
+            return
+        via = "directly connected" if entry.direct else f"via {entry.nexthop}"
+        if QMessageBox.question(
+                self, "Delete route?",
+                f"Delete the route to {entry.network} / {entry.netmask} ({via}, out "
+                f"{entry.iface})?\n\nPackets for that destination will no longer be routed "
+                f"this way. Stop and Run puts GINI's generated routes back.",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
+            return
+        qf, cmd = self.query_fn, route_del_command(entry)
+        self._set_route_status("deleting…")
+
+        def work():
+            qf(cmd)
+            self._emit(self.route_cmd_done, f"deleted — {cmd}")
+        run_off_gui(self, work)
+
+    def _on_route_cmd_done(self, text: str) -> None:
+        self._set_route_status(text)
+        self._refresh_routes()
+
+    # router face: Packets tab ----------------------------------------------------
+    PACKET_ROWS = 300
+
+    def _build_packets_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(8, 8, 8, 6); lay.setSpacing(6)
+        self.pkt_caption = QLabel("Packet watch is off. Turn on “Watch packets” (top right) to "
+                                  "list every packet the router handles, newest first.")
+        self.pkt_caption.setObjectName("Muted"); self.pkt_caption.setWordWrap(True)
+        lay.addWidget(self.pkt_caption)
+        self.pkt_table = self._table(["#", "In → out", "Packet", "What happened"], stretch_col=2,
+                                     min_h=80)
+        lay.addWidget(self.pkt_table, 1)
+        return w
+
+    def _iface_name(self, i: int) -> str:
+        st = getattr(self, "_ifstat", {}).get(i)
+        return st.name if st else (f"if{i}" if i >= 0 else "")
+
+    def _log_packets(self, events: list) -> None:
+        t = self.theme.theme
+        rows = []
+        for e in events:                     # each inserted at the top, so the newest ends first
+            if e.fate == "S":
+                where = f"router → {self._iface_name(e.out_if)}"
+            elif e.fate in ("A", "L"):
+                where = f"{self._iface_name(e.in_if)} → router"
+            elif e.fate == "F":
+                where = f"{self._iface_name(e.in_if)} → {self._iface_name(e.out_if)}"
+            else:
+                where = self._iface_name(e.in_if)
+            rows.append((str(e.seq), where, e.what(), e.verdict, e.fate))
+        for r in rows:
+            self.pkt_table.insertRow(0)
+            for c, val in enumerate(r[:4]):
+                item = QTableWidgetItem(val)
+                if c == 3 and r[4] in "DNT":
+                    item.setForeground(QColor(t.danger))
+                elif c == 3 and r[4] == "A":
+                    item.setForeground(QColor(t.accent_for("purple")))
+                self.pkt_table.setItem(0, c, item)
+        while self.pkt_table.rowCount() > self.PACKET_ROWS:
+            self.pkt_table.removeRow(self.pkt_table.rowCount() - 1)
+
+    # router face: the persistent console (visualizer + meter) -------------------
+    def _start_stream(self) -> None:
+        if self.face != "router" or self.stream_fn is None or self._stream is not None:
+            return
+        spec = self.stream_fn()
+        if not spec:
+            return
+        from .router_flow import RouterStream
+        argv, cwd = spec
+        self._stream = RouterStream(self, argv, cwd)
+        self._stream.ifstat.connect(self._on_ifstat)
+        self._stream.watch_dump.connect(self._on_watch_dump)
+        self._stream.state.connect(self._on_stream_state)
+        self._stream.start()
+        self._ifstat_timer.start(1000)
+        self._stream.request("ifstat")
+
+    def _stop_stream(self) -> None:
+        """Hiding the Lab turns packet watch OFF on the router and ends the session."""
+        self._ifstat_timer.stop()
+        self._watch_timer.stop()
+        st, self._stream = self._stream, None
+        watching = self.face == "router" and self.watch_btn.isChecked()
+        if st is not None:
+            st.stop(farewell="watch off" if watching else "")
+            st.deleteLater()
+        if watching:
+            self.watch_btn.blockSignals(True)
+            self.watch_btn.setChecked(False)
+            self.watch_btn.blockSignals(False)
+            self._style_watch_btn(False)
+            self.flow.set_watching(False)
+            self._set_packet_caption(False)
+
+    def _toggle_watch(self, on: bool) -> None:
+        if self._stream is None:
+            self._start_stream()
+        if self._stream is None:
+            self.watch_btn.blockSignals(True); self.watch_btn.setChecked(False)
+            self.watch_btn.blockSignals(False)
+            return
+        self._stream.request("watch on" if on else "watch off")
+        self._style_watch_btn(on)
+        self._since = None                     # the first dump only sets the starting point
+        self._pkt_times = collections.deque()
+        self.flow.set_watching(on)
+        self._set_packet_caption(on)
+        if on:
+            self._watch_timer.start(400)
+            self._stream.request("watch dump 0")
+        else:
+            self._watch_timer.stop()
+
+    def _style_watch_btn(self, on: bool) -> None:
+        """On has to LOOK on: a checkable button the theme draws the same either way left a
+        student unsure whether the router was recording."""
+        t = self.theme.theme
+        if on:
+            self.watch_btn.setText("  Watching packets")
+            self.watch_btn.setStyleSheet(
+                f"QPushButton{{color:{t.accent_for('green')};border:1px solid "
+                f"{t.accent_for('green')};border-radius:8px;padding:4px 10px;font-weight:600;}}")
+        else:
+            self.watch_btn.setText("  Watch packets")
+            self.watch_btn.setStyleSheet("")
+
+    def _poll_watch(self) -> None:
+        if self._stream is not None and self._since is not None:
+            self._stream.request(f"watch dump {self._since}")
+
+    def _on_watch_dump(self, d) -> None:
+        if not self.watch_btn.isChecked():
+            return
+        if self._since is None:                # turning on: start from now, not the old ring
+            self._since = d.next_seq
+            return
+        events = [e for e in d.events if e.seq > self._since]
+        skipped = d.skipped(self._since)
+        self._since = max(self._since, d.next_seq)
+        if not events and not skipped:
+            return
+        sampled = self.flow.show_packets(events)
+        self._log_packets(events)
+        now = time.monotonic()
+        for _ in range(len(events) + skipped):
+            self._pkt_times.append(now)
+        while self._pkt_times and now - self._pkt_times[0] > 3.0:
+            self._pkt_times.popleft()
+        rate = len(self._pkt_times) / 3.0
+        thinned = sampled + skipped
+        self.pkt_caption.setText(
+            f"Watching — about {rate:.0f} packets/s. " +
+            (f"Drawing a sample: {thinned} recent packet(s) went by faster than they can be "
+             f"shown (every one is still counted)." if thinned else "Showing every packet."))
+
+    def _set_packet_caption(self, on: bool) -> None:
+        self.pkt_caption.setText(
+            "Watching — packets appear here and move through the band above as the router "
+            "handles them." if on else
+            "Packet watch is off. Turn on “Watch packets” (top right) to list every packet the "
+            "router handles, newest first.")
+
+    def _on_ifstat(self, stats: dict) -> None:
+        from ..domain.router_watch import bandwidth, human_bps
+        now = time.monotonic()
+        prev = getattr(self, "_ifstat_prev", None)
+        self._ifstat = stats
+        self.flow.set_ifaces(stats)
+        if prev is not None:
+            rates = bandwidth(prev[0], stats, now - prev[1])
+            self.flow.set_rates(rates)
+            rx = sum(r.rx_bps for r in rates.values())
+            tx = sum(r.tx_bps for r in rates.values())
+            self.bw_lbl.setText(f"↓ {human_bps(rx)}   ↑ {human_bps(tx)}")
+        self._ifstat_prev = (stats, now)
+        # the Routes form's interface menu follows the router's real interfaces
+        names = [f"{st.name} · {st.ip}" for _, st in sorted(stats.items())]
+        have = [self.rt_iface.itemText(i) for i in range(self.rt_iface.count())]
+        if names != have:
+            cur = self.rt_iface.currentText()
+            self.rt_iface.blockSignals(True)
+            self.rt_iface.clear(); self.rt_iface.addItems(names)
+            self.rt_iface.setEditText(cur if cur else (names[0] if names else ""))
+            self.rt_iface.blockSignals(False)
+            self._route_preview()
+
+    def _on_stream_state(self, text: str) -> None:
+        if text == "live":
+            self.flow.set_note("")
+            return
+        if "predates" in text or "stopped" in text or "closed" in text:
+            self.flow.set_note(text)
+            if "watch" in text and self.watch_btn.isChecked():
+                self.pkt_caption.setText(text)
 
     # drag & drop -------------------------------------------------------------
     @staticmethod
@@ -570,27 +1073,37 @@ class RouterLab(QDialog):
             self.flow_status.setText(text)
 
     # Routing table (regular router) ----------------------------------------
-    def _build_route_table(self) -> QWidget:
+    def _build_route_table(self, tabbed: bool = False) -> QWidget:
+        """The live route table. `tabbed` (the router face) drops the card and the collapse
+        chevron — the tab already says what this is — and adds a delete button per row."""
         t = self.theme.theme
-        w = QFrame(); w.setObjectName("Card")
-        w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
-                        f"border-radius:10px;}}")
-        lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
+        if tabbed:
+            w = QWidget()
+            lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(4)
+        else:
+            w = QFrame(); w.setObjectName("Card")
+            w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
+                            f"border-radius:10px;}}")
+            lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
+        self._route_rows_deletable = tabbed
 
-        cols = ["Network", "Netmask", "Next hop", "Interface"]
+        cols = ["Network", "Netmask", "Next hop", "Interface"] + ([""] if tabbed else [])
         self.route_table = QTableWidget(0, len(cols))
         self.route_table.setHorizontalHeaderLabels(cols)
         self.route_table.verticalHeader().setVisible(False)
         self.route_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.route_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.route_table.setMinimumHeight(130)
+        self.route_table.setMinimumHeight(80 if tabbed else 130)
         hh = self.route_table.horizontalHeader()
         for i in range(len(cols)):
             hh.setSectionResizeMode(i, QHeaderView.Stretch if i in (0, 2)
                                     else QHeaderView.ResizeToContents)
 
         head = QHBoxLayout()
-        title = self._chevron("Routing table", self.route_table, expanded=True)
+        title = (QLabel("Routing table") if tabbed
+                 else self._chevron("Routing table", self.route_table, expanded=True))
+        if tabbed:
+            title.setStyleSheet("font-weight:600;")
         self.route_status = QLabel("…"); self.route_status.setObjectName("Muted")
         refresh = QPushButton("  Refresh"); refresh.setIcon(icons.icon("play", t.muted, 13))
         refresh.clicked.connect(self._refresh_routes)
@@ -648,6 +1161,12 @@ class RouterLab(QDialog):
             cells = [e.network, e.netmask, e.nexthop_str(), e.iface]
             for c, val in enumerate(cells):
                 self.route_table.setItem(r, c, QTableWidgetItem(val))
+            if getattr(self, "_route_rows_deletable", False):
+                b = QPushButton("Delete"); b.setFlat(True)
+                b.setToolTip(f"route del {e.index}")
+                b.clicked.connect(lambda _=False, ent=e: self._delete_route(ent))
+                b.setEnabled(self.query_fn is not None)
+                self.route_table.setCellWidget(r, 4, b)
         n = len(rows)
         self._set_route_status(f"{n} route{'s' if n != 1 else ''}" if n else "no routes")
 
@@ -712,11 +1231,13 @@ class RouterLab(QDialog):
         condition anyway, and it covers being hidden without a close.
         """
         self._live_timer.stop()
+        self._stop_stream()
         super().hideEvent(e)
 
     def showEvent(self, e):                  # noqa: N802 - Qt naming
         if self.query_fn is not None and not self._live_timer.isActive():
             self._live_timer.start(max(self.MIN_POLL_MS, self._live_timer.interval()))
+        self._start_stream()
         super().showEvent(e)
 
     def _refresh_router_live(self) -> None:
@@ -726,12 +1247,16 @@ class RouterLab(QDialog):
         self._refresh_routes(counted=True)
         self._refresh_qstats(counted=True)
 
-    def _build_qos_panel(self) -> QWidget:
+    def _build_qos_panel(self, tabbed: bool = False) -> QWidget:
         t = self.theme.theme
-        w = QFrame(); w.setObjectName("Card")
-        w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
-                        f"border-radius:10px;}}")
-        lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
+        if tabbed:
+            w = QWidget()
+            lay = QVBoxLayout(w); lay.setContentsMargins(8, 8, 8, 6); lay.setSpacing(6)
+        else:
+            w = QFrame(); w.setObjectName("Card")
+            w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
+                            f"border-radius:10px;}}")
+            lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
 
         cols = ["Queue", "Qdisc", "Weight", "Backlog", "Fwd pkts", "Drop pkts",
                 "Fwd bytes", "Share"]
@@ -740,15 +1265,16 @@ class RouterLab(QDialog):
         self.qos_table.verticalHeader().setVisible(False)
         self.qos_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.qos_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.qos_table.setMinimumHeight(120)
+        self.qos_table.setMinimumHeight(80 if tabbed else 120)
         hh = self.qos_table.horizontalHeader()
         for i in range(len(cols)):
             hh.setSectionResizeMode(i, QHeaderView.Stretch if i == 0
                                     else QHeaderView.ResizeToContents)
 
         head = QHBoxLayout()
-        title = self._chevron("Traffic & QoS", self.qos_table, expanded=True)
-        head.addWidget(title); head.addStretch(1)
+        if not tabbed:
+            head.addWidget(self._chevron("Traffic & QoS", self.qos_table, expanded=True))
+        head.addStretch(1)
         head.addWidget(QLabel("scheduler:"))
         self.qos_policy = QComboBox()
         self.qos_policy.addItem("Round robin", "rr")
@@ -982,12 +1508,16 @@ class RouterLab(QDialog):
         lay.addLayout(row)
         return b, j, c
 
-    def _build_delay_panel(self) -> QWidget:
+    def _build_delay_panel(self, tabbed: bool = False) -> QWidget:
         t = self.theme.theme
-        w = QFrame(); w.setObjectName("Card")
-        w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
-                        f"border-radius:10px;}}")
-        lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
+        if tabbed:
+            w = QWidget()
+            lay = QVBoxLayout(w); lay.setContentsMargins(8, 8, 8, 6); lay.setSpacing(6)
+        else:
+            w = QFrame(); w.setObjectName("Card")
+            w.setStyleSheet(f"QFrame#Card{{background:{t.panel2};border:1px solid {t.line};"
+                            f"border-radius:10px;}}")
+            lay = QVBoxLayout(w); lay.setContentsMargins(12, 8, 12, 10); lay.setSpacing(6)
 
         # collapsible body (hint + the two parameter rows) — collapsed by default to save height
         body = QWidget()
@@ -1001,7 +1531,8 @@ class RouterLab(QDialog):
         self.de_base, self.de_jit, self.de_corr = self._delay_row(bl, "egress", props.get("DelayEgress", ""))
 
         head = QHBoxLayout()
-        title = self._chevron("Link delay", body, expanded=False)
+        title = (QLabel("") if tabbed           # the tab names it; nothing to collapse
+                 else self._chevron("Link delay", body, expanded=False))
         self.delay_status = QLabel(""); self.delay_status.setObjectName("Muted")
         apply = QPushButton("  Apply"); apply.setObjectName("Accent")
         apply.setIcon(icons.icon("send", "#ffffff", 13)); apply.clicked.connect(self._apply_delay)
@@ -1011,6 +1542,8 @@ class RouterLab(QDialog):
         head.addWidget(clear); head.addWidget(apply)
         lay.addLayout(head)
         lay.addWidget(body)
+        if tabbed:
+            lay.addStretch(1)
         return w
 
     @staticmethod

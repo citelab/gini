@@ -3804,6 +3804,19 @@ class MainWindow(QMainWindow):
         return exec_argv_for(orch if orch is not None
                              else types.SimpleNamespace(_dc=self._compose_argv()), service, env)
 
+    def element_stream(self, device_name: str):
+        """(argv, cwd) for a PERSISTENT console on a router — the Router Lab's packet visualizer
+        and bandwidth meter poll through it, a line at a time, instead of paying a whole
+        `docker compose exec` per poll the way `element_query` does. Same exec, same console
+        client, minus `--once`. None when nothing is running."""
+        if not self._workdir:
+            return None
+        from ..services.compiler import _svc
+        svc = _svc(device_name)
+        argv = [*self._exec_argv(svc), "python3", "/build/grouter-build/grconsole.py",
+                f"/run/{svc}.ctl"]
+        return argv, str(self._workdir)
+
     def element_query(self, device_name: str, command: str) -> str:
         """Run a one-shot console command against a network element (needs Docker up)."""
         if not self._workdir:
@@ -4086,11 +4099,12 @@ class MainWindow(QMainWindow):
         # raw CLI query used by the live panels: `openflow …` for an OVS, `route`/`arp`
         # for a router. Same control socket as the console.
         qf = ((lambda c, n=dev.name: self.element_query(n, c)) if self._running else None)
+        sf = ((lambda n=dev.name: self.element_stream(n)) if self._running else None)
         self._retire_lab("_router_lab")
         self._router_lab = RouterLab(
             self, self.theme, dev, program,
             on_console=lambda: self._open_terminal(device_id),
-            command_fn=cf, sdn=sdn, query_fn=qf, face=face)
+            command_fn=cf, sdn=sdn, query_fn=qf, face=face, stream_fn=sf)
         self._router_lab.show()
         self._router_lab.raise_()
 

@@ -68,3 +68,83 @@ def parse_arp(text: str) -> list[ArpEntry]:
         if ip and mac:
             out.append(ArpEntry(ip.group(1), mac.group(1)))
     return out
+
+
+# -- adding a route, as the Router Lab's form does ----------------------------------------------
+#
+# The form builds the SAME `route add` line a student would type at the console and shows it before
+# sending, so the visual way in teaches the textual one rather than replacing it. Everything a
+# student can get wrong is caught here, in words, before the router sees it: the router's own
+# parser takes `-dev`, `-net`, `-netmask` IN THAT ORDER, reads only the digits of the device name,
+# and says nothing useful about a malformed address.
+
+def _ipv4(text: str) -> tuple[int, ...] | None:
+    parts = (text or "").strip().split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        octets = tuple(int(p) for p in parts)
+    except ValueError:
+        return None
+    return octets if all(0 <= o <= 255 for o in octets) else None
+
+
+def prefix_to_netmask(prefix: int) -> str:
+    """`24` → `255.255.255.0`, `32` → `255.255.255.255` (a host route)."""
+    bits = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF if prefix else 0
+    return ".".join(str((bits >> s) & 0xFF) for s in (24, 16, 8, 0))
+
+
+@dataclass(frozen=True)
+class RouteCommand:
+    command: str = ""           # the exact line to send, or "" when invalid
+    errors: tuple = ()          # what is wrong, in words a student can act on
+    note: str = ""              # something worth saying even though it is valid
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.command) and not self.errors
+
+
+def route_add_command(destination: str, prefix: int, iface: str, via: str = "") -> RouteCommand:
+    """Validate a route and build `route add -dev <iface> -net <net> -netmask <mask> [-gw <via>]`.
+
+    The destination is reduced to its network address for the prefix (10.0.3.12/24 becomes
+    10.0.3.0) and the note says so, because the router would otherwise store an entry that reads
+    as a host but matches a whole subnet. A /32 is a per-host route and is named as one.
+    """
+    errors = []
+    dst = _ipv4(destination)
+    if dst is None:
+        errors.append("Destination must be an IPv4 address, like 10.0.3.0.")
+    try:
+        prefix = int(prefix)
+    except (TypeError, ValueError):
+        prefix = -1
+    if not 0 <= prefix <= 32:
+        errors.append("Prefix length must be between 0 and 32.")
+    dev = (iface or "").strip()
+    if not dev or not any(c.isdigit() for c in dev):
+        errors.append("Pick the interface the route leaves through (tun1, tun2, …).")
+    gw = (via or "").strip()
+    if gw and _ipv4(gw) is None:
+        errors.append("Next hop must be an IPv4 address, or empty for a directly connected route.")
+    if errors:
+        return RouteCommand(errors=tuple(errors))
+
+    mask = prefix_to_netmask(prefix)
+    m = tuple(int(x) for x in mask.split("."))
+    net = ".".join(str(a & b) for a, b in zip(dst, m))
+    notes = []
+    if prefix == 32:
+        notes.append(f"A per-host route: only {net} is sent this way; the rest of its subnet keeps "
+                     f"its existing route (the longest prefix wins).")
+    elif net != ".".join(map(str, dst)):
+        notes.append(f"{destination.strip()} with /{prefix} is the network {net} — the router "
+                     f"stores the network address.")
+    cmd = f"route add -dev {dev} -net {net} -netmask {mask}" + (f" -gw {gw}" if gw else "")
+    return RouteCommand(command=cmd, note=" ".join(notes))
+
+
+def route_del_command(entry: RouteEntry) -> str:
+    return f"route del {entry.index}"

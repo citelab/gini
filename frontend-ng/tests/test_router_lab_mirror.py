@@ -223,21 +223,28 @@ def test_the_window_accepts_drops_and_only_of_lua_files(app):
 # --------------------------------------------------------------------------- #
 
 def test_the_pipeline_is_not_a_peephole(app):
-    """Measured before this: content 637px tall in a 62px viewport at the default window size,
-    because the routing table and QoS panel below carried minimum heights and the pipeline
-    carried none. Mirroring the router into the editor is worthless if the boxes land below
-    the fold — which is exactly where a student's loaded module would have gone."""
+    """Mirroring the router into the editor is worthless if the boxes land where nobody sees them.
+
+    The vertical layout once gave the pipeline a 62-pixel strip (637px of content); then it gave
+    the pipeline the room and pushed the routing table below the fold on a laptop. The router face
+    is a horizontal band now, so the two promises are checked together at the DEFAULT size: every
+    stage — the mirrored modules included — sits whole inside the band, and the routing table
+    below still gets real room."""
     lab = _lab(app)
     lab._on_chain(LIVE)
     lab.show(); app.processEvents(); app.processEvents()
-    # The viewport is the scroll area less its frame, so a pixel or two under the minimum is
-    # the frame, not a squeeze. The squeeze this guards against was 62 pixels.
-    assert lab.pipe_scroll.viewport().height() >= RouterLab.PIPELINE_MIN_H - 4
-    # the first mirrored box sits inside the visible area, not scrolled away
-    first_inline = next(w for w, st in zip(lab._stage_widgets, lab.program.stages())
-                        if st.kind == "inline")
-    assert first_inline.y() + first_inline.height() <= lab.pipe_scroll.viewport().height(), \
-        "the first service function is below the fold"
+    band = lab.flow
+    inline = [w for w in lab._stage_widgets if w.stage.kind == "inline"]
+    assert inline, "the live chain was not mirrored into the band"
+    for chip in lab._stage_widgets:
+        x = chip.mapTo(band, chip.rect().topLeft()).x()
+        assert x >= 0 and x + chip.width() <= band.width(), f"{chip.stage.label} is clipped"
+        assert chip.width() >= chip.minimumWidth()
+    # the lower half is no longer the leftover: the routing table is on screen and usable
+    rt = lab.route_table
+    bottom = rt.mapTo(lab, rt.rect().bottomLeft()).y()
+    assert bottom <= lab.height(), "the routing table is below the fold"
+    assert rt.height() >= 120, f"the routing table got only {rt.height()}px"
 
 
 # --------------------------------------------------------------------------- #
