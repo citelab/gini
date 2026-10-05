@@ -77,6 +77,11 @@ COPY --from=build /usr/local/bin/grouter /usr/local/bin/grouter
 # from outside (the Router Lab's flow-table view, the mission `flow()` probe, probe_doctor), so it
 # has to exist in the runtime image — not just in the builder.
 COPY --from=build /build/grouter-build/ /build/grouter-build/
+# The long `help <command>` pages (helpdefs/*.hlp). The router renders them itself — there is no
+# man in this image, and a pager is wrong on a console captured into a socket — but it has to find
+# them: without these two lines `help route` printed nothing at all (see helpCmd in cli.c).
+COPY --from=build /build/include/helpdefs/ /usr/local/share/gini/grouter/helpdefs/
+ENV GINI_SHARE=/usr/local/share/gini
 
 COPY --from=ttyd /ttyd /usr/local/bin/ttyd
 # What the terminal fronts is per-ELEMENT: this one image serves both gRouters and OVS switches,

@@ -26,8 +26,3 @@ Written by Muthucumaru Maheswaran. Send comments and feedback at maheswar@cs.mcg
 
 
 .SH "SEE ALSO"
-
-
-
-\tThe source command is used to read a batch file and execute it.\n\
-\tThis is useful to run initial setup commands without typing them one by one in the command shell\n"

@@ -202,8 +202,26 @@ void parseACLICmd(char *str)
 
     strcpy(orig_str, str);
     token = strtok(str, " \n");
+    if (token == NULL)
+        return;
     if ((clie = map_get(cli_map, token)) != NULL)
+    {
+        /* `route help` (or -h / --help) means `help route`, for every command at once. Each
+         * handler parses its own arguments and none of them knew the word, so `route help`
+         * fell through to that handler's "missing action" error. Checked here, before the
+         * handler, so no command needs to learn it — none takes "help" as a real argument. */
+        char *arg = strtok(NULL, " \n");
+        if (arg != NULL && strtok(NULL, " \n") == NULL &&
+            (!strcmp(arg, "help") || !strcmp(arg, "-h") || !strcmp(arg, "--help")))
+        {
+            CLIPrintCommandHelp(clie);
+            return;
+        }
+        /* not a help request: re-tokenize so the handler's strtok(NULL, ...) sees its args */
+        strcpy(str, orig_str);
+        strtok(str, " \n");
         clie->handler((void *)clie);
+    }
     else
     {
         printf("WARNING: %s not a gRouter command (deferring to Linux)\n", token);
@@ -1368,7 +1386,6 @@ void consoleCmd()
 
 void helpCmd()
 {
-    char tmpbuf[MAX_TMPBUF_LEN];
     char *next_tok = strtok(NULL, " \n");
     cli_entry_t *n_clie;
 
@@ -1380,18 +1397,176 @@ void helpCmd()
         if (n_clie == NULL)
             printf("ERROR! No help for command: %s \n", next_tok);
         else
-        {
-            if (strstr(n_clie->long_helpstr, ".hlp") != NULL)
-            {
-                sprintf(tmpbuf, "man %s/grouter/helpdefs/%s", getenv("GINI_SHARE"), n_clie->long_helpstr);
-                system(tmpbuf);
-            } else
-            {
-                printf("\n%s:: %s\n", n_clie->keystr, n_clie->usagestr);
-                printf("%s\n", n_clie->long_helpstr);
-            }
-        }
+            CLIPrintCommandHelp(n_clie);
     }
+}
+
+
+/*
+ * The long help of most commands is a man page (helpdefs/<cmd>.hlp), and this used to run
+ * `man $GINI_SHARE/grouter/helpdefs/<cmd>.hlp`. Inside the container that printed NOTHING:
+ * GINI_SHARE was unset, so the shell got `man (null)/...` and died on a syntax error (into the
+ * container log, not the console), and the image has neither man nor the pages. Even with all
+ * three present, man is a pager — wrong on a console whose stdout is captured into a socket.
+ *
+ * So the router reads the page itself and prints it as plain text. The pages use a tiny troff
+ * subset (.TH .SH .B .I .BR .br and \-), which is all hlp_render() understands; anything else
+ * is printed as text rather than dropped, so a new macro degrades to visible, not to missing.
+ */
+#define HLP_WIDTH   78
+#define HLP_INDENT  7
+
+static int hlp_col;                     /* column of the paragraph line being filled, 0 = none */
+
+static void hlp_break(void)
+{
+    if (hlp_col > 0)
+        printf("\n");
+    hlp_col = 0;
+}
+
+static void hlp_word(const char *w, int glue)
+{
+    int n = strlen(w);
+
+    if (n == 0)
+        return;
+    if (hlp_col > 0 && !glue && hlp_col + 1 + n > HLP_WIDTH)
+        hlp_break();
+    if (hlp_col == 0)
+        hlp_col = printf("%*s", HLP_INDENT, "");
+    else if (!glue)
+        hlp_col += printf(" ");
+    hlp_col += printf("%s", w);
+}
+
+/* Words of `text` into the filled paragraph. `glue` joins them without spaces (.BR's
+ * "grouter (1G)," reads "grouter(1G),"), quotes are dropped, and \- is a hyphen. */
+static void hlp_text(char *text, int glue)
+{
+    char word[MAX_TMPBUF_LEN];
+    int first = 1, k = 0;
+    char *p;
+
+    for (p = text; ; p++)
+    {
+        if (*p == '\\' && p[1] == '-')
+        {
+            if (k < (int)sizeof(word) - 1) word[k++] = '-';
+            p++;
+            continue;
+        }
+        if (*p == '"')
+            continue;
+        if (*p == '\0' || *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        {
+            word[k] = '\0';
+            if (k > 0)
+            {
+                hlp_word(word, glue && !first);
+                first = 0;
+            }
+            k = 0;
+            if (*p == '\0')
+                break;
+            continue;
+        }
+        if (k < (int)sizeof(word) - 1)
+            word[k++] = *p;
+    }
+}
+
+static void hlp_render(FILE *fp)
+{
+    char line[MAX_TMPBUF_LEN];
+    int blank = 0;
+
+    hlp_col = 0;
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (line[0] == '\n' || line[0] == '\r')
+        {
+            hlp_break();
+            blank = 1;                          /* one blank line, however many in the page */
+            continue;
+        }
+        if (blank && hlp_col == 0)
+            printf("\n");
+        blank = 0;
+        if (!strncmp(line, ".TH", 3))
+            continue;
+        if (!strncmp(line, ".SH", 3))
+        {
+            char *t = line + 3, *q;
+            hlp_break();
+            while (*t == ' ') t++;
+            for (q = t; *q; q++)
+                if (*q != '"' && *q != '\n' && *q != '\r')
+                    putchar(*q);
+            putchar('\n');
+            continue;
+        }
+        if (!strncmp(line, ".br", 3))
+        {
+            hlp_break();
+            continue;
+        }
+        if (!strncmp(line, ".BR", 3) || !strncmp(line, ".IR", 3) || !strncmp(line, ".RB", 3) ||
+            !strncmp(line, ".RI", 3) || !strncmp(line, ".BI", 3) || !strncmp(line, ".IB", 3))
+        {
+            hlp_text(line + 3, 1);
+            continue;
+        }
+        if (!strncmp(line, ".B ", 3) || !strncmp(line, ".I ", 3))
+        {
+            hlp_text(line + 3, 0);
+            continue;
+        }
+        hlp_text(line, 0);
+    }
+    hlp_break();
+}
+
+/* Where a command's .hlp page lives: $GINI_SHARE/grouter/helpdefs (the image sets GINI_SHARE),
+ * else the image's own location, so a router started without the variable still finds it. */
+static FILE *hlp_open(const char *page)
+{
+    char path[MAX_TMPBUF_LEN];
+    const char *share = getenv("GINI_SHARE");
+    FILE *fp = NULL;
+
+    if (share != NULL && *share)
+    {
+        snprintf(path, sizeof(path), "%s/grouter/helpdefs/%s", share, page);
+        fp = fopen(path, "r");
+    }
+    if (fp == NULL)
+    {
+        snprintf(path, sizeof(path), "/usr/local/share/gini/grouter/helpdefs/%s", page);
+        fp = fopen(path, "r");
+    }
+    return fp;
+}
+
+void CLIPrintCommandHelp(cli_entry_t *clie)
+{
+    FILE *fp;
+
+    if (strstr(clie->long_helpstr, ".hlp") == NULL)
+    {
+        printf("\n%s:: %s\n", clie->keystr, clie->usagestr);
+        printf("%s\n", clie->long_helpstr);
+        return;
+    }
+    if ((fp = hlp_open(clie->long_helpstr)) == NULL)
+    {
+        /* say so rather than print nothing — that silence is the bug this replaced */
+        printf("\n%s:: %s\n\t%s\n", clie->keystr, clie->usagestr, clie->short_helpstr);
+        printf("\t(the full page, %s, is not installed with this router)\n", clie->long_helpstr);
+        return;
+    }
+    hlp_render(fp);
+    fclose(fp);
 }
 
 /*

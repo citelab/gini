@@ -50,6 +50,7 @@ void dummyFunction();
 void parseACLICmd(char *str);
 void CLIProcessCmds(FILE *fp, int online);
 void CLIPrintHelpPreamble();
+void CLIPrintCommandHelp(cli_entry_t *clie);
 void *CLIProcessCmdsInteractive(void *arg);
 void registerCLI(char *key, void (*handler)(),
 		 char *shelp, char *usage, char *lhelp);
