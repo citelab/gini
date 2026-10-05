@@ -108,6 +108,16 @@ def missing_locally(refs, run=subprocess.run) -> list[str]:
     names = [local_name(r) for r in refs]
     if not names:
         return []
+    # A SOURCE build wants the moving `:latest`, and on a developer's machine the image under the
+    # plain name is very often one they just built from this tree. Comparing it with the
+    # registry's `latest` called that build "stale", and `_retag_from_local` then silently pointed
+    # the name back at the registry image — so `docker build -t gini-grouter:latest backend`
+    # worked, and the next launch of gBuilder undid it (a Router Lab feature that needed a new
+    # router command reported "this router image predates" it, over a freshly built image). The
+    # id check exists to stop a RELEASED version running another version's images; an unversioned
+    # build has no version to be wrong about. So here, present under the plain name is current.
+    if refs and all(str(r).endswith(":latest") for r in refs):
+        return [ref for ref, name in zip(refs, names) if _image_id(name, run=run) is None]
     try:
         # Both halves in ONE call: what each version wants, then what each plain name resolves to.
         # The common case — everything current — still answers here, in a single docker invocation

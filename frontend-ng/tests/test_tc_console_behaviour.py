@@ -32,8 +32,11 @@ pytestmark = pytest.mark.skipif(not _CONSOLE.exists(), reason="teaching-center n
 
 def _jsdom_root() -> str | None:
     """jsdom is optional. Look where a developer would plausibly have installed it."""
+    # package.json, not just the directory: macOS's periodic /tmp cleanup deletes old FILES and
+    # leaves the directories, so a gutted install passed a bare `jsdom/` check, ran, and failed
+    # every test with "Cannot find module" instead of skipping.
     for base in (_TC.parent.parent / "node_modules", Path("/tmp/jsdom-dyc/node_modules")):
-        if (base / "jsdom").exists():
+        if (base / "jsdom" / "package.json").exists():
             return str(base)
     return None
 

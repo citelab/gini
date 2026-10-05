@@ -227,3 +227,59 @@ def test_the_format_argument_survives_windows_argument_quoting():
     import subprocess as sp
     argv = ["docker", "images", "--no-trunc", "--format", "{{.ID}} {{.Repository}}:{{.Tag}}"]
     assert '"{{.ID}} {{.Repository}}:{{.Tag}}"' in sp.list2cmdline(argv)
+
+
+# --------------------------------------------------------------------------- #
+# a source build keeps the image its developer just built
+# --------------------------------------------------------------------------- #
+#
+# Found trying the Router Lab's packet visualizer from source: `docker build -t gini-grouter:latest
+# backend` worked, and the next launch of gBuilder silently re-tagged the name back to the
+# registry's `latest`, because a source build "wants" ghcr…:latest and the local build's id
+# differed. The Lab then said the router "predates" the new command, over a fresh build.
+
+class _Ids:
+    """`docker image inspect --format {{.Id}} NAME…` from a fixed table; records every `tag`."""
+
+    def __init__(self, ids):
+        self.ids = dict(ids)
+        self.tags = []
+
+    def __call__(self, argv, **kw):
+        import types
+        if "tag" in argv:
+            self.tags.append(argv[argv.index("tag") + 1:])
+            src, dst = argv[-2], argv[-1]
+            self.ids[dst] = self.ids.get(src)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        names = [a for a in argv if a.startswith(("gini-", "ghcr.io/"))]
+        found = [self.ids.get(n) for n in names]
+        if any(f is None for f in found):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="no such image")
+        return types.SimpleNamespace(returncode=0, stdout="\n".join(found) + "\n", stderr="")
+
+
+def test_a_source_build_keeps_a_locally_built_image():
+    from gini.setup import images as I
+    refs = ["ghcr.io/gini-toolkit/gini-grouter:latest"]
+    d = _Ids({"ghcr.io/gini-toolkit/gini-grouter:latest": "sha256:registry",
+              "gini-grouter:latest": "sha256:mybuild"})
+    assert I.missing_locally(refs, run=d) == []
+    assert d.tags == [], "a source build must never re-tag over the developer's own build"
+    assert d.ids["gini-grouter:latest"] == "sha256:mybuild"
+
+
+def test_a_source_build_still_reports_a_missing_image():
+    from gini.setup import images as I
+    refs = ["ghcr.io/gini-toolkit/gini-grouter:latest"]
+    assert I.missing_locally(refs, run=_Ids({})) == refs
+
+
+def test_a_released_version_still_insists_on_its_own_image():
+    """The guard this exception must not weaken: 6.15.5 runs 6.15.5's router, not a stale one."""
+    from gini.setup import images as I
+    refs = ["ghcr.io/gini-toolkit/gini-grouter:6.15.5"]
+    d = _Ids({"ghcr.io/gini-toolkit/gini-grouter:6.15.5": "sha256:v6155",
+              "gini-grouter:latest": "sha256:old"})
+    assert I.missing_locally(refs, run=d) == []          # repaired by re-tagging…
+    assert d.ids["gini-grouter:latest"] == "sha256:v6155"  # …to the version's own image
