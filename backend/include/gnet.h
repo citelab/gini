@@ -50,7 +50,28 @@ typedef struct _interface_t
 	pthread_t sdwthread;
 	device_t *devdriver;				// the device driver that include toXDev and fromXDev functions
 	void *iarray;                       // pointer to interface array type
+	// Traffic counters for `ifstat` (the Router Lab's per-interface bandwidth meter). Appended,
+	// never inserted, so no initializer elsewhere shifts. Bumped only through gnet_count_rx/tx
+	// below. Cumulative and never reset: a reader takes deltas between two polls.
+	unsigned long long rx_bytes, rx_pkts;
+	unsigned long long tx_bytes, tx_pkts;
 } interface_t;
+
+/* Count one frame in or out. Called from EVERY device driver (ethernet, tun, tap, raw) at the
+ * point it actually reads or writes the wire: GINI's fabric interfaces are `tun`, which has its
+ * own driver, so counting in one driver would have left the meter at zero for the interfaces
+ * students actually use (it did, on the first try). Atomic both ways -- cheap, and it leaves no
+ * thread assumption to get wrong. */
+static inline void gnet_count_rx(interface_t *f, int n)
+{
+	if (f && n > 0) { __sync_fetch_and_add(&f->rx_bytes, (unsigned long long)n);
+	                  __sync_fetch_and_add(&f->rx_pkts, 1ULL); }
+}
+static inline void gnet_count_tx(interface_t *f, int n)
+{
+	if (f && n > 0) { __sync_fetch_and_add(&f->tx_bytes, (unsigned long long)n);
+	                  __sync_fetch_and_add(&f->tx_pkts, 1ULL); }
+}
 
 
 

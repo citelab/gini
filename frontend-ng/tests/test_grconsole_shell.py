@@ -57,7 +57,10 @@ def test_tab_completes_a_verb(grc):
 
 
 def test_completion_narrows_to_what_was_typed(grc):
-    hits = _complete_all(grc, "if", "if")
+    # "if" is ifconfig AND ifstat since the router gained per-interface counters; one more
+    # letter narrows it to one, which is the behaviour this pins.
+    assert sorted(_complete_all(grc, "if", "if")) == ["ifconfig", "ifstat"]
+    hits = _complete_all(grc, "ifc", "ifc")
     assert hits == ["ifconfig"], f"expected just ifconfig, got {hits}"
 
 

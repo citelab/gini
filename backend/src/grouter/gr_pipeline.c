@@ -25,16 +25,26 @@ void gr_pipeline_clear(gr_pipeline_t *p)
     p->count = 0;
 }
 
+/* Which module ended the last run on THIS thread, or -1 when the packet continued through all of
+ * them. The packet watch reads it to say WHICH box dropped a packet; gr_verdict_t has no room for
+ * it, and widening the ABI every module conforms to for one reader would be the wrong trade.
+ * Thread-local, so it is right whichever thread runs the pipeline. */
+__thread int gr_pipeline_stopped_at = -1;
+
 gr_verdict_t gr_pipeline_run(gr_pipeline_t *p, gpacket_t *pkt)
 {
     gr_verdict_t v = { GR_CONTINUE, -1 };
     int i;
+    gr_pipeline_stopped_at = -1;
     for (i = 0; i < p->count; i++)
     {
         gr_module_t *m = p->modules[i];
         v = m->process(m, pkt);
         if (v.action != GR_CONTINUE)   /* terminal: DROP/FORWARD/TO_HOST/CONSUMED */
+        {
+            gr_pipeline_stopped_at = i;
             return v;
+        }
     }
     return v;   /* CONTINUE through all -> caller runs base forwarding */
 }

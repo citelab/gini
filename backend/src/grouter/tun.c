@@ -57,6 +57,7 @@ void *toTunDev(void *arg)
 		pkt_size = gpacketSize(inpkt);
 		verbose(2, "[toTunDev]:: tun_sendto called for interface %d.. ", iface->interface_id);
 		tun_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
+		gnet_count_tx(iface, pkt_size);
 		free(inpkt);          // finally destroy the memory allocated to the packet..
 	} else
 		error("[toTunDev]:: ERROR!! Could not find outgoing interface ...");
@@ -87,6 +88,7 @@ void* fromTunDev(void *arg)
 
         bzero(in_pkt, sizeof(gpacket_t));
         pktsize = tun_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+        gnet_count_rx(iface, pktsize);     /* on the wire, before any filter (gnet.h) */
         pthread_testcancel();
         
         verbose(2, "[fromTunDev]:: Destination MAC is %s ", MAC2Colon(tmpbuf, in_pkt->data.header.dst));
@@ -223,7 +225,7 @@ int tun_recvfrom(vpl_data_t *vpl, void *buf, int len)
     if (n == -1)
     {
         verbose(2, "[tun_recvfrom]:: unable to receive packet, error = %s", strerror(errno));
-        return EXIT_FAILURE;
+        return -1;          /* not EXIT_FAILURE: that is 1, which reads as a one-byte frame */
     }
     /*
      * Each tun interface is a dedicated point-to-point UDP link, so only the peer
@@ -237,7 +239,10 @@ int tun_recvfrom(vpl_data_t *vpl, void *buf, int len)
         verbose(3, "[tun_recvfrom]:: sender differs from configured peer (accepting anyway)");
 
     verbose(2, "[tun_recvfrom]:: Destination MAC is %s ", MAC2Colon(tmpbuf, buf));
-    return EXIT_SUCCESS;
+    /* The byte count, like recvfrom itself. It returned EXIT_SUCCESS (0), so the caller's
+     * `pktsize` was always 0 -- harmless while it only fed a log line, and the reason the
+     * per-interface RX counter read zero for every tun interface on its first try. */
+    return n;
         
 }
 

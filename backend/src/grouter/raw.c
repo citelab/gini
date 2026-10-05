@@ -97,6 +97,7 @@ void *toRawDev(void *arg)
 		pkt_size = gpacketSize(inpkt);
 		verbose(2, "[toRawDev]:: raw_sendto called for interface %d.. ", iface->interface_id);
 		raw_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
+		gnet_count_tx(iface, pkt_size);
 		free(inpkt);          // finally destroy the memory allocated to the packet..
 	} else
 		error("[toRawDev]:: ERROR!! Could not find outgoing interface ...");
@@ -128,6 +129,7 @@ void* fromRawDev(void *arg)
 
         bzero(in_pkt, sizeof(gpacket_t));
         pktsize = raw_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+        gnet_count_rx(iface, pktsize);
         pthread_testcancel();
         
         verbose(2, "[fromRawDev]:: Destination MAC is %s ", MAC2Colon(tmpbuf, in_pkt->data.header.dst));
@@ -262,11 +264,11 @@ int raw_recvfrom(vpl_data_t *vpl, void *buf, int len)
     if (n == -1) 
     {
         verbose(2, "[raw_recvfrom]:: unable to receive packet, error = %s", strerror(errno));		
-        return EXIT_FAILURE;
+        return -1;          /* not EXIT_FAILURE (1), which reads as a one-byte frame */
     } 
     
     verbose(2, "[raw_recvfrom]:: Destination MAC is %s ", MAC2Colon(tmpbuf, buf));
-    return EXIT_SUCCESS;   
+    return n;           /* the length, as tun_recvfrom now does -- see the note there */
 }
 
 

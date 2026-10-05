@@ -16,6 +16,7 @@
 #include "mtu.h"
 #include "protocols.h"
 #include "ip.h"
+#include "gr_watch.h"
 #include "tcp.h"
 #include "tcp_impl.h"
 #include "udp.h"
@@ -62,6 +63,7 @@ void IPIncomingPacket(gpacket_t *in_pkt)
 	if (IPCheckPacket4Me(in_pkt))
 	{
 		verbose(2, "[IPIncomingPacket]:: got IP packet destined to this router");
+		GR_WATCH(in_pkt, GW_LOCAL, -1, -1);
 		IPProcessMyPacket(in_pkt);
 	} else if ((gNtohl(tmpbuf, ip_pkt->ip_dst)[0] & 0xf0) == 0xe0)
 	{
@@ -233,7 +235,10 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 	{
 		gr_verdict_t _gv = gr_pipeline_run(gr_default_pipeline(), in_pkt);
 		if (_gv.action == GR_DROP)
+		{
+			GR_WATCH(in_pkt, GW_DROP, -1, gr_pipeline_stopped_at);
 			return EXIT_FAILURE;
+		}
 		if (_gv.action != GR_CONTINUE)
 			return EXIT_SUCCESS;   /* a module took ownership of the packet */
 	}
@@ -262,7 +267,11 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 	if (gr_route_lookup(gNtohl(tmpbuf, ip_pkt->ip_dst),
 			   in_pkt->frame.nxth_ip_addr,
 			   &(in_pkt->frame.dst_interface)) == EXIT_FAILURE)
+	{
+		GR_WATCH(in_pkt, GW_NOROUTE, -1, -1);
 		return EXIT_FAILURE;
+	}
+	GR_WATCH(in_pkt, GW_FWD, in_pkt->frame.dst_interface, -1);
 
 	// check for redirection?? -- the output interface is already found
 	// by the previous command.. if needed the following routine sends the
@@ -334,6 +343,7 @@ int IPCheck4Errors(gpacket_t *in_pkt)
 		verbose(2, "[processIPErrors]:: TTL expired on packet from %s",
 		       IP2Dot(tmpbuf, gNtohl((tmpbuf+20), ip_pkt->ip_src)));
 
+		GR_WATCH(in_pkt, GW_TTL, -1, -1);
 		ICMPProcessTTLExpired(in_pkt);
 		return EXIT_FAILURE;
 	}
@@ -525,6 +535,9 @@ int IPOutgoingPacket(gpacket_t *pkt, uchar *dst_ip, int size, int newflag, int s
 	ip_pkt->ip_cksum = htons(cksum);
 	pkt->data.header.prot = htons(IP_PROTOCOL);
 
+	/* An IP packet the ROUTER originates (echo reply, TTL exceeded, unreachable): every field is
+	 * final here, the outgoing interface included. */
+	GR_WATCH(pkt, GW_SENT, pkt->frame.dst_interface, -1);
 	IPSend2Output(pkt);
 	verbose(2, "[IPOutgoingPacket]:: IP packet sent to output queue.. ");
 	return EXIT_SUCCESS;

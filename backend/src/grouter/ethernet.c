@@ -80,6 +80,7 @@ void *toEthernetDev(void *arg)
 		pkt_size = gpacketSize(inpkt);
 		verbose(2, "[toEthernetDev]:: vpl_sendto called for interface %d..%d bytes written ", iface->interface_id, pkt_size);
 		vpl_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
+		gnet_count_tx(iface, pkt_size);                 /* see gnet.h */
 		free(inpkt);          // finally destroy the memory allocated to the packet..
 	} else
 		error("[toEthernetDev]:: ERROR!! Could not find outgoing interface ...");
@@ -118,6 +119,9 @@ void* fromEthernetDev(void *arg)
 			 * size rather than padded to sizeof(pkt_data_t) -- see frame.pkt_len. */
 			int _n = vpl_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
 			in_pkt->frame.pkt_len = (_n > 0) ? _n : 0;
+			/* Counted at arrival, before the not-for-me filter: the meter shows what is on the
+			 * wire, the way a real interface counter does. */
+			gnet_count_rx(iface, _n);
 		}
 		pthread_testcancel();
 		// check whether the incoming packet is a layer 2 broadcast or

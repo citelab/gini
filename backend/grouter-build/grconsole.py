@@ -20,8 +20,8 @@ END = "__END__"
 # nothing else, so a stale entry costs a useless suggestion rather than a broken command.
 COMMANDS = [
     "arp", "class", "console", "delay", "exit", "filter", "get", "gnc", "gpipe", "halt",
-    "help", "ifconfig", "openflow", "ping", "qdisc", "queue", "route", "set", "source",
-    "spolicy", "version", "quit", "logout",
+    "help", "ifconfig", "ifstat", "openflow", "ping", "qdisc", "queue", "route", "set",
+    "source", "spolicy", "version", "watch", "quit", "logout",
 ]
 # Second words worth completing. Only where there is an obvious small set — guessing wrong here
 # is worse than not completing, because Tab then silently inserts something that does not exist.
@@ -30,6 +30,7 @@ SUBCOMMANDS = {
     "route": ["show", "add", "del"],
     "arp": ["show", "clear"],
     "gpipe": ["list", "add", "del", "cp"],
+    "watch": ["on", "off", "show", "dump"],
     "queue": ["show", "add", "del", "stats"],
     "qdisc": ["add", "del", "show"],
     "delay": ["show", "clear", "ingress", "egress"],

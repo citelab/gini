@@ -19,6 +19,7 @@
 #include "moduledefs.h"
 #include "grouter.h"
 #include "packetcore.h"
+#include "gr_watch.h"     /* the Router Lab sees ARP too */
 
 
 int tbl_replace_indx;            // overwrite this element if no free space in ARP table
@@ -131,6 +132,8 @@ void ARPProcess(gpacket_t *pkt)
   // Check it's actually destined to us,if not throw packet
   if (COMPARE_IP(apkt->dst_ip_addr, gHtonl((uchar *)tmpbuf, pkt->frame.src_ip_addr)) != 0)
   {
+    GR_WATCH_ARP(GW_ARP, pkt->frame.src_interface, -1, ntohs(apkt->arp_opcode),
+                 apkt->src_ip_addr, apkt->dst_ip_addr, "ignored");
     verbose(2, "[APRProcess]:: packet has a frame source (after ntohl) %s ...",
         IP2Dot(tmpbuf, gNtohl((uchar *)tmpbuf, pkt->frame.src_ip_addr)));
 
@@ -143,6 +146,8 @@ void ARPProcess(gpacket_t *pkt)
   // If it's a REQUEST, send a reply back
   if (ntohs(apkt->arp_opcode) == ARP_REQUEST)
   {
+    GR_WATCH_ARP(GW_ARP, pkt->frame.src_interface, -1, ARP_REQUEST,
+                 apkt->src_ip_addr, apkt->dst_ip_addr, "answered");
     apkt->arp_opcode = htons(ARP_REPLY);
     COPY_MAC(apkt->src_hw_addr, pkt->frame.src_hw_addr);
     COPY_MAC(apkt->dst_hw_addr, pkt->data.header.src);
@@ -163,10 +168,14 @@ void ARPProcess(gpacket_t *pkt)
 
     pkt->data.header.prot = htons(ARP_PROTOCOL);
 
+    GR_WATCH_ARP(GW_SENT, -1, pkt->frame.dst_interface, ARP_REPLY,
+                 apkt->src_ip_addr, apkt->dst_ip_addr, "");
     ARPSend2Output(pkt);
   }
   else if (ntohs(apkt->arp_opcode) == ARP_REPLY)
   {
+    GR_WATCH_ARP(GW_ARP, pkt->frame.src_interface, -1, ARP_REPLY,
+                 apkt->src_ip_addr, apkt->dst_ip_addr, "learned");
     // Flush buffer of any packets waiting for the incoming ARP..
     verbose(2, "[ARPProcess]:: packet was ARP REPLY... ");
     ARPFlushBuffer(gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), apkt->src_hw_addr);
@@ -363,6 +372,16 @@ void ARPSendRequest(gpacket_t *pkt)
 
   COPY_MAC(pkt->data.header.dst, bcast_addr);
   pkt->data.header.prot = htons(ARP_PROTOCOL);
+  // The sender address is filled in by the driver on the way out (toEthernetDev), so record
+  // the interface's own address -- which is exactly what it will be filled with.
+  if (gr_watch_enabled)
+  {
+    interface_t *ifc = findInterface(pkt->frame.dst_interface);
+    uchar me[4] = {0, 0, 0, 0};
+    if (ifc != NULL)
+      gHtonl(me, ifc->ip_addr);
+    gr_watch_arp(GW_SENT, -1, pkt->frame.dst_interface, ARP_REQUEST, me, apkt->dst_ip_addr, "");
+  }
   // actually send the message to the other module..
   ARPSend2Output(pkt);
 

@@ -60,6 +60,7 @@ void *toTapDev(void *arg)
 
 		verbose(2, "[toTapDev]:: tap_sendto called for interface %d.. ", iface->interface_id);
 		tap_sendto(iface->vpl_data, &(inpkt->data), pkt_size);
+		gnet_count_tx(iface, pkt_size);
 		free(inpkt);          // finally destroy the memory allocated to the packet..
 	} else
 		error("[toTapDev]:: ERROR!! Could not find outgoing interface ...");
@@ -92,6 +93,7 @@ void* fromTapDev(void *arg)
 
 		bzero(in_pkt, sizeof(gpacket_t));
 		pktsize = tap_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+		gnet_count_rx(iface, pktsize);
 		pthread_testcancel();
 
 		// check whether the incoming packet is a layer 2 broadcast or

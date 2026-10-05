@@ -18,6 +18,7 @@
 #include "memp.h"
 #include "helpdefs.h"
 #include "cli.h"
+#include "gr_watch.h"
 #include "gr_state.h"   /* Z1: locked route/ARP accessors (race fix) */
 #include "gr_control.h" /* Z2: module-pipeline control surface */
 #include "gr_delay_ctl.h" /* link-delay lines */
@@ -114,6 +115,17 @@ int CLIInit(router_config *rarg)
                 "gpipe add acl <cidr>|nat <ip>|counter|block <ip>|lua <path> | list | clear | trace <a.b.c.d>"
                 " | cp add <name> [args] | cp list | cp status | cp stop",
                 "edit and inspect the gRouter's inline (data-plane) pipeline and control-plane modules");
+
+    registerCLI("watch", watchCmd,
+                "record what happens to each packet, for the Router Lab's packet visualizer",
+                "watch on | off | show | dump [since_seq]",
+                "a ring of packet fates (forwarded / dropped by which module / no route / TTL / "
+                "local); off by default, and free while off");
+
+    registerCLI("ifstat", ifstatCmd,
+                "per-interface traffic counters (bytes and packets, in and out)",
+                "ifstat",
+                "cumulative RX/TX counters per interface; two readings give bandwidth");
 
     registerCLI("delay", delayCmd,
                 "add link delay/jitter to this router (ingress and/or egress)",
