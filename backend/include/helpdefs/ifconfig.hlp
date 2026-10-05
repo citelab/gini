@@ -1,161 +1,88 @@
-.TH "ifconfig" 1G "30 July 2009" GINI "gRouter Commands"
+.TH "ifconfig" 1G "5 October 2026" GINI "gRouter Commands"
 
 .SH NAME
 ifconfig \- setup network interfaces at gRouter
 
-.SH SNOPSIS
-.B ifconfig 
-.B add
-( ethX | tap0 ) [
-.B -socket
-socketfile ]
-.B -addr
-IP_address
-.B -hwaddr
-MAC_addr [
-.B -gateway
-GW_addr ] [
-.B -mtu
-Value ]
-
-.B ifconfig 
-.B del
-ethX | tap0
-
-.B ifconfig
-.B show 
-( brief | verbose )
-
-.B ifconfig
-.B up
-ethX | tap0
-
-.B ifconfig
-.B down
-ethX | tap0
-
-.B ifconfig
-.B mod
-ethX 
-(-gateway GW | -mtu Value)
-
+.SH SYNOPSIS
+.nf
+ifconfig show [brief | verbose]
+ifconfig down | up tunN
+ifconfig mod tunN -mtu value
+ifconfig del tunN
+ifconfig add tunN -dstip peer_ip -dstport peer_port -addr IP_address
+             -hwaddr MAC_addr [-srcport local_port]
+.fi
 
 .SH DESCRIPTION
 
-.B ifconfig with the 
-.B add 
-command
-is used to setup the router resident interfaces at bootup. After that it is 
-normally used for tuning the setup or debugging the router interfaces. This command 
-can add, delete, or change interface parameters.
-	
-The 
-.I ethX
-interfaces connect the GINI router to virtual network elements such as other GINI routers,
-switches, or machines. The 
-.I tap0 
-interface connects a GINI router to the Internet. If a router in a virtual topology is
-connected to the Internet, all elements (routers and machines) part of the topology 
-should be able to access the Internet.
+Each link from the router to another element is one interface: tun1, tun2, and so on. When you
+press Run, gBuilder creates them for you, gives each its IP and MAC address, and connects it to
+the element at the other end of the link. So you will mostly use ifconfig to LOOK at interfaces
+and to take one down and up; you rarely need add.
 
-The 
-.B -socket
-switch denotes the 
-.I socketfile
-to associate with the interface. If a file under the given name exists, the interface
-is opened in client mode and a connection is initiated with the element that created
-the file. Otherwise the socketfile is created by the router.
-The
-.B -addr
-gives the IP address
-.B -network 
-gives the subnet address, and
-.B -hwaddr
-gives the MAC address, respectively of the interface.
-
-The 
-.B -socket
-switch is not used for 
-.I tap0
-interfaces. The 
-.I tap0 
-interface does not work through a socket file. It directly connects to the host.
-
-The
-.B del 
-command of 
-.B ifconfig
-can be used to remove a previously setup interface.
-
-The
 .B show
-command of 
-.B ifconfig
-can be used to print the interface tables. It takes a parameter to indicate the verbosity of the output.
-The
-.I brief
-option denotes a summarised output and 
-.I verbose
-denotes a detailed output.
+prints the interface table: device, state (U up, D down), IP address, MAC address and MTU.
+.B show verbose
+adds the interface number and the socket and thread behind each one.
+.B show brief
+is the same as plain show.
 
-The 
+.B down
+disables an interface without removing it: nothing is sent or received on it, so the link
+behaves as if it were unplugged, and its routes stay in the table pointing at a dead link. That
+is a good way to watch what fails, and what does not, when a link breaks.
 .B up
-command of 
-.B ifconfig 
-is used to enable a previously created interface. Similarly, the
-.B down 
-command is used to disable an active interface.
+brings it back.
 
-The 
 .B mod
-command is used to modify the operating parameters of an interface. Currently, the
-gateway address and the MTU can be changed.
+changes an interface's MTU, the largest IP packet it will send without fragmenting it.
 
-It is important to use the
-.B route
-command to setup the default or specific routes correctly. The 
-.B ifconfig
-command does not enter any entries in the routing table. This is 
-.B unlike 
-some networking subsystems of *nix operating systems that create appropriate default
-entries with the ifconfig command.
+.B del
+removes an interface for good, together with the routes that use it. It does not come back
+until the next Run.
 
-.SH OPTIONS
+.B add
+creates an interface by hand. A tun interface carries Ethernet frames inside UDP datagrams to
+the element at the other end: -dstip and -dstport say where to send them, -srcport is the local
+UDP port to receive on, and -addr and -hwaddr are the interface's own IP and MAC addresses. The
+commands gBuilder ran for this router are in its configuration file, which is the best model to
+copy: type cat /run/r1.conf (with your router's name), since this console hands commands it
+does not know to the Linux shell. add does not create a route; use route add for that, and use
+mod to set the MTU.
 
-The
-.B -gateway
-option gives the IP address of the gateway. This is the default next hop for all the outgoing
-traffic on the interface. 
-The 
-.B -mtu
-option specifies using an integer value the maximum transfer unit of the interface.
-
+The router also knows three older interface types from GINI's earlier versions: ethN (a
+Unix-socket link), tap0 (a link to the host) and raw. GINI's current topologies use only tun.
 
 .SH EXAMPLES
 
-To create an interface 
-.I eth0
-with 192.197.122.43 as the IP address use the following command:
-.br
-ifconfig add eth0 -socket ./sockname.ctl -addr 192.197.122.43	
-.br		
-		-hwaddr 99:33:45:89:43:23
+Look at the interfaces:
+.RS
+.nf
+ifconfig show
+.fi
+.RE
 
-To connect to the Internet, use the following command. This works assuming 
-.I tap0
-interface is already created using 
-.B tunctl
-.br
-ifconfig add tap0 -addr 192.167.133.67 -hwaddr 99:44:45:89:34:24
+Unplug the link on tun2, watch the traffic stop, then plug it back in:
+.RS
+.nf
+ifconfig down tun2
+ifconfig show
+ifconfig up tun2
+.fi
+.RE
 
-
+Lower the MTU on tun1, so larger packets have to be fragmented:
+.RS
+.nf
+ifconfig mod tun1 -mtu 576
+.fi
+.RE
 
 .SH AUTHORS
 
 Written by Muthucumaru Maheswaran. Send comments and feedback at maheswar@cs.mcgill.ca.
 
-
 .SH "SEE ALSO"
-.BR grouter (1),
-.BR route (1), 
-.BR arp (1)
+.BR route (1G),
+.BR ifstat (1G),
+.BR arp (1G)

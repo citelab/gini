@@ -111,27 +111,26 @@ int CLIInit(router_config *rarg)
     registerCLI("openflow", openflowCmd, SHELP_OPENFLOW, USAGE_OPENFLOW, LHELP_OPENFLOW);
     registerCLI("gnc", gncCmd, SHELP_GNC, USAGE_GNC, LHELP_GNC);
     registerCLI("gpipe", gpipeCmd,
-                "manage the inline module pipeline (Z2) + control-plane modules (B2)",
-                "gpipe add acl <cidr>|nat <ip>|counter|block <ip>|lua <path> | list | clear | trace <a.b.c.d>"
-                " | cp add <name> [args] | cp list | cp status | cp stop",
-                "edit and inspect the gRouter's inline (data-plane) pipeline and control-plane modules");
+                "build and inspect the router's packet-processing pipeline",
+                "gpipe list | add <module> [arg] | clear | trace <ip> | cp add|list|status|stop"
+                " | mcast join|leave|show",
+                "gpipe.hlp");
 
     registerCLI("watch", watchCmd,
                 "record what happens to each packet, for the Router Lab's packet visualizer",
                 "watch on | off | show | dump [since_seq]",
-                "a ring of packet fates (forwarded / dropped by which module / no route / TTL / "
-                "local); off by default, and free while off");
+                "watch.hlp");
 
     registerCLI("ifstat", ifstatCmd,
                 "per-interface traffic counters (bytes and packets, in and out)",
                 "ifstat",
-                "cumulative RX/TX counters per interface; two readings give bandwidth");
+                "ifstat.hlp");
 
     registerCLI("delay", delayCmd,
                 "add link delay/jitter to this router (ingress and/or egress)",
                 "delay ingress|egress <base_ms> [jitter_ms] [corr] [limit] | ingress|egress off"
                 " | show | clear",
-                "hold packets in a per-router delay line to model link latency; correlated jitter, order-preserving");
+                "delay.hlp");
 
     if (rarg->config_dir != NULL)
         chdir(rarg->config_dir);                  // change to the configuration directory
@@ -407,6 +406,12 @@ void registerCLI(char *key, void (*handler)(),
 #define GET_THIS_OR_THIS_PARAMETER(X, Z, Y) if (((next_tok = strtok(NULL, " \n")) == NULL) ||  \
         ((strstr(next_tok, X) == NULL) && \
          (strstr(next_tok, Z) == NULL))) { error(Y); return; }
+/* The next token must name an interface of a device type this router has a driver for (eth, tap,
+ * tun, raw) -- the check `ifconfig add` already made. up/down/del/mod used to accept only "eth"
+ * or "tap", so on the tun devices every GINI router actually has, `ifconfig down tun2` failed --
+ * and said so with error(), which goes to the container log, so the console showed nothing. */
+#define GET_IFACE_PARAMETER(Y)              if (((next_tok = strtok(NULL, " \n")) == NULL) ||  \
+        (findDeviceDriver(next_tok) == NULL)) { printf("%s\n", Y); return; }
 
 int getDevType(char *str)
 {
@@ -436,7 +441,7 @@ void ifconfigCmd()
     interface_t *iface;
     char dev_name[MAX_DNAME_LEN], con_sock[MAX_NAME_LEN], dev_type[MAX_NAME_LEN], raw_bridge[MAX_NAME_LEN];
     uchar mac_addr[6], ip_addr[4], gw_addr[4], dst_ip[4];
-    int mtu, interface, mode;
+    int mtu, interface, mode, mtu_given = 0;
     short int dst_port;
     int src_port;           // int (not short): a literal port can exceed 32767,
                             // which would wrap negative in a short and defeat the
@@ -543,7 +548,7 @@ void ifconfigCmd()
     }
     else if (!strcmp(next_tok, "del"))
     {
-        GET_THIS_OR_THIS_PARAMETER("eth", "tap", "ifconfig:: missing interface spec ..");
+        GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
         strcpy(dev_name, next_tok);
         interface = gAtoi(next_tok);
         destroyInterfaceByIndex(interface);
@@ -551,7 +556,7 @@ void ifconfigCmd()
     }
     else if (!strcmp(next_tok, "up"))
     {
-        GET_THIS_OR_THIS_PARAMETER("eth", "tap", "ifconfig:: missing interface spec ..");
+        GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
         strcpy(dev_name, next_tok);
         interface = gAtoi(next_tok);
         upInterface(interface);
@@ -559,36 +564,45 @@ void ifconfigCmd()
     }
     else if (!strcmp(next_tok, "down"))
     {
-        GET_THIS_OR_THIS_PARAMETER("eth", "tap", "ifconfig:: missing interface spec ..");
+        GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
         strcpy(dev_name, next_tok);
         interface = gAtoi(next_tok);
         downInterface(interface);
     }
     else if (!strcmp(next_tok, "mod"))
     {
-        GET_THIS_PARAMETER("eth", "ifconfig:: missing interface spec ..");
+        GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
         strcpy(dev_name, next_tok);
         interface = gAtoi(next_tok);
 
         while ((next_tok = strtok(NULL, " \n")) != NULL)
             if (!strcmp("-gateway", next_tok))
             {
+                /* This was strcpy(gw_addr, ...) -- a dotted address into a 4-byte array, a stack
+                 * overflow -- and the value was never used. Nothing reads a per-interface gateway
+                 * after `add`, so say so rather than pretend; a gateway is a route. */
                 next_tok = strtok(NULL, " \n");
-                strcpy(gw_addr, next_tok);
-            } else if (!strcmp("-mtu", next_tok))
-            {
-                next_tok = strtok(NULL, " \n");
-                mtu = atoi(next_tok);
-            }
+                printf("ifconfig mod:: -gateway is not applied after add; use "
+                       "route add -dev %s -net 0.0.0.0 -netmask 0.0.0.0 -gw <gw>\n", dev_name);
+            } else if (!strcmp("-mtu", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
+                mtu = atoi(next_tok), mtu_given = 1;
 
-        changeInterfaceMTU(interface, mtu);
+        /* Only with -mtu: `mtu` starts at DEFAULT_MTU, so a mod without it used to reset the MTU.
+         * And BOTH places: changeInterfaceMTU sets the device_mtu that `ifconfig show` prints,
+         * but fragmentation reads MTU_tbl (ip.c findMTU), so changing only the first altered the
+         * display and nothing a packet ever met. */
+        if (mtu_given && changeInterfaceMTU(interface, mtu) == EXIT_SUCCESS &&
+            (iface = findInterface(interface)) != NULL)
+            addMTUEntry(MTU_tbl, interface, mtu, iface->ip_addr);
     }
     else if (!strcmp(next_tok, "show"))
     {
         if ((next_tok = strtok(NULL, " \n")) != NULL)
         {
             if (strstr(next_tok, "bri") != NULL)
-                mode = BRIEF_LISTING;
+                mode = NORMAL_LISTING;  /* printInterfaces never had a BRIEF case, so `show brief`
+                                         * printed the title and no rows; the normal listing IS
+                                         * the brief one */
             else if (strstr(next_tok, "verb") != NULL)
                 mode = VERBOSE_LISTING;
         } else
@@ -1409,14 +1423,22 @@ void helpCmd()
  * container log, not the console), and the image has neither man nor the pages. Even with all
  * three present, man is a pager — wrong on a console whose stdout is captured into a socket.
  *
- * So the router reads the page itself and prints it as plain text. The pages use a tiny troff
- * subset (.TH .SH .B .I .BR .br and \-), which is all hlp_render() understands; anything else
- * is printed as text rather than dropped, so a new macro degrades to visible, not to missing.
+ * So the router reads the page itself and prints it as plain text. The pages use a small troff
+ * subset, which is all hlp_render() understands: .TH .SH, the font macros (.B .I .BR ...) whose
+ * words are just text here, .br, .RS/.RE to indent a block, .nf/.fi for lines that must print
+ * exactly as written (code, output), and \-. Anything else is printed as text rather than
+ * dropped, so a new macro degrades to visible, not to missing.
+ *
+ * Quotes are troff syntax only in a MACRO's arguments (.B "two words"). In running text they are
+ * the author's: stripping them everywhere turned `if pkt.dst == "10.0.3.10"` into broken Lua.
  */
 #define HLP_WIDTH   78
 #define HLP_INDENT  7
+#define HLP_STEP    4                   /* .RS indents by this much */
 
 static int hlp_col;                     /* column of the paragraph line being filled, 0 = none */
+static int hlp_indent;                  /* left margin now: HLP_INDENT plus any .RS */
+static int hlp_nofill;                  /* inside .nf ... .fi: print lines as written */
 
 static void hlp_break(void)
 {
@@ -1434,15 +1456,16 @@ static void hlp_word(const char *w, int glue)
     if (hlp_col > 0 && !glue && hlp_col + 1 + n > HLP_WIDTH)
         hlp_break();
     if (hlp_col == 0)
-        hlp_col = printf("%*s", HLP_INDENT, "");
+        hlp_col = printf("%*s", hlp_indent, "");
     else if (!glue)
         hlp_col += printf(" ");
     hlp_col += printf("%s", w);
 }
 
 /* Words of `text` into the filled paragraph. `glue` joins them without spaces (.BR's
- * "grouter (1G)," reads "grouter(1G),"), quotes are dropped, and \- is a hyphen. */
-static void hlp_text(char *text, int glue)
+ * "grouter (1G)," reads "grouter(1G),"); `macro` drops quotes, which are syntax only there;
+ * \- is a hyphen. */
+static void hlp_text(char *text, int glue, int macro)
 {
     char word[MAX_TMPBUF_LEN];
     int first = 1, k = 0;
@@ -1456,7 +1479,7 @@ static void hlp_text(char *text, int glue)
             p++;
             continue;
         }
-        if (*p == '"')
+        if (*p == '"' && macro)
             continue;
         if (*p == '\0' || *p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
         {
@@ -1476,12 +1499,33 @@ static void hlp_text(char *text, int glue)
     }
 }
 
+/* One line inside .nf: at the current margin, spacing kept, \- still a hyphen. */
+static void hlp_verbatim(const char *line)
+{
+    const char *p;
+
+    printf("%*s", hlp_indent, "");
+    for (p = line; *p && *p != '\n' && *p != '\r'; p++)
+    {
+        if (*p == '\\' && p[1] == '-')
+        {
+            putchar('-');
+            p++;
+        }
+        else
+            putchar(*p);
+    }
+    putchar('\n');
+}
+
 static void hlp_render(FILE *fp)
 {
     char line[MAX_TMPBUF_LEN];
     int blank = 0;
 
     hlp_col = 0;
+    hlp_indent = HLP_INDENT;
+    hlp_nofill = 0;
     while (fgets(line, sizeof(line), fp) != NULL)
     {
         if (line[0] == '\n' || line[0] == '\r')
@@ -1499,6 +1543,8 @@ static void hlp_render(FILE *fp)
         {
             char *t = line + 3, *q;
             hlp_break();
+            hlp_indent = HLP_INDENT;            /* a section starts at the left margin */
+            hlp_nofill = 0;
             while (*t == ' ') t++;
             for (q = t; *q; q++)
                 if (*q != '"' && *q != '\n' && *q != '\r')
@@ -1506,23 +1552,38 @@ static void hlp_render(FILE *fp)
             putchar('\n');
             continue;
         }
+        if (!strncmp(line, ".nf", 3)) { hlp_break(); hlp_nofill = 1; continue; }
+        if (!strncmp(line, ".fi", 3)) { hlp_nofill = 0; continue; }
+        if (!strncmp(line, ".RS", 3)) { hlp_break(); hlp_indent += HLP_STEP; continue; }
+        if (!strncmp(line, ".RE", 3))
+        {
+            hlp_break();
+            if (hlp_indent - HLP_STEP >= HLP_INDENT)
+                hlp_indent -= HLP_STEP;
+            continue;
+        }
         if (!strncmp(line, ".br", 3))
         {
             hlp_break();
             continue;
         }
+        if (hlp_nofill && line[0] != '.')
+        {
+            hlp_verbatim(line);
+            continue;
+        }
         if (!strncmp(line, ".BR", 3) || !strncmp(line, ".IR", 3) || !strncmp(line, ".RB", 3) ||
             !strncmp(line, ".RI", 3) || !strncmp(line, ".BI", 3) || !strncmp(line, ".IB", 3))
         {
-            hlp_text(line + 3, 1);
+            hlp_text(line + 3, 1, 1);
             continue;
         }
         if (!strncmp(line, ".B ", 3) || !strncmp(line, ".I ", 3))
         {
-            hlp_text(line + 3, 0);
+            hlp_text(line + 3, 0, 1);
             continue;
         }
-        hlp_text(line, 0);
+        hlp_text(line, 0, 0);
     }
     hlp_break();
 }

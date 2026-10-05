@@ -1,0 +1,193 @@
+.TH "gpipe" 1G "5 October 2026" GINI "gRouter Commands"
+
+.SH NAME
+gpipe \- build and inspect the router's packet-processing pipeline
+
+.SH SYNOPSIS
+.nf
+gpipe list
+gpipe add module [argument]
+gpipe clear
+gpipe trace destination_ip
+
+gpipe cp add lua /scripts/file.lua [tick_ms]
+gpipe cp list | status | stop
+
+gpipe mcast join | leave group interface_number
+gpipe mcast show
+.fi
+
+.SH DESCRIPTION
+
+Every IP packet the router FORWARDS goes through the same stages: it is parsed, it passes the
+pipeline modules in order, the route table picks an output interface, and the frame is rewritten
+for the next hop. The modules are the part you control. Each one looks at the packet and either
+lets it CONTINUE to the next stage or DROPs it, so the order matters: the first module to drop a
+packet is the one that stopped it.
+
+The pipeline is empty at start, which is plain forwarding. Modules see only forwarded packets,
+after the TTL has been checked: packets addressed to the router itself (a ping to one of its
+interfaces), ARP, and multicast do not pass through them. In OpenFlow mode the flow table decides
+instead and the pipeline is not used.
+
+.B list
+prints the pipeline as the router runs it. The number in each box is the module's position:
+.RS
+.nf
+base: parse -> [0:acl:10.0.3.0/24] -> [1:block:10.0.2.10] -> route -> rewrite
+.fi
+.RE
+
+.B add
+appends a module to the END of the pipeline.
+.B clear
+removes every module. There is no command to remove one module: clear, then add back the ones
+you want, in the order you want. The Router Lab's module editor does exactly that for you.
+
+.B trace
+asks "what would the pipeline do with a packet to this address?" without sending one. It runs a
+made-up packet whose only field is the destination address through each module and prints each
+verdict, stopping at the first DROP. Because the rest of the packet is zeros, a module that looks
+at other fields (a Lua script reading pkt.proto, say) may answer differently for real traffic,
+and counter and rate count the trace packet as one of theirs.
+
+.SH MODULES
+
+.B acl
+cidr
+.RS
+Drop every packet whose destination is inside cidr (a deny rule).
+.nf
+gpipe add acl 10.0.3.0/24
+.fi
+.RE
+
+.B block
+ip
+.RS
+Drop packets to exactly one destination address: the same job as acl with a /32, written as a
+small self-contained C module (gr_mod_block.c in the GINI source). It is the example to copy
+when you write a native module of your own.
+.RE
+
+.B nat
+ip
+.RS
+Rewrite the SOURCE address of every packet to ip and fix the IP header checksum. The TCP/UDP
+checksum is not adjusted, and it covers the source address, so the receiver discards rewritten
+TCP (and UDP that carries a checksum) as corrupt; ping (ICMP) works.
+.RE
+
+.B rate
+pps[/burst]
+.RS
+A token-bucket policer: let through at most pps packets per second, allowing a burst of up to
+burst packets (default: one second's worth), and drop the rest. It drops rather than delays; to
+add latency, use the delay command.
+.nf
+gpipe add rate 100/200
+.fi
+.RE
+
+.B classify
+[cidr:]dscp
+.RS
+Mark packets to cidr (or all packets) with a DSCP value in the IP header: a name (be, ef,
+cs0..cs7, af11..af43) or a number 0..63. It only marks; nothing in the pipeline treats marked
+packets differently.
+.nf
+gpipe add classify 10.0.3.0/24:ef
+.fi
+.RE
+
+.B tap
+path[@cidr]
+.RS
+Copy each packet (or only those to cidr) into a pcap file that opens in Wireshark, and let the
+original continue untouched. Use a path under /captures, which is ~/.gini/captures on your
+computer. If path is an existing named pipe (mkfifo), packets stream live to whatever reads it.
+.nf
+gpipe add tap /captures/r1.pcap@10.0.2.0/24
+.fi
+.RE
+
+.B counter
+.RS
+Count the packets that reach this point and let them all continue.
+.RE
+
+.B filter
+.RS
+Apply the router's classic firewall, the rules made with the filter command, at this point.
+.RE
+
+.B lua
+/scripts/file.lua
+.RS
+Run your own Lua function on every packet. Scripts live in ~/.gini/scripts on your computer,
+which the router sees as /scripts. The script defines process:
+.nf
+function process(pkt, ctx)
+  if pkt.dst == "10.0.3.10" then return DROP end
+  return CONTINUE
+end
+.fi
+pkt has the fields src and dst (dotted strings), proto, ttl and len. A script can call
+log(text); its output goes to the router's log (View logs in gBuilder), not to this console.
+.RE
+
+.SH CONTROL PLANE MODULES
+
+A pipeline module can only judge a packet that is passing through. A protocol has to act on a
+clock, send its own packets and write the route table, which is what a control-plane module is
+for. It runs alongside forwarding rather than inside it.
+
+.B cp add lua
+/scripts/file.lua [tick_ms]
+.RS
+Load a Lua control-plane script. It may define init(ifaces), tick() (called every tick_ms) and
+on_message(iface, src, payload, pkt), and it can call listen, send, emit, route_add, route_del,
+interfaces, log and publish. rip_reference.lua and mcast_tree.lua, which gBuilder puts in
+~/.gini/scripts, are complete worked examples.
+.RE
+
+.B cp list
+names the loaded modules,
+.B cp status
+prints what each has published, and
+.B cp stop
+removes them all.
+
+.B mcast join
+and
+.B leave
+add or remove interface_number (1 for tun1) as a member of a multicast group;
+.B mcast show
+prints the membership table.
+
+.SH EXAMPLES
+
+Drop everything to one subnet, count what is left, and check two destinations:
+.RS
+.nf
+gpipe add acl 10.0.3.0/24
+gpipe add counter
+gpipe list
+gpipe trace 10.0.3.7
+gpipe trace 10.0.2.10
+.fi
+.RE
+
+Start again, with a capture of the traffic towards 10.0.2.0/24:
+.RS
+.nf
+gpipe clear
+gpipe add tap /captures/r1.pcap@10.0.2.0/24
+.fi
+.RE
+
+.SH "SEE ALSO"
+.BR watch (1G),
+.BR delay (1G),
+.BR filter (1G),
+.BR route (1G)

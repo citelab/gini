@@ -1,98 +1,94 @@
-.TH "route" 1 "30 July 2009" GINI "gRouter Commands"
+.TH "route" 1G "5 October 2026" GINI "gRouter Commands"
 
 .SH NAME
 route \- setup the route table entries at gRouter
 
-.SH SNOPSIS
-
-.B route 
-.B add
--dev 
-(ethX | tap0) 
-.B -net
-nw_addr
-.B -netmask
-mask [
-.B -gw
-gw_addr ]
-
-.B route show
-
-.B route del
-route_number
+.SH SYNOPSIS
+.nf
+route show
+route add -dev tunN -net network -netmask mask [-gw next_hop]
+route del route_number
+.fi
 
 .SH DESCRIPTION
 
-The 
+The
 .B route
-command modifies the routing table within the GINI router. 
-It is meant to setup the static routes within the router. This command should be used after the interfaces are
-setup using the 
-.B ifconfig 
-command. The route command can be used to add, delete, and print the routing table.
+command modifies the routing table within the GINI router. It is meant to setup the static
+routes within the router: the table is the only thing the router consults to decide where a
+packet goes, and no routing protocol fills it in unless you load one (see gpipe cp).
 
-The 
-.B route
-command needs a device specificiation using the 
-.I -dev 
-switch. Either
-.I ethX 
-or the
-.I tap0
-interface can be specified for the route command. 
-For each interface, we need to specify the subnet address using the 
-.B -net
-switch and the corresponding network mask using the 
-.B -netmask
-switch.
+When you press Run, gBuilder creates the router's interfaces (tun1, tun2, ... one per link, in
+the order shown by ifconfig show) and adds a route for the subnet on each of them. In a topology
+with several routers it also adds routes to the subnets behind the other routers. To reach a
+network the table does not cover, add a route for it. In route show, an entry with no next hop
+(reached directly on its link) is marked C, connected; one with a next hop is marked S, static.
+A routing protocol module may add entries of its own.
 
-To show the routing table use the 
-.B show
-command. 
-
-To delete a route table entry, use the
-.B del 
-command. This command takes a 
-.I route_number
-as the argument. This number can be obtained by listing the route table
-using the 
-.B show
-command.
-
-.SH OPTIONS
-
-Sometimes we need to setup default routes to capture the `rest' of the traffic. These 
-default routes often include a default gateway that is specified using the
+.B add
+needs the interface the packets should leave by
+.RI ( -dev
+tun2), the destination network
+.RI ( -net )
+and its mask
+.RI ( -netmask ),
+always in that order. Without
 .B -gw
-switch.
+the destination is taken to be on that interface's own link and is reached directly. With
+.B -gw
+the packets are handed to next_hop, a router on that link, to carry further.
+
+When several entries match a destination, the router uses the most specific one (the longest
+mask). So a /32 entry for one host beats a /24 for its subnet, which beats the default route.
+
+.B del
+removes one entry, by the number shown in the first column of
+.BR route
+.BR show .
+The other entries keep their numbers, so look again before deleting a second one.
+
+Routes added here last until the router stops; the next Run starts again from the routes
+gBuilder computes. The Routes tab of the Router Lab adds and deletes routes the same way, and
+shows the route command it sends.
 
 .SH EXAMPLES
 
-To add a route table entry for the subnet 192.168.2.0 at eth1 use the following command:
-.br
-route add -dev eth1 -net 192.168.2.0 -netmask 255.255.255.0
+Reach the subnet 10.0.3.0/24 through the router 10.0.2.2, on the link at tun2:
+.RS
+.nf
+route add -dev tun2 -net 10.0.3.0 -netmask 255.255.255.0 -gw 10.0.2.2
+.fi
+.RE
 
-To use show the routing table:
-.br
+A route for one host only (a /32 mask), which overrides the route for its subnet:
+.RS
+.nf
+route add -dev tun1 -net 10.0.3.20 -netmask 255.255.255.255 -gw 10.0.1.5
+.fi
+.RE
+
+A default route, for every destination nothing else matches. The network and mask are both
+0.0.0.0; there is no shorter form:
+.RS
+.nf
+route add -dev tun1 -net 0.0.0.0 -netmask 0.0.0.0 -gw 10.0.1.254
+.fi
+.RE
+
+Show the table, then delete entry 2:
+.RS
+.nf
 route show
-
-To delete the second route entry in the route table use the following command:
-.br
 route del 2
-
-To insert a default entry into the routing table:
-.br
-route add -dev eth0 -gw 192.168.2.1
+.fi
+.RE
 
 .SH AUTHORS
 
 Written by Muthucumaru Maheswaran. Send comments and feedback at maheswar@cs.mcgill.ca.
 
-
 .SH "SEE ALSO"
 
-.BR grouter (1G),
 .BR ifconfig (1G),
-.BR arp (1G)
-
-
+.BR arp (1G),
+.BR watch (1G)

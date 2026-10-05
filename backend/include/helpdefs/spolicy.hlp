@@ -1,28 +1,54 @@
-.TH "spolicy" 1 "12 September 2009" GINI "gRouter Commands"
+.TH "spolicy" 1G "5 October 2026" GINI "gRouter Commands"
 
 .SH NAME
 spolicy \- setup scheduling policy at gRouter
 
-.SH SNOPSIS
-.B spolicy show
-
-.B spolicy activate policy_name
-
+.SH SYNOPSIS
+.nf
+spolicy show
+spolicy set rr | drr
+.fi
 
 .SH DESCRIPTION
 
-This command shows the list of scheduling policies available at the gRouter.
-At this time, the scheduling policies cannot be created using the command
-input. One among the available scheduling policies can be activated by this
-command. At least one scheduling policy will be active at any time.
+Packets wait in the router's queues (see the queue command), one queue per class of traffic. A
+single scheduler takes them out and passes them on. When the router is busy, the scheduling
+policy decides whose packets go first, which is how one class gets more of a congested link than
+another.
 
-Now the gRouter support 'fifo' (first in first out) and 'rr' (round robin) as the 
-scheduling policies.
+.B rr
+(round robin, the default) takes one packet from each non-empty queue in turn. It is simple but
+ignores the queue weights, and it counts packets, not bytes: a queue of large packets gets more
+bandwidth than a queue of small ones.
 
+.B drr
+(deficit round robin) gives each queue a share of bytes in proportion to its weight on every
+round. A queue sends while its share lasts, charged by each packet's real length, and carries any
+unused share to the next round. A congested link is then divided by weight, in bytes, whatever
+the packet sizes.
+
+The difference only shows when packets queue up. On an idle router every packet leaves at once
+under either policy.
+
+.B show
+prints the active policy;
+.B set
+changes it at once.
+
+.SH EXAMPLES
+
+.RS
+.nf
+spolicy show
+spolicy set drr
+.fi
+.RE
 
 .SH AUTHORS
 
 Written by Muthucumaru Maheswaran. Send comments and feedback at maheswar@cs.mcgill.ca.
 
-
 .SH "SEE ALSO"
+.BR queue (1G),
+.BR qdisc (1G),
+.BR class (1G)

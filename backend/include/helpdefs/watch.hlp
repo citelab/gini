@@ -1,0 +1,79 @@
+.TH "watch" 1G "5 October 2026" GINI "gRouter Commands"
+
+.SH NAME
+watch \- record what happens to each packet at the router
+
+.SH SYNOPSIS
+.nf
+watch on | off
+watch show
+watch dump [since_seq]
+.fi
+
+.SH DESCRIPTION
+
+When watch is on, the router writes one record for every packet it handles: where it came in,
+where it went, and if it did not get through, what stopped it. The Router Lab's packet
+visualizer and its Packets tab are drawn from these records, and you can read them here.
+
+Watch is OFF when the router starts and costs nothing while off. The Router Lab turns it on while
+the visualizer is showing and off again when you close the Lab.
+
+.B on
+and
+.B off
+start and stop recording.
+.B show
+says whether it is on and how many packets have been recorded since the router started.
+.B dump
+prints the records, oldest first. The router keeps the last 512; give the sequence number you
+last saw to get only the newer ones.
+
+.SH OUTPUT
+
+dump prints a header line, then one line per packet:
+.RS
+.nf
+WATCH on|off next_seq router_ms
+W seq ms fate in_if out_if module module_type src dst proto ttl len sport dport
+.fi
+.RE
+
+fate is one letter:
+.RS
+.nf
+F  forwarded out interface out_if
+D  dropped by pipeline module number module, of type module_type (see gpipe list)
+N  no route to the destination
+T  TTL expired here (the router sends back ICMP time exceeded)
+L  addressed to the router itself (a ping to one of its interfaces)
+A  an ARP arrived; module_type says answered, learned or ignored
+S  sent by the router itself: its own ARP requests and replies, and the ICMP it
+   originates (echo replies, time exceeded, unreachable); in_if is -1
+.fi
+.RE
+
+in_if and out_if are interface numbers (1 is tun1); -1 means none. proto is the IP protocol
+(1 ICMP, 6 TCP, 17 UDP), or 2054 for ARP. For TCP and UDP, sport and dport are the ports; for ICMP
+they hold the type and code (8 0 is an echo request, 0 0 an echo reply, 11 0 time exceeded); for
+ARP sport is 1 for a request and 2 for a reply. ms is the router's clock in milliseconds, good for
+spacing between packets, not for the time of day.
+
+If the first seq is more than one past the since_seq you asked for, packets came and went faster
+than the ring could hold them between two dumps.
+
+.SH EXAMPLES
+
+Turn watch on, ping across the router from a machine, then read what happened:
+.RS
+.nf
+watch on
+watch dump
+watch off
+.fi
+.RE
+
+.SH "SEE ALSO"
+.BR gpipe (1G),
+.BR ifstat (1G),
+.BR route (1G)

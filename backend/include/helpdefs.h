@@ -35,7 +35,7 @@
 #define SHELP_PING          "ping another router or machine"
 #define SHELP_CONSOLE       "manage port (FIFO) used to interact with wireshark and visualizer"
 #define SHELP_HALT          "halt the router"
-#define SHELP_EXIT          "exit the command shell"
+#define SHELP_EXIT          "halt the router (to leave the console, type quit)"
 #define SHELP_QUEUE			"create, add, del, and view queues with given names"
 #define SHELP_QDISC			"create a queuing discipline"
 #define SHELP_SPOLICY		"set the inter queue scheduler"
@@ -73,8 +73,9 @@ absolute path (e.g., /sbin/ifconfig). \n"
 #define LHELP_PING          "ping.hlp"
 #define LHELP_CONSOLE      	"console.hlp"
 #define LHELP_HALT          "\tHalts the router."
-#define LHELP_EXIT          "\tExit the command shell without halting the router. The router\n\
-\tshould go into the deamon once the CLI is exitted."
+#define LHELP_EXIT          "\tHalts the router, exactly like halt: the router stops and its links go\n\
+\tdead until the next Run. To leave this console and keep the router\n\
+\trunning, type quit or press Ctrl-D."
 #define LHELP_QUEUE			"queue.hlp"
 #define LHELP_QDISC			"qdisc.hlp"
 #define LHELP_SPOLICY		"spolicy.hlp"

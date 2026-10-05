@@ -1,0 +1,43 @@
+.TH "ifstat" 1G "5 October 2026" GINI "gRouter Commands"
+
+.SH NAME
+ifstat \- traffic counters for each interface
+
+.SH SYNOPSIS
+.nf
+ifstat
+.fi
+
+.SH DESCRIPTION
+
+Prints, for every interface, how many bytes and packets it has received and sent since the
+router started. One line per interface:
+.RS
+.nf
+IFSTAT id device ip rx_bytes rx_pkts tx_bytes tx_pkts
+.fi
+.RE
+
+The counters only ever grow. To get bandwidth, take two readings some seconds apart: the
+difference in bytes, times 8, divided by the seconds between them, is the rate in bits per
+second. The Router Lab's bandwidth meter does exactly this every second or so.
+
+Every frame counts, including ARP and the router's own packets, so an idle link still shows a
+little traffic.
+
+.SH EXAMPLES
+
+.RS
+.nf
+ifstat
+IFSTAT 1 tun1 10.0.1.1 5124 52 4998 51
+IFSTAT 2 tun2 10.0.2.1 4998 51 5124 52
+.fi
+.RE
+
+Here tun1 has received 5124 bytes in 52 packets. The two interfaces mirror each other because
+everything that came in one went out the other.
+
+.SH "SEE ALSO"
+.BR watch (1G),
+.BR ifconfig (1G)

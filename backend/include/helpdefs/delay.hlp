@@ -1,0 +1,73 @@
+.TH "delay" 1G "5 October 2026" GINI "gRouter Commands"
+
+.SH NAME
+delay \- add latency and jitter to the router, like a long or busy link
+
+.SH SYNOPSIS
+.nf
+delay show
+delay ingress | egress base_ms [jitter_ms [correlation [limit]]]
+delay ingress | egress off
+delay clear
+.fi
+
+.SH DESCRIPTION
+
+GINI links are instant. delay holds packets in a queue for a while before letting them go, so a
+router can stand in for a slow link: a satellite hop, a congested path, a far-away server.
+
+There are two delay lines per router, shared by all its interfaces.
+.B ingress
+holds every packet as it arrives, before the router looks at it.
+.B egress
+holds every packet just before it is sent out an interface, including the router's own replies.
+A ping that crosses the router passes its egress line once each way, so
+.B delay egress 20
+adds about 40 ms to the round trip.
+
+base_ms is the average delay. jitter_ms makes it vary: each packet's delay is spread around
+base_ms by about jitter_ms (a standard deviation). correlation, from 0 up to (not including) 1,
+makes the variation drift slowly instead of jumping from one packet to the next; 0 is
+independent per packet. Packets always leave in the order they arrived, even with jitter.
+
+limit is how many packets the line can hold at once (default 4096), like a link's buffer. When it
+is full, new packets are dropped.
+
+.B show
+prints both lines with their settings and, for each, how many packets are held right now, how
+many have passed and how many were dropped for a full buffer.
+.B off
+removes one line,
+.B clear
+removes both. Anything still held is dropped.
+
+The Router Lab's Link delay tab sets the same two lines.
+
+.SH EXAMPLES
+
+A 50 ms link with 10 ms of jitter on the way out:
+.RS
+.nf
+delay egress 50 10
+delay show
+.fi
+.RE
+
+Jitter that wanders rather than jumps, and a small buffer that overflows under load:
+.RS
+.nf
+delay egress 50 10 0.8 100
+.fi
+.RE
+
+Back to an instant router:
+.RS
+.nf
+delay clear
+.fi
+.RE
+
+.SH "SEE ALSO"
+.BR gpipe (1G),
+.BR ping (1G),
+.BR ifstat (1G)
