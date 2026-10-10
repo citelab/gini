@@ -811,6 +811,10 @@ _SHIPPED_HASHES = {
         "e88482702660615aadab2fc3388b854ce4f8701889af0e1e8db9bfd11afe191c",   # link costs
         "97ce039d7def05981d7b8fb11f7d80f991e671b75f6a7e10492340484119ce8d",   # on_link_change
     }),
+    "mcast_tree.lua": frozenset({
+        "06d8456674075e38cdf75791c82648d525f193b8a80ae23b2958bc4c24051acc",   # 2026-08-21, loops
+        "f01b0b5a78d49d97d1ab8943b111a62f02ad4b69656589a8cf4a79916884468c",   # reverse-path, prune
+    }),
 }
 
 

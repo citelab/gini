@@ -148,9 +148,11 @@ for. It runs alongside forwarding rather than inside it.
 Load a Lua control-plane script. It may define init(ifaces), tick() (called every tick_ms),
 on_message(iface, src, payload, pkt) and on_link_change(iface, up, cost) -- called when a link
 fails, is repaired, or changes cost -- and it can call listen, send, emit, route_add, route_del,
-interfaces, log and publish. interfaces() gives each interface's number, ip, prefix, cost (the
-drawn link's routing cost) and up. rip_reference.lua and mcast_tree.lua, which gBuilder puts in
-~/.gini/scripts, are complete worked examples.
+route_lookup, interfaces, log and publish. interfaces() gives each interface's number, ip,
+prefix, cost (the drawn link's routing cost) and up. route_lookup(ip) answers which interface
+(and next hop) this router would use to reach ip right now, or nil: a multicast forwarder asks it
+about a datagram's source for the reverse-path check. rip_reference.lua and mcast_tree.lua, which
+gBuilder puts in ~/.gini/scripts, are complete worked examples.
 .RE
 
 .B cp list
@@ -165,7 +167,14 @@ and
 .B leave
 add or remove interface_number (1 for tun1) as a member of a multicast group;
 .B mcast show
-prints the membership table.
+prints the membership table. The built-in forwarder copies a datagram to every member interface
+except the one it came in on, and never onto a link that is down. It accepts a datagram only if
+it arrived on the interface this router's route table uses to reach the datagram's SOURCE (the
+reverse-path check); any other copy took a longer way round and is dropped, which
+.BR watch (1G)
+shows as "dropped by rpf". So joins on every link of a loop deliver one copy, along the
+cheapest path back to the source, and when a routing protocol moves that path the multicast
+follows it.
 
 .SH EXAMPLES
 

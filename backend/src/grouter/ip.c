@@ -154,6 +154,17 @@ int IPProcessBcastPacket(gpacket_t *in_pkt)
  * IGMP membership reports) are offered to the control plane so the IGMP-snoop module can
  * learn memberships; routable groups are replicated to every interface that has a member,
  * except the one the packet arrived on. With no members, the packet is dropped.
+ *
+ * REVERSE-PATH FORWARDING. A copy is accepted only if it arrived on the interface this router
+ * would itself use to reach the datagram's SOURCE (a route-table lookup on the source address);
+ * any other copy is a duplicate that took a longer way round, and is dropped. Without it, members
+ * joined on more than one path (`gpipe mcast join` on both links of a triangle, which is what
+ * makes multicast survive a failure) delivered one copy per path, and a cycle of joins forwarded
+ * a datagram round the cycle until its TTL ran out. With it the tree is the unicast routes
+ * reversed, so it follows link costs (static routes are cost-shortest, RIP adds costs), and when
+ * a link fails and RIP routes around it, the check moves to the new path on its own. With static
+ * routes a failure moves nothing: the source's route still points at the dead link, so multicast
+ * from it stops -- the same lesson as unicast. No route to the source means nothing passes.
  */
 void IPProcessMulticast(gpacket_t *in_pkt)
 {
@@ -166,7 +177,6 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 	/* The group in WIRE (reading) order, straight from the header: that is how `gpipe mcast join`
 	 * stores it (gr_control.c) and what the multicast MAC below is built from. This used
 	 * gNtohl's reversed order, so no lookup ever matched a join and the MAC was wrong. */
-	(void)tmpbuf;
 	memcpy(grp, (const uchar *)in_pkt->data.data + 16, 4);
 
 	gr_cp_deliver(in_pkt);                           /* let IGMP snoop / control see it */
@@ -178,6 +188,18 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 	{
 		free(in_pkt);
 		return;
+	}
+
+	{                                                /* the reverse-path check, above */
+		uchar src[4], nh[4];
+		int rif = -1;
+		COPY_IP(src, gNtohl(tmpbuf, ip_pkt->ip_src));   /* the route table is in router order */
+		if (gr_route_lookup(src, nh, &rif) != EXIT_SUCCESS || rif != in_pkt->frame.src_interface)
+		{
+			GR_WATCH(in_pkt, GW_DROP, -1, GW_MOD_RPF);
+			free(in_pkt);
+			return;
+		}
 	}
 
 	mask = gr_mcast_lookup(grp);

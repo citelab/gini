@@ -19,6 +19,8 @@
  *     send(iface, data)                           -- broadcast a control message (UDP) on iface
  *     emit(iface, packet)                         -- send a raw IP packet out iface (multicast MAC)
  *     route_add(net, mask, nexthop, iface) / route_del(net, mask)
+ *     route_lookup(ip)  -> iface, nexthop    (nil if no route: what the router would use to
+ *                                             reach ip -- the multicast reverse-path check)
  *     interfaces()  -> { {iface=, ip=}, .. }
  *     log(msg)
  *     publish(text)                               -- set the module's status snapshot; read
@@ -99,6 +101,30 @@ static int l_route_del(lua_State *L)
         return luaL_error(L, "route_del: expects dotted-quad net, mask");
     svc->route_del(net, mask);
     return 0;
+}
+
+/* route_lookup(ip) -> iface, nexthop | nil: which interface this router would send to `ip` on,
+ * right now -- the same longest-prefix match forwarding uses, so it follows whatever installed the
+ * route (static routes chosen by link cost, RIP, a failure that RIP routed around). A multicast
+ * forwarder asks it about a datagram's SOURCE: the reverse-path check, accept a copy only if it
+ * came in on the interface that leads back to the sender. */
+static int l_route_lookup(lua_State *L)
+{
+    const gr_cp_services_t *svc = ST(L)->svc;
+    uchar dst[4], nh[4];
+    int iface = -1;
+    char s[16];
+    if (str2ip(luaL_checkstring(L, 1), dst))
+        return luaL_error(L, "route_lookup: expects a dotted-quad address");
+    if (svc->route_lookup(dst, nh, &iface) != 0 || iface < 0)
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushinteger(L, iface);
+    ip2str(nh, s);
+    lua_pushstring(L, s);
+    return 2;
 }
 
 /* send(iface, data): broadcast an opaque control message on one interface (UDP, control port). */
@@ -311,6 +337,7 @@ static int lua_cp_start(gr_cp_module_t *self, const gr_cp_services_t *svc, const
     lua_setglobal(L, (nm)); } while (0)
     REG("route_add",  l_route_add);
     REG("route_del",  l_route_del);
+    REG("route_lookup", l_route_lookup);
     REG("send",       l_send);
     REG("emit",       l_emit);
     REG("interfaces", l_interfaces);

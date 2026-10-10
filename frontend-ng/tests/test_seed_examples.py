@@ -11,6 +11,7 @@ from gini.services import orchestrator as O
 
 EXAMPLES = Path(O.__file__).resolve().parents[1] / "data" / "examples"
 OLD_RIP = Path(__file__).resolve().parent / "data" / "rip_reference_2026-08-23.lua"
+OLD_MCAST = Path(__file__).resolve().parent / "data" / "mcast_tree_2026-08-21.lua"
 
 
 def _seed(tmp_path):
@@ -36,6 +37,18 @@ def test_an_untouched_old_copy_is_brought_up_to_date(tmp_path):
     assert "cost_of(iface)" in text and "cost + 1" not in text
 
 
+def test_the_multicast_forwarder_that_looped_is_replaced(tmp_path):
+    """The first mcast_tree.lua copied along every branch it had heard a join on and never
+    decremented the TTL: on any topology with a loop one datagram went round forever. An
+    untouched copy of it must not survive the upgrade."""
+    scripts, shared = tmp_path / "scripts", tmp_path / "shared"
+    scripts.mkdir(); shared.mkdir()
+    (scripts / "mcast_tree.lua").write_bytes(OLD_MCAST.read_bytes())
+    O._seed_examples(scripts, shared)
+    text = (scripts / "mcast_tree.lua").read_text()
+    assert "route_lookup(s)" in text and "hop(pkt.raw)" in text
+
+
 def test_an_edited_copy_is_never_overwritten(tmp_path):
     scripts, shared = tmp_path / "scripts", tmp_path / "shared"
     scripts.mkdir(); shared.mkdir()
@@ -54,3 +67,4 @@ def test_every_shipped_version_is_on_record():
         current = hashlib.sha256((EXAMPLES / name).read_bytes()).hexdigest()
         assert current in hashes, f"{name} changed: add {current} to _SHIPPED_HASHES"
     assert hashlib.sha256(OLD_RIP.read_bytes()).hexdigest() in O._SHIPPED_HASHES["rip_reference.lua"]
+    assert hashlib.sha256(OLD_MCAST.read_bytes()).hexdigest() in O._SHIPPED_HASHES["mcast_tree.lua"]

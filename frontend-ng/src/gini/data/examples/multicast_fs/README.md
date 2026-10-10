@@ -27,3 +27,9 @@ receiver station:
 
 Watch the joins, the tree, and the per-interface copy counters in gBuilder's
 **Multicast HUD** while a session runs.
+
+The forwarder builds the tree from the unicast routes (reverse-path forwarding), so
+the network needs working routes first: static routes, or `rip_reference.lua` in
+dynamic mode. Then the tree follows the link costs, and with RIP it re-forms around a
+failed link on its own. `gpipe cp status` on a router shows, per source, where data
+must arrive (RPF), where it is copied (OIF) and which branches were pruned.

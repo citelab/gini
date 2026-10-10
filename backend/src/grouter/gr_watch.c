@@ -80,7 +80,9 @@ void gr_watch_note(gpacket_t *pkt, char fate, int out_if, int module)
     e->out_if = (short)out_if;
     e->module = (short)module;
     e->mtype[0] = '\0';
-    if (module >= 0)
+    if (module == GW_MOD_RPF)
+        strcpy(e->mtype, "rpf");
+    else if (module >= 0)
     {
         gr_pipeline_t *p = gr_default_pipeline();
         if (module < p->count && p->modules[module] && p->modules[module]->type)

@@ -122,9 +122,20 @@ routes in dynamic mode, as today.
 ### Multicast
 
 - The built-in forwarder (`gpipe mcast join`) does not copy onto a down interface.
-- `mcast_tree.lua` gets the same `up` flag and callback, so it can prune a dead branch; on a
-  topology with a redundant path its per-tick re-announcements graft the tree the other way.
-- A script building shortest-path trees (reverse-path forwarding) can use `cost`.
+- Both forwarders do **reverse-path forwarding**: a datagram is accepted only on the interface
+  the router's own route to its source uses. The tree is therefore the unicast routes reversed —
+  cost-shortest under static routing, RIP's choice in dynamic mode — and moves when RIP does.
+  With static routes a failure moves nothing, and multicast from behind it stops, as unicast does.
+- `mcast_tree.lua` is a dense-mode protocol (flood, prune, graft, assert, IGMP queries with
+  expiring memberships) and uses the new `route_lookup(ip)` for the check, plus `up` and
+  `on_link_change` to forget a failed link's members and prunes at once.
+
+  *Found while implementing:* the first `mcast_tree.lua` was correct only on a loop-free
+  topology. It copied along every branch it had heard a join on and did not decrement the TTL,
+  so the weighted triangle delivered two copies of every datagram and most five-router meshes
+  forwarded one datagram round a cycle forever. The plan above ("re-announcements graft the tree
+  the other way") would not have worked. `backend/grouter-build/tests/mcast_test.py` covers both
+  forwarders on the triangle, random meshes, RIP failover, static black-holing and soft state.
 
 ### Network HUD and path tracing
 

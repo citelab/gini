@@ -39,6 +39,10 @@
 
 #define GW_PROTO_ARP    2054            /* 0x0806 */
 
+/* Not a pipeline module but recorded like one, so the Lab can say who dropped it: a multicast
+ * copy that failed the reverse-path check (ip.c, IPProcessMulticast) -- "dropped by rpf". */
+#define GW_MOD_RPF      (-2)
+
 extern volatile int gr_watch_enabled;
 
 /* Record one packet's fate. `out_if` is -1 unless forwarded; `module` is the pipeline index that

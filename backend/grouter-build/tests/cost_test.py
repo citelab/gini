@@ -64,7 +64,7 @@ def topology(mode):
 class Lab:
     """Real routers and hosts for one compiled topology."""
 
-    def __init__(self, t, tag):
+    def __init__(self, t, tag, host_cls=Host):
         self.t = t
         self.cfg = RuntimeCompiler().compile(t)
         rt = self.cfg.to_runtime(docker=False)
@@ -77,7 +77,7 @@ class Lab:
         self.hosts = {}
         for m in rt["machines"]:
             itf = m["ifaces"][0]
-            self.hosts[m["hostname"]] = Host(m["hostname"], itf["ip"].split("/")[0], itf["mac"],
+            self.hosts[m["hostname"]] = host_cls(m["hostname"], itf["ip"].split("/")[0], itf["mac"],
                                              m["gw"], itf["port"]["bind_port"],
                                              itf["port"]["peer_port"])
         time.sleep(0.3)
