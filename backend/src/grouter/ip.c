@@ -66,8 +66,12 @@ void IPIncomingPacket(gpacket_t *in_pkt)
 		verbose(2, "[IPIncomingPacket]:: got IP packet destined to this router");
 		GR_WATCH(in_pkt, GW_LOCAL, -1, -1);
 		IPProcessMyPacket(in_pkt);
-	} else if ((gNtohl(tmpbuf, ip_pkt->ip_dst)[0] & 0xf0) == 0xe0)
+	} else if ((((const uchar *)in_pkt->data.data)[16] & 0xf0) == 0xe0)
 	{
+		// 224.0.0.0/4 is decided by the FIRST octet. This tested gNtohl(dst)[0], which is the
+		// LAST octet (gNtohl yields the router's reversed order), so a unicast packet to any
+		// host numbered .224-.239 was handed to the multicast path and silently dropped, and
+		// real multicast went to the forwarding path and died as "no route".
 		// B3: class-D destination (224.0.0.0/4) -> multicast handling
 		verbose(2, "[IPIncomingPacket]:: got a multicast packet");
 		IPProcessMulticast(in_pkt);
@@ -158,9 +162,22 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 	uint32_t mask;
 	int i;
 
-	COPY_IP(grp, gNtohl(tmpbuf, ip_pkt->ip_dst));   /* group address (host order) */
+	/* The group in WIRE (reading) order, straight from the header: that is how `gpipe mcast join`
+	 * stores it (gr_control.c) and what the multicast MAC below is built from. This used
+	 * gNtohl's reversed order, so no lookup ever matched a join and the MAC was wrong. */
+	(void)tmpbuf;
+	memcpy(grp, (const uchar *)in_pkt->data.data + 16, 4);
 
 	gr_cp_deliver(in_pkt);                           /* let IGMP snoop / control see it */
+
+	/* A packet that arrives with TTL 1 (all link-local 224.0.0.x, IGMP) is for this link only:
+	 * the control plane has seen it, and it goes no further. Forwarding it would send it out
+	 * with TTL 0. */
+	if (ip_pkt->ip_ttl <= 1)
+	{
+		free(in_pkt);
+		return;
+	}
 
 	mask = gr_mcast_lookup(grp);
 	if (mask == 0)                                   /* no members anywhere */
@@ -188,6 +205,7 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 		cp->data.header.dst[4] = grp[2];
 		cp->data.header.dst[5] = grp[3];
 		cp->data.header.prot = htons(IP_PROTOCOL);
+		GR_WATCH(cp, GW_FWD, i, -1);                 /* one record per copy, for the Lab */
 		IPSend2Output(cp);
 	}
 	free(in_pkt);
@@ -202,10 +220,8 @@ void IPProcessMulticast(gpacket_t *in_pkt)
  * receiving interface's address, which the MTU table keeps reversed (Dot2IP order). /24
  * subnets, as everywhere else in this file.
  *
- * Note for whoever next touches ip_directed_bcast_iface below: it compares dst[0..2] with
- * ip[0..2] on gNtohl'd (reversed) bytes, i.e. the LAST three octets, so as written it does not
- * match a directed broadcast. Left alone here because making it match would start forwarding
- * directed broadcasts between subnets, which is a behaviour change of its own.
+ * The packet to ANOTHER of our subnets' broadcast address is ip_directed_bcast_iface's case,
+ * below: forwarded onto that subnet. This one is not forwarded at all.
  */
 static int ip_local_bcast(gpacket_t *in_pkt)
 {
@@ -226,7 +242,11 @@ static int ip_directed_bcast_iface(uchar *dst, int *iface)
 	for (i = 0; i < MAX_MTU; i++)
 	{
 		if (findInterfaceIP(MTU_tbl, i, ip) != EXIT_SUCCESS) continue;
-		if (ip[0] == dst[0] && ip[1] == dst[1] && ip[2] == dst[2] && dst[3] == 255)
+		/* Both are in the router's reversed order ({1,2,0,10} is 10.0.2.1), so the host octet
+		 * is byte 0 and the /24 is bytes 1..3. This compared bytes 0..2 and tested byte 3 for
+		 * 255 -- reading-order logic on reversed bytes -- so it never matched, and a directed
+		 * broadcast was routed as unicast and ARPed for. */
+		if (ip[1] == dst[1] && ip[2] == dst[2] && ip[3] == dst[3] && dst[0] == 255)
 		{
 			*iface = i;
 			return 1;
@@ -280,6 +300,8 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 	// B3: directed broadcast — dst is the all-ones host address of a connected /24. Forward
 	// it onto that subnet as a link-layer broadcast (unless it arrived from there). This is
 	// what makes the cross-subnet smurf experiment work; real edge routers disable it.
+	// (The hosts must also answer broadcast pings: a Linux machine ignores them unless
+	// net.ipv4.icmp_echo_ignore_broadcasts=0, and GINI does not set that for you.)
 	{
 		int dbif;
 		if (ip_directed_bcast_iface(gNtohl(tmpbuf, ip_pkt->ip_dst), &dbif) &&
@@ -291,6 +313,7 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 			in_pkt->frame.arp_bcast = TRUE;
 			memset(in_pkt->data.header.dst, 0xff, 6);   /* L2 broadcast */
 			in_pkt->data.header.prot = htons(IP_PROTOCOL);
+			GR_WATCH(in_pkt, GW_FWD, dbif, -1);
 			IPSend2Output(in_pkt);
 			return EXIT_SUCCESS;
 		}

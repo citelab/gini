@@ -97,9 +97,16 @@ void* fromTunDev(void *arg)
         // destination MAC is some other host (that's the whole point of switching). Only
         // apply the "is it for me?" router filter when NOT acting as an OpenFlow switch.
         // (fromEthernetDev has the identical guard; the tun path needs it too.)
+        //
+        // Group-addressed frames (the L2 multicast bit, dst[0] & 0x01: 01:00:5e:.. for IPv4
+        // multicast) are accepted too, as fromEthernetDev has done since B3. tun never got that
+        // line, and tun is the driver every GINI link uses -- so a host's IGMP join and every
+        // multicast datagram it sent were dropped here as "not for this router", before IP or
+        // the control plane could see them.
         if (!(sdn_mode() == SDN_MODE_OPENFLOW) &&
                 (COMPARE_MAC(in_pkt->data.header.dst, iface->mac_addr) != 0) &&
-                (COMPARE_MAC(in_pkt->data.header.dst, bcast_mac) != 0))
+                (COMPARE_MAC(in_pkt->data.header.dst, bcast_mac) != 0) &&
+                ((in_pkt->data.header.dst[0] & 0x01) == 0))
         {
             verbose(1, "[fromTunDev]:: Packet[%d] dropped .. not for this router!? ", pktsize);
             free(in_pkt);
