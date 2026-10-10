@@ -44,7 +44,7 @@ def test_recipes_cover_every_palette_element():
 def test_every_recipe_link_is_grammar_valid():
     for r in recipes.RECIPES:
         types = {el.ref: el.type_key for el in r.elements}
-        for a, b in r.links:
+        for a, b, *_ in r.links:
             assert a in types and b in types, f"{r.id}: link ref not found"
             ta, tb = types[a], types[b]
             # a recipe edge is valid if it's a grammar-valid network LINK, OR a valid rider→donor

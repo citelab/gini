@@ -28,6 +28,7 @@ from ..domain import content as _content
 from ..domain import fragments as _frag
 from ..domain import objectives as _obj
 from ..domain import riders as _riders
+from ..domain.topology import apply_link_attributes, link_attributes
 from .theme import icons as _icons
 from .worker_host import run_off_gui
 
@@ -531,10 +532,9 @@ exactly what recursion means here.</li>
             if not (s and t):
                 continue
             try:
-                if l.get("kind") == "attach":
-                    self.ctx.add_attach(s, t)
-                else:
-                    self.ctx.add_link(s, t)
+                new = (self.ctx.add_attach(s, t) if l.get("kind") == "attach"
+                       else self.ctx.add_link(s, t))
+                apply_link_attributes(new, link_attributes(l))   # label, link properties, ...
             except Exception:                            # noqa: BLE001 — a stale/invalid edge is skipped
                 pass
         self.ctx.bus.topology_changed.emit()
@@ -1068,7 +1068,8 @@ exactly what recursion means here.</li>
             if not (s and t):
                 continue
             try:
-                self.ctx.add_attach(s, t) if l.kind == "attach" else self.ctx.add_link(s, t)
+                new = self.ctx.add_attach(s, t) if l.kind == "attach" else self.ctx.add_link(s, t)
+                apply_link_attributes(new, link_attributes(l))   # label, link properties, ...
             except Exception:                                # noqa: BLE001 — skip an invalid edge
                 pass
         self._scaffold_ids = set()                           # a composed board isn't a scaffold
@@ -1094,7 +1095,8 @@ exactly what recursion means here.</li>
             if not (s and t):
                 continue
             try:
-                self.ctx.add_attach(s, t) if l.kind == "attach" else self.ctx.add_link(s, t)
+                new = self.ctx.add_attach(s, t) if l.kind == "attach" else self.ctx.add_link(s, t)
+                apply_link_attributes(new, link_attributes(l))   # label, link properties, ...
             except Exception:                                # noqa: BLE001 — skip an invalid edge
                 pass
 

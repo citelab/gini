@@ -27,7 +27,7 @@ import re
 from . import devices as _devices
 from . import fragments as _frag
 from .objectives import Objective, _TYPE_ARG_FUNCS
-from .topology import Topology
+from .topology import Topology, apply_link_attributes, link_attributes
 
 _SLOT_RE = re.compile(r"@(\w+)")
 MAX_DEPTH = 6                       # recursion budget — a composition can't nest forever
@@ -125,7 +125,7 @@ def _instantiate_stage(topo: Topology, stage: dict, label: str, source: str = ""
             continue
         s, t = idmap.get(l.get("source_id")), idmap.get(l.get("target_id"))
         if s and t:
-            topo.add_link(s, t)
+            apply_link_attributes(topo.add_link(s, t), link_attributes(l))
 
 
 def _link_exists(topo: Topology, a_id: str, b_id: str) -> bool:

@@ -42,12 +42,16 @@ def normalize(stage) -> dict:
     empty = {"devices": [], "links": [], "reset": True, "manual_addressing": False}
     if not stage or not isinstance(stage, dict):
         return empty
+    # A link is [a, b], or [a, b, attrs] when the author gave it attributes (a label, link
+    # properties) by writing it as {source, target, ...}. Those used to be dropped here.
     links = []
     for l in stage.get("links", []) or []:
         if isinstance(l, (list, tuple)) and len(l) >= 2:
-            links.append([l[0], l[1]])
+            links.append([l[0], l[1]] + ([dict(l[2])] if len(l) > 2 and isinstance(l[2], dict)
+                                         else []))
         elif isinstance(l, dict) and "source" in l and "target" in l:
-            links.append([l["source"], l["target"]])
+            attrs = {k: v for k, v in l.items() if k not in ("source", "target")}
+            links.append([l["source"], l["target"]] + ([attrs] if attrs else []))
     return {
         "devices": list(stage.get("devices", []) or []),
         "links": links,
@@ -100,7 +104,9 @@ def apply(stage, *, add_device, add_link, topology=None) -> dict:
         if ips:
             wanted[ref] = {str(k): str(v) for k, v in ips.items()}
 
-    for a, b in spec["links"]:
+    for spec_link in spec["links"]:
+        a, b = spec_link[0], spec_link[1]
+        attrs = spec_link[2] if len(spec_link) > 2 else None
         da, db = placed.get(a), placed.get(b)
         if da is None or db is None:
             continue
@@ -111,6 +117,10 @@ def apply(stage, *, add_device, add_link, topology=None) -> dict:
         lid = getattr(link, "id", None)
         if lid is None:
             continue
+        if attrs:
+            from .topology import Link, apply_link_attributes
+            if isinstance(link, Link):
+                apply_link_attributes(link, attrs)
         # now that the link exists we can pin each authored IP to the right leg: the author writes
         # "on h1, the interface facing s1", i.e. wanted[near_ref][far_ref].
         for near_ref, far_ref in ((a, b), (b, a)):

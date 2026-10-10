@@ -133,8 +133,13 @@ class GiniAPI:
                 if dev is not None:
                     dev.parent_id = refs[parent]
         links = 0
-        for a, b in r.links:
-            self.connect(refs[a], refs[b])
+        for a, b, *more in r.links:              # (a, b) or (a, b, {link attributes})
+            made = self.connect(refs[a], refs[b])
+            if more and isinstance(more[0], dict):
+                from ..domain.topology import apply_link_attributes
+                link = self.ctx.topology.links.get(made.get("id"))
+                if link is not None:
+                    apply_link_attributes(link, more[0])
             links += 1
         return {"recipe": r.id, "name": r.name, "added": list(refs.values()),
                 "links": links}

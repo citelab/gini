@@ -2,12 +2,21 @@
 
 This is the single source of truth for what's on the canvas. The UI renders it,
 the compiler/persistence layers read it, and the AI agent layer mutates it.
+
+FORWARD COMPATIBILITY. A saved file may come from a NEWER GINI than the one reading it: a student
+who has not upgraded, the remote run server, a Teaching Center marker on last term's release. This
+loader used to build every record with `Cls(**record)`, so one field it did not know -- the first
+link property, say -- raised TypeError and the whole file failed to open. Now a record's unknown
+keys are kept in `extra` and written back out unchanged, flat, beside the known ones (never under
+an "extra" key, which a still-older loader would itself choke on). So a file passes through an
+older GINI and keeps what it did not understand. The topology's own unknown top-level keys are kept
+the same way. See docs/design/link-properties.md, Phase 0.
 """
 from __future__ import annotations
 
 import itertools
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 
 from . import devices
 from .devices import DeviceType
@@ -39,6 +48,8 @@ class DeviceInstance:
     # reads it; it exists so the canvas can label a slot group with what actually fills it
     # ("nets · cap-lan ×4") instead of just a count, and so a composed board is self-describing.
     slot_source: str = ""
+    # saved keys this version does not know, kept so they survive a load/save (module docstring)
+    extra: dict = field(default_factory=dict, repr=False)
 
     @property
     def type(self) -> DeviceType:
@@ -55,6 +66,58 @@ class Link:
     # "attach" = a rider→donor mount: a Source/Sink runs ON the donor. Carries no traffic and is
     # NOT compiled as a cable — a "runs on" relationship, drawn dotted. source_id is the rider.
     kind: str = "link"
+    # saved keys this version does not know, kept so they survive a load/save (module docstring)
+    extra: dict = field(default_factory=dict, repr=False)
+
+
+def _record(obj) -> dict:
+    """A dataclass as a saved record: its fields, with `extra` flattened back in beside them. A
+    known field always wins over a same-named leftover."""
+    rec = asdict(obj)
+    extra = rec.pop("extra", None) or {}
+    return {**{k: v for k, v in extra.items() if k not in rec}, **rec}
+
+
+def _from_record(cls, rec: dict):
+    """Build `cls` from a saved record, keeping the keys it does not know in `extra`."""
+    known = {f.name for f in fields(cls)} - {"extra"}
+    obj = cls(**{k: v for k, v in rec.items() if k in known})
+    obj.extra = {k: v for k, v in rec.items() if k not in known and k != "extra"}
+    return obj
+
+
+_TOPOLOGY_KEYS = ("name", "manual_addressing", "routing_mode", "devices", "links")
+
+# What makes a link THIS link rather than any link: its identity and endpoints are re-made when a
+# link is copied (new ids, remapped endpoints), and its kind decides add_link vs add_attach.
+_LINK_IDENTITY = ("id", "source_id", "target_id", "kind")
+
+
+def link_attributes(link) -> dict:
+    """Everything a copied link must keep: the label, any future field (link properties), and keys
+    this version does not know. Takes a Link or a saved link record, because the paths that copy
+    links hold one or the other.
+
+    These paths -- loading a fragment's board, composing a lab, merging a scaffold, applying a
+    staged spec -- used to rebuild each link from its two endpoints alone, so a label was already
+    silently lost there, and link properties would have been next."""
+    rec = _record(link) if isinstance(link, Link) else dict(link or {})
+    rec.pop("extra", None)
+    return {k: v for k, v in rec.items() if k not in _LINK_IDENTITY}
+
+
+def apply_link_attributes(link: "Link", attrs: dict) -> "Link":
+    """Put `link_attributes(...)` onto a freshly made link: known fields set, the rest kept in
+    `extra`. Identity keys in `attrs` are ignored."""
+    known = {f.name for f in fields(Link)} - {"extra"} - set(_LINK_IDENTITY)
+    for k, v in (attrs or {}).items():
+        if k in _LINK_IDENTITY or k == "extra":
+            continue
+        if k in known:
+            setattr(link, k, v)
+        else:
+            link.extra[k] = v
+    return link
 
 
 class Topology:
@@ -77,6 +140,8 @@ class Topology:
         # per-type auto-name prefix overrides (type_key -> prefix), set from Settings;
         # empty means use the curated DEFAULT_PREFIXES (R1, S1, M1, …).
         self.prefix_overrides: dict[str, str] = {}
+        # top-level keys from a saved file this version does not know (module docstring)
+        self.extra: dict = {}
 
     # -- creation ----------------------------------------------------------- #
     def _new_id(self, prefix: str) -> str:
@@ -210,19 +275,22 @@ class Topology:
 
     # -- serialization (used by persistence + agent layer) ------------------ #
     def to_dict(self) -> dict:
-        return {
+        out = {k: v for k, v in self.extra.items() if k not in _TOPOLOGY_KEYS}
+        out.update({
             "name": self.name,
             "manual_addressing": self.manual_addressing,
             "routing_mode": self.routing_mode,
-            "devices": [asdict(d) for d in self.devices.values()],
-            "links": [asdict(l) for l in self.links.values()],
-        }
+            "devices": [_record(d) for d in self.devices.values()],
+            "links": [_record(l) for l in self.links.values()],
+        })
+        return out
 
     @classmethod
     def from_dict(cls, data: dict) -> "Topology":
         t = cls(data.get("name", "untitled"))
         t.manual_addressing = bool(data.get("manual_addressing", False))
         t.routing_mode = data.get("routing_mode", "static") or "static"
+        t.extra = {k: v for k, v in data.items() if k not in _TOPOLOGY_KEYS}
         max_n = 0
 
         def _bump(ident: str) -> None:
@@ -232,11 +300,11 @@ class Topology:
                     max_n = max(max_n, int(token))
 
         for d in data.get("devices", []):
-            inst = DeviceInstance(**d)
+            inst = _from_record(DeviceInstance, d)
             t.devices[inst.id] = inst
             _bump(inst.id)
         for l in data.get("links", []):
-            link = Link(**l)
+            link = _from_record(Link, l)
             t.links[link.id] = link
             _bump(link.id)                       # links share the id counter — MUST count them too,
             #                                      else new ids collide with existing links on load

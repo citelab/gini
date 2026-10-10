@@ -21,7 +21,7 @@ def test_every_recipe_uses_real_palette_elements():
         refs = {e.ref for e in r.elements}
         for e in r.elements:
             assert e.type_key in REGISTRY, f"{r.id}: {e.type_key}"
-        for a, b in r.links:                       # links reference declared elements
+        for a, b, *_ in r.links:                       # links reference declared elements
             assert a in refs and b in refs, f"{r.id}: bad link {a}-{b}"
 
 

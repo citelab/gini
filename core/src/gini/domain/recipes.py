@@ -35,7 +35,8 @@ class Recipe:
     intent: tuple[str, ...]        # keywords the LLM/offline matcher scores against
     teaches: str
     elements: tuple[RecipeElement, ...]
-    links: tuple[tuple[str, str], ...] = ()
+    # (a, b) pairs of element refs; a link may carry attributes as (a, b, {"label": ..., ...})
+    links: tuple[tuple, ...] = ()
     concept: str = ""              # related concepts.Concept.key
 
 
