@@ -80,12 +80,21 @@ def test_config_gives_the_router_its_real_netmask():
     assert line.endswith("-netmask 255.255.0.0")
 
 
+def test_router_lab_delay_is_applied_at_boot():
+    """Set in the Router Lab, saved on the router -- and, until now, lost on the next Run."""
+    cfg = _one_iface("10.0.1.1/24", delay={"egress": [50, 5, 0.9], "ingress": [20, 0, 0]})
+    assert "delay ingress 20 0 0" in cfg.splitlines()
+    assert "delay egress 50 5 0.9" in cfg.splitlines()
+    assert "delay " not in _one_iface("10.0.1.1/24")        # nothing set, nothing emitted
+
+
 if __name__ == "__main__":
     test_cmd_uses_valid_option_spelling()
     test_cmd_options_are_accepted_by_the_binary()
     test_config_has_srcport_after_hwaddr()
     test_openflow_mode_adds_flag_and_drops_routes()
     test_config_gives_the_router_its_real_netmask()
+    test_router_lab_delay_is_applied_at_boot()
     print("ok")
     test_openflow_mode_adds_flag_and_drops_routes()
     print("test_run_grouter: ALL PASS")

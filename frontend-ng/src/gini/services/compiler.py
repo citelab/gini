@@ -334,6 +334,27 @@ class RouterSpec:
     ifaces: list[IfaceSpec]
     routes: list = field(default_factory=list)   # static inter-router routes:
     #                                              {net, mask, gw, dev} (dev = tun index)
+    # link delay set in the Router Lab: {"ingress"|"egress": [base_ms, jitter_ms, corr]}
+    delay: dict = field(default_factory=dict)
+
+
+def _delay_setting(prop) -> list | None:
+    """A router's `DelayIngress` / `DelayEgress` property ("50 5 0.90": base ms, jitter ms,
+    correlation) as numbers, or None when unset or all zero.
+
+    The Router Lab saved these on the router and applied them live, but nothing applied them at
+    Run, so a delay a student had tuned vanished on the next Run. Numbers only, because the config
+    is embedded in single-quoted YAML: a stray quote in a property would break the compose file."""
+    vals = []
+    for tok in str(prop or "").split()[:3]:
+        try:
+            vals.append(float(tok))
+        except ValueError:
+            return None
+    if not vals or (vals[0] <= 0 and (len(vals) < 2 or vals[1] <= 0)):
+        return None
+    vals += [0.0] * (3 - len(vals))
+    return vals
 
 
 @dataclass
@@ -513,7 +534,8 @@ class RuntimeConfig:
                 {"name": _svc(r.name),
                  "ifaces": [{"ip": i.ip, "mac": i.mac, "port": i.ep.wiring(docker)}
                             for i in r.ifaces],
-                 "routes": r.routes}
+                 "routes": r.routes,
+                 **({"delay": r.delay} if r.delay else {})}     # absent unless set: no churn
                 for r in self.routers
             ],
             # SDN: OVS switches run as their own gRouter --openflow containers; each
@@ -1291,6 +1313,11 @@ class RuntimeCompiler:
                 seg_routers.setdefault(seg, []).append(did)
             if ifaces:
                 spec = RouterSpec(name=name[did], ifaces=ifaces)
+                props = topo.devices[did].properties if did in topo.devices else {}
+                for side, key in (("ingress", "DelayIngress"), ("egress", "DelayEgress")):
+                    d = _delay_setting(props.get(key))
+                    if d:
+                        spec.delay[side] = d
                 cfg.routers.append(spec)
                 spec_of[did] = spec
 

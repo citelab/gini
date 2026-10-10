@@ -75,6 +75,13 @@ def build_config(cfg: dict) -> str:
             f"-netmask {rt['mask']} -gw {rt['gw']}"
         )
     lines += routes
+    # link delay set in the Router Lab (compiler: RouterSpec.delay) -- the same `delay` command
+    # the Lab sends live, so a tuned delay survives the next Run instead of vanishing.
+    for side in ("ingress", "egress"):
+        d = (cfg.get("delay") or {}).get(side)
+        if d:
+            base, jit, corr = (list(d) + [0, 0, 0])[:3]
+            lines.append(f"delay {side} {float(base):g} {float(jit):g} {float(corr):g}")
     return "\n".join(lines) + "\n"
 
 
