@@ -65,6 +65,11 @@ typedef struct _interface_t
 	// local- and directed-broadcast checks -- assumed /24. `ifconfig add ... -netmask M` sets it;
 	// absent, it defaults to 255.255.255.0, which is what every GINI subnet has been.
 	uchar netmask[4];
+	// Routing cost of this interface, 1-15 (docs/design/link-properties.md): an ABSTRACT number,
+	// unrelated to delay or bandwidth. The router itself forwards by its table and does not read
+	// it; a routing protocol does (Lua interfaces()[i].cost), and gBuilder's static routes are
+	// computed from the same link costs. Default 1, which is hop count.
+	int metric;
 } interface_t;
 
 /* Count one frame in or out. Called from EVERY device driver (ethernet, tun, tap, raw) at the

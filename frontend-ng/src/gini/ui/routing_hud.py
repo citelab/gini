@@ -212,12 +212,14 @@ class RoutingHud(QWidget):
                 lit_c = t.accent if kind == "computed" else t.accent_for(_PROGRAMMED)
                 p.setPen(QPen(QColor(lit_c), 3))
             p.drawLine(pa, pb)
-            if e.latency_ms is not None:              # latency label at the midpoint
+            # The link's COST at the midpoint -- never its delay. Delay is a router setting, and
+            # two numbers on one edge read as the same kind of thing; cost is what routing uses.
+            if getattr(e, "cost", None) is not None:
                 mid = QPointF((pa.x() + pb.x()) / 2, (pa.y() + pb.y()) / 2)
                 p.setPen(QColor(t.text if src else t.muted))
                 p.setFont(QFont(self.font().family(), 8))
                 p.drawText(int(mid.x()) - 20, int(mid.y()) - 14, 40, 12,
-                           Qt.AlignCenter, f"{e.latency_ms:g}ms")
+                           Qt.AlignCenter, f"cost {e.cost}")
         self._paint_control_overlay(p, fit)
         # nodes
         loops = self._trace.loops if self._trace else set()
@@ -522,7 +524,7 @@ class RoutingHudController(QObject):
                  switch_devices=None, neighbours_of=None, mac_of=None, ip_of=None,
                  topo_links=None,
                  passthrough_of=None, controllers_of=None, log=None,
-                 interval_ms: int = 2500) -> None:
+                 interval_ms: int = 2500, cost_of=None) -> None:
         super().__init__(parent)
         self.hud = RoutingHud(parent, theme)
         self._router_devices = router_devices
@@ -537,6 +539,8 @@ class RoutingHudController(QObject):
         self._topo_links = topo_links
         self._passthrough_of = passthrough_of
         self._controllers_of = controllers_of
+        # cost_of(a_rid, b_rid) -> int | None: the link cost to label an edge with
+        self._cost_of = cost_of
         # Static port map + last-good flow dumps, for the lifetime of this run.
         # See collect_network_data: it is what stops a timed-out poll blanking the picture.
         self._run_cache: dict = {}
@@ -628,6 +632,12 @@ class RoutingHudController(QObject):
                 topo_links=self._topo_links() if self._topo_links else None,
                 passthrough=self._passthrough_of() if self._passthrough_of else None,
                 run_cache=self._run_cache)
+        if self._cost_of is not None:
+            for e in model.edges:
+                try:
+                    e.cost = self._cost_of(e.a, e.b)
+                except Exception:                   # noqa: BLE001 — a label must not stop a poll
+                    e.cost = None
         controllers = self._controllers_of() if self._controllers_of else {}
         return model, self._positions_of(), controllers
 

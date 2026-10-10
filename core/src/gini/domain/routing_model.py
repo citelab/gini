@@ -71,6 +71,9 @@ class Edge:
     a: str
     b: str
     latency_ms: float | None = None   # configured delay-VNF value (None = unknown/unweighted)
+    # the link's abstract routing cost (domain/link_props.py), set by the HUD controller from the
+    # topology; None when the lab is not weighted. This, not latency, is what the HUD labels.
+    cost: int | None = None
 
 
 @dataclass

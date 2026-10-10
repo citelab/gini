@@ -163,6 +163,8 @@ static int l_interfaces(lua_State *L)
                     prefix += (m[k] >> b) & 1;
             lua_pushinteger(L, prefix); lua_setfield(L, -2, "prefix");   /* 24 for /24 */
         }
+        /* the link's routing cost (gBuilder sets it from the drawn link): abstract, 1-15 */
+        lua_pushinteger(L, svc->iface_metric(i)); lua_setfield(L, -2, "cost");
         lua_rawseti(L, -2, ++row);
     }
     return 1;

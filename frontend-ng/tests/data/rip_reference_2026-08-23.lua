@@ -10,13 +10,6 @@
 -- route table is only rewritten when something actually changes, and a published status
 -- snapshot so `gpipe cp status` shows what the router currently believes.
 --
--- Link costs. Each link drawn in gBuilder has an abstract routing cost (1-15, default 1; select
--- the link to set it). The router hands it to this script as interfaces()[i].cost, and a route
--- learned over an interface costs what the neighbour advertised PLUS that interface's cost --
--- RIP's metric, with hop count as the special case where every cost is 1. The costs are re-read
--- every tick, so changing one in a running lab is picked up at the next advertisement. 16 is
--- infinity, so a path costing 16 or more is unreachable, as in real RIP.
---
 -- What this is NOT: RIP's wire format. Vectors travel as plain text on the control port,
 -- because the point of the exercise is the ALGORITHM. RFC 2453 specifies the real thing,
 -- with its own packet layout, timers, and authentication. Reading it after building this
@@ -42,14 +35,6 @@ local function decode(s)
 end
 
 local function net_of(ip)  return (ip:gsub("%d+$", "0")) .. "/24" end
-
--- the routing cost of one of our interfaces (1 on a router image that does not report costs)
-local function cost_of(iface)
-    for _, itf in ipairs(myifaces) do
-        if itf.iface == iface then return itf.cost or 1 end
-    end
-    return 1
-end
 local function addr_of(nt) return (nt:gsub("/24$", "")) end
 
 -- The vector we advertise OUT OF one interface. Split horizon with poison reverse: a
@@ -94,7 +79,6 @@ function init(list)
 end
 
 function tick()
-    myifaces = interfaces()                             -- costs may have changed since last tick
     for _, itf in ipairs(myifaces) do                   -- advertise, per interface
         send(itf.iface, encode(vector_for(itf.iface)))
     end
@@ -118,7 +102,7 @@ function on_message(iface, src, data)
     for net, cost in pairs(decode(data)) do
         local r = dv[net]
         if not (r and r.connected) then          -- a connected LAN always wins
-            local newc = math.min(cost + cost_of(iface), INF)
+            local newc = math.min(cost + 1, INF)
             -- Take the route if it is better, OR if it comes from the neighbour we are
             -- already using, because that neighbour is the authority on its own cost
             -- (this is how bad news arrives at all).

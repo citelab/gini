@@ -21,7 +21,7 @@ void gr_route_add(uchar *net, uchar *mask, uchar *nhop, int iface);     /* write
 void gr_route_add_tagged(uchar *net, uchar *mask, uchar *nhop, int iface,
                          uchar origin);                                 /* write, ROUTE_ORIGIN_* */
 void gr_route_del(int index);                                          /* write */
-void gr_route_del_match(uchar *net, uchar *mask);                       /* write (by net/mask) */
+int  gr_route_del_match(uchar *net, uchar *mask);   /* 1 if a route was deleted */                       /* write (by net/mask) */
 
 /* ARP cache (rwlock-protected) */
 int  gr_arp_find(uchar *ip_addr, uchar *mac_out);                       /* read  */

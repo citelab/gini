@@ -435,6 +435,16 @@ int getDevType(char *str)
  * ifconfig down eth0|tap0
  * ifconfig mod eth0 (-gateway GW | -mtu N)
  */
+/* A routing cost is 1-15 (RIP's range; 16 is its infinity). Out of range is refused in words
+ * rather than clamped -- a silently different number is worse than none. */
+static int ifconfig_metric_ok(int m)
+{
+    if (m >= 1 && m <= 15)
+        return 1;
+    printf("ifconfig:: -metric must be a whole number from 1 to 15 (not %d)\n", m);
+    return 0;
+}
+
 void ifconfigCmd()
 {
     char *next_tok;
@@ -444,6 +454,7 @@ void ifconfigCmd()
     int mtu, interface, mode, mtu_given = 0;
     uchar mask[4];
     int mask_given = 0;
+    int metric = 1, metric_given = 0;
     short int dst_port;
     int src_port;           // int (not short): a literal port can exceed 32767,
                             // which would wrap negative in a short and defeat the
@@ -523,6 +534,10 @@ void ifconfigCmd()
             {
                 Dot2IP(next_tok, mask);                 // router order, like -addr
                 mask_given = 1;
+            } else if (!strcmp("-metric", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
+            {
+                metric = atoi(next_tok);
+                metric_given = 1;
             } else if (!strcmp("-srcport", next_tok))
             {
                 // literal local UDP bind port (portable fabric); when given,
@@ -548,6 +563,8 @@ void ifconfigCmd()
         {
             if (mask_given)
                 COPY_IP(iface->netmask, mask);
+            if (metric_given && ifconfig_metric_ok(metric))
+                iface->metric = metric;
             verbose(2, "[configureInterfaces]:: Inserting the definition in the interface table ");
             GNETInsertInterface(iface);
             addMTUEntry(MTU_tbl, iface->interface_id, iface->device_mtu, iface->ip_addr);
@@ -596,9 +613,16 @@ void ifconfigCmd()
                 mtu = atoi(next_tok), mtu_given = 1;
             else if (!strcmp("-netmask", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
                 Dot2IP(next_tok, mask), mask_given = 1;
+            else if (!strcmp("-metric", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
+                metric = atoi(next_tok), metric_given = 1;
 
         if (mask_given && (iface = findInterface(interface)) != NULL)
             COPY_IP(iface->netmask, mask);
+        if (metric_given && ifconfig_metric_ok(metric) && (iface = findInterface(interface)) != NULL)
+        {
+            iface->metric = metric;
+            printf("%s cost %d\n", dev_name, metric);
+        }
 
         /* Only with -mtu: `mtu` starts at DEFAULT_MTU, so a mod without it used to reset the MTU.
          * And BOTH places: changeInterfaceMTU sets the device_mtu that `ifconfig show` prints,
@@ -741,8 +765,30 @@ void routeCmd()
         else if (!strcmp(next_tok, "del"))
         {
             next_tok = strtok(NULL, " \n");
-            del_route = gAtoi(next_tok);
-            gr_route_del(del_route);
+            if (next_tok != NULL && !strcmp(next_tok, "-net"))
+            {
+                /* `route del -net N -netmask M`: by what the route IS, not by where it sits.
+                 * Indices shift as entries come and go, so anything automated (gBuilder pushing
+                 * recomputed static routes) must not depend on them. */
+                char *nv = strtok(NULL, " \n"), *kw = strtok(NULL, " \n"), *mv = strtok(NULL, " \n");
+                uchar n[4], m[4];
+                if (nv == NULL || kw == NULL || strcmp(kw, "-netmask") || mv == NULL)
+                {
+                    printf("route:: usage: route del -net <network> -netmask <mask>\n");
+                    return;
+                }
+                Dot2IP(nv, n);
+                Dot2IP(mv, m);
+                if (gr_route_del_match(n, m))
+                    printf("route to %s/%s deleted\n", nv, mv);
+                else
+                    printf("route:: no route to %s/%s\n", nv, mv);
+            }
+            else
+            {
+                del_route = gAtoi(next_tok);
+                gr_route_del(del_route);
+            }
         }
         else if (!strcmp(next_tok, "show"))
             printRouteTable(route_tbl);

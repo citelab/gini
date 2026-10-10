@@ -62,6 +62,8 @@ typedef struct gr_cp_services
 
     /* the interface's subnet mask, router (reversed) order; 0 on success. Appended last. */
     int  (*iface_mask)(int iface, uchar *mask);
+    /* the interface's routing cost, 1-15 (1 if no such interface). Appended last. */
+    int  (*iface_metric)(int iface);
 } gr_cp_services_t;
 
 /* ---- which packets a module wants delivered to on_packet() ---- */

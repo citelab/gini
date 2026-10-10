@@ -237,6 +237,9 @@ class MainWindow(QMainWindow):
         self.ctx.bus.topology_changed.connect(self._recompute_timer.start)
         self.ctx.bus.device_resized.connect(self._on_device_resized)
         self.ctx.bus.device_changed.connect(self._on_device_changed_live)
+        # a link's cost changed: push it into a running lab (services/link_push.py)
+        self.ctx.bus.link_changed.connect(self._on_link_changed_live)
+        self._run_links = None                  # (structure, costs, installed routes, static)
         self.ctx.bus.log.connect(self._on_log)
         self.ctx.bus.device_delete_requested.connect(self._delete_device)
         self.ctx.bus.warning_explain_requested.connect(self._on_warning_explain)
@@ -1603,6 +1606,7 @@ class MainWindow(QMainWindow):
                             for d in self.ctx.topology.devices.values()
                             if d.type_key == "ovs"],
                         neighbours_of=self._ovs_link_peers,
+                        cost_of=self._hud_cost_of,
                         mac_of=self._hud_mac_of,
                         ip_of=self._hud_ip_of,
                         topo_links=lambda: [(l.source_id, l.target_id)
@@ -2582,6 +2586,12 @@ class MainWindow(QMainWindow):
             return
         self._last_services = list(cfg.services)
         self._last_machines = list(cfg.machines)     # headful Desktops carry a noVNC port here
+        # What this Run installed, so a later cost change can push only the differences.
+        from ..services import link_push
+        self._run_links = (link_push.structure(self.ctx.topology),
+                           link_push.link_costs(self.ctx.topology),
+                           link_push.installed_routes(cfg),
+                           getattr(self.ctx.topology, "routing_mode", "static") != "dynamic")
         self._last_k8s = list(cfg.k8s)
         self._last_gbridge = list(getattr(cfg, "gbridge", []))   # real GINI32 boards
         self._board_state = {}          # board_id -> live state, refreshed by the poller
@@ -3818,6 +3828,67 @@ class MainWindow(QMainWindow):
         argv = [*self._exec_argv(svc), "python3", "/build/grouter-build/grconsole.py",
                 f"/run/{svc}.ctl"]
         return argv, str(self._workdir)
+
+    def _hud_cost_of(self, a: str, b: str):
+        """The link cost the Network HUD labels the edge a-b with: a direct router link's cost, or
+        a's cable onto a switch b is also on. None while the lab is not weighted, matching the
+        canvas, so an unweighted network is drawn as it always was."""
+        from ..domain import link_props as LP
+        topo = self.ctx.topology
+        if not LP.weighted(topo):
+            return None
+        links = [l for l in topo.links.values() if l.kind == "link"]
+        for l in links:
+            if {l.source_id, l.target_id} == {a, b}:
+                return LP.get(l, LP.COST)
+        for l in links:                               # a -- switch -- b
+            if a in (l.source_id, l.target_id):
+                mid = l.target_id if l.source_id == a else l.source_id
+                d = topo.devices.get(mid)
+                if d is not None and d.type_key in ("switch", "hub") and any(
+                        {m.source_id, m.target_id} == {mid, b} for m in links):
+                    return LP.get(l, LP.COST)
+        return None
+
+    def _on_link_changed_live(self, link_id: str) -> None:
+        """A link's cost changed while the lab runs: tell both routers on it, and in static mode
+        recompute the network and push the route differences. Failure settings change nothing
+        live here (Phase 3). See services/link_push.py for what is pushed and why."""
+        if not self._running or self._remote is not None or self._run_links is None:
+            return
+        from ..services import link_push
+        structure, costs, installed, static = self._run_links
+        now = link_push.link_costs(self.ctx.topology)
+        changed = {lid: c for lid, c in now.items() if costs.get(lid, 1) != c}
+        if not changed:
+            return
+        if link_push.structure(self.ctx.topology) != structure:
+            self.ctx.log("The topology has changed since Run, so the new cost cannot be pushed "
+                         "safely; it applies at the next Run.", "info")
+            return
+        try:
+            new_cfg = self._gloader.compile(self.ctx.topology)
+        except Exception as e:                      # noqa: BLE001 — a diagnostic must not crash
+            self.ctx.log(f"Could not recompute routes: {e}", "error")
+            return
+        cmds, new_installed, msgs = link_push.plan(new_cfg, installed, changed, static)
+        self._run_links = (structure, {**costs, **changed}, new_installed, static)
+
+        def work():
+            failed = []
+            for rname, cmd in cmds:
+                out = self.element_query(rname, cmd)
+                # `route add` prints nothing ("(no output)"); only a query that did not reach the
+                # router, or a command the router refused, is a failure
+                if out.startswith(("(query failed", "(not running)")) or "usage:" in out \
+                        or "must be a whole number" in out:
+                    failed.append(f"{rname}: {cmd} -> {out[:120]}")
+            for m in msgs:
+                self.ctx.log(m, "info")
+            if failed:
+                self.ctx.log("Some routers did not take the change: " + "; ".join(failed),
+                             "error")
+        run_off_gui(self, work)
 
     def element_query(self, device_name: str, command: str) -> str:
         """Run a one-shot console command against a network element (needs Docker up)."""

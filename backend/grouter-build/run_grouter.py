@@ -58,10 +58,19 @@ def build_config(cfg: dict) -> str:
         # -netmask: the router kept no mask and assumed /24 everywhere that needed one; give it
         # the real one. A trailing option, after -srcport -- the parser's fixed part ends at
         # -hwaddr -- and an older router image ignores it.
+        # -metric: the drawn link's routing cost (the compiler puts it in port["link"]), for a
+        # routing protocol to read through Lua interfaces(). Only when it is not 1, so a plain
+        # lab's config is unchanged; an older router image ignores the option.
+        cost = (peer.get("link") or {}).get("cost", 1)
+        try:
+            cost = int(cost)
+        except (TypeError, ValueError):
+            cost = 1
+        metric_opt = f" -metric {cost}" if 1 < cost <= 15 else ""
         lines.append(
             f"ifconfig add {dev} -dstip {peer_ip} -dstport {peer['peer_port']} "
             f"-addr {ip} -hwaddr {itf['mac']} -mtu 1400{srcport_opt} "
-            f"-netmask {iface.network.netmask}"
+            f"-netmask {iface.network.netmask}{metric_opt}"
         )
         if not openflow:
             routes.append(

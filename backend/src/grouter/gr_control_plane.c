@@ -199,6 +199,12 @@ static int svc_iface_mask(int iface, uchar *mask)
     return 0;
 }
 
+static int svc_iface_metric(int iface)
+{
+    interface_t *f = findInterface(iface);
+    return (f != NULL && f->metric >= 1) ? f->metric : 1;
+}
+
 static void svc_log(const char *fmt, ...)
 {
     va_list ap;
@@ -217,6 +223,7 @@ static const gr_cp_services_t SERVICES = {
     .iface_count = svc_iface_count, .iface_addr = svc_iface_addr,
     .log = svc_log,
     .iface_mask = svc_iface_mask,
+    .iface_metric = svc_iface_metric,
 };
 
 /* ---- filter matching ----------------------------------------------------- */

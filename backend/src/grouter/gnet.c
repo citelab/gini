@@ -250,10 +250,10 @@ void printInterfaces(int mode)
 	switch (mode)
 	{
 		case NORMAL_LISTING:
-			printf("Device\tState\tIP address\tMAC address\t\tMTU\n");
+			printf("Device\tState\tIP address\tMAC address\t\tMTU\tCost\n");
 			break;
 		case VERBOSE_LISTING:
-			printf("Int.\tState/Mode\tDevice\tIP address\tMAC address\t\tMTU\tSocket Name\tThread ID\n");
+			printf("Int.\tState/Mode\tDevice\tIP address\tMAC address\t\tMTU\tSocket Name\tThread ID\tCost\n");
 			break;
 	}
 	for (i = 0; i < MAX_INTERFACES; i++)
@@ -263,20 +263,22 @@ void printInterfaces(int mode)
 			switch (mode)
 			{
 				case NORMAL_LISTING:
-					printf("%s\t%c\t%s\t%s\t%d\n", ifptr->device_name,
+					/* Cost is the LAST column, in both listings: parse_iface_ips and
+					 * parse_iface_macs read leading fields, so a trailing one is safe. */
+					printf("%s\t%c\t%s\t%s\t%d\t%d\n", ifptr->device_name,
 					       ifptr->state, IP2Dot(tmpbuf, ifptr->ip_addr),
 					       MAC2Colon((tmpbuf+20), ifptr->mac_addr),
-					       ifptr->device_mtu);
+					       ifptr->device_mtu, ifptr->metric);
 					break;
 				case VERBOSE_LISTING:
-					printf("%d\t%c%c\t\t%s\t%s\t%s\t%d\t%s\t%d\n", ifptr->interface_id,
+					printf("%d\t%c%c\t\t%s\t%s\t%s\t%d\t%s\t%d\t%d\n", ifptr->interface_id,
 					       ifptr->state, ifptr->mode,
 					       ifptr->device_name,
 					       IP2Dot(tmpbuf, ifptr->ip_addr),
 					       MAC2Colon((tmpbuf+20), ifptr->mac_addr),
 					       ifptr->device_mtu,
 					       ifptr->sock_name,
-					       (int) ifptr->threadid);
+					       (int) ifptr->threadid, ifptr->metric);
 					break;
 			}
 		}
@@ -324,6 +326,7 @@ interface_t *newInterfaceStructure(char *vsock_name, char *device,
 	/* /24 until `ifconfig ... -netmask` says otherwise: what every GINI subnet has been, so a
 	 * config written before the mask existed behaves exactly as it did. Router (reversed) order. */
 	iface->netmask[0] = 0; iface->netmask[1] = iface->netmask[2] = iface->netmask[3] = 255;
+	iface->metric = 1;                                       /* hop count until told otherwise */
 
 	verbose(2, "[makeInterface]:: Searching the device driver for %s ", iface->device_type);
 	iface->devdriver = findDeviceDriver(iface->device_type);

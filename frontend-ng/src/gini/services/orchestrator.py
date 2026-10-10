@@ -798,6 +798,26 @@ while True:
 '''
 
 
+#: sha256 of every version of a reference module GINI has ever shipped. A copy in ~/.gini/scripts
+#: that is byte-for-byte one of these was never touched by the user, so it is safe to replace with
+#: the current one; anything else is somebody's work and is left alone. Without this an install
+#: kept the first version it was given forever -- rip_reference.lua's `cost + 1` survived the
+#: change to link costs on every machine that already had it. The CURRENT version is listed too
+#: (an identical copy is simply skipped), so editing a module fails tests/test_seed_examples.py
+#: until its new hash is added -- and the old one stays, so no untouched copy is ever stranded.
+_SHIPPED_HASHES = {
+    "rip_reference.lua": frozenset({
+        "bcaf63f8d8c6053bac380e12a2ded875b2c8df6fbb9099c850e2518d7a6be7df",   # 2026-08-23, +1/hop
+        "e88482702660615aadab2fc3388b854ce4f8701889af0e1e8db9bfd11afe191c",   # link costs
+    }),
+}
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _seed_examples(scripts: Path, shared: Path) -> None:
     """Copy the examples GINI ships (packaged under gini/data/examples) into the user's
     ~/.gini dirs, so the book's instructions work out of the box: the reference Lua
@@ -811,9 +831,12 @@ def _seed_examples(scripts: Path, shared: Path) -> None:
     ex = Path(__file__).resolve().parents[1] / "data" / "examples"
     try:
         for name in ("mcast_tree.lua", "rip_reference.lua"):
-            src = ex / name
-            if src.exists() and not (scripts / name).exists():
-                shutil.copy(src, scripts / name)
+            src, dst = ex / name, scripts / name
+            if not src.exists():
+                continue
+            if not dst.exists() or (_sha256(dst) in _SHIPPED_HASHES.get(name, ())
+                                    and _sha256(dst) != _sha256(src)):
+                shutil.copy(src, dst)                 # new, or an untouched older shipped copy
         kit = ex / "multicast_fs"
         if kit.is_dir():
             dst = shared / "multicast_fs"

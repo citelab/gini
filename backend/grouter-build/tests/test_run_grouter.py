@@ -88,6 +88,21 @@ def test_router_lab_delay_is_applied_at_boot():
     assert "delay " not in _one_iface("10.0.1.1/24")        # nothing set, nothing emitted
 
 
+def test_config_passes_the_links_cost_to_the_router():
+    """The compiler puts the drawn link's cost in port["link"]; the router learns it as the
+    interface's metric, which Lua interfaces() reports as `cost`. Cost 1 adds nothing."""
+    def cfg(link):
+        return run_grouter.build_config({"name": "r1", "ifaces": [
+            {"ip": "10.0.1.1/24", "mac": "02:00:00:01:01:01",
+             "port": {"peer_host": "127.0.0.1", "peer_port": 5000, "bind_port": 5001,
+                      "link": link}}]})
+    line = next(l for l in cfg({"id": "link-3", "cost": 7}).splitlines()
+                if l.startswith("ifconfig"))
+    assert line.endswith("-metric 7")
+    for plain in ({"id": "link-3", "cost": 1}, {"id": "link-3"}, {}, {"cost": 99}):
+        assert "-metric" not in cfg(plain)
+
+
 if __name__ == "__main__":
     test_cmd_uses_valid_option_spelling()
     test_cmd_options_are_accepted_by_the_binary()
@@ -95,6 +110,7 @@ if __name__ == "__main__":
     test_openflow_mode_adds_flag_and_drops_routes()
     test_config_gives_the_router_its_real_netmask()
     test_router_lab_delay_is_applied_at_boot()
+    test_config_passes_the_links_cost_to_the_router()
     print("ok")
     test_openflow_mode_adds_flag_and_drops_routes()
     print("test_run_grouter: ALL PASS")

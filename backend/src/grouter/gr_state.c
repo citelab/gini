@@ -52,9 +52,9 @@ void gr_route_del(int index)
 
 /* Delete the route whose (network, netmask) match exactly. Control protocols think in
  * (net, mask), not table indices; this finds the slot under the write lock and removes it. */
-void gr_route_del_match(uchar *net, uchar *mask)
+int gr_route_del_match(uchar *net, uchar *mask)
 {
-    int i;
+    int i, found = 0;
     pthread_rwlock_wrlock(&route_lock);
     for (i = 0; i < MAX_ROUTES; i++)
         if (!route_tbl[i].is_empty &&
@@ -62,9 +62,11 @@ void gr_route_del_match(uchar *net, uchar *mask)
             memcmp(route_tbl[i].netmask, mask, 4) == 0)
         {
             deleteRouteEntryByIndex(route_tbl, i);
+            found = 1;
             break;
         }
     pthread_rwlock_unlock(&route_lock);
+    return found;
 }
 
 int gr_arp_find(uchar *ip_addr, uchar *mac_out)

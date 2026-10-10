@@ -8,6 +8,7 @@ route \- setup the route table entries at gRouter
 route show
 route add -dev tunN -net network -netmask mask [-gw next_hop]
 route del route_number
+route del -net network -netmask mask
 .fi
 
 .SH DESCRIPTION
@@ -44,8 +45,9 @@ mask). So a /32 entry for one host beats a /24 for its subnet, which beats the d
 .B del
 removes one entry, by the number shown in the first column of
 .BR route
-.BR show .
-The other entries keep their numbers, so look again before deleting a second one.
+.BR show ,
+or by the network it is for (-net and -netmask). The other entries keep their numbers, so look
+again before deleting a second one by number.
 
 Routes added here last until the router stops; the next Run starts again from the routes
 gBuilder computes. The Routes tab of the Router Lab adds and deletes routes the same way, and

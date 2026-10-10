@@ -1314,6 +1314,7 @@ class RuntimeCompiler:
         spec_of: dict[str, RouterSpec] = {}        # router did -> its spec
         rtr_seg_ip: dict[tuple, str] = {}          # (did, seg) -> this router's ip on seg
         rtr_seg_dev: dict[tuple, int] = {}         # (did, seg) -> tun index (1-based)
+        rtr_seg_cost: dict[tuple, int] = {}        # (did, seg) -> cost of did's link onto seg
         seg_routers: dict[int, list] = {}          # seg -> [router dids on it]
         for did, r in role.items():
             if r != "router":
@@ -1332,6 +1333,8 @@ class RuntimeCompiler:
                                         link_id=l.id))
                 rtr_seg_ip[(did, seg)] = iface_ip[key]
                 rtr_seg_dev[(did, seg)] = pos          # matches run_grouter's tun{pos}
+                from ..domain import link_props as _LP
+                rtr_seg_cost[(did, seg)] = _LP.get(l, _LP.COST)
                 seg_routers.setdefault(seg, []).append(did)
             if ifaces:
                 spec = RouterSpec(name=name[did], ifaces=ifaces)
@@ -1356,42 +1359,63 @@ class RuntimeCompiler:
         # static routes too would silently fight it (same table, last writer wins).
         if getattr(topo, "routing_mode", "static") != "dynamic":
             self._add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                                    gw_seg, gw_ip, extra)
+                                    gw_seg, gw_ip, extra, rtr_seg_cost)
 
         return cfg
 
     @staticmethod
     def _add_static_routes(cfg, spec_of, rtr_seg_ip, rtr_seg_dev, seg_routers,
-                           gw_seg=None, gw_ip=None, extra_nets=None) -> None:
+                           gw_seg=None, gw_ip=None, extra_nets=None, rtr_seg_cost=None) -> None:
         """extra_nets: [(cidr, seg, via_ip)] — destinations that are not GINI subnets but
         hang off a node ON `seg` (a routed-mode GINI32 board's physical subnet). Routers on
-        that segment route to them via `via_ip`; others hop toward a router that is."""
-        import ipaddress
-        from collections import deque
+        that segment route to them via `via_ip`; others hop toward a router that is.
 
+        LOWEST COST, not fewest hops (docs/design/link-properties.md). Crossing from router A to a
+        neighbour B over segment S costs A's link onto S -- the cost of the interface the traffic
+        leaves by, which is also exactly what a distance-vector protocol adds when B's update
+        arrives on that interface. So static routes and RIP agree on every path's cost.
+
+        Dijkstra, with ties broken in discovery order (a FIFO counter in the heap). With every cost
+        1 that is precisely the breadth-first search this replaced -- same first hop for every
+        destination -- so an unweighted lab compiles to the same routes as before.
+        tests/test_static_routes_by_cost.py checks that on generated topologies."""
+        import heapq
+        import ipaddress
+        import itertools
+
+        cost_of = rtr_seg_cost or {}
         routers = list(spec_of.keys())
         # router adjacency: two routers are neighbours if they share a segment (a
-        # router-to-router link), which gives the gateway IPs on that link.
+        # router-to-router link), which gives the gateway IPs on that link. Two routers sharing
+        # two segments use the cheaper one (ties keep the later, as the plain dict did).
         adj: dict = {d: {} for d in routers}
         for _seg, rtrs in seg_routers.items():
             for a in rtrs:
                 for b in rtrs:
                     if a != b:
-                        adj[a][b] = _seg
+                        old = adj[a].get(b)
+                        if old is None or cost_of.get((a, _seg), 1) <= cost_of.get((a, old), 1):
+                            adj[a][b] = _seg
 
         for did in routers:
             my_segs = {seg for (d, seg) in rtr_seg_ip if d == did}
-            # BFS: first-hop neighbour toward every reachable router
+            # Dijkstra: lowest-cost first hop toward every reachable router
             dist = {did: 0}
             firsthop: dict = {did: None}
-            q = deque([did])
-            while q:
-                cur = q.popleft()
-                for nb in adj[cur]:
-                    if nb not in dist:
-                        dist[nb] = dist[cur] + 1
+            seq = itertools.count()
+            heap = [(0, next(seq), did)]
+            done: set = set()
+            while heap:
+                d_cur, _n, cur = heapq.heappop(heap)
+                if cur in done:
+                    continue
+                done.add(cur)
+                for nb, seg in adj[cur].items():
+                    nd = d_cur + cost_of.get((cur, seg), 1)
+                    if nb not in dist or nd < dist[nb]:
+                        dist[nb] = nd
                         firsthop[nb] = nb if cur == did else firsthop[cur]
-                        q.append(nb)
+                        heapq.heappush(heap, (nd, next(seq), nb))
             routes = []
             for seg, cidr in cfg.subnets.items():
                 if seg in my_segs:
