@@ -17,6 +17,14 @@ class Port:
     def __init__(self, bind_port: int, peer_host: str, peer_port: int,
                  bind_host: str = "0.0.0.0", name: str = "") -> None:
         self.name = name
+        # The drawn link this port is one end of (the compiler's port["link"]["id"]), and whether
+        # that link is down. A down link carries nothing either way: send() drops, recv() drains
+        # and discards -- the socket is never left to fill, so nothing sent while the link was down
+        # arrives as a stale burst when it comes back (the gRouter does the same, gnet_rx_discard).
+        # Every Python node -- machine shuttle, switch, gbridge, the in-process simulator -- goes
+        # through here, so this is the one place a link failure has to be honoured on this side.
+        self.link_id = ""
+        self.down = False
         self.peer_host = peer_host
         self.peer_port = peer_port
         self._peer_ip: str | None = None
@@ -27,8 +35,10 @@ class Port:
 
     @classmethod
     def from_cfg(cls, cfg: dict, name: str = "") -> "Port":
-        return cls(cfg["bind_port"], cfg["peer_host"], cfg["peer_port"],
+        port = cls(cfg["bind_port"], cfg["peer_host"], cfg["peer_port"],
                    cfg.get("bind_host", "0.0.0.0"), name)
+        port.link_id = str((cfg.get("link") or {}).get("id", "") or "")
+        return port
 
     def _resolve(self) -> str | None:
         if self._peer_ip is None:
@@ -39,6 +49,8 @@ class Port:
         return self._peer_ip
 
     def send(self, frame: bytes) -> None:
+        if self.down:
+            return                                   # a cut cable carries nothing
         ip = self._resolve()
         if ip is None:
             return
@@ -50,9 +62,14 @@ class Port:
     def recv(self) -> bytes | None:
         try:
             data, _ = self.sock.recvfrom(65535)
-            return data
         except BlockingIOError:
             return None
+        while self.down:                             # drain and discard: down receives nothing
+            try:
+                self.sock.recvfrom(65535)
+            except BlockingIOError:
+                return None
+        return data
 
 
 def run_loop(ports: list[Port], handler, tick=None, tick_interval: float = 0.5,

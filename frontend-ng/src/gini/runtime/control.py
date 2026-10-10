@@ -101,6 +101,34 @@ class ControlServer(threading.Thread):
         conn.close()
 
 
+def link_command(ports, cmd: str, on_change: Callable | None = None) -> str | None:
+    """The `link` commands every element answers the same way, so gBuilder can fail or restore a
+    drawn link at whatever is on its end without knowing what kind of element that is:
+
+        links                  each port's link id and state
+        link <id> down|up      cut or restore that link here (all ports on it)
+
+    `on_change(port, up)` lets an element add what a cut means to it -- a machine drops carrier on
+    its interface. Returns None when `cmd` is not a link command, so the caller handles the rest.
+    """
+    words = cmd.split()
+    if not words or words[0] not in ("link", "links"):
+        return None
+    if words[0] == "links":
+        return "\n".join(f"  {p.name}  {p.link_id or '-'}  {'down' if p.down else 'up'}"
+                         for p in ports) or "(no ports)"
+    if len(words) != 3 or words[2] not in ("up", "down"):
+        return "usage: link <link-id> up|down"
+    on = [p for p in ports if p.link_id and p.link_id == words[1]]
+    if not on:
+        return f"no port on link {words[1]}"
+    for p in on:
+        p.down = words[2] == "down"
+        if on_change is not None:
+            on_change(p, not p.down)
+    return f"link {words[1]} {words[2]}"
+
+
 def maybe_start(name: str, handler: Callable[[str], str], banner: str = "") -> ControlServer | None:
     """Start a control server iff GINI_CTRL_DIR is set (i.e., running in the fabric)."""
     ctrl_dir = os.environ.get("GINI_CTRL_DIR")

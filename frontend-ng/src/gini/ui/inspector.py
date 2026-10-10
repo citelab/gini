@@ -139,6 +139,7 @@ class Inspector(QWidget):
         self._link_committing = False            # our own edit: do not rebuild under the widget
         ctx.bus.link_selection_changed.connect(self._on_select_link)
         ctx.bus.link_changed.connect(self._on_link_changed)
+        ctx.bus.link_state_changed.connect(lambda lid, _up, _why: self._on_link_changed(lid))
         ctx.bus.addressing_changed.connect(self._rebuild)
         # The board panel reads hardware state ONCE, when it is built. Without this the
         # Inspector kept describing a board that had been unplugged — claim, MAC and all
@@ -333,6 +334,22 @@ class Inspector(QWidget):
         fnote.setObjectName("Faint")
         fnote.setWordWrap(True)
         self.props_form.addRow("", fnote)
+
+        if self._live_running:                       # the running lab: fail it, or bring it back
+            down = link.id in self.ctx.failed_links
+            state = QLabel("DOWN — failed" if down else "up")
+            state.setObjectName("LinkState")
+            if down:
+                state.setStyleSheet(f"color:{self.theme.theme.accent_for('red')}; font-weight:600;")
+            btn = QPushButton("Restore" if down else "Fail now")
+            btn.setObjectName("LinkFailButton")
+            btn.setToolTip("Bring the link back at both ends" if down else
+                           "Cut the link at both ends now: carrier lost, as if unplugged")
+            btn.clicked.connect(lambda _c=False, lid=link.id, up=down:
+                                self.ctx.bus.link_state_requested.emit(lid, up))
+            row = QWidget(); rl = QHBoxLayout(row); rl.setContentsMargins(0, 0, 0, 0)
+            rl.addWidget(state); rl.addStretch(1); rl.addWidget(btn)
+            self.props_form.addRow("State", row)
 
     def _commit_link(self, key: str, value) -> None:
         if not self._link_id:
@@ -624,6 +641,8 @@ class Inspector(QWidget):
                 except RuntimeError:
                     setattr(self, attr, None)              # widget was rebuilt away
         self.login_btn.setEnabled(self._login_allowed())   # Log in follows the same gate
+        if self._link_id:                                  # a link's Fail now / Restore follows too
+            QTimer.singleShot(0, self._rebuild)
         self._update_live_mode()
 
     _HIST_KEYS = ("cpu", "mem", "thru", "lat", "cpu_pct", "target_pct", "replicas")

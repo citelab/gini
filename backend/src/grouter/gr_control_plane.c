@@ -44,11 +44,17 @@ typedef struct cp_pkt {
     struct cp_pkt *next;
 } cp_pkt_t;
 
+typedef struct cp_evt {                  /* a link event for on_link, queued like a packet */
+    int iface, up, metric;
+    struct cp_evt *next;
+} cp_evt_t;
+
 static gr_cp_module_t *g_modules[GR_CP_MAX_MODULES];
 static int             g_nmod = 0;
 static cp_timer_t      g_timers[GR_CP_MAX_TIMERS];
 static int             g_next_timer_id = 1;
 static cp_pkt_t       *g_qhead = NULL, *g_qtail = NULL;
+static cp_evt_t       *g_ehead = NULL, *g_etail = NULL;
 static pthread_mutex_t cp_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  cp_cond = PTHREAD_COND_INITIALIZER;
 static int             g_running = 0;
@@ -199,6 +205,12 @@ static int svc_iface_mask(int iface, uchar *mask)
     return 0;
 }
 
+static int svc_iface_up(int iface)
+{
+    interface_t *f = findInterface(iface);
+    return (f != NULL && f->state == INTERFACE_UP) ? 1 : 0;
+}
+
 static int svc_iface_metric(int iface)
 {
     interface_t *f = findInterface(iface);
@@ -224,6 +236,7 @@ static const gr_cp_services_t SERVICES = {
     .log = svc_log,
     .iface_mask = svc_iface_mask,
     .iface_metric = svc_iface_metric,
+    .iface_up = svc_iface_up,
 };
 
 /* ---- filter matching ----------------------------------------------------- */
@@ -275,6 +288,27 @@ void gr_cp_deliver(gpacket_t *pkt)
     pthread_mutex_unlock(&cp_lock);
 }
 
+void gr_cp_link_event(int iface, int up, int metric)
+{
+    cp_evt_t *e;
+    if (g_nmod == 0) return;                 /* nothing loaded: nobody to tell */
+    if ((e = (cp_evt_t *)malloc(sizeof *e)) == NULL) return;
+    e->iface = iface; e->up = up; e->metric = metric; e->next = NULL;
+    pthread_mutex_lock(&cp_lock);
+    if (g_etail) g_etail->next = e; else g_ehead = e;
+    g_etail = e;
+    pthread_cond_signal(&cp_cond);
+    pthread_mutex_unlock(&cp_lock);
+}
+
+static void dispatch_link(cp_evt_t *e)
+{
+    int i;
+    for (i = 0; i < g_nmod; i++)
+        if (g_modules[i]->on_link)
+            g_modules[i]->on_link(g_modules[i], e->iface, e->up, e->metric);
+}
+
 static void dispatch(gpacket_t *pkt)
 {
     int i;
@@ -313,12 +347,20 @@ static void *gr_cp_loop(void *unused)
                 if (g_timers[i].deadline_ms < next) next = g_timers[i].deadline_ms;
             }
 
-        /* detach the inbound packet queue */
+        /* detach the inbound packet queue, and the link events */
         cp_pkt_t *pkts = g_qhead;
         g_qhead = g_qtail = NULL;
+        cp_evt_t *evts = g_ehead;
+        g_ehead = g_etail = NULL;
 
         pthread_mutex_unlock(&cp_lock);
 
+        while (evts)                   /* link changes first: they explain what follows */
+        {
+            cp_evt_t *e = evts; evts = evts->next;
+            dispatch_link(e);
+            free(e);
+        }
         for (i = 0; i < ndue; i++)
             if (due[i].cb) due[i].cb(due[i].owner, due[i].arg);
         while (pkts)
@@ -329,7 +371,7 @@ static void *gr_cp_loop(void *unused)
         }
 
         pthread_mutex_lock(&cp_lock);
-        if (g_qhead == NULL)           /* nothing new arrived while we worked */
+        if (g_qhead == NULL && g_ehead == NULL)   /* nothing new arrived while we worked */
         {
             struct timespec ts;
             ts.tv_sec  = next / 1000;

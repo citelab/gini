@@ -70,6 +70,12 @@ typedef struct _interface_t
 	// it; a routing protocol does (Lua interfaces()[i].cost), and gBuilder's static routes are
 	// computed from the same link costs. Default 1, which is hop count.
 	int metric;
+	// The connected route `down` withdrew, so `up` restores exactly that and nothing else: a real
+	// router withdraws an interface's subnet when it loses carrier, and a failure is then visible
+	// in `route show`. None is withdrawn in OpenFlow mode (no connected routes), and one a routing
+	// protocol has since taken over (origin D) is not ours to touch.
+	int conn_withdrawn;
+	uchar conn_net[4], conn_mask[4];
 } interface_t;
 
 /* Count one frame in or out. Called from EVERY device driver (ethernet, tun, tap, raw) at the

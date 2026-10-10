@@ -193,6 +193,10 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 		ip_packet_t *cip;
 		if (!(mask & (1u << i))) continue;
 		if (i == in_pkt->frame.src_interface) continue;   /* don't echo to the source LAN */
+		{                                                 /* nor onto a dead link */
+			interface_t *f = findInterface(i);
+			if (f == NULL || f->state == INTERFACE_DOWN) continue;
+		}
 		if ((cp = duplicatePacket(in_pkt)) == NULL) continue;
 		cip = (ip_packet_t *)&cp->data.data;
 		cip->ip_ttl -= 1;                            /* this is a hop */

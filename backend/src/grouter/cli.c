@@ -23,6 +23,7 @@
 #include "gr_control.h" /* Z2: module-pipeline control surface */
 #include "gr_delay_ctl.h" /* link-delay lines */
 #include "gr_rctl.h"    /* remote control socket (interactive console) */
+#include "gr_control_plane.h" /* gr_cp_link_event: a cost change reaches the protocols */
 #include "gnet.h"
 
 void gpipeCmd(void);    /* Z2: 'gpipe' command */
@@ -620,8 +621,11 @@ void ifconfigCmd()
             COPY_IP(iface->netmask, mask);
         if (metric_given && ifconfig_metric_ok(metric) && (iface = findInterface(interface)) != NULL)
         {
+            int changed = (iface->metric != metric);
             iface->metric = metric;
             printf("%s cost %d\n", dev_name, metric);
+            if (changed)                         /* a protocol may react at once */
+                gr_cp_link_event(interface, iface->state == INTERFACE_UP, metric);
         }
 
         /* Only with -mtu: `mtu` starts at DEFAULT_MTU, so a mod without it used to reset the MTU.

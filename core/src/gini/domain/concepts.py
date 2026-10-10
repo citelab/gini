@@ -41,9 +41,15 @@ CONCEPTS: tuple[Concept, ...] = (
         "FAILURE is set as two mean times in seconds: 'Fail after' (0 = never fails, the "
         "default) and 'Repair after' (0 = a failed link stays down until restored). Both are "
         "drawn from an exponential distribution, the classic model of component failure; a "
-        "link with both set fails and recovers again and again, a flapping link. Once any "
-        "router link has a cost other than 1, the canvas labels every router link with its "
-        "cost; a link set to fail shows ↯.",
+        "link with both set fails and recovers again and again, a flapping link. In a running "
+        "lab the failures really happen: both ends lose carrier at once (a router's interface "
+        "goes down and withdraws its connected route; a machine's shows NO-CARRIER), and the "
+        "link is drawn red and broken. Select a link while the lab runs to Fail it now or "
+        "Restore it, or right-click it. Static routes do not react to a failure -- traffic "
+        "through the dead link is lost -- while a routing protocol such as RIP routes around "
+        "it; that contrast is the point of a failure lab. Once any router link has a cost "
+        "other than 1, the canvas labels every router link with its cost; a link set to fail "
+        "shows ↯.",
     ),
     Concept(
         "networking-basics", "LANs, switching & routing",

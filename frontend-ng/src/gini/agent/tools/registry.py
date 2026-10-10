@@ -125,6 +125,17 @@ def build_registry(api: GiniAPI) -> ToolRegistry:
         lambda link, key, value: api.set_link_property(link, key, value), group="build"))
 
     r.register(ToolSpec(
+        "fail_link", "Fail a link in the RUNNING lab now (carrier lost at both ends, as if "
+        "unplugged). The link is its id or its two ends, e.g. 'R1-R2'.",
+        {"type": "object", "properties": {"link": _STR}, "required": ["link"]},
+        lambda link: api.fail_link(link), group="build"))
+
+    r.register(ToolSpec(
+        "restore_link", "Restore a failed link in the running lab.",
+        {"type": "object", "properties": {"link": _STR}, "required": ["link"]},
+        lambda link: api.restore_link(link), group="build"))
+
+    r.register(ToolSpec(
         "inspect_link", "Inspect a link (its id or its two ends, e.g. 'R1-R2'): cost and failure model, and whether each applies.",
         {"type": "object", "properties": {"link": _STR}, "required": ["link"]},
         lambda link: api.get_link(link), group="inspect"))

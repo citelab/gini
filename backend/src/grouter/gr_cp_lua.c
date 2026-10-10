@@ -165,6 +165,8 @@ static int l_interfaces(lua_State *L)
         }
         /* the link's routing cost (gBuilder sets it from the drawn link): abstract, 1-15 */
         lua_pushinteger(L, svc->iface_metric(i)); lua_setfield(L, -2, "cost");
+        /* false while the link is down (failed, or `ifconfig down`) */
+        lua_pushboolean(L, svc->iface_up(i));    lua_setfield(L, -2, "up");
         lua_rawseti(L, -2, ++row);
     }
     return 1;
@@ -276,6 +278,19 @@ static void lua_cp_on_packet(gr_cp_module_t *self, gpacket_t *pkt)
     call_hook(s, "on_message", 4);
 }
 
+/* an interface went up/down or changed cost -> on_link_change(iface, up, cost), if defined */
+static void lua_cp_on_link(gr_cp_module_t *self, int iface, int up, int metric)
+{
+    lua_cp_state *s = (lua_cp_state *)self->state;
+    if (!s || !s->L) return;
+    lua_getglobal(s->L, "on_link_change");
+    if (!lua_isfunction(s->L, -1)) { lua_pop(s->L, 1); return; }
+    lua_pushinteger(s->L, iface);
+    lua_pushboolean(s->L, up);
+    lua_pushinteger(s->L, metric);
+    call_hook(s, "on_link_change", 3);
+}
+
 static int lua_cp_start(gr_cp_module_t *self, const gr_cp_services_t *svc, const char *args)
 {
     char path[256] = ""; int tick_ms = 5000;
@@ -347,5 +362,6 @@ gr_cp_module_t *gr_cp_lua_create(void)
     m->on_packet = lua_cp_on_packet;
     m->stop = lua_cp_stop;
     m->status = lua_cp_status;
+    m->on_link = lua_cp_on_link;
     return m;
 }

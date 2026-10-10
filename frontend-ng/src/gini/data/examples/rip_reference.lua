@@ -17,6 +17,13 @@
 -- every tick, so changing one in a running lab is picked up at the next advertisement. 16 is
 -- infinity, so a path costing 16 or more is unreachable, as in real RIP.
 --
+-- Link failures. When a link goes down the router calls on_link_change(iface, false, cost). This
+-- module then does what RIP's triggered updates do: every route learned over that interface goes
+-- to infinity and leaves the route table at once, its own subnet on that interface is advertised
+-- at infinity while it is down, and the news goes to the neighbours straight away instead of
+-- waiting for the next tick. Without the callback the same thing still happens, only slower --
+-- the routes age out after AGE_TICKS silent ticks -- and comparing the two is a lesson in itself.
+--
 -- What this is NOT: RIP's wire format. Vectors travel as plain text on the control port,
 -- because the point of the exercise is the ALGORITHM. RFC 2453 specifies the real thing,
 -- with its own packet layout, timers, and authentication. Reading it after building this
@@ -83,11 +90,21 @@ local function snapshot()                      -- what `gpipe cp status` reports
     publish(table.concat(lines, "\n"))
 end
 
+-- send our vector out of every interface that is up (a triggered update, or the tick's)
+local function advertise()
+    for _, itf in ipairs(myifaces) do
+        if itf.up ~= false then
+            send(itf.iface, encode(vector_for(itf.iface)))
+        end
+    end
+end
+
 -- ---- callbacks -------------------------------------------------------------
 function init(list)
     myifaces = list
     for _, itf in ipairs(list) do                       -- our own LANs are free
-        dv[net_of(itf.ip)] = {cost = 0, connected = true}
+        dv[net_of(itf.ip)] = {cost = itf.up == false and INF or 0, connected = true,
+                              iface = itf.iface}
     end
     log("rip: up on " .. #list .. " interfaces")
     snapshot()
@@ -95,9 +112,7 @@ end
 
 function tick()
     myifaces = interfaces()                             -- costs may have changed since last tick
-    for _, itf in ipairs(myifaces) do                   -- advertise, per interface
-        send(itf.iface, encode(vector_for(itf.iface)))
-    end
+    advertise()
     local changed = false                               -- then age what we learned
     for net, r in pairs(dv) do
         if not r.connected then
@@ -111,6 +126,30 @@ function tick()
         end
     end
     if changed then snapshot() end
+end
+
+-- A link went down or came back (or its cost changed). Down: poison everything that depended on
+-- it and tell the neighbours now. Up: our subnet there is reachable again, at cost 0.
+function on_link_change(iface, up, cost)
+    myifaces = interfaces()
+    local changed = false
+    for net, r in pairs(dv) do
+        if r.iface == iface then
+            if not up and r.cost < INF then
+                r.cost = INF
+                if not r.connected then route_del(addr_of(net), "255.255.255.0") end
+                log("rip: " .. net .. " lost with its link")
+                changed = true
+            elseif up and r.connected and r.cost ~= 0 then
+                r.cost = 0
+                changed = true
+            end
+        end
+    end
+    if changed then
+        snapshot()
+        advertise()                                     -- triggered update
+    end
 end
 
 function on_message(iface, src, data)

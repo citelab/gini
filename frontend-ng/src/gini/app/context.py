@@ -27,6 +27,11 @@ class EventBus(QObject):
     # all expect a device id; selecting one clears the other (AppContext.select / select_link).
     link_selection_changed = Signal(object)  # link id or None
     link_changed = Signal(str)        # link id (its properties: cost, failure model)
+    # A link failed or recovered in the running lab (link id, up, why: "random" | "manual"),
+    # after it has been applied at every end. And the request for one (Fail now / Restore, the
+    # AI), which the main window -- the only owner of the failure clocks -- turns into the fact.
+    link_state_changed = Signal(str, bool, str)
+    link_state_requested = Signal(str, bool)
     canvas_background_clicked = Signal()  # left-click on empty canvas (exit sticky modes)
     llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
     enrolment_changed = Signal(str, bool, int)  # (student, course-server online, missions due)
@@ -171,6 +176,7 @@ class AppContext:
         self.topology = Topology("untitled")
         self.selected_id: str | None = None
         self.selected_link_id: str | None = None
+        self.failed_links: set[str] = set()      # links down in the running lab (main window)
         self.addressing: dict[str, dict] = {}   # device name -> {interfaces:[…]}
         self.warnings: dict[str, list] = {}     # device name -> [lint messages]
         self.mission_flags: dict[str, str] = {}  # device id -> reason (Mission off-task / bad-link)

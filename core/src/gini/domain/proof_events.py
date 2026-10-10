@@ -66,6 +66,7 @@ SIGNAL_KINDS = {
     "link_removed": DISCONNECT,
     "device_changed": CONFIGURE,
     "link_changed": CONFIGURE,          # a link's cost or failure model (configure_link)
+    "link_state_changed": OBSERVE,      # a link failed / was repaired (link_state)
     "run_state": RUN,
     "device_activated": OPEN_CONSOLE,
     "rider_ran": MEASURE,
@@ -82,6 +83,7 @@ IGNORED = frozenset({
     "device_resized", "addressing_changed", "mission_flags_changed", "boards_changed",
     "enrolment_changed", "log", "machine_events", "fabric_metrics", "k8s_metrics",
     "link_selection_changed",
+    "link_state_requested",             # the request, not the fact: link_state_changed records it
 })
 
 
@@ -163,6 +165,17 @@ def configure_link(link_id: str, a_name: str, b_name: str, changes: dict) -> tup
         return None
     return CONFIGURE, {"id": str(link_id), "name": clip(f"{a_name} ↔ {b_name}", 64),
                        "changes": dict(changes), "edge": "link"}
+
+
+def link_state(a_name: str, b_name: str, up: bool, why: str) -> tuple[str, dict]:
+    """A link failed or was repaired in the running lab. An OBSERVATION, like `observe`: a random
+    failure is something that happened to the lab, not something the student did -- and "by hand"
+    (Fail now / Restore) is said in the detail, so the narration can tell the two apart."""
+    what = "link repaired" if up else "link failed"
+    how = "by hand" if why == "manual" else "at random"
+    # narrates as "GINI observed on R1 ↔ R2: link failed at random"
+    return OBSERVE, {"on": clip(f"{a_name} ↔ {b_name}", 64), "what": what,
+                     "detail": clip(f"{what} {how}", 300)}
 
 
 # -- operation --------------------------------------------------------------- #

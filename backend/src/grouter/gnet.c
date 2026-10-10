@@ -26,6 +26,8 @@
 #include "routetable.h"
 #include "openflow_config.h"
 #include "gr_delay_ctl.h"
+#include "gr_state.h"          /* withdraw / restore an interface's connected route */
+#include "gr_control_plane.h"  /* tell control-plane modules a link changed */
 
 #define MAX_MTU 1500
 #define BASEPORTNUM 60000
@@ -734,12 +736,22 @@ int upInterface(int index)
 		return EXIT_FAILURE;
 	}
 
+	int was_up = (iface->state == INTERFACE_UP);
 	int status = upThisInterface(iface);
 	if (rconfig.openflow)
 	{
 		openflow_config_update_phy_port(
 				openflow_config_get_of_port_num(index));
 	}
+	if (iface->conn_withdrawn)            /* put back exactly what down took away */
+	{
+		uchar zero[4] = {0, 0, 0, 0};
+		gr_route_add_tagged(iface->conn_net, iface->conn_mask, zero, index,
+		                    ROUTE_ORIGIN_CONNECTED);
+		iface->conn_withdrawn = 0;
+	}
+	if (!was_up)
+		gr_cp_link_event(index, 1, iface->metric);
 	return status;
 }
 
@@ -758,12 +770,32 @@ int downInterface(int index)
 		return EXIT_FAILURE;
 	}
 
+	int was_up = (iface->state == INTERFACE_UP);
 	int status = downThisInterface(iface);
 	if (rconfig.openflow)
 	{
 		openflow_config_update_phy_port(
 				openflow_config_get_of_port_num(index));
 	}
+	/* Withdraw the interface's subnet, as a real router does when it loses carrier: the failure
+	 * is then visible in `route show`, and nothing is routed into a dead link as if it were up.
+	 * Only the CONNECTED route on this interface; static and protocol routes through it are
+	 * left alone (static ones black-hole by design, dynamic ones are the protocol's to drop). */
+	if (was_up && !iface->conn_withdrawn)
+	{
+		uchar net[4];
+		int k;
+		for (k = 0; k < 4; k++)
+			net[k] = iface->ip_addr[k] & iface->netmask[k];
+		if (gr_route_withdraw_connected(net, iface->netmask, index))
+		{
+			COPY_IP(iface->conn_net, net);
+			COPY_IP(iface->conn_mask, iface->netmask);
+			iface->conn_withdrawn = 1;
+		}
+	}
+	if (was_up)
+		gr_cp_link_event(index, 0, iface->metric);
 	return status;
 }
 

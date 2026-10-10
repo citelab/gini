@@ -64,6 +64,8 @@ typedef struct gr_cp_services
     int  (*iface_mask)(int iface, uchar *mask);
     /* the interface's routing cost, 1-15 (1 if no such interface). Appended last. */
     int  (*iface_metric)(int iface);
+    /* 1 if the interface is up, 0 if down or absent. Appended last. */
+    int  (*iface_up)(int iface);
 } gr_cp_services_t;
 
 /* ---- which packets a module wants delivered to on_packet() ---- */
@@ -89,6 +91,9 @@ struct gr_cp_module
      * read cross-thread (e.g. a published snapshot buffer). Backs `gpipe cp status`,
      * which the Multicast HUD polls. NULL = module has no status. */
     int  (*status)(gr_cp_module_t *self, char *out, size_t outlen);
+    /* OPTIONAL: an interface went up or down, or its cost changed. Runs on the control thread,
+     * like everything else a module does. NULL = not interested. Appended last. */
+    void (*on_link)(gr_cp_module_t *self, int iface, int up, int metric);
 };
 
 /* ---- runtime entry points ---- */
@@ -118,5 +123,10 @@ const char *gr_cp_names(void);
  * forwarding worker (ip.c). Cheap no-op when no module is loaded; otherwise filter-matches
  * and copies the packet onto the control queue. Never runs module code itself. */
 void gr_cp_deliver(gpacket_t *pkt);
+
+/* An interface changed: up/down, or its routing cost. Queued for the control thread (never runs
+ * module code on the caller's thread) and delivered to every module's on_link. Cheap and a no-op
+ * when nothing is loaded. */
+void gr_cp_link_event(int iface, int up, int metric);
 
 #endif /* __GR_CONTROL_PLANE_H__ */

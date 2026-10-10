@@ -54,6 +54,16 @@ def build_server(api: GiniAPI, registry: ToolRegistry | None = None):
         return call("set_link_property", link=link, key=key, value=value)
 
     @server.tool()
+    def fail_link(link: str) -> str:
+        """Fail a link in the RUNNING lab now (carrier lost at both ends, as if unplugged). The link is its id or its two ends, e.g. 'R1-R2'."""
+        return call("fail_link", link=link)
+
+    @server.tool()
+    def restore_link(link: str) -> str:
+        """Restore a failed link in the running lab."""
+        return call("restore_link", link=link)
+
+    @server.tool()
     def inspect_link(link: str) -> str:
         """Inspect a link (its id or its two ends, e.g. 'R1-R2'): cost and failure model, and whether each applies."""
         return call("inspect_link", link=link)

@@ -12,7 +12,7 @@ import json
 import os
 import sys
 
-from .control import maybe_start
+from .control import link_command, maybe_start
 from .frame import is_multicast_mac, parse_eth
 from .transport import Port, run_loop
 
@@ -26,9 +26,12 @@ class LearningSwitch:
         self._ctrl = maybe_start(self.name, self._control, f"switch {self.name}")
 
     def _control(self, cmd: str) -> str:
+        out = link_command(self.ports, cmd.strip())
+        if out is not None:
+            return out
         cmd = cmd.lower()
         if cmd in ("help", "?", "h"):
-            return "commands: mactable, ports, help, exit"
+            return "commands: mactable, ports, links, link <id> up|down, help, exit"
         if cmd in ("mactable", "mac", "table"):
             if not self.table:
                 return "(mac table empty)"

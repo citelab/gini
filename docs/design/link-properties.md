@@ -1,6 +1,6 @@
 # Link properties: cost and failure
 
-**Status: agreed design (Mahesh, 2026-10-10). Not yet implemented.**
+**Status: agreed design (Mahesh, 2026-10-10). Implemented, Phases 0-3 (2026-10-10).**
 
 ## The problem
 

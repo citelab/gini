@@ -809,6 +809,7 @@ _SHIPPED_HASHES = {
     "rip_reference.lua": frozenset({
         "bcaf63f8d8c6053bac380e12a2ded875b2c8df6fbb9099c850e2518d7a6be7df",   # 2026-08-23, +1/hop
         "e88482702660615aadab2fc3388b854ce4f8701889af0e1e8db9bfd11afe191c",   # link costs
+        "97ce039d7def05981d7b8fb11f7d80f991e671b75f6a7e10492340484119ce8d",   # on_link_change
     }),
 }
 
@@ -1217,6 +1218,8 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             f"    networks: {nets}",
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",
+            # the shuttle's control socket: gBuilder fails / restores a drawn link through it
+            "      GINI_CTRL_DIR: /run/gini",
             *_term_env(m["name"]),
         ]
         from ..app.paths import captures_dir, machine_dir, shared_dir

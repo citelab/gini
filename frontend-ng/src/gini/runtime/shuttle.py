@@ -23,9 +23,13 @@ import struct
 import subprocess
 import sys
 
+from .control import link_command, maybe_start
 from .transport import Port
 
 TUNSETIFF = 0x400454CA
+# _IOW('T', 226, int): set a tap's carrier. A cut link drops it, so `ip link` inside the machine
+# shows NO-CARRIER -- exactly what a real host shows when its cable is pulled.
+TUNSETCARRIER = 0x400454E2
 TUNSETOFFLOAD = 0x400454D0        # _IOW('T', 208, unsigned int)
 IFF_TAP = 0x0002
 IFF_NO_PI = 0x1000
@@ -135,6 +139,19 @@ def repair_l4_checksum(frame: bytearray) -> bool:
     frame[ck_off] = new >> 8
     frame[ck_off + 1] = new & 0xFF
     return True
+
+
+def set_carrier(fd: int, tap: str, up: bool) -> None:
+    """Carrier on or off for one tap. TUNSETCARRIER where the kernel has it (Linux >= 3.19);
+    otherwise the interface is taken down administratively, which loses its routes too but still
+    stops the machine sending into a dead link."""
+    try:
+        fcntl.ioctl(fd, TUNSETCARRIER, struct.pack("i", 1 if up else 0))
+        return
+    except OSError:
+        pass
+    subprocess.run(["ip", "link", "set", "dev", tap, "up" if up else "down"],
+                   capture_output=True)
 
 
 def open_tap(name: str) -> int:
@@ -357,6 +374,19 @@ def main() -> None:
         sel.register(port.sock, selectors.EVENT_READ, "udp")
         print(f"[{cfg['name']}] {tap} {itf['ip']} <-> UDP "
               f"{port.peer_host}:{port.peer_port}", file=sys.stderr)
+
+    # gBuilder fails and restores a drawn link through this machine's control socket
+    # (`link <id> down|up`); a cut link also drops carrier on the interface it feeds.
+    tap_of = {port.sock.fileno(): (fd, port.name) for fd, port in fd_port.items()}
+
+    def _carrier(port, up):
+        fd, tap = tap_of[port.sock.fileno()]
+        set_carrier(fd, tap, up)
+
+    def _control(cmd):
+        out = link_command(list(fd_port.values()), cmd.strip(), on_change=_carrier)
+        return out if out is not None else "commands: links, link <id> up|down"
+    maybe_start(cfg["name"], _control, f"machine {cfg['name']}")
 
     if cfg.get("gateway"):                       # the drawn Internet element = NAT gateway
         setup_nat_gateway(cfg)

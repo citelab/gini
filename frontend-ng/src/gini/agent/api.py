@@ -140,6 +140,29 @@ class GiniAPI:
         self.ctx.bus.topology_changed.emit()
         return self._link_dict(link)
 
+    def fail_link(self, ref) -> dict:
+        """Fail a link in the RUNNING lab now (carrier lost at both ends), as its Fail now does.
+        It is restored by its own repair time, if it has one, or by restore_link."""
+        link = self._resolve_link(ref)
+        self.ctx.bus.link_state_requested.emit(link.id, False)
+        return {"link": link.id, "requested": "down"}
+
+    def restore_link(self, ref) -> dict:
+        """Restore a failed link in the running lab, as its Restore does."""
+        link = self._resolve_link(ref)
+        self.ctx.bus.link_state_requested.emit(link.id, True)
+        return {"link": link.id, "requested": "up"}
+
+    def set_failure_seed(self, seed) -> dict:
+        """Pin the seed the failure clocks draw from, so every Run (and every student given this
+        lab) sees the same failure schedule; None for a fresh seed each Run."""
+        if seed is None or seed == "":
+            self.ctx.topology.extra.pop("failure_seed", None)
+        else:
+            self.ctx.topology.extra["failure_seed"] = int(seed)
+        self.ctx.bus.topology_changed.emit()
+        return {"failure_seed": self.ctx.topology.extra.get("failure_seed")}
+
     # -- manual addressing -------------------------------------------------- #
     def set_manual_addressing(self, on: bool) -> None:
         """Toggle manual addressing: stop auto-assigning IPs and honor static_ips

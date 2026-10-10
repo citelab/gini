@@ -29,10 +29,13 @@ is the same as plain show.
 
 .B down
 disables an interface without removing it: nothing is sent or received on it, so the link
-behaves as if it were unplugged, and its routes stay in the table pointing at a dead link. That
-is a good way to watch what fails, and what does not, when a link breaks.
+behaves as if it were unplugged. Like a real router losing carrier, it withdraws the interface's
+own (connected, C) route; static routes through it stay, pointing at a dead link, and routes a
+routing protocol learned through it are the protocol's to withdraw -- a protocol is told at once
+(on_link_change). That is a good way to watch what fails, and what does not, when a link breaks.
 .B up
-brings it back.
+brings it back, and restores the connected route. gBuilder does both, at both ends of a link,
+when a link fails or is repaired in a running lab.
 
 .B mod
 changes an interface's MTU, the largest IP packet it will send without fragmenting it, its

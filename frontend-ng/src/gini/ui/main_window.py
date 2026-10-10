@@ -240,6 +240,15 @@ class MainWindow(QMainWindow):
         # a link's cost changed: push it into a running lab (services/link_push.py)
         self.ctx.bus.link_changed.connect(self._on_link_changed_live)
         self._run_links = None                  # (structure, costs, installed routes, static)
+        # link failures (domain/link_faults.py): one clock per link, owned here
+        self.ctx.bus.link_state_requested.connect(self._on_link_state_requested)
+        self._run_cfg = None                    # the RuntimeConfig this Run launched
+        self._faults = None                     # link_faults.Schedule while running
+        self._fault_t0 = 0.0
+        from PySide6.QtCore import QTimer as _QT
+        self._fault_timer = _QT(self)
+        self._fault_timer.setInterval(500)
+        self._fault_timer.timeout.connect(self._fault_tick)
         self.ctx.bus.log.connect(self._on_log)
         self.ctx.bus.device_delete_requested.connect(self._delete_device)
         self.ctx.bus.warning_explain_requested.connect(self._on_warning_explain)
@@ -2586,6 +2595,7 @@ class MainWindow(QMainWindow):
             return
         self._last_services = list(cfg.services)
         self._last_machines = list(cfg.machines)     # headful Desktops carry a noVNC port here
+        self._run_cfg = cfg                         # which interface each link is, per element
         # What this Run installed, so a later cost change can push only the differences.
         from ..services import link_push
         self._run_links = (link_push.structure(self.ctx.topology),
@@ -2639,6 +2649,7 @@ class MainWindow(QMainWindow):
             self._stopping = False
             self._set_runtime_status("running")
             self._poll.start()                  # reconcile with real container state
+            self._start_link_faults()           # links set to fail get their clocks
             # `engine_name`, not the word Docker. Its own docstring says why: telling somebody
             # with Podman that their topology is running on Docker is confusing at best, and on a
             # campus machine where Docker is not installed at all it reads as the app talking about
@@ -2739,6 +2750,7 @@ class MainWindow(QMainWindow):
                 self._stopping = False
                 self._orphaned = False          # nothing of ours is left out there
                 self._poll.stop()
+                self._stop_link_faults()
                 self._set_runtime_status("idle")
                 self.dashboard.stop()           # freeze the session's GINI $ bill
                 self._mem_poll.stop()
@@ -3849,6 +3861,111 @@ class MainWindow(QMainWindow):
                         {m.source_id, m.target_id} == {mid, b} for m in links):
                     return LP.get(l, LP.COST)
         return None
+
+    # -- link failures (docs/design/link-properties.md, Phase 3) ------------------------- #
+    def _start_link_faults(self) -> None:
+        """Arm every link's failure clock for this Run. The seed is the topology's pinned one, if
+        a teacher set it (GiniAPI.set_failure_seed), else a fresh one -- logged either way, so a
+        run can be replayed."""
+        import random
+        import time
+        from ..domain import link_faults as LF
+        self.ctx.failed_links = set()
+        self.canvas.scene_.set_failed_links(set())
+        if self._run_cfg is None:
+            return
+        seed = self.ctx.topology.extra.get("failure_seed")
+        if not isinstance(seed, int):
+            seed = random.SystemRandom().randrange(1, 1_000_000)
+        self._faults = LF.Schedule(self.ctx.topology, seed)
+        self._fault_t0 = time.monotonic()
+        n = len(self._faults._links)
+        if n:
+            self.ctx.log(f"Link failures armed on {n} link(s), seed {seed}.", "info")
+        self._fault_timer.start()
+
+    def _stop_link_faults(self) -> None:
+        self._fault_timer.stop()
+        self._faults = None
+        self.ctx.failed_links = set()
+        self.canvas.scene_.set_failed_links(set())   # a stopped lab has no failed links
+
+    def _fault_tick(self) -> None:
+        import time
+        if not self._running or self._faults is None:
+            return
+        for ev in self._faults.due(time.monotonic() - self._fault_t0):
+            self._apply_link_state(ev.link_id, ev.up, "random")
+
+    def _on_link_state_requested(self, link_id: str, up: bool) -> None:
+        """Fail now / Restore (the inspector, the link's menu, the AI)."""
+        import time
+        if not self._running or self._run_cfg is None or self._remote is not None:
+            self.ctx.log("Links can only fail in a running lab — press Run first.", "info")
+            return
+        if link_id not in self.ctx.topology.links:
+            return
+        if up == (link_id not in self.ctx.failed_links):
+            return                                  # already in that state
+        if self._faults is not None:
+            now = time.monotonic() - self._fault_t0
+            (self._faults.restore if up else self._faults.fail_now)(link_id, now)
+        self._apply_link_state(link_id, up, "manual")
+
+    def _apply_link_state(self, link_id: str, up: bool, why: str) -> None:
+        """Cut or restore a link at every end at once -- router interfaces, switch ports, machine
+        interfaces -- and say so. Static routes are deliberately NOT recomputed: that is what
+        static routing does, and the contrast is the lesson. Dynamic routing reacts on its own."""
+        from ..domain import link_faults as LF
+        from ..domain import link_props as LP
+        topo = self.ctx.topology
+        link = topo.links.get(link_id)
+        if link is None:
+            return
+        if up:
+            self.ctx.failed_links.discard(link_id)
+        else:
+            self.ctx.failed_links.add(link_id)
+        cmds = LF.commands(self._run_cfg, link_id, up)
+        a, b = topo.devices.get(link.source_id), topo.devices.get(link.target_id)
+        ends = f"{a.name if a else '?'} ↔ {b.name if b else '?'}"
+        if why == "random":
+            mean = LP.get(link, LP.REPAIR_AFTER if up else LP.FAIL_AFTER)
+            reason = f"random, mean {mean:g} s"
+        else:
+            reason = "by hand"
+        self.ctx.log(f"Link {ends} {'repaired' if up else 'FAILED'} ({reason}).",
+                     "info" if up else "error")
+        self.ctx.bus.link_state_changed.emit(link_id, up, why)
+
+        def work():
+            failed = []
+            for kind, element, cmd in cmds:
+                out = self._link_cmd(kind, element, cmd)
+                if out.startswith(("(query failed", "(not running)", "cannot connect")) \
+                        or "no port on link" in out or "usage" in out:
+                    failed.append(f"{element}: {out[:100]}")
+            if failed:
+                self.ctx.log(f"Link {ends}: not every end took it: " + "; ".join(failed),
+                             "error")
+        run_off_gui(self, work)
+
+    def _link_cmd(self, kind: str, element: str, cmd: str) -> str:
+        """Run one link command at one end. Routers and switches answer on their consoles; a
+        machine on its shuttle's control socket, inside its own container."""
+        if kind in ("router", "fabric"):
+            return self.element_query(element, cmd)
+        import subprocess
+        from ..services.compiler import _svc
+        svc = _svc(element)
+        try:
+            r = subprocess.run([*self._exec_argv(svc), "python3", "-m", "dataplane.console",
+                                svc, cmd], cwd=self._workdir, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=15)
+            return (r.stdout or "").strip() or _runtime.compose_error(r.stderr, limit=400) \
+                or "(no output)"
+        except Exception as e:                      # noqa: BLE001
+            return f"(query failed: {e})"
 
     def _on_link_changed_live(self, link_id: str) -> None:
         """A link's cost changed while the lab runs: tell both routers on it, and in static mode

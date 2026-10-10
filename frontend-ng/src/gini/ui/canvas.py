@@ -767,6 +767,8 @@ class EdgeItem(QGraphicsObject):
                 parts.append(str(_LP.get(self.link, _LP.COST)))
             if _LP.get(self.link, _LP.FAIL_AFTER) > 0:
                 parts.append("↯")
+            if self.link.id in getattr(self._scene, "failed_links", ()):
+                parts.insert(0, "✕")                 # down right now
             label = " ".join(parts)
             a, b = topo.devices.get(self.link.source_id), topo.devices.get(self.link.target_id)
             ends = f"{a.name if a else '?'} ↔ {b.name if b else '?'}"
@@ -774,11 +776,31 @@ class EdgeItem(QGraphicsObject):
             if not _LP.is_costed(topo, self.link):
                 what = what.split(" · ", 1)[-1]       # cost means nothing without a router
             tip = f"{ends}\n{what}"
+            if self.link.id in getattr(self._scene, "failed_links", ()):
+                tip += "\nDOWN — failed in the running lab"
         self.setToolTip(tip)
         if label != self._label:
             self.prepareGeometryChange()
             self._label = label
         self.update()
+
+    def contextMenuEvent(self, e) -> None:  # noqa: N802
+        """Right-click a cable in the running lab: Fail now / Restore, for demonstrating a failure
+        live. Requests go to the main window, which owns the failure clocks."""
+        if self._is_attach():
+            return
+        from PySide6.QtWidgets import QMenu
+        ctx = self._scene.ctx
+        down = self.link.id in getattr(self._scene, "failed_links", ())
+        menu = QMenu()
+        act = menu.addAction("Restore link" if down else "Fail link now")
+        act.setEnabled(bool(getattr(self._scene, "running", False)))
+        if not act.isEnabled():
+            act.setToolTip("Run the topology first")
+        chosen = menu.exec(e.screenPos())
+        if chosen is act:
+            ctx.bus.link_state_requested.emit(self.link.id, down)
+        e.accept()
 
     def _label_rect(self) -> QRectF:
         if not self._label or self._path.isEmpty():
@@ -809,6 +831,7 @@ class EdgeItem(QGraphicsObject):
                 p.setPen(QPen(_qcolor(t.accent), 1.6, Qt.DashLine))
                 p.drawPath(self._path)
             return
+        failed = self.link.id in getattr(self._scene, "failed_links", ())
         if self.isSelected():                     # selected wire: accent + a soft halo
             halo = _qcolor(t.accent); halo.setAlpha(60)
             p.setPen(QPen(halo, 7))
@@ -816,6 +839,9 @@ class EdgeItem(QGraphicsObject):
             p.setPen(QPen(_qcolor(t.accent), 2.4))
         else:
             p.setPen(QPen(_qcolor(t.line2), 2))
+        if failed:                                # a cut cable: red and broken
+            pen = QPen(_qcolor(t.accent_for("red")), 2.4, Qt.DashLine)
+            p.setPen(pen)
         p.drawPath(self._path)
         if self._label:                           # cost / ↯, a pill on the wire's midpoint
             r = self._label_rect()
@@ -944,6 +970,7 @@ class CanvasScene(QGraphicsScene):
         # and while it is false none does -- a plain lab looks exactly as it did. Cached here (see
         # _relabel_links) so painting an edge never rescans the topology.
         self.link_labels = False
+        self.failed_links: set[str] = set()        # down in the running lab (set_failed_links)
         self.groups: dict[str, GroupItem] = {}     # VPC/Subnet/Region container boxes
         self.running = False                        # lab up? gates console/logs/login actions
         self.setSceneRect(-2000, -2000, 4000, 4000)
@@ -957,6 +984,7 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.link_added.connect(self._on_link_added)
         ctx.bus.link_removed.connect(self._on_link_removed)
         ctx.bus.link_changed.connect(self._relabel_links)
+        ctx.bus.link_state_changed.connect(self._on_link_state)
         ctx.bus.device_changed.connect(self._on_device_changed)
         ctx.bus.addressing_changed.connect(self._refresh_node_labels)
         ctx.bus.warnings_changed.connect(self._on_warnings)
@@ -1116,6 +1144,17 @@ class CanvasScene(QGraphicsScene):
         if edge:
             self.removeItem(edge)
         self._relabel_links()
+
+    def set_failed_links(self, ids) -> None:
+        """Which links are down right now (the main window owns the failure clocks)."""
+        self.failed_links = set(ids)
+        for e in self.edges.values():
+            e.refresh_meta()
+
+    def _on_link_state(self, link_id: str, up: bool, _why: str = "") -> None:
+        failed = set(self.failed_links)
+        (failed.discard if up else failed.add)(link_id)
+        self.set_failed_links(failed)
 
     def _relabel_links(self, *_a) -> None:
         """A link's cost or failure model changed, or a link came or went: recompute whether the

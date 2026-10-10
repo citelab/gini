@@ -32,6 +32,7 @@ _SUBSCRIPTIONS = (
     ("link_added", "_on_link_added"),
     ("link_removed", "_on_link_removed"),
     ("link_changed", "_on_link_changed"),
+    ("link_state_changed", "_on_link_state_changed"),
     ("run_state", "_on_run_state"),
     ("device_activated", "_on_device_activated"),
     ("rider_ran", "_on_rider_ran"),
@@ -438,6 +439,16 @@ class ProofRecorder:
         self._link_props[link_id] = after
         a, b = self._endpoint_names(link)
         self._record(ev.configure_link(link_id, a, b, changes))
+
+    def _on_link_state_changed(self, link_id, up, why="") -> None:
+        self._guard(self._link_state_changed, link_id, up, why)
+
+    def _link_state_changed(self, link_id, up, why) -> None:
+        link = getattr(self._topology(), "links", {}).get(link_id)
+        if link is None:
+            return
+        a, b = self._endpoint_names(link)
+        self._record(ev.link_state(a, b, bool(up), why))
 
     def _on_link_removed(self, link_id) -> None:
         self._guard(self._link_removed, link_id)

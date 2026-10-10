@@ -145,9 +145,11 @@ for. It runs alongside forwarding rather than inside it.
 .B cp add lua
 /scripts/file.lua [tick_ms]
 .RS
-Load a Lua control-plane script. It may define init(ifaces), tick() (called every tick_ms) and
-on_message(iface, src, payload, pkt), and it can call listen, send, emit, route_add, route_del,
-interfaces, log and publish. rip_reference.lua and mcast_tree.lua, which gBuilder puts in
+Load a Lua control-plane script. It may define init(ifaces), tick() (called every tick_ms),
+on_message(iface, src, payload, pkt) and on_link_change(iface, up, cost) -- called when a link
+fails, is repaired, or changes cost -- and it can call listen, send, emit, route_add, route_del,
+interfaces, log and publish. interfaces() gives each interface's number, ip, prefix, cost (the
+drawn link's routing cost) and up. rip_reference.lua and mcast_tree.lua, which gBuilder puts in
 ~/.gini/scripts, are complete worked examples.
 .RE
 
