@@ -118,6 +118,7 @@ void* fromEthernetDev(void *arg)
 			/* record the TRUE received length so this frame is forwarded at its real
 			 * size rather than padded to sizeof(pkt_data_t) -- see frame.pkt_len. */
 			int _n = vpl_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+			if (gnet_rx_discard(iface, in_pkt)) continue;   /* down: received nothing */
 			in_pkt->frame.pkt_len = (_n > 0) ? _n : 0;
 			/* Counted at arrival, before the not-for-me filter: the meter shows what is on the
 			 * wire, the way a real interface counter does. */

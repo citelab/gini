@@ -7,10 +7,10 @@ ifconfig \- setup network interfaces at gRouter
 .nf
 ifconfig show [brief | verbose]
 ifconfig down | up tunN
-ifconfig mod tunN -mtu value
+ifconfig mod tunN [-mtu value] [-netmask mask]
 ifconfig del tunN
 ifconfig add tunN -dstip peer_ip -dstport peer_port -addr IP_address
-             -hwaddr MAC_addr [-srcport local_port]
+             -hwaddr MAC_addr [-srcport local_port] [-netmask mask]
 .fi
 
 .SH DESCRIPTION
@@ -35,7 +35,8 @@ is a good way to watch what fails, and what does not, when a link breaks.
 brings it back.
 
 .B mod
-changes an interface's MTU, the largest IP packet it will send without fragmenting it.
+changes an interface's MTU, the largest IP packet it will send without fragmenting it, or its
+subnet mask.
 
 .B del
 removes an interface for good, together with the routes that use it. It does not come back
@@ -44,7 +45,9 @@ until the next Run.
 .B add
 creates an interface by hand. A tun interface carries Ethernet frames inside UDP datagrams to
 the element at the other end: -dstip and -dstport say where to send them, -srcport is the local
-UDP port to receive on, and -addr and -hwaddr are the interface's own IP and MAC addresses. The
+UDP port to receive on, -addr and -hwaddr are the interface's own IP and MAC addresses, and
+-netmask is its subnet mask (255.255.255.0 if omitted). The router uses the mask to work out its
+subnet's broadcast address, which a routing protocol's messages are sent to. The
 commands gBuilder ran for this router are in its configuration file, which is the best model to
 copy: type cat /run/r1.conf (with your router's name), since this console hands commands it
 does not know to the Linux shell. add does not create a route; use route add for that, and use

@@ -14,6 +14,7 @@
 #include "routetable.h"     /* ROUTE_ORIGIN_DYNAMIC */
 #include "ip.h"             /* IPOutgoingPacket, IPSend2Output, ip_packet_t, MTU_tbl */
 #include "mtu.h"            /* findInterfaceIP, findAllInterfaceIPs */
+#include "gnet.h"           /* findInterface: the interface's netmask */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -190,6 +191,14 @@ static int svc_iface_addr(int iface, uchar *ip)
     return (findInterfaceIP(MTU_tbl, iface, ip) == EXIT_SUCCESS) ? 0 : -1;
 }
 
+static int svc_iface_mask(int iface, uchar *mask)
+{
+    interface_t *f = findInterface(iface);
+    if (f == NULL) return -1;
+    COPY_IP(mask, f->netmask);
+    return 0;
+}
+
 static void svc_log(const char *fmt, ...)
 {
     va_list ap;
@@ -207,6 +216,7 @@ static const gr_cp_services_t SERVICES = {
     .timer_add = svc_timer_add,  .timer_del   = svc_timer_del,
     .iface_count = svc_iface_count, .iface_addr = svc_iface_addr,
     .log = svc_log,
+    .iface_mask = svc_iface_mask,
 };
 
 /* ---- filter matching ----------------------------------------------------- */

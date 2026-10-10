@@ -64,9 +64,28 @@ def test_openflow_mode_adds_flag_and_drops_routes():
     assert "route add" in rcfg
 
 
+def _one_iface(ip, **extra):
+    return run_grouter.build_config({"name": "r1", **extra, "ifaces": [
+        {"ip": ip, "mac": "02:00:00:01:01:01",
+         "port": {"peer_host": "127.0.0.1", "peer_port": 5000, "bind_port": 5001}}]})
+
+
+def test_config_gives_the_router_its_real_netmask():
+    """The router kept no mask and assumed /24 for every broadcast it worked out. -netmask is a
+    trailing option, after -srcport (the fixed part of the parser ends at -hwaddr)."""
+    line = next(l for l in _one_iface("10.0.1.1/24").splitlines() if l.startswith("ifconfig"))
+    assert line.endswith("-netmask 255.255.255.0")
+    assert line.index("-srcport") < line.index("-netmask")
+    line = next(l for l in _one_iface("172.16.5.1/16").splitlines() if l.startswith("ifconfig"))
+    assert line.endswith("-netmask 255.255.0.0")
+
+
 if __name__ == "__main__":
     test_cmd_uses_valid_option_spelling()
     test_cmd_options_are_accepted_by_the_binary()
     test_config_has_srcport_after_hwaddr()
+    test_openflow_mode_adds_flag_and_drops_routes()
+    test_config_gives_the_router_its_real_netmask()
+    print("ok")
     test_openflow_mode_adds_flag_and_drops_routes()
     print("test_run_grouter: ALL PASS")

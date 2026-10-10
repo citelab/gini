@@ -14,6 +14,7 @@
 #include "gr_control_plane.h" /* B2: control-plane module receive hook */
 #include "gr_mcast.h"         /* B3: multicast membership table */
 #include "mtu.h"
+#include "gnet.h"     /* findInterface: an interface's netmask */
 #include "protocols.h"
 #include "ip.h"
 #include "gr_watch.h"
@@ -217,22 +218,35 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 /*
  * Is this packet addressed to the broadcast address of the subnet it ARRIVED on? Reads the
  * destination from the header bytes, which are in wire order, and compares it with the
- * receiving interface's address, which the MTU table keeps reversed (Dot2IP order). /24
- * subnets, as everywhere else in this file.
+ * receiving interface's address, which the MTU table keeps reversed (Dot2IP order), under that
+ * interface's netmask.
  *
  * The packet to ANOTHER of our subnets' broadcast address is ip_directed_bcast_iface's case,
  * below: forwarded onto that subnet. This one is not forwarded at all.
  */
+/* Is `dst` (router order) the broadcast address of interface `ifc`'s subnet? Same network under
+ * the interface's mask, and every host bit set. */
+static int ip_is_subnet_bcast(int ifc, const uchar *dst)
+{
+	interface_t *f = findInterface(ifc);
+	uchar ip[4];
+	int i;
+
+	if (f == NULL || findInterfaceIP(MTU_tbl, ifc, ip) != EXIT_SUCCESS)
+		return 0;
+	for (i = 0; i < 4; i++)
+		if ((ip[i] & f->netmask[i]) != (dst[i] & f->netmask[i]) ||
+		    (uchar)(dst[i] | f->netmask[i]) != 0xff)
+			return 0;
+	return 1;
+}
+
 static int ip_local_bcast(gpacket_t *in_pkt)
 {
 	const uchar *d = (const uchar *)in_pkt->data.data + 16;   /* IPv4 destination, wire order */
-	uchar ip[4];
+	uchar dst[4] = { d[3], d[2], d[1], d[0] };                   /* ...in router order */
 
-	if (d[3] != 255)
-		return 0;
-	if (findInterfaceIP(MTU_tbl, in_pkt->frame.src_interface, ip) != EXIT_SUCCESS)
-		return 0;
-	return ip[3] == d[0] && ip[2] == d[1] && ip[1] == d[2];
+	return ip_is_subnet_bcast(in_pkt->frame.src_interface, dst);
 }
 
 static int ip_directed_bcast_iface(uchar *dst, int *iface)
@@ -242,11 +256,11 @@ static int ip_directed_bcast_iface(uchar *dst, int *iface)
 	for (i = 0; i < MAX_MTU; i++)
 	{
 		if (findInterfaceIP(MTU_tbl, i, ip) != EXIT_SUCCESS) continue;
-		/* Both are in the router's reversed order ({1,2,0,10} is 10.0.2.1), so the host octet
-		 * is byte 0 and the /24 is bytes 1..3. This compared bytes 0..2 and tested byte 3 for
+		/* Both in the router's reversed order. This compared bytes 0..2 and tested byte 3 for
 		 * 255 -- reading-order logic on reversed bytes -- so it never matched, and a directed
-		 * broadcast was routed as unicast and ARPed for. */
-		if (ip[1] == dst[1] && ip[2] == dst[2] && ip[3] == dst[3] && dst[0] == 255)
+		 * broadcast was routed as unicast and ARPed for. It also assumed /24; it now uses the
+		 * interface's mask. */
+		if (ip_is_subnet_bcast(i, dst))
 		{
 			*iface = i;
 			return 1;

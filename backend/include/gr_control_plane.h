@@ -59,6 +59,9 @@ typedef struct gr_cp_services
     int  (*iface_addr)(int iface, uchar *ip);   /* 0 on success, -1 if no such iface */
 
     void (*log)(const char *fmt, ...);
+
+    /* the interface's subnet mask, router (reversed) order; 0 on success. Appended last. */
+    int  (*iface_mask)(int iface, uchar *mask);
 } gr_cp_services_t;
 
 /* ---- which packets a module wants delivered to on_packet() ---- */

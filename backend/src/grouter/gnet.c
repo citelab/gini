@@ -321,6 +321,9 @@ interface_t *newInterfaceStructure(char *vsock_name, char *device,
 	COPY_MAC(iface->mac_addr, mac_addr);
 	COPY_IP(iface->ip_addr, nw_addr);
 	iface->device_mtu = iface_mtu;
+	/* /24 until `ifconfig ... -netmask` says otherwise: what every GINI subnet has been, so a
+	 * config written before the mask existed behaves exactly as it did. Router (reversed) order. */
+	iface->netmask[0] = 0; iface->netmask[1] = iface->netmask[2] = iface->netmask[3] = 255;
 
 	verbose(2, "[makeInterface]:: Searching the device driver for %s ", iface->device_type);
 	iface->devdriver = findDeviceDriver(iface->device_type);
@@ -686,10 +689,13 @@ int upThisInterface(interface_t *iface)
 	int thread_stat;
 
 	iface->state = INTERFACE_UP;
+	if (iface->rx_running)                       /* idempotent: one reader per interface, ever */
+		return EXIT_SUCCESS;
 	thread_stat = pthread_create(&(iface->threadid), NULL,
 				     (void *)iface->devdriver->fromdev, (void *)iface);
 	if (thread_stat != 0)
 		return EXIT_FAILURE;
+	iface->rx_running = 1;
 
 	return EXIT_SUCCESS;
 }
@@ -701,15 +707,11 @@ int upThisInterface(interface_t *iface)
  */
 int downThisInterface(interface_t *iface)
 {
-	int status;
-
-	status = pthread_cancel(iface->threadid);
+	/* The reader stays alive and discards (gnet_rx_discard); the output handler drops what would
+	 * be sent. Cancelling the reader here left the socket undrained and could cancel it inside
+	 * malloc -- see gnet.h. */
 	iface->state = INTERFACE_DOWN;
-
-	if (status == 0)
-		return EXIT_SUCCESS;
-	else
-		return EXIT_FAILURE;
+	return EXIT_SUCCESS;
 }
 
 
@@ -903,13 +905,18 @@ void *GNETHandler(void *outq)
 		verbose(2, "[gnetHandler]:: Recvd message pkt ");
 		pthread_testcancel();
 
+		/* Both drops free the packet: they used to `continue` without, leaking one gpacket_t per
+		 * packet routed at a down link -- every packet, for as long as it stayed down. And verbose,
+		 * not error(): error() wrote a line to the container log for each one. */
 		if ((iface = findInterface(in_pkt->frame.dst_interface)) == NULL)
 		{
-			error("[gnetHandler]:: Packet dropped, interface [%d] is invalid ", in_pkt->frame.dst_interface);
+			verbose(1, "[gnetHandler]:: Packet dropped, interface [%d] is invalid ", in_pkt->frame.dst_interface);
+			free(in_pkt);
 			continue;
 		} else if (iface->state == INTERFACE_DOWN)
 		{
-			error("[gnetHandler]:: Packet dropped! Interface not up");
+			verbose(2, "[gnetHandler]:: Packet dropped! Interface not up");
+			free(in_pkt);
 			continue;
 		}
 

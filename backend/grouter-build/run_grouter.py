@@ -55,9 +55,13 @@ def build_config(cfg: dict) -> str:
         # -srcport is optional and parsed in the trailing-args region, so it must
         # come AFTER -addr/-hwaddr (the fixed parser expects -addr after -dstport).
         srcport_opt = f" -srcport {srcport}" if srcport is not None else ""
+        # -netmask: the router kept no mask and assumed /24 everywhere that needed one; give it
+        # the real one. A trailing option, after -srcport -- the parser's fixed part ends at
+        # -hwaddr -- and an older router image ignores it.
         lines.append(
             f"ifconfig add {dev} -dstip {peer_ip} -dstport {peer['peer_port']} "
-            f"-addr {ip} -hwaddr {itf['mac']} -mtu 1400{srcport_opt}"
+            f"-addr {ip} -hwaddr {itf['mac']} -mtu 1400{srcport_opt} "
+            f"-netmask {iface.network.netmask}"
         )
         if not openflow:
             routes.append(

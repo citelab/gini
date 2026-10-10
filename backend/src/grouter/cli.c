@@ -442,6 +442,8 @@ void ifconfigCmd()
     char dev_name[MAX_DNAME_LEN], con_sock[MAX_NAME_LEN], dev_type[MAX_NAME_LEN], raw_bridge[MAX_NAME_LEN];
     uchar mac_addr[6], ip_addr[4], gw_addr[4], dst_ip[4];
     int mtu, interface, mode, mtu_given = 0;
+    uchar mask[4];
+    int mask_given = 0;
     short int dst_port;
     int src_port;           // int (not short): a literal port can exceed 32767,
                             // which would wrap negative in a short and defeat the
@@ -517,6 +519,10 @@ void ifconfigCmd()
             {
                 next_tok = strtok(NULL, " \n");
                 mtu = atoi(next_tok);
+            } else if (!strcmp("-netmask", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
+            {
+                Dot2IP(next_tok, mask);                 // router order, like -addr
+                mask_given = 1;
             } else if (!strcmp("-srcport", next_tok))
             {
                 // literal local UDP bind port (portable fabric); when given,
@@ -540,6 +546,8 @@ void ifconfigCmd()
 
         if (iface != NULL)
         {
+            if (mask_given)
+                COPY_IP(iface->netmask, mask);
             verbose(2, "[configureInterfaces]:: Inserting the definition in the interface table ");
             GNETInsertInterface(iface);
             addMTUEntry(MTU_tbl, iface->interface_id, iface->device_mtu, iface->ip_addr);
@@ -586,6 +594,11 @@ void ifconfigCmd()
                        "route add -dev %s -net 0.0.0.0 -netmask 0.0.0.0 -gw <gw>\n", dev_name);
             } else if (!strcmp("-mtu", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
                 mtu = atoi(next_tok), mtu_given = 1;
+            else if (!strcmp("-netmask", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
+                Dot2IP(next_tok, mask), mask_given = 1;
+
+        if (mask_given && (iface = findInterface(interface)) != NULL)
+            COPY_IP(iface->netmask, mask);
 
         /* Only with -mtu: `mtu` starts at DEFAULT_MTU, so a mod without it used to reset the MTU.
          * And BOTH places: changeInterfaceMTU sets the device_mtu that `ifconfig show` prints,

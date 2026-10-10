@@ -93,6 +93,7 @@ void* fromTapDev(void *arg)
 
 		bzero(in_pkt, sizeof(gpacket_t));
 		pktsize = tap_recvfrom(iface->vpl_data, &(in_pkt->data), sizeof(pkt_data_t));
+		if (gnet_rx_discard(iface, in_pkt)) continue;   /* down: received nothing */
 		gnet_count_rx(iface, pktsize);
 		pthread_testcancel();
 

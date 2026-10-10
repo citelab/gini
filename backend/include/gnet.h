@@ -55,6 +55,16 @@ typedef struct _interface_t
 	// below. Cumulative and never reset: a reader takes deltas between two polls.
 	unsigned long long rx_bytes, rx_pkts;
 	unsigned long long tx_bytes, tx_pkts;
+	// The receive thread is started once, by the first `up`, and runs until the interface is
+	// destroyed. `down` no longer cancels it (see gnet_rx_discard); this records that it exists,
+	// so a second `up` does not start a second reader -- which it used to, after which `down`
+	// stopped only one of the two and reception carried on.
+	int rx_running;
+	// Subnet mask, in the router's (reversed, Dot2IP) byte order like ip_addr. The router kept no
+	// mask at all, so everything that needed one -- a control-plane script's broadcast, the
+	// local- and directed-broadcast checks -- assumed /24. `ifconfig add ... -netmask M` sets it;
+	// absent, it defaults to 255.255.255.0, which is what every GINI subnet has been.
+	uchar netmask[4];
 } interface_t;
 
 /* Count one frame in or out. Called from EVERY device driver (ethernet, tun, tap, raw) at the
@@ -71,6 +81,19 @@ static inline void gnet_count_tx(interface_t *f, int n)
 {
 	if (f && n > 0) { __sync_fetch_and_add(&f->tx_bytes, (unsigned long long)n);
 	                  __sync_fetch_and_add(&f->tx_pkts, 1ULL); }
+}
+
+/* Called by EVERY driver straight after it reads a frame, before counting it: a down interface
+ * receives nothing, so the frame is freed and the caller goes round again (returns 1).
+ *
+ * `down` used to pthread_cancel the receive thread instead. That left the socket undrained, so
+ * everything the peer sent while the link was down sat in the kernel buffer and arrived as one
+ * stale burst on `up` -- and the cancel was ASYNCHRONOUS, so it could land inside malloc. Keeping
+ * the reader alive and discarding is what a down NIC actually does. */
+static inline int gnet_rx_discard(interface_t *f, void *pkt)
+{
+	if (f && f->state == INTERFACE_DOWN) { free(pkt); return 1; }
+	return 0;
 }
 
 

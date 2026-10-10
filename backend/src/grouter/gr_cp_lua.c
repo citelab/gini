@@ -107,11 +107,14 @@ static int l_send(lua_State *L)
     const gr_cp_services_t *svc = ST(L)->svc;
     int iface = (int)luaL_checkinteger(L, 1);
     size_t len; const char *data = luaL_checklstring(L, 2, &len);
-    uchar mine[4];
+    uchar mine[4], mask[4] = { 0, 255, 255, 255 };     /* /24 if the router has no mask */
     if (svc->iface_addr(iface, mine) != 0) return 0;
-    /* the header is in WIRE order: reverse the router-order address, broadcast is x.y.z.255 */
+    svc->iface_mask(iface, mask);
+    /* the header is in WIRE order: reverse the router-order address. The broadcast is the subnet
+     * address with every host bit set -- from the interface's real mask, not an assumed /24. */
     uchar src[4]   = { mine[3], mine[2], mine[1], mine[0] };
-    uchar bcast[4] = { mine[3], mine[2], mine[1], 255 };
+    uchar bcast[4] = { (uchar)(mine[3] | ~mask[3]), (uchar)(mine[2] | ~mask[2]),
+                       (uchar)(mine[1] | ~mask[1]), (uchar)(mine[0] | ~mask[0]) };
     uchar bmac[6]  = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
     svc->send_udp(iface, bmac, src, bcast, GR_CP_LUA_PORT, GR_CP_LUA_PORT, data, (int)len);
     return 0;
@@ -151,6 +154,15 @@ static int l_interfaces(lua_State *L)
         lua_pushinteger(L, i);   lua_setfield(L, -2, "iface");
         ip2str(ip, s);
         lua_pushstring(L, s);    lua_setfield(L, -2, "ip");
+        {
+            uchar m[4] = { 0, 255, 255, 255 };
+            int b, k, prefix = 0;
+            svc->iface_mask(i, m);
+            for (k = 0; k < 4; k++)
+                for (b = 0; b < 8; b++)
+                    prefix += (m[k] >> b) & 1;
+            lua_pushinteger(L, prefix); lua_setfield(L, -2, "prefix");   /* 24 for /24 */
+        }
         lua_rawseti(L, -2, ++row);
     }
     return 1;
