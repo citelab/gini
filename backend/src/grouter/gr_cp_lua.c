@@ -40,6 +40,7 @@
 
 #include "gr_control_plane.h"
 #include "message.h"
+#include "mtu.h"             /* MAX_MTU: interface numbers run below it */
 
 #define GR_CP_LUA_PORT 5200      /* GINI control-plane teaching port (UDP) */
 #define GR_CP_SNAP_MAX 4096      /* published status snapshot buffer */
@@ -56,12 +57,25 @@ typedef struct {
 /* every API function carries the module state as its first upvalue */
 #define ST(L) ((lua_cp_state *)lua_touserdata((L), lua_upvalueindex(1)))
 
-static int str2ip(const char *s, uchar ip[4])
+/* BYTE ORDER, the edge this file exists to get right. Lua speaks dotted strings in reading
+ * order. The router stores an address REVERSED -- Dot2IP puts "10.0.1.1" in as {1,1,0,10}, and
+ * the route table, the MTU table and route_add all use that -- while a packet on the wire is in
+ * reading order. This file used to pass Lua's bytes straight through in both directions, so
+ * interfaces() told a script its address was "1.1.0.10", send() broadcast to 1.1.0.255, and
+ * route_add would have installed every route backwards. A RIP script loaded, ran, and never
+ * changed a route table. So: str2ip/ip2str convert between Lua and the ROUTER's order, and
+ * send() reverses once more to build the wire header. */
+static int str2ip(const char *s, uchar ip[4])          /* "a.b.c.d" -> router order */
 {
     int a, b, c, d;
     if (!s || sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d) != 4) return -1;
-    ip[0] = (uchar)a; ip[1] = (uchar)b; ip[2] = (uchar)c; ip[3] = (uchar)d;
+    ip[3] = (uchar)a; ip[2] = (uchar)b; ip[1] = (uchar)c; ip[0] = (uchar)d;
     return 0;
+}
+
+static void ip2str(const uchar ip[4], char out[16])    /* router order -> "a.b.c.d" */
+{
+    snprintf(out, 16, "%u.%u.%u.%u", ip[3], ip[2], ip[1], ip[0]);
 }
 
 /* ---- API callable from the script ---- */
@@ -93,9 +107,11 @@ static int l_send(lua_State *L)
     const gr_cp_services_t *svc = ST(L)->svc;
     int iface = (int)luaL_checkinteger(L, 1);
     size_t len; const char *data = luaL_checklstring(L, 2, &len);
-    uchar src[4];
-    if (svc->iface_addr(iface, src) != 0) return 0;
-    uchar bcast[4] = { src[0], src[1], src[2], 255 };
+    uchar mine[4];
+    if (svc->iface_addr(iface, mine) != 0) return 0;
+    /* the header is in WIRE order: reverse the router-order address, broadcast is x.y.z.255 */
+    uchar src[4]   = { mine[3], mine[2], mine[1], mine[0] };
+    uchar bcast[4] = { mine[3], mine[2], mine[1], 255 };
     uchar bmac[6]  = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
     svc->send_udp(iface, bmac, src, bcast, GR_CP_LUA_PORT, GR_CP_LUA_PORT, data, (int)len);
     return 0;
@@ -116,19 +132,24 @@ static int l_emit(lua_State *L)
     return 0;
 }
 
-/* interfaces() -> array of { iface=<index>, ip="a.b.c.d" } */
+/* interfaces() -> array of { iface=<index>, ip="a.b.c.d" }
+ *
+ * Walks interface NUMBERS until it has found as many as exist. It used to loop i < count, but
+ * interfaces are numbered from 1 (tun1, tun2, ...; 0 is reserved for tap), so a router with N
+ * interfaces reported N-1: the highest-numbered one was never advertised on, and the network
+ * behind it never entered the protocol. */
 static int l_interfaces(lua_State *L)
 {
     const gr_cp_services_t *svc = ST(L)->svc;
     int n = svc->iface_count(), i, row = 0;
     lua_newtable(L);
-    for (i = 0; i < n; i++)
+    for (i = 0; i < MAX_MTU && row < n; i++)
     {
         uchar ip[4]; char s[16];
         if (svc->iface_addr(i, ip) != 0) continue;
         lua_newtable(L);
         lua_pushinteger(L, i);   lua_setfield(L, -2, "iface");
-        snprintf(s, sizeof s, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+        ip2str(ip, s);
         lua_pushstring(L, s);    lua_setfield(L, -2, "ip");
         lua_rawseti(L, -2, ++row);
     }

@@ -15,12 +15,13 @@ import os
 import sys
 import time
 
-# the app package lives in the sibling app dir's src/ (gbuilder/, formerly frontend-ng/)
-for _cand in ("../../../gbuilder/src", "../../../frontend-ng/src"):
+# the app package lives in the sibling app dir's src/ (gbuilder/, formerly frontend-ng/), and
+# since 2026-08-28 the domain model in core/src -- both halves of the `gini` namespace are needed,
+# so this no longer stops at the first match (it did, and failed on `import gini.domain`).
+for _cand in ("../../../gbuilder/src", "../../../frontend-ng/src", "../../../core/src"):
     _p = os.path.abspath(os.path.join(os.path.dirname(__file__), _cand))
     if os.path.isdir(_p):
         sys.path.insert(0, _p)
-        break
 
 from gini.domain.topology import Topology          # noqa: E402
 from gini.services.compiler import RuntimeCompiler  # noqa: E402
@@ -61,9 +62,10 @@ def main() -> int:
 
         hosts = {}
         for m in rt["machines"]:
-            ip = m["ip"].split("/")[0]
-            p = m["port"]
-            hosts[m["name"]] = Host(m["name"], ip, m["mac"], m["gw"],
+            itf = m["ifaces"][0]                     # a machine carries a list of interfaces now
+            ip = itf["ip"].split("/")[0]
+            p = itf["port"]
+            hosts[m["name"]] = Host(m["name"], ip, itf["mac"], m["gw"],
                                     p["bind_port"], p["peer_port"])
         time.sleep(0.3)
         for h in hosts.values():

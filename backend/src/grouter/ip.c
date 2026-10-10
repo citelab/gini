@@ -35,6 +35,7 @@ extern pktcore_t *pcore;
 
 void IPProcessMulticast(gpacket_t *in_pkt);                 /* B3 */
 static int ip_directed_bcast_iface(uchar *dst, int *iface); /* B3 */
+static int ip_local_bcast(gpacket_t *in_pkt);
 
 void IPInit()
 {
@@ -70,6 +71,16 @@ void IPIncomingPacket(gpacket_t *in_pkt)
 		// B3: class-D destination (224.0.0.0/4) -> multicast handling
 		verbose(2, "[IPIncomingPacket]:: got a multicast packet");
 		IPProcessMulticast(in_pkt);
+	} else if (ip_local_bcast(in_pkt))
+	{
+		// The broadcast address of the subnet it arrived on (10.0.12.255 on 10.0.12.0/24):
+		// for everyone on that link, this router included. It went to the forwarding path,
+		// which routed it straight back out the interface it came in on, sent the sender an
+		// ICMP redirect, and ARPed for "10.0.12.255" -- and never offered it to the control
+		// plane, where a routing protocol's send() broadcasts land. So RIP loaded, advertised
+		// every tick, and no router ever heard a neighbour.
+		GR_WATCH(in_pkt, GW_LOCAL, -1, -1);
+		IPProcessBcastPacket(in_pkt);
 	} else if (COMPARE_IP(gNtohl(tmpbuf, ip_pkt->ip_dst), bcast_ip) == 0)
 	{
 		// TODO: rudimentary 'broadcast IP address' check
@@ -185,6 +196,29 @@ void IPProcessMulticast(gpacket_t *in_pkt)
 
 /* B3: if dst is the all-ones host address of one of our connected /24s, return 1 and the
  * interface index; used to forward a directed broadcast onto that subnet. */
+/*
+ * Is this packet addressed to the broadcast address of the subnet it ARRIVED on? Reads the
+ * destination from the header bytes, which are in wire order, and compares it with the
+ * receiving interface's address, which the MTU table keeps reversed (Dot2IP order). /24
+ * subnets, as everywhere else in this file.
+ *
+ * Note for whoever next touches ip_directed_bcast_iface below: it compares dst[0..2] with
+ * ip[0..2] on gNtohl'd (reversed) bytes, i.e. the LAST three octets, so as written it does not
+ * match a directed broadcast. Left alone here because making it match would start forwarding
+ * directed broadcasts between subnets, which is a behaviour change of its own.
+ */
+static int ip_local_bcast(gpacket_t *in_pkt)
+{
+	const uchar *d = (const uchar *)in_pkt->data.data + 16;   /* IPv4 destination, wire order */
+	uchar ip[4];
+
+	if (d[3] != 255)
+		return 0;
+	if (findInterfaceIP(MTU_tbl, in_pkt->frame.src_interface, ip) != EXIT_SUCCESS)
+		return 0;
+	return ip[3] == d[0] && ip[2] == d[1] && ip[1] == d[2];
+}
+
 static int ip_directed_bcast_iface(uchar *dst, int *iface)
 {
 	int i;
