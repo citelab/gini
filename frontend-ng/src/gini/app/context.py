@@ -23,6 +23,10 @@ class EventBus(QObject):
     link_added = Signal(str)          # link id
     link_removed = Signal(str)        # link id
     selection_changed = Signal(object)  # device id or None
+    # A LINK selected on the canvas (or None). Separate from selection_changed, whose listeners
+    # all expect a device id; selecting one clears the other (AppContext.select / select_link).
+    link_selection_changed = Signal(object)  # link id or None
+    link_changed = Signal(str)        # link id (its properties: cost, failure model)
     canvas_background_clicked = Signal()  # left-click on empty canvas (exit sticky modes)
     llm_reachable = Signal(str, bool)  # (model, reachable) — async LLM health probe result
     enrolment_changed = Signal(str, bool, int)  # (student, course-server online, missions due)
@@ -166,6 +170,7 @@ class AppContext:
         self.settings = Settings()
         self.topology = Topology("untitled")
         self.selected_id: str | None = None
+        self.selected_link_id: str | None = None
         self.addressing: dict[str, dict] = {}   # device name -> {interfaces:[…]}
         self.warnings: dict[str, list] = {}     # device name -> [lint messages]
         self.mission_flags: dict[str, str] = {}  # device id -> reason (Mission off-task / bad-link)
@@ -340,11 +345,15 @@ class AppContext:
         self.topology.remove_device(device_id)
         if self.selected_id == device_id:
             self.select(None)
+        if self.selected_link_id and self.selected_link_id not in self.topology.links:
+            self.select_link(None)                # its links went with it
         self.bus.device_removed.emit(device_id)
         self.bus.topology_changed.emit()
 
     def remove_link(self, link_id: str) -> None:
         self.topology.remove_link(link_id)
+        if self.selected_link_id == link_id:
+            self.select_link(None)
         self.bus.link_removed.emit(link_id)
         self.bus.topology_changed.emit()
 
@@ -362,8 +371,24 @@ class AppContext:
         return len(ids)
 
     def select(self, device_id: str | None) -> None:
+        if device_id is not None and self.selected_link_id is not None:
+            self.selected_link_id = None              # a device and a link are never both selected
+            self.bus.link_selection_changed.emit(None)
         self.selected_id = device_id
         self.bus.selection_changed.emit(device_id)
+
+    def select_link(self, link_id: str | None) -> None:
+        """Select a link (the inspector then edits its cost and failure model). Clears any device
+        selection first, so the listeners that only know devices see "nothing selected"."""
+        if link_id is not None and link_id not in self.topology.links:
+            link_id = None
+        if link_id is not None and self.selected_id is not None:
+            self.selected_id = None
+            self.bus.selection_changed.emit(None)
+        if link_id == self.selected_link_id:
+            return
+        self.selected_link_id = link_id
+        self.bus.link_selection_changed.emit(link_id)
 
     # -- Teaching Center ----------------------------------------------------- #
     def connect_teaching_center(self):

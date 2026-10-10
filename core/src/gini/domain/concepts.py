@@ -26,6 +26,26 @@ class Concept:
 
 CONCEPTS: tuple[Concept, ...] = (
     Concept(
+        "link-properties", "Link cost and link failure",
+        ("router", "firewall", "switch", "host"),
+        ("link cost", "cost", "metric", "weight", "weighted", "link failure", "fail", "failure",
+         "repair", "flap", "flapping", "mttf", "mttr", "unreachable", "infinity"),
+        "A link (the cable you draw) has two properties: a cost and a failure model. Select a "
+        "link on the canvas to set them in the inspector's Properties tab; they are saved with "
+        "the lab and handed to both ends of the link when you press Run. COST is an abstract "
+        "routing cost, a whole number from 1 to 15, the same in both directions -- think of it "
+        "as a price or a policy preference. It is NOT delay and NOT bandwidth: those are set on "
+        "the routers (the Router Lab's Link delay tab), and a costly link is not a slow one. "
+        "Cost only matters on a link with a router at one end. The 1-15 range is RIP's: 16 is "
+        "RIP's infinity, so a path whose costs add up to 16 or more is unreachable to RIP. "
+        "FAILURE is set as two mean times in seconds: 'Fail after' (0 = never fails, the "
+        "default) and 'Repair after' (0 = a failed link stays down until restored). Both are "
+        "drawn from an exponential distribution, the classic model of component failure; a "
+        "link with both set fails and recovers again and again, a flapping link. Once any "
+        "router link has a cost other than 1, the canvas labels every router link with its "
+        "cost; a link set to fail shows ↯.",
+    ),
+    Concept(
         "networking-basics", "LANs, switching & routing",
         ("host", "switch", "hub", "router", "firewall", "wap", "gini32"),
         ("lan", "subnet", "gateway", "layer 2", "layer 3", "l2", "l3", "ethernet",

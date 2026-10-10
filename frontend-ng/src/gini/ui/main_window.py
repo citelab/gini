@@ -2366,6 +2366,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "dashboard"):           # fresh experiment -> fresh GINI $ meter
             self.dashboard.reset()
         self.ctx.bus.selection_changed.emit(None)
+        self.ctx.selected_link_id = None          # a link of the old topology is not selectable
+        self.ctx.bus.link_selection_changed.emit(None)
 
     def _export_png(self) -> None:
         from PySide6.QtCore import QRectF, QSize, Qt
@@ -4514,16 +4516,21 @@ class MainWindow(QMainWindow):
     # -- reactions ---------------------------------------------------------- #
     def _on_scene_selection(self) -> None:
         # single source of truth for selection -> inspector (avoids the click race)
-        from .canvas import GroupItem, NodeItem
+        from .canvas import EdgeItem, GroupItem, NodeItem
         try:
             selected = self.canvas.scene_.selectedItems()
         except RuntimeError:
             return                              # scene torn down (window closing)
         nodes = [i for i in selected if isinstance(i, (NodeItem, GroupItem))]
+        edges = [i for i in selected if isinstance(i, EdgeItem)]
         if nodes:
             self.ctx.select(nodes[0].inst.id)
+        elif len(edges) == 1:
+            # a single link: the inspector edits its cost and failure model
+            self.ctx.select_link(edges[0].link.id)
         else:
             self.ctx.select(None)
+            self.ctx.select_link(None)
             self.ctx.bus.present_clear.emit()   # clicking empty space dismisses the tutor
         self._update_delete_enabled()
 

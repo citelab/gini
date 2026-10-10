@@ -65,6 +65,7 @@ SIGNAL_KINDS = {
     "link_added": CONNECT,
     "link_removed": DISCONNECT,
     "device_changed": CONFIGURE,
+    "link_changed": CONFIGURE,          # a link's cost or failure model (configure_link)
     "run_state": RUN,
     "device_activated": OPEN_CONSOLE,
     "rider_ran": MEASURE,
@@ -80,6 +81,7 @@ IGNORED = frozenset({
     "present_narrate", "present_packet", "present_clear", "topology_changed",
     "device_resized", "addressing_changed", "mission_flags_changed", "boards_changed",
     "enrolment_changed", "log", "machine_events", "fabric_metrics", "k8s_metrics",
+    "link_selection_changed",
 })
 
 
@@ -150,6 +152,17 @@ def configure(device_id: str, name: str, changes: dict) -> tuple[str, dict] | No
     if not changes:
         return None
     return CONFIGURE, {"id": str(device_id), "name": clip(name, 64), "changes": dict(changes)}
+
+
+def configure_link(link_id: str, a_name: str, b_name: str, changes: dict) -> tuple[str, dict] | None:
+    """A link's cost or failure model changed. The same kind as a device edit, deliberately: the
+    narration reads "Configured R1 ↔ R2: cost = 4", and a Teaching Center on an older release
+    reads it as a configure it already knows rather than a kind it has never seen. `edge` marks it
+    a link, as `connect` marks an attachment. None when nothing changed."""
+    if not changes:
+        return None
+    return CONFIGURE, {"id": str(link_id), "name": clip(f"{a_name} ↔ {b_name}", 64),
+                       "changes": dict(changes), "edge": "link"}
 
 
 # -- operation --------------------------------------------------------------- #

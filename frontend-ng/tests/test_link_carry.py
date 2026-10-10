@@ -15,26 +15,27 @@ def _source() -> Topology:
     t = Topology("src")
     r, m = t.add_device("router"), t.add_device("host")
     link = t.add_link(m.id, r.id, "uplink")
-    link.extra["props"] = {"cost": 3}                 # stands in for a field from Phase 1
+    link.props = {"cost": 3}
+    link.extra["future"] = 1                          # and a field this version does not know
     return t
 
 
 def test_attributes_are_everything_but_identity():
     t = _source()
     attrs = link_attributes(next(iter(t.links.values())))
-    assert attrs == {"label": "uplink", "props": {"cost": 3}}
+    assert attrs == {"label": "uplink", "props": {"cost": 3}, "future": 1}
 
 
 def test_they_read_the_same_from_a_saved_record():
     rec = _source().to_dict()["links"][0]
-    assert link_attributes(rec) == {"label": "uplink", "props": {"cost": 3}}
+    assert link_attributes(rec) == {"label": "uplink", "props": {"cost": 3}, "future": 1}
 
 
 def test_applying_sets_known_fields_and_keeps_the_rest():
     link = Link("link-9", "a", "b")
-    apply_link_attributes(link, {"label": "x", "props": {"cost": 5}, "id": "ignored",
-                                 "kind": "attach"})
-    assert link.label == "x" and link.extra == {"props": {"cost": 5}}
+    apply_link_attributes(link, {"label": "x", "props": {"cost": 5}, "future": 2,
+                                 "id": "ignored", "kind": "attach"})
+    assert link.label == "x" and link.props == {"cost": 5} and link.extra == {"future": 2}
     assert link.id == "link-9" and link.kind == "link"          # identity is never overwritten
 
 
@@ -43,7 +44,7 @@ def test_composing_a_lab_keeps_the_stage_links_attributes():
     topo = Topology("lab")
     _instantiate_stage(topo, stage, label="A")
     (link,) = topo.links.values()
-    assert link.label == "uplink" and link.extra["props"] == {"cost": 3}
+    assert link.label == "uplink" and link.props == {"cost": 3} and link.extra["future"] == 1
 
 
 def test_a_staged_link_written_as_an_object_keeps_its_attributes():
@@ -57,4 +58,4 @@ def test_a_staged_link_written_as_an_object_keeps_its_attributes():
     staging.apply(spec, add_device=lambda tk, x=0.0, y=0.0: topo.add_device(tk),
                   add_link=topo.add_link, topology=topo)
     labelled = [l for l in topo.links.values() if l.label == "wan"]
-    assert len(labelled) == 1 and labelled[0].extra["props"] == {"cost": 7}
+    assert len(labelled) == 1 and labelled[0].props == {"cost": 7}

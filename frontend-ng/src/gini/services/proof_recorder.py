@@ -31,6 +31,7 @@ _SUBSCRIPTIONS = (
     ("device_changed", "_on_device_changed"),
     ("link_added", "_on_link_added"),
     ("link_removed", "_on_link_removed"),
+    ("link_changed", "_on_link_changed"),
     ("run_state", "_on_run_state"),
     ("device_activated", "_on_device_activated"),
     ("rider_ran", "_on_rider_ran"),
@@ -99,6 +100,7 @@ class ProofRecorder:
         self._devices: dict[str, tuple[str, str]] = {}      # id -> (name, type_key)
         self._props: dict[str, dict] = {}                   # id -> last seen properties
         self._links: dict[str, tuple[str, str]] = {}        # link id -> (a name, b name)
+        self._link_props: dict[str, dict] = {}              # link id -> last seen cost/failure
         self._last_measure: dict[str, float] = {}           # rider id -> when last recorded
         self._obj_status: dict[str, str] = {}               # objective id -> last seen status
         self._objectives: list = []                         # last results, for the submit entry
@@ -410,6 +412,8 @@ class ProofRecorder:
         a, b = devs.get(link.source_id), devs.get(link.target_id)
         names = self._endpoint_names(link)
         self._links[link_id] = names
+        from ..domain import link_props as LP                # baseline, so a later edit diffs
+        self._link_props[link_id] = {k: str(v) for k, v in LP.values(link).items()}   # from THIS
         if link_id in self._loaded_links:
             self._loaded_links.discard(link_id)
             return
@@ -417,10 +421,29 @@ class ProofRecorder:
                                 names[1], b.type_key if b else "",
                                 kind=getattr(link, "kind", "link")))
 
+    def _on_link_changed(self, link_id) -> None:
+        self._guard(self._link_changed, link_id)
+
+    def _link_changed(self, link_id) -> None:
+        """A link's cost or failure model, diffed against what was recorded last, exactly as a
+        device's properties are -- with the defaults filled in, so setting a value back to the
+        default still reads as an edit."""
+        from ..domain import link_props as LP
+        link = getattr(self._topology(), "links", {}).get(link_id)
+        if link is None:
+            return
+        after = {k: str(v) for k, v in LP.values(link).items()}
+        before = self._link_props.get(link_id) or {k: str(v) for k, v in LP.DEFAULTS.items()}
+        changes = ev.diff_properties(before, after)
+        self._link_props[link_id] = after
+        a, b = self._endpoint_names(link)
+        self._record(ev.configure_link(link_id, a, b, changes))
+
     def _on_link_removed(self, link_id) -> None:
         self._guard(self._link_removed, link_id)
 
     def _link_removed(self, link_id) -> None:
+        self._link_props.pop(link_id, None)
         a, b = self._links.pop(link_id, (str(link_id), ""))
         self._record(ev.disconnect(a, b))
 

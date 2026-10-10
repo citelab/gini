@@ -135,6 +135,10 @@ class Inspector(QWidget):
 
         ctx.bus.selection_changed.connect(self._on_select)
         ctx.bus.device_changed.connect(self._on_changed)
+        self._link_id = None
+        self._link_committing = False            # our own edit: do not rebuild under the widget
+        ctx.bus.link_selection_changed.connect(self._on_select_link)
+        ctx.bus.link_changed.connect(self._on_link_changed)
         ctx.bus.addressing_changed.connect(self._rebuild)
         # The board panel reads hardware state ONCE, when it is built. Without this the
         # Inspector kept describing a board that had been unplugged — claim, MAC and all
@@ -216,8 +220,23 @@ class Inspector(QWidget):
     # selection ------------------------------------------------------------- #
     def _on_select(self, device_id) -> None:
         self._device_id = device_id
+        if device_id is not None:
+            self._link_id = None
         self._rebuild()
         self._update_live_mode()
+
+    def _on_select_link(self, link_id) -> None:
+        self._link_id = link_id
+        if link_id is not None:
+            self._device_id = None
+        self._rebuild()
+        self._update_live_mode()
+
+    def _on_link_changed(self, link_id) -> None:
+        # Deferred like _on_changed; and not at all for our own edit, which would rebuild the spin
+        # box out from under the student mid-typing.
+        if link_id == self._link_id and not self._link_committing:
+            QTimer.singleShot(0, self._rebuild)
 
     def _on_changed(self, device_id) -> None:
         # Defer the rebuild: this fires from inside an editor's own signal (slider drag,
@@ -238,6 +257,94 @@ class Inspector(QWidget):
         if d is not None and d.type_key == "gini32":
             QTimer.singleShot(0, self._rebuild)
 
+    # link editor (docs/design/link-properties.md) ------------------------------------------ #
+    def _set_tabs_for_link(self, link: bool) -> None:
+        """A link has properties and nothing else: no interfaces, routes or live state of its own.
+        Restoring them here runs before _hide_container_tabs, which then re-hides a board's."""
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) != "Properties":
+                self.tabs.setTabVisible(i, not link)
+        if link:
+            self.tabs.setCurrentIndex(0)
+
+    def _rebuild_link(self, link) -> None:
+        from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
+        from ..domain import link_props as LP
+        topo = self.ctx.topology
+        a, b = topo.devices.get(link.source_id), topo.devices.get(link.target_id)
+        an, bn = (a.name if a else "?"), (b.name if b else "?")
+        self._set_tabs_for_link(True)
+        self.icon_lbl.setPixmap(icons.render_pixmap("link", self.theme.theme.accent, size=30))
+        self.login_btn.hide()
+        self._clear_layout(self.ifaces_lay)
+        self.routes.setText("—")
+        if not LP.can_fail(link):
+            self.name_lbl.setText(f"{an} → {bn}")
+            self.type_lbl.setText("Attachment · runs on its host")
+            self.runs_lbl.setText("Not a cable: a Source/Sink running on its host. It has no "
+                                  "cost and cannot fail.")
+            self.runs_lbl.setVisible(True)
+            return
+        self.name_lbl.setText(f"{an} ↔ {bn}")
+        self.type_lbl.setText("Network link")
+        self.runs_lbl.setText("Saved with the lab, and handed to both ends of the link when you "
+                              "press Run.")
+        self.runs_lbl.setVisible(True)
+        v = LP.values(link)
+
+        cost = QSpinBox()
+        cost.setRange(LP.COST_MIN, LP.COST_MAX)
+        cost.setValue(int(v[LP.COST]))
+        cost.setToolTip(LP.HELP[LP.COST])
+        cost.setObjectName("LinkCost")
+        costed = LP.is_costed(topo, link)
+        cost.setEnabled(costed)
+        cost.valueChanged.connect(lambda val: self._commit_link(LP.COST, val))
+        self.props_form.addRow(LP.LABELS[LP.COST], cost)
+        note = QLabel("Abstract — not delay or bandwidth, which are set on the routers."
+                      if costed else "Only links with a router at one end have a routing cost.")
+        note.setObjectName("Faint")
+        note.setWordWrap(True)
+        self.props_form.addRow("", note)
+
+        def seconds(key, never_text, name):
+            box = QDoubleSpinBox()
+            box.setRange(0.0, LP.TIME_MAX)
+            box.setDecimals(0)
+            box.setSingleStep(10.0)
+            box.setSuffix(" s")
+            box.setSpecialValueText(never_text)      # shown at 0
+            box.setValue(float(v[key]))
+            box.setToolTip(LP.HELP[key])
+            box.setObjectName(name)
+            box.setKeyboardTracking(False)           # commit the number, not every keystroke
+            return box
+
+        fail = seconds(LP.FAIL_AFTER, "never", "LinkFailAfter")
+        repair = seconds(LP.REPAIR_AFTER, "stays down", "LinkRepairAfter")
+        repair.setEnabled(v[LP.FAIL_AFTER] > 0)
+        fail.valueChanged.connect(lambda val: (self._commit_link(LP.FAIL_AFTER, val),
+                                               repair.setEnabled(val > 0)))
+        repair.valueChanged.connect(lambda val: self._commit_link(LP.REPAIR_AFTER, val))
+        self.props_form.addRow(LP.LABELS[LP.FAIL_AFTER], fail)
+        self.props_form.addRow(LP.LABELS[LP.REPAIR_AFTER], repair)
+        fnote = QLabel("Mean times, drawn from an exponential distribution. A link that fails "
+                       "and is repaired goes on failing — a flapping link.")
+        fnote.setObjectName("Faint")
+        fnote.setWordWrap(True)
+        self.props_form.addRow("", fnote)
+
+    def _commit_link(self, key: str, value) -> None:
+        if not self._link_id:
+            return
+        self._link_committing = True
+        try:
+            self.api.set_link_property(self._link_id, key, value)
+        except (KeyError, ValueError) as e:
+            self.ctx.log(str(e), "error")
+        finally:
+            self._link_committing = False
+
     def _clear_form(self) -> None:
         while self.props_form.rowCount():
             self.props_form.removeRow(0)
@@ -249,6 +356,11 @@ class Inspector(QWidget):
         self._deploy_btn = None
         self._rider_btn = None
         t = self.theme.theme
+        self._set_tabs_for_link(False)
+        if (not self._device_id or self._device_id not in self.ctx.topology.devices) \
+                and self._link_id in self.ctx.topology.links:
+            self._rebuild_link(self.ctx.topology.links[self._link_id])
+            return
         if not self._device_id or self._device_id not in self.ctx.topology.devices:
             self.name_lbl.setText("No selection")
             self.type_lbl.setText("Select a device to edit it")

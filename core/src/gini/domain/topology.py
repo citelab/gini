@@ -66,15 +66,24 @@ class Link:
     # "attach" = a rider→donor mount: a Source/Sink runs ON the donor. Carries no traffic and is
     # NOT compiled as a cable — a "runs on" relationship, drawn dotted. source_id is the rider.
     kind: str = "link"
+    # cost and failure model -- see domain/link_props.py, which owns the keys, defaults and rules.
+    # Holds only values someone chose; an unconfigured link has {} and saves without the key.
+    props: dict = field(default_factory=dict)
     # saved keys this version does not know, kept so they survive a load/save (module docstring)
     extra: dict = field(default_factory=dict, repr=False)
 
 
 def _record(obj) -> dict:
     """A dataclass as a saved record: its fields, with `extra` flattened back in beside them. A
-    known field always wins over a same-named leftover."""
+    known field always wins over a same-named leftover.
+
+    A link with no properties is written WITHOUT a "props" key, exactly as before link properties
+    existed: plain topologies keep their proof-of-activity hashes, and still open in a GINI from
+    before Phase 0 (whose loader rejects any key it does not know)."""
     rec = asdict(obj)
     extra = rec.pop("extra", None) or {}
+    if isinstance(obj, Link) and not rec.get("props"):
+        rec.pop("props", None)
     return {**{k: v for k, v in extra.items() if k not in rec}, **rec}
 
 
@@ -83,6 +92,10 @@ def _from_record(cls, rec: dict):
     known = {f.name for f in fields(cls)} - {"extra"}
     obj = cls(**{k: v for k, v in rec.items() if k in known})
     obj.extra = {k: v for k, v in rec.items() if k not in known and k != "extra"}
+    if isinstance(obj, Link):
+        # validated on the way in: a hand-edited or newer file cannot put a cost of 99 on a link
+        from .link_props import clean
+        obj.props = clean(obj.props if isinstance(obj.props, dict) else {})
     return obj
 
 
@@ -113,7 +126,10 @@ def apply_link_attributes(link: "Link", attrs: dict) -> "Link":
     for k, v in (attrs or {}).items():
         if k in _LINK_IDENTITY or k == "extra":
             continue
-        if k in known:
+        if k == "props":
+            from .link_props import clean
+            link.props = clean(v if isinstance(v, dict) else {})   # a copy, validated
+        elif k in known:
             setattr(link, k, v)
         else:
             link.extra[k] = v

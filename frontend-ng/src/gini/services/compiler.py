@@ -207,6 +207,12 @@ class Endpoint:
     location: str          # service name (machine) or "fabric"
     bind_port: int = 0
     peer: "Endpoint | None" = None
+    # the topology link this end belongs to, and its properties (domain/link_props.py), so every
+    # kind of endpoint -- router interface, machine interface, switch port, OVS port -- learns
+    # them the same way, inside its `port` entry. Link identity used to be lost here: nothing in a
+    # running lab knew which drawn link a UDP pair was.
+    link_id: str = ""
+    link: dict = field(default_factory=dict)
 
     def peer_host(self, docker: bool) -> str:
         if not docker:
@@ -216,10 +222,24 @@ class Endpoint:
         return self.peer.location
 
     def wiring(self, docker: bool) -> dict:
-        return {"bind_host": "0.0.0.0" if docker else "127.0.0.1",
-                "bind_port": self.bind_port,
-                "peer_host": self.peer_host(docker),
-                "peer_port": self.peer.bind_port}
+        w = {"bind_host": "0.0.0.0" if docker else "127.0.0.1",
+             "bind_port": self.bind_port,
+             "peer_host": self.peer_host(docker),
+             "peer_port": self.peer.bind_port}
+        if self.link_id:
+            # Port.from_cfg reads only the keys above, so this rides along harmlessly on images
+            # that predate it. Id and numbers only: the config is embedded in single-quoted YAML.
+            w["link"] = {"id": self.link_id, **self.link}
+        return w
+
+
+_LINK_ID_SAFE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def _link_entry(link) -> tuple[str, dict]:
+    """(safe link id, its properties with defaults filled) for Endpoint.link_id / .link."""
+    from ..domain import link_props as LP
+    return _LINK_ID_SAFE.sub("", str(link.id)), LP.values(link)
 
 
 @dataclass
@@ -837,6 +857,8 @@ class RuntimeCompiler:
             a.bind_port = port; port += 1
             b.bind_port = port; port += 1
             a.peer, b.peer = b, a
+            a.link_id, a.link = _link_entry(l)
+            b.link_id, b.link = a.link_id, dict(a.link)
             link_eps[l.id] = (a, b)
             eps[(l.id, l.source_id)] = a
             eps[(l.id, l.target_id)] = b

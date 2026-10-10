@@ -73,6 +73,73 @@ class GiniAPI:
         self.ctx.bus.topology_changed.emit()
         return self._device_dict(d)
 
+    # -- link properties (docs/design/link-properties.md) -------------------- #
+    def _resolve_link(self, ref: str):
+        """A link by id, or by its two ends' names: "R1-R2" / "R1<->R2" / ("R1", "R2")."""
+        topo = self.ctx.topology
+        if isinstance(ref, (list, tuple)) and len(ref) == 2:
+            da, db = self._resolve(ref[0]), self._resolve(ref[1])
+        elif ref in topo.links:
+            return topo.links[ref]
+        else:
+            # Try separators from the most to the least specific, and take the first split whose
+            # two halves are both device names -- so a name that itself contains "-" still works.
+            text, pair = str(ref).strip(), None
+            for sep in ("<->", "<>", "--", "->", "—", ",", " ", "-"):
+                # every occurrence is a candidate split point: "core-1-edge-2" has three hyphens
+                # and only one of them separates the two names
+                start = 0
+                while pair is None and (i := text.find(sep, start)) > 0:
+                    left, right = text[:i].strip(), text[i + len(sep):].strip()
+                    start = i + 1
+                    if not (left and right):
+                        continue
+                    try:
+                        pair = (self._resolve(left), self._resolve(right))
+                    except KeyError:
+                        continue
+                if pair is not None:
+                    break
+            if pair is None:
+                raise KeyError(f"no link {ref!r} (give its id, or 'A-B' with the two ends' names)")
+            da, db = pair
+        found = [l for l in topo.links.values() if {l.source_id, l.target_id} == {da.id, db.id}]
+        if not found:
+            raise KeyError(f"{da.name} and {db.name} are not linked")
+        if len(found) > 1:
+            raise KeyError(f"{da.name} and {db.name} have {len(found)} links between them; "
+                           "give the link id")
+        return found[0]
+
+    def _link_dict(self, link) -> dict:
+        from ..domain import link_props as LP
+        topo = self.ctx.topology
+        a, b = topo.devices.get(link.source_id), topo.devices.get(link.target_id)
+        return {"id": link.id, "kind": link.kind,
+                "a": a.name if a else link.source_id, "b": b.name if b else link.target_id,
+                "label": link.label, **LP.values(link),
+                "cost_applies": LP.is_costed(topo, link), "can_fail": LP.can_fail(link),
+                "summary": LP.describe(link)}
+
+    def get_link(self, ref) -> dict:
+        """A link's properties: cost (abstract, 1-15) and failure model (mean seconds to fail and
+        to repair; 0 = never / stays down)."""
+        return self._link_dict(self._resolve_link(ref))
+
+    def set_link_property(self, ref, key: str, value) -> dict:
+        """Set a link's `cost`, `fail_after` or `repair_after`. Validated (cost is a whole number
+        1-15; times are seconds >= 0); raises ValueError with the rule otherwise. Handed to
+        both ends of the link at the next Run."""
+        from ..domain import link_props as LP
+        link = self._resolve_link(ref)
+        if link.kind != "link":
+            raise ValueError("an attachment (a Source/Sink running on its host) is not a cable "
+                             "and has no link properties")
+        LP.set_prop(link, key, value)
+        self.ctx.bus.link_changed.emit(link.id)
+        self.ctx.bus.topology_changed.emit()
+        return self._link_dict(link)
+
     # -- manual addressing -------------------------------------------------- #
     def set_manual_addressing(self, on: bool) -> None:
         """Toggle manual addressing: stop auto-assigning IPs and honor static_ips

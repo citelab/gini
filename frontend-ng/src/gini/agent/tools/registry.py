@@ -118,6 +118,18 @@ def build_registry(api: GiniAPI) -> ToolRegistry:
         lambda device, key, value: api.set_property(device, key, value), group="build"))
 
     r.register(ToolSpec(
+        "set_link_property", "Set a link's property: 'cost' (abstract routing cost, whole number 1-15, not delay or bandwidth), 'fail_after' or 'repair_after' (mean seconds; 0 = never fails / stays down). The link is its id or its two ends, e.g. 'R1-R2'. Handed to both ends of the link at the next Run.",
+        {"type": "object",
+         "properties": {"link": _STR, "key": _STR, "value": _STR},
+         "required": ["link", "key", "value"]},
+        lambda link, key, value: api.set_link_property(link, key, value), group="build"))
+
+    r.register(ToolSpec(
+        "inspect_link", "Inspect a link (its id or its two ends, e.g. 'R1-R2'): cost and failure model, and whether each applies.",
+        {"type": "object", "properties": {"link": _STR}, "required": ["link"]},
+        lambda link: api.get_link(link), group="inspect"))
+
+    r.register(ToolSpec(
         "remove_device", "Remove a device (by name or id).",
         {"type": "object", "properties": {"device": _STR}, "required": ["device"]},
         lambda device: (api.remove_device(device), {"removed": device})[1], group="build"))

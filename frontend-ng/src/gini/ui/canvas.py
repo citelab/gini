@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..app import AppContext
-from ..domain import grouping, pricing
+from ..domain import grouping, link_props as _LP, pricing
 from ..domain.topology import DeviceInstance, Link
 from .theme import icons
 from .theme.manager import sp as _sp, ui_scale as _uiscale   # scale text + node cards by the UI setting
@@ -691,7 +691,9 @@ class EdgeItem(QGraphicsObject):
         self._packet_t: float | None = None
         self._packet_color: QColor | None = None
         self._flow_anim: QVariantAnimation | None = None
+        self._label = ""                          # cost / failure marker, see refresh_meta
         self.refresh()
+        self.refresh_meta()
 
     def shape(self) -> QPainterPath:  # noqa: N802
         """Clickable region = the wire itself, fattened to a finger-friendly ~12px."""
@@ -752,10 +754,47 @@ class EdgeItem(QGraphicsObject):
             self._path = _rounded_path(_ortho_waypoints(a, b), CORNER_R)
         self.update()
 
+    def refresh_meta(self) -> None:
+        """Label and tooltip from the link's properties. The label is the cost -- shown on every
+        costed link once the topology is weighted (CanvasScene.link_labels), never on a plain
+        one -- and ↯ on a link that is set to fail. The tooltip always says both."""
+        topo = self._scene.ctx.topology
+        if self._is_attach():
+            label, tip = "", "Attachment: a Source/Sink running on its host"
+        else:
+            parts = []
+            if getattr(self._scene, "link_labels", False) and _LP.is_costed(topo, self.link):
+                parts.append(str(_LP.get(self.link, _LP.COST)))
+            if _LP.get(self.link, _LP.FAIL_AFTER) > 0:
+                parts.append("↯")
+            label = " ".join(parts)
+            a, b = topo.devices.get(self.link.source_id), topo.devices.get(self.link.target_id)
+            ends = f"{a.name if a else '?'} ↔ {b.name if b else '?'}"
+            what = _LP.describe(self.link)
+            if not _LP.is_costed(topo, self.link):
+                what = what.split(" · ", 1)[-1]       # cost means nothing without a router
+            tip = f"{ends}\n{what}"
+        self.setToolTip(tip)
+        if label != self._label:
+            self.prepareGeometryChange()
+            self._label = label
+        self.update()
+
+    def _label_rect(self) -> QRectF:
+        if not self._label or self._path.isEmpty():
+            return QRectF()
+        f = QFont(); f.setPointSizeF(_sp(8.5)); f.setBold(True)
+        fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(self._label) + 10
+        h = fm.height() + 2
+        mid = self._path.pointAtPercent(0.5)
+        return QRectF(mid.x() - w / 2, mid.y() - h / 2, w, h)
+
     def boundingRect(self) -> QRectF:
         if self._path.isEmpty():
             return QRectF()
-        return self._path.boundingRect().adjusted(-4, -4, 4, 4)
+        r = self._path.boundingRect().adjusted(-4, -4, 4, 4)
+        return r.united(self._label_rect().adjusted(-2, -2, 2, 2)) if self._label else r
 
     def paint(self, p: QPainter, opt, widget=None) -> None:
         if self._path.isEmpty():
@@ -778,6 +817,16 @@ class EdgeItem(QGraphicsObject):
         else:
             p.setPen(QPen(_qcolor(t.line2), 2))
         p.drawPath(self._path)
+        if self._label:                           # cost / ↯, a pill on the wire's midpoint
+            r = self._label_rect()
+            p.setPen(QPen(_qcolor(t.accent if self.isSelected() else t.line2), 1))
+            p.setBrush(_qcolor(t.panel))
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            f = QFont(); f.setPointSizeF(_sp(8.5)); f.setBold(True)
+            p.setFont(f)
+            p.setPen(_qcolor(t.text))
+            p.drawText(r, Qt.AlignCenter, self._label)
+            p.setBrush(Qt.NoBrush)
         if self._packet_t is not None:
             pt = self._path.pointAtPercent(self._packet_t)
             col = self._packet_color or _qcolor(t.accent)
@@ -891,6 +940,10 @@ class CanvasScene(QGraphicsScene):
         self.theme = theme
         self.nodes: dict[str, NodeItem] = {}
         self.edges: dict[str, EdgeItem] = {}
+        # True once any router link has a cost other than 1: then EVERY costed link shows its cost,
+        # and while it is false none does -- a plain lab looks exactly as it did. Cached here (see
+        # _relabel_links) so painting an edge never rescans the topology.
+        self.link_labels = False
         self.groups: dict[str, GroupItem] = {}     # VPC/Subnet/Region container boxes
         self.running = False                        # lab up? gates console/logs/login actions
         self.setSceneRect(-2000, -2000, 4000, 4000)
@@ -903,6 +956,7 @@ class CanvasScene(QGraphicsScene):
         ctx.bus.device_removed.connect(self._on_device_removed)
         ctx.bus.link_added.connect(self._on_link_added)
         ctx.bus.link_removed.connect(self._on_link_removed)
+        ctx.bus.link_changed.connect(self._relabel_links)
         ctx.bus.device_changed.connect(self._on_device_changed)
         ctx.bus.addressing_changed.connect(self._refresh_node_labels)
         ctx.bus.warnings_changed.connect(self._on_warnings)
@@ -1061,6 +1115,14 @@ class CanvasScene(QGraphicsScene):
         edge = self.edges.pop(link_id, None)
         if edge:
             self.removeItem(edge)
+        self._relabel_links()
+
+    def _relabel_links(self, *_a) -> None:
+        """A link's cost or failure model changed, or a link came or went: recompute whether the
+        topology is weighted and refresh every edge's label and tooltip."""
+        self.link_labels = _LP.weighted(self.ctx.topology)
+        for e in self.edges.values():
+            e.refresh_meta()
 
     def _on_device_removed(self, device_id: str) -> None:
         node = self.nodes.pop(device_id, None)
@@ -1079,6 +1141,7 @@ class CanvasScene(QGraphicsScene):
             if eid not in self.ctx.topology.links:
                 self.removeItem(edge)
                 self.edges.pop(eid, None)
+        self._relabel_links()                     # its links went with it
         if group:
             self.recompute_membership()
 
@@ -1126,6 +1189,7 @@ class CanvasScene(QGraphicsScene):
         edge = EdgeItem(self, link)
         self.edges[link_id] = edge
         self.addItem(edge)
+        self._relabel_links()
         edge.flow()      # subtle 'alive' feedback on connect
 
     def _on_device_changed(self, device_id: str) -> None:

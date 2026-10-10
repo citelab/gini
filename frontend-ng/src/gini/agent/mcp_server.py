@@ -49,6 +49,16 @@ def build_server(api: GiniAPI, registry: ToolRegistry | None = None):
         return call("set_property", device=device, key=key, value=value)
 
     @server.tool()
+    def set_link_property(link: str, key: str, value: str) -> str:
+        """Set a link's property: 'cost' (abstract routing cost, whole number 1-15, not delay or bandwidth), 'fail_after' or 'repair_after' (mean seconds; 0 = never fails / stays down). The link is its id or its two ends, e.g. 'R1-R2'. Handed to both ends of the link at the next Run."""
+        return call("set_link_property", link=link, key=key, value=value)
+
+    @server.tool()
+    def inspect_link(link: str) -> str:
+        """Inspect a link (its id or its two ends, e.g. 'R1-R2'): cost and failure model, and whether each applies."""
+        return call("inspect_link", link=link)
+
+    @server.tool()
     def inspect_device(device: str) -> str:
         """Inspect a device's type, properties, neighbors, and degree."""
         return call("inspect_device", device=device)
