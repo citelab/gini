@@ -229,6 +229,36 @@ End-to-end on real routers, in the style of `rip_test.py` and `bcast_mcast_test.
 - Silent cuts (link up, carrying nothing — the failure mode behind a switch, detectable only by
   timeout).
 - Floating static routes and recomputing static routes on failure.
+- Costs inside SDN — see the next section.
+
+## SDN: parked
+
+Checked live on 2026-10-10, and parked with the maintainer the same day.
+
+**Costs stay out of SDN.** The POX apps GINI ships are cost-blind: `gini.samples.*` are
+single-switch apps, and `forwarding.l2_multi` runs Floyd-Warshall on hop count. That is normal,
+not a gap: ONOS defaults to `HopCountLinkWeigher` (link metrics are opt-in, through annotations),
+and Floodlight's default is also hop count. A weight in SDN is a controller policy, not something
+a switch advertises, so there is no cost to carry from a link to the controller. Costs were added
+for realistic distance-vector and multicast demonstrations, and they do that.
+
+**Where SDN meets routing, everything works.** An OVS segment is one L2 subnet, and a router sees
+it as a LAN. Costs and failures on router–OVS links behave as on any other router link: RIP failed
+over in 2.9 s in the live probe, and static routing black-holes on a failure, as designed.
+
+**What is wrong, and waits.** An OVS–OVS failure does take the port down at both switches, but:
+
+- The gRouter in `--openflow` mode tells the controller the port is still up.
+  `openflow_config_update_phy_port()` (`backend/src/grouter/openflow_config.c`) sets
+  `OFPPS_LINK_DOWN` only when the interface does not exist at all; an interface that exists but is
+  down gets the bit cleared. It should read `iface->state`.
+- So POX hears nothing. `openflow.discovery` notices only when its LLDP times out (10 s), and only
+  then do `spanning_tree` and `l2_multi` recompute. On a triangle of three OVS, with discovery,
+  spanning_tree and l2_multi, traffic stopped for **32 s** before it took the other path.
+
+Fixing the port status should bring that down to the controller's reaction time. Also seen once,
+and not reproduced in two reruns: a mixed router + OVS lab in static mode passed no traffic for
+the first 90 s.
 
 ## Decisions
 
@@ -241,3 +271,4 @@ Agreed with the maintainer on 2026-10-10:
   faults by default.
 - A link failure is carrier loss at both ends, and the router withdraws the connected route.
 - Static routes are recomputed on a cost change, not on a failure.
+- SDN stays at hop count: no costs on OVS links or in the POX apps (2026-10-10).
