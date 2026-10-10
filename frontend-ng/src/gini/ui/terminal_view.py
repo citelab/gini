@@ -24,7 +24,7 @@ import sys
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QScrollBar, QSizePolicy, QWidget
 
 from .theme.manager import sp as _sp   # point size scaled by Settings > Text size
 
@@ -175,6 +175,21 @@ class TerminalView(QWidget):
         self._refit_timer.setSingleShot(True)
         self._refit_timer.timeout.connect(self._refit)
 
+        # The scroll bar. Wheel and trackpad already scrolled; what was missing is SEEING it:
+        # where you are in the scrollback, how much there is, and a way to drag straight to the
+        # top of a long capture. It is a child at the right edge, outside the character grid
+        # (cols_rows leaves its width out), so no column is ever drawn underneath it. Its value is
+        # the document row at the top of the view: the maximum is the live screen, so the handle
+        # sits at the bottom while following output, as in every terminal. NoFocus: clicking it
+        # must not take the keyboard away from the shell.
+        self._bar = QScrollBar(Qt.Vertical, self)
+        self._bar.setFocusPolicy(Qt.NoFocus)
+        self._bar.setCursor(Qt.ArrowCursor)
+        self._bar.valueChanged.connect(self._on_bar)
+        self._syncing_bar = False
+        self._style_bar()
+        self._sync_bar()
+
     # -- geometry ----------------------------------------------------------- #
     def _metrics(self) -> None:
         fm = QFontMetricsF(self._font)
@@ -184,8 +199,34 @@ class TerminalView(QWidget):
         self._ch = max(1.0, fm.height())
         self._ascent = fm.ascent()
 
+    def _bar_width(self) -> int:
+        return self._bar.sizeHint().width()
+
+    def _style_bar(self) -> None:
+        """Its own look, from the same theme colours. The app-wide scroll bar is a transparent
+        track with a `line2` handle -- right for lists, nearly invisible on a terminal, whose
+        background IS the panel colour that handle was chosen to sit quietly on. Here the track
+        shows faintly (so the margin reads as a scroll bar) and the handle is `faint`, brighter
+        under the pointer."""
+        t = getattr(self.theme, "theme", None)
+        track = getattr(t, "line", None) or "#232b36"
+        handle = getattr(t, "faint", None) or getattr(t, "muted", None) or "#697682"
+        hover = getattr(t, "muted", None) or "#9aa7b4"
+        self._bar.setStyleSheet(
+            f"QScrollBar:vertical {{ background: {track}; width: 12px; margin: 0; border: none; }}"
+            f"QScrollBar::handle:vertical {{ background: {handle}; border-radius: 4px;"
+            f" min-height: 28px; margin: 2px; }}"
+            f"QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed"
+            f" {{ background: {hover}; }}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }")
+
+    def _place_bar(self) -> None:
+        w = self._bar_width()
+        self._bar.setGeometry(self.width() - w, 0, w, self.height())
+
     def cols_rows(self) -> tuple[int, int]:
-        return (max(MIN_COLS, int(self.width() / self._cw)),
+        return (max(MIN_COLS, int((self.width() - self._bar_width()) / self._cw)),
                 max(MIN_ROWS, int(self.height() / self._ch)))
 
     def sizeHint(self) -> QSize:                      # noqa: N802 - Qt naming
@@ -193,6 +234,7 @@ class TerminalView(QWidget):
 
     def resizeEvent(self, e) -> None:                 # noqa: N802 - Qt naming
         super().resizeEvent(e)
+        self._place_bar()                             # at once, not debounced like the grid
         # DEBOUNCED. See REFIT_MS: a transient size during layout is not a user resizing their
         # terminal, and acting on it moves everything on screen into the scrollback.
         self._refit_timer.start(REFIT_MS)
@@ -286,6 +328,8 @@ class TerminalView(QWidget):
             if rows > was:
                 self._scroll_in(rows - was)           # ...and a grow must scroll BACK
             self.size_changed.emit(cols, rows)
+        self._place_bar()
+        self._sync_bar()
         self.update()
 
     def _apply_font(self) -> None:
@@ -298,6 +342,7 @@ class TerminalView(QWidget):
         """Theme or text size changed. ThemeManager emits themeChanged for BOTH, so this is where
         a Settings > Text size change reaches the terminal."""
         self._apply_font()
+        self._style_bar()
         self._refit()                                # the grid changes with the glyph size
         self.update()
 
@@ -337,11 +382,13 @@ class TerminalView(QWidget):
             grew = len(self._screen.history.top) - before
             if grew > 0:
                 self._scroll = min(len(self._screen.history.top), self._scroll + grew)
+        self._sync_bar()                              # the document grew either way
         self.update()
 
     def reset(self) -> None:
         self._screen.reset()
         self._scroll = 0
+        self._sync_bar()
         self.update()
 
     # -- painting ------------------------------------------------------------ #
@@ -419,7 +466,27 @@ class TerminalView(QWidget):
     def _set_scroll(self, lines: int) -> None:
         """Clamp to what there is: 0 is the live screen, `len(history.top)` is the oldest line."""
         self._scroll = max(0, min(len(self._screen.history.top), int(lines)))
+        self._sync_bar()
         self.update()
+
+    def _sync_bar(self) -> None:
+        """Make the bar show the view: range = the scrollback, page = one screen, value = the
+        document row at the top. Signals are held so this never re-enters `_on_bar`."""
+        n = len(self._screen.history.top)
+        self._syncing_bar = True
+        try:
+            self._bar.setRange(0, n)
+            self._bar.setPageStep(max(1, self._screen.lines))
+            self._bar.setSingleStep(3)                # one wheel notch, as wheelEvent scrolls
+            self._bar.setValue(n - self._scroll)
+        finally:
+            self._syncing_bar = False
+
+    def _on_bar(self, value: int) -> None:
+        """The student dragged or clicked the bar."""
+        if self._syncing_bar:
+            return
+        self._set_scroll(len(self._screen.history.top) - int(value))
 
     def to_bottom(self) -> None:
         """Back to the live screen — what Shift+End and any keypress do."""
@@ -625,9 +692,8 @@ class TerminalView(QWidget):
                 self.to_bottom(); return
         data = encode_key(key, mods, e.text())
         if data:
-            self._scroll = 0                          # typing returns to the live screen
+            self._set_scroll(0)                       # typing returns to the live screen (and the bar)
             self.key_bytes.emit(data)
-            self.update()
         else:
             super().keyPressEvent(e)
 

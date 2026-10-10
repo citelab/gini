@@ -195,3 +195,71 @@ def test_unshifted_pageup_still_belongs_to_the_program(app):
     v.keyPressEvent(_key(Qt.Key_PageUp))
     assert sent, "PageUp was swallowed instead of reaching the shell"
     assert v.scrolled_back() == 0
+
+
+# -- the scroll bar ------------------------------------------------------------------------- #
+# Asked for: "Scrolling is working… can we put a scroll bar on the right margin?" The wheel
+# already moved the view; what was missing was seeing where you are in the scrollback and a way
+# to drag straight to the top of a long capture. The bar is one more control over the SAME
+# offset, so everything above (no snapping, no drift) has to hold for it too.
+
+def _sized(app, lines=200):
+    v = _view(app, lines)
+    v.resize(640, 360)
+    v._refit()
+    return v
+
+
+def test_the_bar_sits_at_the_bottom_while_following_output(app):
+    v = _sized(app)
+    bar = v._bar
+    assert bar.maximum() == len(v._screen.history.top) > 0
+    assert bar.value() == bar.maximum()
+    assert bar.pageStep() == v._screen.lines
+
+
+def test_the_bar_follows_the_wheel(app):
+    v = _sized(app)
+    _wheel(v, angle=120)                                     # three lines back
+    assert v._bar.value() == v._bar.maximum() - 3
+
+
+def test_dragging_the_bar_scrolls_the_text(app):
+    v = _sized(app)
+    v._bar.setValue(0)                                       # drag to the very top
+    assert v.scrolled_back() == len(v._screen.history.top)
+    assert _top_row(v) == "line 0"
+    v._bar.setValue(v._bar.maximum())                        # and back down to the live screen
+    assert v.scrolled_back() == 0
+
+
+def test_reading_back_with_the_bar_is_not_disturbed_by_new_output(app):
+    """The bar must not drag the reader along as history grows: the text stays put, so the
+    handle's VALUE stays put while its range grows underneath it."""
+    v = _sized(app)
+    v._bar.setValue(10)
+    before, value = _top_row(v), v._bar.value()
+    for i in range(30):
+        v.feed(b"more %d\r\n" % i)
+    assert _top_row(v) == before
+    assert v._bar.value() == value
+    assert v._bar.maximum() == len(v._screen.history.top)
+
+
+def test_no_text_is_drawn_under_the_bar(app):
+    v = _sized(app)
+    cols, _ = v.cols_rows()
+    assert cols * v._cw <= v.width() - v._bar.width() + 0.5
+    assert v._bar.geometry().right() == v.width() - 1
+
+
+def test_clicking_the_bar_leaves_the_keyboard_with_the_shell(app):
+    v = _sized(app)
+    assert v._bar.focusPolicy() == Qt.NoFocus
+
+
+def test_typing_brings_the_bar_back_to_the_bottom(app):
+    v = _sized(app)
+    v._bar.setValue(0)
+    v.keyPressEvent(_key(Qt.Key_A, "a"))
+    assert v._bar.value() == v._bar.maximum()
