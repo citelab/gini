@@ -84,3 +84,76 @@ def test_a_preview_that_breaks_never_stands_in_the_way():
             raise RuntimeError("no chain")
     _strip([])                                           # a QApplication exists
     assert confirm(None, _Broken()) is True
+
+
+def _told(st):
+    seen = []
+    saved = type(st).tell_student
+    type(st).tell_student = staticmethod(lambda p, title, text: seen.append((title, text)))
+    return seen, saved
+
+
+def test_not_yet_says_so_in_a_dialog_not_only_in_the_strip():
+    """The preview's ✕ is "Not yet". A student who closed it thinking they were done was told
+    only by a strip line, and went looking for a receipt that was never made."""
+    log = []
+    _app, st = _strip(log)
+    type(st).confirm_handin, saved = staticmethod(lambda p, r: False), type(st).confirm_handin
+    seen, saved_tell = _told(st)
+    try:
+        st._generate()
+        [(title, text)] = seen
+        assert "Not handed in" in title
+        assert "receipt code" in text and "Nothing has been sent" in text
+    finally:
+        type(st).confirm_handin = saved
+        type(st).tell_student = saved_tell
+        st.deleteLater()
+
+
+def test_a_proof_that_could_not_be_sealed_is_a_dialog_with_the_reason():
+    log = []
+    _app, st = _strip(log)                                # its recorder refuses with "no code"
+    type(st).confirm_handin, saved = staticmethod(lambda p, r: True), type(st).confirm_handin
+    seen, saved_tell = _told(st)
+    try:
+        st._generate()
+        [(title, text)] = seen
+        assert "could not be sealed" in title
+        assert "no code" in text and "no receipt code" in text
+    finally:
+        type(st).confirm_handin = saved
+        type(st).tell_student = saved_tell
+        st.deleteLater()
+
+
+def test_a_sealed_proof_is_not_reported_as_a_failure():
+    log = []
+    _app, st = _strip(log)
+    st.recorder.generate_proof = lambda objectives=None: {"ok": True, "receipt": "ABCD-1234",
+                                                          "proof": {}, "path": "/p"}
+    st._hand_in = lambda result, receipt: log.append(("hand_in", receipt))
+    type(st).confirm_handin, saved = staticmethod(lambda p, r: True), type(st).confirm_handin
+    seen, saved_tell = _told(st)
+    try:
+        st._generate()
+        assert seen == [] and log == [("hand_in", "ABCD-1234")]
+    finally:
+        type(st).confirm_handin = saved
+        type(st).tell_student = saved_tell
+        st.deleteLater()
+
+
+def test_the_preview_says_nothing_has_been_sent_yet():
+    import inspect
+
+    from gini.ui import handin_preview
+    src = inspect.getsource(handin_preview.confirm)
+    assert "nothing sent yet" in src and "Nothing has been handed in yet" in src
+    assert "receipt code" in src
+
+
+def test_telling_the_student_never_hangs_headless():
+    from gini.ui.handin_preview import tell
+    _strip([])
+    assert tell(None, "t", "x") is None

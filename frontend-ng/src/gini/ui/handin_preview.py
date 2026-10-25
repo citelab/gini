@@ -9,7 +9,8 @@ So, between the grading run and the seal, this shows the SAME cooked view the ma
 the function is pure and already takes the chain — and it turns "I did the work, honest" into
 something they can check and fix while they still can.
 
-It never blocks. "Hand in" is the default button; "Not yet" only returns them to the lab.
+It never blocks. "Hand in" is the default button; "Not yet" (and the window's ✕, which Qt maps to
+it) only returns them to the lab — and says so in a dialog, because it is not obvious.
 """
 from __future__ import annotations
 
@@ -70,13 +71,31 @@ def confirm(parent, recorder) -> bool:
     look = list(cooked.get("look_at") or [])
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Information if not look else QMessageBox.Warning)
-    box.setWindowTitle("Before you hand in")
-    box.setText("This is what your instructor will see first:\n\n"
+    # Titled and worded as a step BEFORE the hand-in. "Before you hand in" over a summary with a
+    # warning icon read as the result of one: students closed it with ✕ — which is "Not yet" —
+    # and waited for a receipt that was never going to come.
+    box.setWindowTitle("Check before you hand in — nothing sent yet")
+    box.setText("Nothing has been handed in yet. This is what your instructor will see "
+                "first:\n\n"
                 + "\n".join("•  " + x for x in summary_lines(cooked))
                 + (("\n\nThey will be pointed at:\n" + "\n".join("•  " + x for x in look))
-                   if look else "\n\nNothing stands out."))
+                   if look else "\n\nNothing stands out.")
+                + "\n\nPress Hand in to seal and send it — you will be given a receipt code.")
     go = box.addButton("Hand in", QMessageBox.AcceptRole)
     box.addButton("Not yet", QMessageBox.RejectRole)
     box.setDefaultButton(go)
     box.exec()
     return box.clickedButton() is go
+
+
+def tell(parent, title: str, text: str) -> None:
+    """A warning the student has to dismiss. Skipped headless, like `confirm`: a modal box with
+    nobody to click it would hang a test run for ever."""
+    try:
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QMessageBox
+        if QGuiApplication.platformName() == "offscreen":
+            return
+        QMessageBox.warning(parent, title, text)
+    except Exception:                          # noqa: BLE001 — a message must never raise
+        pass

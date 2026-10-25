@@ -50,6 +50,11 @@ def _preview_confirm(parent, recorder) -> bool:
     return confirm(parent, recorder)
 
 
+def _tell(parent, title: str, text: str) -> None:
+    from .handin_preview import tell
+    tell(parent, title, text)
+
+
 def _ago(seconds: float) -> str:
     """A duration a student can act on. Minutes matter here; seconds do not."""
     m = int(max(0.0, seconds) // 60)
@@ -445,14 +450,32 @@ class ProofStrip(QWidget):
         self._generating = False
         # Show what the marker will see while it can still be fixed — generate_proof seals it.
         if not type(self).confirm_handin(self, self.recorder):
+            # Said in a dialog, not only in the strip. The preview LOOKS like the end of a hand-in
+            # — a summary with a warning icon — and its ✕ counts as "Not yet", so a student who
+            # closed it believing they were done walked away with nothing sent and no receipt,
+            # told so only by a line at the bottom of the dock they never looked at.
             self._say("Not handed in. Your work is still being recorded — press Generate when "
                       "you are ready.", bad=False)
             self.refresh(keep_hint=True)
+            type(self).tell_student(
+                self, "Not handed in yet",
+                "Nothing has been sent, and you do not have a receipt code yet.\n\n"
+                "Your work is still being recorded. When you are ready, press Generate proof "
+                "again and choose Hand in — a receipt code is shown once it is sealed.")
             return
         result = self.recorder.generate_proof()
         if not result.get("ok"):
-            self._say(result.get("message", "Could not generate a proof."), bad=True)
+            # The one failure that used to get a strip line instead of a dialog — every upload
+            # outcome below gets a dialog with the receipt, but a proof that could not be SEALED
+            # left the student with no receipt and nothing on screen to say why.
+            why = result.get("message", "Could not generate a proof.")
+            self._say(why, bad=True)
             self.refresh(keep_hint=True)
+            type(self).tell_student(
+                self, "Not handed in — the proof could not be sealed",
+                f"{why}\n\nNothing has been sent, and no receipt code was made.\n\n"
+                "If your work is still being recorded, press Generate proof and Hand in again. "
+                "If this keeps happening, tell your instructor and include the message above.")
             return
         receipt = result.get("receipt", "")
         self._say(f"Proof generated · receipt <b>{receipt}</b>", bad=False)
@@ -462,6 +485,9 @@ class ProofStrip(QWidget):
     #: The hand-in preview (ui/handin_preview). A class attribute so a headless test can answer
     #: it without a modal dialog that nobody is there to click.
     confirm_handin = staticmethod(lambda parent, recorder: _preview_confirm(parent, recorder))
+
+    #: A dialog that says why nothing was handed in. A class attribute for the same reason.
+    tell_student = staticmethod(lambda parent, title, text: _tell(parent, title, text))
 
     #: How many times Generate is REFUSED before the warning becomes a choice. Three is enough
     #: that nobody arrives at a blank by accident and few enough that a student who has run out of
