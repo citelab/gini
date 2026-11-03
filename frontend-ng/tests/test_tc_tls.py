@@ -386,3 +386,23 @@ def test_a_busy_port_is_a_sentence_not_a_traceback(certs, tmp_path, monkeypatch)
     msg = str(e.value)
     assert f"Port {port} is already in use" in msg
     assert "lsof" in msg and "--port" in msg        # how to find it, and how to work around it
+
+
+@needs_openssl
+def test_a_refusal_by_the_operating_systems_verifier_reaches_the_student_as_one(tls_server,
+                                                                                monkeypatch):
+    """Through the real verifier gBuilder now uses (gini/app/trust.py), not a hand-made exception.
+
+    The keychain or the Windows chain builder answers in its own words and codes, none of which
+    say "CERTIFICATE_VERIFY_FAILED". A self-signed course server is still untrusted there, and the
+    student must still be told it is a certificate problem with the server up — not an outage.
+    """
+    truststore = pytest.importorskip("truststore")
+    monkeypatch.setattr(ssl, "_create_default_https_context",
+                        lambda: truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    url, _ = tls_server
+    with pytest.raises(tc_submit.Untrusted) as e:
+        tc_submit.check_code(url.replace("127.0.0.1", "localhost"), "AAAA-AAAA")
+    msg = str(e.value)
+    assert "server is running" in msg
+    assert "rejected by this machine" not in msg        # recognised, not the catch-all

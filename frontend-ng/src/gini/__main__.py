@@ -87,6 +87,10 @@ def launch_steps(plan: dict | None, args) -> dict:
 
 def main() -> int:
     args = set(sys.argv[1:])
+    # First, before anything can open an HTTPS connection: verify certificates the way the
+    # operating system does, not against Python's own list. See app/trust.py.
+    from .app.trust import use_system_trust
+    use_system_trust()
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 

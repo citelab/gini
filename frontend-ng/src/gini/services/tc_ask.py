@@ -186,6 +186,9 @@ __all__ = ["Answer", "ask", "as_context", "Insecure", "Unreachable"]
 def _cli(argv=None) -> int:                                  # pragma: no cover - a terminal tool
     import argparse
     from ..app import paths
+    from ..app.trust import describe, use_system_trust
+
+    use_system_trust()                  # check with the same certificates gBuilder uses
 
     ap = argparse.ArgumentParser(
         prog="python3 -m gini.services.tc_ask",
@@ -226,8 +229,9 @@ def _cli(argv=None) -> int:                                  # pragma: no cover 
             "no_such_course": "  The server is up and does not have that course. Check "
                               "the spelling against the Teaching Center console.",
             "insecure": "  GINI speaks HTTPS only. The URL must start with https://.",
-            "untrusted": ("  The server IS up — its certificate is not one this machine trusts,\n"
-                          "  which in practice means a self-signed one. Point at it:\n"
+            "untrusted": ("  The server IS up — its certificate is not one this machine trusts\n"
+                          f"  (checked against {describe()}).\n"
+                          "  If the server uses a self-signed certificate, point at it:\n"
                           "      SSL_CERT_FILE=<the server's cert.pem> gbuilder\n"
                           "  Retrying, the VPN and the port number are all beside the point."),
             "unreachable": "  The server could not be reached — VPN, or the wrong port.",

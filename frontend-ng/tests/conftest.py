@@ -111,6 +111,22 @@ def _reap_windows_between_modules():
 
 
 @pytest.fixture(autouse=True)
+def _python_trust_in_tests(monkeypatch):
+    """Keep the suite on Python's own certificate list, whatever a test calls.
+
+    `gini.app.trust.use_system_trust` swaps `ssl.SSLContext` for the WHOLE process, and gBuilder's
+    entry points call it. A test that runs one (the `tc_ask` CLI does) would otherwise flip every
+    later TLS test onto the operating system's verifier — where the self-signed fixtures that the
+    TLS tests trust through `ssl._create_default_https_context` are not trusted at all — so the
+    result would depend on test order. Deciding "python" up front makes every such call a no-op;
+    tests of the module itself reset it and inject a fake.
+    """
+    from gini.app import trust
+    monkeypatch.setattr(trust, "_mode", trust.PYTHON)
+    monkeypatch.setattr(trust, "_why", "")
+
+
+@pytest.fixture(autouse=True)
 def _pristine_fragment_registry():
     """Hand every test the fragment registry the process started with.
 

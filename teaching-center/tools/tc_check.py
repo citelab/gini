@@ -6,6 +6,10 @@ the whole point. A browser proves nothing here: browsers use the operating syste
 store and will fetch a missing intermediate on their own, while Python uses its own store and never
 does. "It works in Safari" and "it fails in gBuilder" are perfectly consistent.
 
+Releases after 6.22.3 close most of that gap: gBuilder verifies through `truststore`, against the
+operating system's certificates, so this checks both ways — Python's own list (what an older
+gBuilder used) and the system's (what a current one uses) — and says which one gBuilder needs.
+
     python3 tc_check.py https://gini.cs.mcgill.ca
 
 To find the interpreter gBuilder uses:
@@ -153,7 +157,7 @@ def main(argv: list[str]) -> int:
         seen_ok = seen_fp == expected
         _say("matches the real one", "YES" if seen_ok else "NO  <-- something is rewriting it")
 
-    # ---- now with verification on, which is what gBuilder does --------------------------------- #
+    # ---- now with verification on, against Python's own list (gBuilder 6.22.3 and older) ------ #
     err = None
     try:
         with socket.create_connection((host, port), timeout=10) as s2:
@@ -166,6 +170,30 @@ def main(argv: list[str]) -> int:
     except Exception as e:                                   # noqa: BLE001
         err = e
         _say("verified connection", f"REFUSED — {type(e).__name__}: {e}")
+
+    # ---- and with the operating system's certificates ------------------------------------------ #
+    #
+    # gBuilder releases after 6.22.3 verify through `truststore` — the keychain on macOS, the
+    # Windows chain builder — and never consult the list above. So the line above says what an
+    # older gBuilder sees, and this one what a current one sees. If truststore is not importable
+    # here, this interpreter is not running a current gBuilder.
+    system = None
+    try:
+        import truststore
+    except ImportError:
+        _say("system certificates", "(truststore not installed — an older gBuilder)")
+    else:
+        try:
+            sctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            with socket.create_connection((host, port), timeout=10) as s4:
+                with sctx.wrap_socket(s4, server_hostname=host):
+                    pass
+            system = True
+            _say("system certificates", "ok — what a current gBuilder uses")
+        except Exception as e:                               # noqa: BLE001
+            system = False
+            _say("system certificates",
+                 f"REFUSED — {getattr(e, 'verify_message', '') or e}")
 
     # ---- does this Python trust ANYTHING? ------------------------------------------------------ #
     #
@@ -215,6 +243,12 @@ def main(argv: list[str]) -> int:
         print("  This machine connects and verifies the certificate correctly. If gBuilder still\n"
               "  refuses, it is running a DIFFERENT Python from this one — re-run this with the\n"
               "  interpreter named by:  head -1 \"$(command -v gbuilder)\"")
+    elif system:
+        print("  This Python's own certificate list refuses the server, but this computer's\n"
+              "  system certificates accept it — and those are what gBuilder uses since the\n"
+              "  release after 6.22.3. If gBuilder still refuses, it is older than that:\n\n"
+              "      pipx upgrade gini-toolkit        (or: pip install -U gini-toolkit)\n\n"
+              "  then restart gBuilder and press Retry now — the queued hand-ins go out.")
     elif expected and not seen_ok:
         print("  The certificate this machine received is NOT the one the server is sending, so\n"
               "  something between you and the server is intercepting HTTPS — antivirus with\n"

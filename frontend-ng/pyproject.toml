@@ -41,6 +41,10 @@ dependencies = [
     #                              the container's byte stream into a grid of cells, which
     #                              ui/terminal_view.py paints. Replaced an embedded xterm.js page
     #                              in QtWebEngine — a Chromium process per terminal.
+    "truststore>=0.10",          # verify HTTPS with the operating system's certificates, not
+    #                              Python's own list (gini/app/trust.py). Pure Python, what pip
+    #                              uses by default. Without it a python.org Python on a Mac
+    #                              trusted nothing and could not hand in at all.
 ]
 
 [project.optional-dependencies]

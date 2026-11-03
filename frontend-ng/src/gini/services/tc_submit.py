@@ -90,6 +90,26 @@ class Untrusted(Unreachable):
     """
 
 
+#: The operating system's verifier (gini.app.trust) reports its own codes, and on Windows its
+#: message is in the user's language — so the codes are what is matched there, not the words.
+#: OpenSSL's codes are small positive integers, so none of these can be mistaken for one.
+_OS_HOSTNAME = {-67602,                                  # macOS errSecHostNameMismatch
+                0x800B010F}                              # Windows CERT_E_CN_NO_MATCH
+_OS_EXPIRED = {-67818,                                   # macOS errSecCertificateExpired
+               0x800B0101}                               # Windows CERT_E_EXPIRED
+_OS_UNTRUSTED = {-67843,                                 # macOS errSecNotTrusted
+                 0x800B0109,                             # Windows CERT_E_UNTRUSTEDROOT
+                 0x800B010A}                             # Windows CERT_E_CHAINING
+
+
+def _os_code(cause: object) -> int | None:
+    """The verifier's code, with a Windows HRESULT folded to its unsigned form either way."""
+    code = getattr(cause, "verify_code", None)
+    if not isinstance(code, int):
+        return None
+    return code & 0xFFFFFFFF if code < -0x80000 else code
+
+
 def _wrap(e: Exception, url: str = "") -> Unreachable:
     """Classify a transport failure. A certificate problem is NOT an outage.
 
@@ -99,32 +119,51 @@ def _wrap(e: Exception, url: str = "") -> Unreachable:
     hostname mismatch — a URL with the wrong port, pointing at a certificate issued for a different
     name. Those two have nothing in common except the exception class. Python hands us the specific
     reason; throwing it away turns a five-second diagnosis into a hunt.
+
+    **"Self-signed certificate IN CERTIFICATE CHAIN" is not "the server's certificate is
+    self-signed".** This said it was, to a student whose Python had no certificate list at all:
+    the course server sends its chain right up to its (self-signed) root, so a client that trusts
+    nothing reaches that root and reports it. The server's certificate was fine. That case, and
+    OpenSSL's two "unable to get … issuer" refusals, all mean the same thing — the list this
+    machine checked against does not hold the authority at the top of the chain — and say so.
+
+    And the message names the list (`trust.describe()`): an operating system that distrusts a
+    certificate and an interpreter with an empty file can produce the same words.
     """
     cause = getattr(e, "reason", e)
     verify = getattr(cause, "verify_message", "") or ""
     if isinstance(cause, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+        from ..app import trust
         where = f" ({url})" if url else ""
-        low = (verify or str(e)).lower()
-        if "hostname mismatch" in low:
+        low = (verify or str(e)).lower().replace("self signed", "self-signed")
+        code = _os_code(cause)
+        if "hostname mismatch" in low or "does not match" in low or code in _OS_HOSTNAME:
             detail = (f"the address you are connecting to{where} does not match the name on the "
                       f"server's certificate — check the address in Settings, especially the port, "
                       f"since a different port can serve a different certificate")
-        elif "expired" in low:
+        elif "expired" in low or code in _OS_EXPIRED:
             detail = ("the server's certificate has expired — check your computer's clock first, "
                       "since a wrong date makes a good certificate look expired")
-        elif "self-signed" in low or "self signed" in low:
+        elif ("self-signed certificate in certificate chain" in low
+              or "unable to get local issuer" in low or "unable to get issuer" in low):
+            detail = ("this computer's certificate list does not include the authority at the top "
+                      "of the server's certificate chain — on a Mac, usually a Python from "
+                      "python.org whose certificates were never installed; otherwise an "
+                      "out-of-date list, or security software inspecting secure connections")
+        elif "self-signed" in low:
             detail = ("the server's certificate is self-signed, or something on your network is "
                       "intercepting secure connections")
-        elif "unable to get local issuer" in low:
-            detail = ("this machine cannot find the authority that issued the server's certificate "
-                      "— often an out-of-date certificate store, or security software inspecting "
-                      "HTTPS")
+        elif code in _OS_UNTRUSTED or "not trusted" in low:
+            detail = ("this computer does not trust the authority that issued the server's "
+                      "certificate — the server may be using a self-signed certificate, or "
+                      "something on your network is intercepting secure connections")
         else:
             detail = f"the server's certificate was rejected by this machine ({verify or cause})"
         return Untrusted(
-            f"{detail}. The server is running — this is a certificate problem, so nothing you do "
-            f"in gBuilder will fix it. Tell your instructor (teaching-center/tools/tc_check.py in "
-            f"the GINI repo prints the details they will ask for), and keep your proof file.")
+            f"{detail}. Checked against {trust.describe()}. The server is running — this is a "
+            f"certificate problem, so nothing you do in gBuilder will fix it. Tell your instructor "
+            f"(teaching-center/tools/tc_check.py in the GINI repo prints the details they will "
+            f"ask for), and keep your proof file.")
     if _dropped(cause):
         # Name what happened in words a student can act on. "[Errno 32] Broken pipe" is the
         # whole of what twenty of them were shown, and none of them could tell whether the server
