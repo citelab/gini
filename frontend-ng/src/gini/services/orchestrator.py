@@ -488,6 +488,25 @@ _MACHINE_IMAGE = {
     MACHINE_GUI:      ("gini-machine-gui",      "docker/Dockerfile.machine-gui"),
 }
 
+# Every station speaks IGMPv2, set when the container is CREATED. v2 is the version the multicast
+# labs teach — one report per group, one leave, nothing else — and the one a simple router script
+# can read. Linux starts in v3, and drops to v2 only after it hears a v2 query, so a passive
+# membership script (Lab 6's mcast.lua) never saw a join at all.
+#
+# The handout's fix, `sysctl -w net.ipv4.conf.all.force_igmp_version=2` on the station, cannot
+# work: Docker mounts /proc/sys read-only in an unprivileged container, and NET_ADMIN does not
+# change that ("permission denied on key"). The two ways to make it writable — `privileged`, or
+# `security_opt: systempaths=unconfined` — also hand the station the GLOBAL kernel knobs (vm.*,
+# kernel.*), which on a Linux laptop are the student's real kernel. Compose `sysctls:` sets only
+# this station's own network namespace, and only at creation. `default` reaches the fabric
+# interfaces too: the shuttle creates gini0… after the container starts, and a new interface
+# copies `default`. `all` covers anything already up.
+_STATION_SYSCTLS = [
+    "    sysctls:",
+    "      net.ipv4.conf.all.force_igmp_version: 2",
+    "      net.ipv4.conf.default.force_igmp_version: 2",
+]
+
 _DOCKERFILE_FABRIC = """FROM python:3.12-slim
 WORKDIR /app
 COPY dataplane/ /app/dataplane/
@@ -1223,6 +1242,7 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
             f"    build: {{ context: ., dockerfile: {dockerfile} }}",
             "    cap_add: [NET_ADMIN]",
             '    devices: ["/dev/net/tun:/dev/net/tun"]',
+            *_STATION_SYSCTLS,
             f"    networks: {nets}",
             "    environment:",
             f"      NODE_CONFIG: '{json.dumps(m)}'",

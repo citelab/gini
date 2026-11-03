@@ -19,11 +19,14 @@ mounts at `/shared/multicast_fs`.
 
 ## Network side
 
-Load the provided tree forwarder on **every** router, and force IGMPv2 on every
-receiver station:
+Load the provided tree forwarder on **every** router:
 
     router>  gpipe cp add lua /scripts/mcast_tree.lua 1000
-    recv:~#  sysctl -w net.ipv4.conf.all.force_igmp_version=2
+
+Every station already speaks IGMPv2 — gBuilder sets it when the station is created,
+because `sysctl -w` cannot change it from inside a container. To check:
+
+    recv:~#  sysctl net.ipv4.conf.all.force_igmp_version      # → 2
 
 Watch the joins, the tree, and the per-interface copy counters in gBuilder's
 **Multicast HUD** while a session runs.

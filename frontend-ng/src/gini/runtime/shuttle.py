@@ -39,6 +39,7 @@ IFF_NO_PI = 0x1000
 WAN_SUBNET_PREFIX = "192.168.244."
 WAN_GATEWAY = "192.168.244.1"
 EXP_SUPERNET = "10.0.0.0/8"
+MCAST_NET = "224.0.0.0/4"
 
 
 _BIG_ENDIAN = sys.byteorder == "big"
@@ -258,6 +259,36 @@ def add_default_route(gw: str, exp_net: str = EXP_SUPERNET) -> None:
     subprocess.run(["ip", "route", "replace", exp_net, "via", gw], check=False)
 
 
+def multicast_iface(ifaces: list[dict], gw: str | None) -> str:
+    """The fabric interface multicast leaves by: the one on the gateway's subnet, else the first.
+    PURE, so the choice is testable without a container. A station with no gateway (hosts on one
+    switch, no router) still sends multicast to its neighbours, which is why this never returns
+    nothing."""
+    import ipaddress
+    taps = [(itf.get("tap", f"gini{i}"), itf.get("ip", "")) for i, itf in enumerate(ifaces)]
+    if gw:
+        for tap, cidr in taps:
+            try:
+                if ipaddress.ip_address(gw) in ipaddress.ip_interface(cidr).network:
+                    return tap
+            except ValueError:
+                continue
+    return taps[0][0] if taps else "gini0"
+
+
+def add_multicast_route(dev: str) -> None:
+    """Send multicast into the fabric, as add_default_route does for the experiment's unicast.
+
+    Without it a group address matches only the container's default route — Docker's eth0, the
+    management NIC that carries the fabric underneath — and a sender that names no interface
+    (Lab 6's sender.py, the multicast_fs starter kit, anything a student writes) put every datagram
+    onto Docker's bridge, where no gRouter ever saw it. Measured: `eth0 Out … > 239.1.1.1`, nothing
+    delivered. On a real one-NIC host the same program is correct, so this is GINI's plumbing to
+    hide, not a lesson to teach. A member is unaffected: it joins on the address it names.
+    """
+    subprocess.run(["ip", "route", "replace", MCAST_NET, "dev", dev], check=False)
+
+
 def set_fabric_default(gw: str) -> None:
     """Send the *real* default route (0.0.0.0/0) into the fabric via `gw`, so internet-
     bound traffic egresses through the drawn routers + Internet element (not docker eth0).
@@ -399,6 +430,10 @@ def main() -> None:
             add_default_route(cfg["gw"])         # experiment supernet via the router
         if cfg.get("cut_default"):               # faithful mode: no internet on this host
             cut_default_route()
+    if not cfg.get("gateway") and not cfg.get("nf"):
+        # Every station but the two that forward for others: the NAT gateway's default route is
+        # its WAN, and a VNF is transit, not a sender.
+        add_multicast_route(multicast_iface(ifaces, cfg.get("gw")))
 
     # Counted, and announced the first time it happens: a data plane quietly rewriting
     # packets is exactly the kind of thing that should be visible in a teaching tool.
