@@ -10,7 +10,19 @@ returns:
 ``parse_cp_status`` turns one router's snapshot into ``GroupState`` rows.
 ``McastTracker`` ingests rows from every router each poll and derives what the HUD
 draws: the union of groups, each router's member interfaces, per-interface copy
-*rates* (counters differenced between polls), and a join/leave event log.
+*rates*, and a join/leave event log.
+
+**A rate is measured between CHANGES of a counter, not between polls.** The router
+republishes its snapshot once per control-plane tick, and the HUD polls every 1.2 s.
+Differencing poll against poll is only right when every poll sees a new snapshot — and
+`gpipe cp add lua mcast_tree.lua` with no tick argument runs at 5 s, so four polls in
+five saw the same counters. Measured on a real gRouter with a steady 1 datagram/s
+sender: the counter read 0,0,0,0,5,5,5,10,… and the HUD's rate went 0, 0, 0, 4/s, 0, 0 —
+every member badge flashing teal for one poll and grey for three, while forwarding never
+missed a datagram. That is what "the HUD shows multicast working sometimes" was. An
+unchanged counter now means "no new snapshot yet": the last rate is held until the
+counter moves again, or until it has been still for much longer than it usually takes
+to move (`STALE_FACTOR`, never less than `STALE_MIN_S`) — which is a sender that stopped.
 """
 from __future__ import annotations
 
@@ -68,22 +80,60 @@ class McastEvent:
         return f"{self.router} if{self.iface} {self.kind} {self.group}"
 
 
+#: A counter that has not moved for this many of its usual intervals has stopped.
+STALE_FACTOR = 2.5
+#: …but never call it stopped sooner than this: two polls' worth, with room for a slow one.
+STALE_MIN_S = 3.0
+#: A rate is averaged over the counter's moves in about this long. A 1 s tick polled every
+#: 1.2 s sees one copy, then two, then one — 0.8/s, 1.7/s, 0.8/s from the last move alone.
+WINDOW_S = 6.0
+
+
 @dataclass
 class McastTracker:
     """Accumulates polls; derives rates and join/leave events."""
     state: dict[tuple[str, str], GroupState] = field(default_factory=dict)
     rates: dict[tuple[str, str, int], float] = field(default_factory=dict)
     events: list[McastEvent] = field(default_factory=list)
-    _last_t: float = 0.0
     max_events: int = 40
+    # per (router, group, iface): the (count, poll time) of each time the counter moved, oldest
+    # first, kept back to about WINDOW_S
+    _moves: dict[tuple[str, str, int], list[tuple[int, float]]] = field(default_factory=dict)
+
+    def _count(self, k: tuple[str, str, int], c: int, tnow: float) -> None:
+        h = self._moves.get(k)
+        if not h or c < h[-1][0]:                # first sight, or the module was reloaded
+            if h:
+                self.rates[k] = 0.0
+            self._moves[k] = [(c, tnow)]
+            return
+        if c > h[-1][0]:
+            h.append((c, tnow))
+            while len(h) > 2 and tnow - h[1][1] >= WINDOW_S:
+                h.pop(0)
+            (c0, t0), (c1, t1) = h[0], h[-1]
+            if t1 > t0:
+                self.rates[k] = (c1 - c0) / (t1 - t0)
+            return
+        usual = (h[-1][1] - h[-2][1]) if len(h) >= 2 else 0.0
+        if tnow - h[-1][1] > max(STALE_MIN_S, STALE_FACTOR * usual):
+            self.rates[k] = 0.0                  # still for far longer than usual: stopped
+
+    def _forget(self, k: tuple[str, str, int]) -> None:
+        self.rates.pop(k, None)
+        self._moves.pop(k, None)
 
     def ingest(self, rows: list[GroupState], tnow: float | None = None,
                polled: set[str] | None = None) -> None:
         """`polled` names every router that answered this poll (so a router whose
         snapshot went empty generates leaves, while an unpolled router is left
-        alone). Defaults to the routers present in `rows`."""
+        alone). Defaults to the routers present in `rows`.
+
+        "Answered" is the caller's to get right, and it was the HUD's second flicker: a
+        query that FAILED (a docker exec that timed out, a busy engine) came back as text
+        with no group rows, was counted as an answer, and every group on that router was
+        logged as a leave — then joined again on the next poll that got through."""
         tnow = time.monotonic() if tnow is None else tnow
-        dt = (tnow - self._last_t) if self._last_t else 0.0
         seen: set[tuple[str, str]] = set()
         routers_polled = set(polled) if polled is not None else {r.router for r in rows}
 
@@ -97,9 +147,7 @@ class McastTracker:
             for i in sorted(prev_ifs - set(r.ifaces)):
                 self.events.append(McastEvent(tnow, r.router, r.group, i, "leave"))
             for i, c in r.copies.items():
-                if prev and dt > 0:
-                    dc = c - prev.copies.get(i, 0)
-                    self.rates[(r.router, r.group, i)] = max(0.0, dc / dt)
+                self._count((r.router, r.group, i), c, tnow)
             self.state[key] = r
 
         # a group that vanished from a router we DID poll = every iface left
@@ -108,10 +156,9 @@ class McastTracker:
             for i in old.ifaces:
                 self.events.append(McastEvent(tnow, old.router, old.group, i, "leave"))
             for i in list(old.copies):
-                self.rates.pop((old.router, old.group, i), None)
+                self._forget((old.router, old.group, i))
 
         del self.events[:-self.max_events]
-        self._last_t = tnow
 
     # ---- accessors the HUD paints from ---------------------------------- #
     def groups(self) -> list[str]:

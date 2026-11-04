@@ -1704,7 +1704,7 @@ class MainWindow(QMainWindow):
                         self.canvas, self.theme,
                         routers=lambda: [d.name for d in self.ctx.topology.devices.values()
                                          if d.type_key in ("router", "firewall")],
-                        query=self.element_query)
+                        query=self.element_query_checked)
                 self._mhud.show_topright()
             elif getattr(self, "_mhud", None) is not None:
                 self._mhud.close()
@@ -4105,9 +4105,26 @@ class MainWindow(QMainWindow):
         run_off_gui(self, work)
 
     def element_query(self, device_name: str, command: str) -> str:
-        """Run a one-shot console command against a network element (needs Docker up)."""
+        """Run a one-shot console command against a network element (needs Docker up).
+
+        Never raises: a failure comes back as text, which is what a console wants to show."""
+        return self._element_exec(device_name, command)[1]
+
+    def element_query_checked(self, device_name: str, command: str) -> str:
+        """`element_query`, but a query that did not reach the element RAISES.
+
+        For pollers that must not mistake a failure for an answer. `element_query` folds both
+        into text, and the Multicast HUD read "(query failed: …)" as a router with no groups —
+        logging a leave for every member on it, then a join on the next poll that got through."""
+        ok, text = self._element_exec(device_name, command)
+        if not ok:
+            raise RuntimeError(text)
+        return text
+
+    def _element_exec(self, device_name: str, command: str) -> tuple[bool, str]:
+        """(reached the element and it answered, the text). See `element_query`."""
         if not self._workdir:
-            return "(not running)"
+            return False, "(not running)"
         import subprocess
         from ..services.compiler import _role, _svc
         svc = _svc(device_name)
@@ -4131,13 +4148,13 @@ class MainWindow(QMainWindow):
                        "python", "-m", "dataplane.console", svc, command]
             r = subprocess.run(cmd, cwd=self._workdir, capture_output=True,
                                text=True, encoding="utf-8", errors="replace", timeout=15)
+            out = (r.stdout or "").strip()
             # Podman announces its compose provider on stderr for every command, so a command
             # with no output would "return" that banner as its result. See runtime.compose_error.
-            return ((r.stdout or "").strip()
-                    or _runtime.compose_error(r.stderr, limit=4000)
-                    or "(no output)")
+            return (r.returncode == 0 and bool(out),
+                    out or _runtime.compose_error(r.stderr, limit=4000) or "(no output)")
         except Exception as e:
-            return f"(query failed: {e})"
+            return False, f"(query failed: {e})"
 
     def _machine_shell(self, device_name: str, command: str) -> str:
         """Run a shell command directly inside a machine's container (docker exec).

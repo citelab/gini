@@ -165,8 +165,12 @@ class McastHudController(QObject):
             self.canvas, self.theme,
             routers=lambda: [d.name for d in devs.values()
                              if d.type_key in ("router", "firewall")],
-            query=self.element_query)          # (name, cmd) -> text
+            query=self.element_query_checked)  # (name, cmd) -> text; RAISES on failure
         self._mhud.show_topright()             # toggle off -> self._mhud.close()
+
+    `query` must raise when it did not reach the router. A router counts as polled only
+    when its query returned, and a polled router with no group rows has lost them all —
+    so a failure passed off as text wiped the router's groups for one poll.
     """
 
     rows_ready = Signal(object, object, float)     # (rows, polled_names, tnow)
