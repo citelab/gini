@@ -195,6 +195,40 @@ def test_touching_survives_a_file_that_is_not_there(ga, tmp_path, monkeypatch):
     ga._touch_sources()                      # must not raise
 
 
+def test_an_a_lab_file_linked_into_the_tree_is_touched_too(ga, tmp_path, monkeypatch):
+    """The A-Lab files live on the same bind mount as the shadows, and a student may restore an
+    older copy of one. With only the shadows touched, a replaced kalloc.c kept its old date, make
+    rebuilt nothing, and Load booted the previous allocator while reporting "loaded"."""
+    import os
+    lab, tree = tmp_path / "lab" / "a-lab-03", tmp_path / "tree"
+    lab.mkdir(parents=True)
+    (tree / "kernel").mkdir(parents=True)
+    (tree / "user").mkdir()
+    mine, image = lab / "kalloc.c", tree / "kernel" / "proc.c"
+    mine.write_text("// the student's"); image.write_text("// the image's")
+    for f in (mine, image):
+        os.utime(f, (1_000_000, 1_000_000))
+    (tree / "kernel" / "kalloc.c").symlink_to(mine)
+    monkeypatch.setattr(ga, "XV6_DIR", str(tree))
+    monkeypatch.setattr(ga, "LAB_MOUNT", str(tmp_path / "lab"))
+    monkeypatch.setattr(ga, "SHADOWS", {})
+    ga._touch_sources()
+    assert os.stat(mine).st_mtime > 1_000_000          # the student's file, through the link
+    assert os.stat(image).st_mtime == 1_000_000        # the image's own files are left alone
+
+
+def test_the_agent_and_gbuilder_agree_where_the_lab_is_mounted(ga):
+    from gini.services import xv6_lab
+    assert ga.LAB_MOUNT == xv6_lab.MOUNT
+
+
+def test_qemu_waits_for_the_agent_so_the_boot_is_not_lost(ga):
+    """With `nowait`, everything the kernel printed before the agent's reader attached -- the whole
+    boot, including a boot panic -- was dropped."""
+    serial = ga._qemu_cmd()[ga._qemu_cmd().index("-serial") + 1]
+    assert "wait=on" in serial and "nowait" not in serial
+
+
 def test_a_load_touches_before_it_builds(ga, tree, monkeypatch):
     """Ordering is the guarantee: touching after make would fix nothing."""
     order = []

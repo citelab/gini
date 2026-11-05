@@ -33,7 +33,7 @@ Load loop (edit → `make` → relaunch) possible without killing the container.
 | 1234 | gdb stub | container-internal only; gdb runs inside |
 
 QEMU command (`gini_agent.py:288–296`): `qemu-system-riscv64 -machine virt -bios
-none -kernel kernel/kernel -m 128M -smp $XV6_CPUS -serial tcp::4444,server,nowait
+none -kernel kernel/kernel -m 128M -smp $XV6_CPUS -serial tcp::4444,server=on,wait=on
 -gdb tcp::1234`. The element's Size tier sets `-smp`: S/M→1, L→2, XL→4
 (`compiler.py:127–140`) — which is why lock contention is all-zero on S/M.
 

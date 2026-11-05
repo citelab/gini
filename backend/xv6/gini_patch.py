@@ -969,97 +969,10 @@ regex_once("kernel/kalloc.c",
            "  }\n",
            "GINI-xv6: kalloc shadow hook")
 
-append_once("kernel/kalloc.c", """
-// GINI-xv6: the physical-page allocation bitmap — 1 bit per page. This is what makes a student
-// page allocator SAFE to run: without it, a shadow that hands back a live page corrupts memory
-// undetectably. 4 KB of state for 128 MiB of RAM, updated inside the lock kalloc/kfree already
-// take, and it is also the data source for the Memory Lab's fragmentation view.
-uint8 gini_pagemap[((PHYSTOP - KERNBASE) / PGSIZE + 7) / 8];
-uint64 gini_ka_shadow;
-
-static inline uint64 gini_pg_idx(uint64 pa) { return (pa - KERNBASE) / PGSIZE; }
-
-static int
-gini_pg_inrange(uint64 pa)
-{
-  return pa >= KERNBASE && pa < PHYSTOP;
-}
-
-void
-gini_page_set(uint64 pa)
-{
-  uint64 i;
-  if(!gini_pg_inrange(pa)) return;
-  i = gini_pg_idx(pa);
-  gini_pagemap[i / 8] |= (1 << (i %% 8));
-}
-
-void
-gini_page_clear(uint64 pa)
-{
-  uint64 i;
-  if(!gini_pg_inrange(pa)) return;
-  i = gini_pg_idx(pa);
-  gini_pagemap[i / 8] &= ~(1 << (i %% 8));
-}
-
-int
-gini_page_isset(uint64 pa)
-{
-  uint64 i;
-  if(!gini_pg_inrange(pa)) return 0;
-  i = gini_pg_idx(pa);
-  return (gini_pagemap[i / 8] >> (i %% 8)) & 1;
-}
-
-void *
-gsh_kalloc(void *arg)
-{
-  (void)arg;
-  return kalloc_shadow();
-}
-
-// EXACT, not probabilistic: the page must be aligned, inside RAM, and genuinely free per the
-// bitmap. (xv6's kfree also poisons freed pages with 0x01, which is a cheap secondary check —
-// but the bitmap is authoritative and costs one bit.)
-int
-gsh_kalloc_valid(void *arg, void *ans)
-{
-  uint64 pa = (uint64)ans;
-  (void)arg;
-  if(pa %% PGSIZE)            return 0;
-  if(!gini_pg_inrange(pa))    return 0;
-  if((char *)pa < end)        return 0;    // below the kernel's own end = not allocatable
-  return !gini_page_isset(pa);
-}
-
-// Free-page count + the largest CONTIGUOUS free run — the fragmentation score a buddy-allocator
-// mission is graded on (a first-fit list scores badly here once memory churns).
-void
-gini_kadump(void)
-{
-  uint64 npages = (PHYSTOP - KERNBASE) / PGSIZE;
-  // Start where the ALLOCATOR starts, not where physical memory starts. kinit() does
-  // freerange(end, PHYSTOP), so the pages below PGROUNDUP(end) are the kernel's own image: they
-  // are never kfree'd, so gini_page_clear never runs on them, so their bits stay 0 — and a 0 bit
-  // means "free". This counted the kernel itself as free memory, about 50 pages of it, on every
-  // machine since the bitmap was added. Found while building the sysinfo assignment, where a
-  // student walks kmem.freelist and gets the right answer: the two disagreed by exactly the size
-  // of the kernel image, and the student's number was the correct one.
-  uint64 first = (PGROUNDUP((uint64)end) - KERNBASE) / PGSIZE;
-  uint64 free = 0, run = 0, best = 0;
-  for(uint64 i = first; i < npages; i++){
-    if(gini_page_isset(KERNBASE + i * PGSIZE)){
-      run = 0;
-    } else {
-      free++; run++;
-      if(run > best) best = run;
-    }
-  }
-  %(P)s("KA free %%d total %%d maxrun %%d shadow %%d\\n",
-        (int)free, (int)npages, (int)best, (int)gini_ka_shadow);
-}
-""" % {"P": PRINT}, "GINI-xv6: page bitmap + kalloc shadow")
+# The bitmap itself, the vm-shadow adapters (gsh_kalloc, gsh_kalloc_valid) and gini_kadump() used
+# to be appended here. They live in kernel/gini_mem.c now (section 6), unchanged in behaviour: in
+# A-Lab 03 the student's kalloc.c REPLACES this one, so nothing GINI needs at run time may live in
+# it. kalloc.c keeps only the calls above, declared in defs.h.
 
 # 3f) spinlock.c/h — LOCK CONTENTION telemetry. The one phenomenon in this kernel that is
 #     completely invisible today, and the thing 6.1810 students read as text from a test program
@@ -1664,8 +1577,9 @@ gini_vmdump(void)
 # 4d1) gini_vmdump_all(): EVERY user process's leaf mappings, tagged by pid, so the Memory face
 # can put parent and child side by side and DERIVE sharing (same PA in two procs) — the whole
 # basis of the copy-on-write experiment, with no kernel refcount required. Emits `VP pid name sz`
-# per proc then `VL pid va pa flags` per leaf, where flags = the low 10 PTE bits (R/W/X/U AND the
-# student's RSW/COW bit). The VA is accumulated during the walk (Sv39: index i at level L adds
+# per proc then `VL pid va pa flags level` per leaf, where flags = the low 10 PTE bits (R/W/X/U AND
+# the student's RSW/COW bit), and level is 0 for a 4 KB page, 1 for a 2 MB megapage (A-Lab 03).
+# The level came last, and later: a parser must default it to 0, because older images omit it. The VA is accumulated during the walk (Sv39: index i at level L adds
 # i<<(12+9L)); a leaf is level 0 or any PTE with R/W/X set.
 _GINI_VMALL = '''
 // GINI-xv6: dump all user page tables (leaf mappings, tagged by pid) — the COW / sharing view.
@@ -1678,7 +1592,8 @@ gini_leafwalk(pagetable_t pt, uint64 va, int level, int pid)
       continue;
     uint64 cva = va | ((uint64)i << (12 + 9*level));
     if(level == 0 || (pte & (PTE_R|PTE_W|PTE_X)))
-      PRINTF("VL %d %p %p %d\\n", pid, (void*)cva, (void*)PTE2PA(pte), (int)(pte & 0x3FF));
+      PRINTF("VL %d %p %p %d %d\\n", pid, (void*)cva, (void*)PTE2PA(pte), (int)(pte & 0x3FF),
+             level);
     else
       gini_leafwalk((pagetable_t)PTE2PA(pte), cva, level - 1, pid);
   }
@@ -3257,6 +3172,7 @@ _GINI_SYSCALL_H = """// GINI's own system calls -- part of the machine, not of a
 #define SYS_gini_setpolicy   64   // setpolicy(n)
 #define SYS_gini_getrtime    65   // getrtime(pid)
 #define SYS_gini_settick     66   // settick(ms)
+#define SYS_gini_memctl      67   // memctl(op, a, b) -- A-Lab 03 (gini_mem.c)
 """
 
 _GINI_SYS_C = """// kernel/gini_sys.c — GINI's own system calls (see gini_syscall.h). Not student code.
@@ -3277,6 +3193,9 @@ _GINI_SYS_C = """// kernel/gini_sys.c — GINI's own system calls (see gini_sysc
 #include "proc.h"
 #include "defs.h"
 #include "gini_syscall.h"   // directly: an older student defs.h does not include it
+
+// A-Lab 03 (gini_mem.c). In defs.h too, and repeated for the same reason as the include above.
+uint64 gini_memctl(void);
 
 extern struct proc proc[NPROC];
 extern int sched_policy;
@@ -3313,6 +3232,8 @@ gini_syscall(int num)
     gini_tick_cycles = (uint64)a * 10000;
     return old;
   }
+  case SYS_gini_memctl:
+    return gini_memctl();
   }
   PRINTF("%d %s: unknown GINI sys call %d\\n", myproc()->pid, myproc()->name, num);
   return -1;
@@ -3323,6 +3244,9 @@ _GINI_USER_H = """// GINI's own system calls -- part of the machine, not of any 
 int setpolicy(int n);   // n < 0: the current policy; else switch, return the old one (-1: no such)
 int getrtime(int pid);  // timer ticks that process has run, or -1
 int settick(int ms);    // ms <= 0: the tick length in ms; else set it (10..1000), return the old one
+
+// A-Lab 03: GINI's allocator instrument (kernel/gini_mem.c, kernel/gini_mem.h)
+uint64 memctl(int op, uint64 a, uint64 b);
 """
 
 _GINI_USYS_S = """# GINI's own system calls (kernel/gini_syscall.h) -- kept out of usys.pl, which is a student file.
@@ -3340,6 +3264,11 @@ getrtime:
 .global settick
 settick:
  li a7, SYS_gini_settick
+ ecall
+ ret
+.global memctl
+memctl:
+ li a7, SYS_gini_memctl
  ecall
  ret
 """
@@ -3435,6 +3364,1456 @@ uint64          gini_syscall(int);
     add_uprog("policy", _POLICY_PROG)
     if "$U/_policy\\" not in (ROOT / "Makefile").read_text():
         failed.append("Makefile: _policy not registered")
+
+
+# ---------------------------------------------------------------------------------------------
+# 6) A-LAB 03 — BUDDY ALLOCATION AND MEGAPAGES. Compiled into EVERY lab's kernel, because the
+#    image is one image, and inert in every lab but A-Lab 03.
+#
+#    The student OWNS kernel/kalloc.c (seeded with the buddy starter by a-lab-03.yaml, replacing
+#    the image's) and kernel/vm.c (the image's, below). buddy.h, buddytest.c and megatest.c are
+#    shown to them and never built from their copy. GINI OWNS:
+#
+#      kernel/gini_mem.c   the allocation bitmap that used to sit at the end of kalloc.c (3e),
+#                          moved because in A-Lab 03 the student's kalloc.c REPLACES the image's,
+#                          so nothing GINI needs at run time may live in it; plus the bookkeeping
+#                          around kalloc_block()/kfree_block(), an audit of the student's free
+#                          lists, and memctl(). kalloc_block/kfree_block are weak references, so
+#                          memctl() returns -1 on every other lab's kernel.
+#      kernel/buddy.h      the allocator's structures. In the image, not a seed: gini_mem.c
+#                          includes it in every build.
+#      kernel/gini_mem.h   what memctl() reports, shared with the two test programs.
+#      vm.c megapages      walk_level(), megapte(), demote(), and uvmunmap()/uvmcopy() that
+#                          handle a 2 MB leaf. Inert elsewhere: only the student's A-Lab 03
+#                          uvmalloc() ever makes one. What the student writes -- the leaf check in
+#                          walk(), the offset in walkaddr(), megapages in uvmalloc() -- must never
+#                          be here.
+#      memctl              system call 67, GINI's own (gini_sys.c), so it stays out of usys.pl.
+#      buddytest megatest  in UPROGS for every lab. On another lab's kernel they print one line,
+#                          "buddytest: memctl failed -- is this GINI's A-Lab 03 kernel?", and exit.
+#
+#    The sources are the public gini-side files of the lab, verbatim, except that the bitmap in
+#    gini_mem.c is weak (see there) and keeps the comments it carried in kalloc.c; and vm.c repeats
+#    three declarations, because an A-Lab 01/02 folder keeps an older defs.h (see _VM_WALK_LEVEL). Anchored on kalloc.c existing, like 3e; every edit after that
+#    is a regex_must/write_must, because a lab that silently lost one cannot be done.
+# ---------------------------------------------------------------------------------------------
+_BUDDY_H = r"""// kernel/buddy.h -- the buddy allocator's data structures and helper macros. A-Lab 03.
+//
+// Read all of it. Do not change it: GINI reads these structures to check your allocator.
+//
+// Include after types.h, param.h, memlayout.h, spinlock.h and riscv.h.
+//
+// Every block is 2^k pages long, for k = 0 .. MAXK, and starts at a multiple of its own size:
+//
+//     k      0    1    2    3    4     5     6     7     8    9
+//     size   4K   8K   16K  32K  64K   128K  256K  512K  1M   2M
+//
+// k is only an index: free list k holds the free blocks of 2^k pages.
+
+#define MAXK       9                    // 2^9 pages = 2 MB, the largest block
+#define NPAGES     ((PHYSTOP - KERNBASE) / PGSIZE)
+
+// The size in bytes of a block of 2^k pages.
+#define BLOCKSIZE(k)   ((uint64)PGSIZE << (k))
+
+// Physical address <-> page number. Page 0 is the page at KERNBASE.
+#define PA2IDX(pa)     (((uint64)(pa) - KERNBASE) / PGSIZE)
+#define IDX2PA(i)      (KERNBASE + (uint64)(i) * PGSIZE)
+
+// The buddy of the block of 2^k pages at pa. Correct only if pa is a multiple of BLOCKSIZE(k),
+// which every such block in a buddy allocator is. (KERNBASE is a multiple of 2 MB, so "a multiple
+// of BLOCKSIZE(k)" means the same thing for the address and for the page number.)
+#define BUDDY(pa, k)   ((uint64)(pa) ^ BLOCKSIZE(k))
+
+// page_info[]: one byte per physical page. For the FIRST page of a FREE block it holds
+// PI_FREE | k. For every other page it is 0: pages inside a free block, pages in use, and the
+// kernel image. Keeping it correct is your job.
+#define PI_FREE        0x80
+#define PI_K(b)        ((b) & 0x0f)
+
+extern uint8 page_info[NPAGES];
+
+// A free block is threaded onto its free list through its own first bytes: the memory is free,
+// so the allocator may use it. You never touch next and prev yourself -- the helpers do.
+struct block {
+  struct block *next;
+  struct block *prev;
+};
+
+// The allocator's state: free list k, and a counter for it, for every k. The helpers keep
+// nfree[k] equal to the length of list k.
+struct buddy {
+  struct spinlock lock;
+  struct block *free[MAXK + 1];
+  uint64 nfree[MAXK + 1];
+};
+
+extern struct buddy buddy;
+
+// GINI's helpers (kalloc.c, top half). They change the lists and counters, never page_info.
+// The caller must hold buddy.lock -- the wrappers already do when they call your functions.
+void   block_push(uint64 pa, int k);    // put the block at pa on list k
+uint64 block_pop(int k);                // take a block off list k; 0 if it is empty
+void   block_remove(uint64 pa, int k);  // take this particular block off list k
+
+// Yours (kalloc.c, bottom half).
+void   buddy_init(uint64 start, uint64 end);
+uint64 buddy_alloc(int k);              // a free block of 2^k pages, or 0
+void   buddy_free(uint64 pa, int k);    // the block of 2^k pages at pa is free again
+"""
+
+_GINI_MEM_H = r"""// kernel/gini_mem.h -- what memctl() reports. GINI's, shared by the kernel and the A-Lab 03
+// test programs. Not student code.
+
+#define MC_STATE     1   // memctl(MC_STATE, &state)       audit the allocator now
+#define MC_ALLOC     2   // memctl(MC_ALLOC, size)         kalloc_block(size), held for the test
+#define MC_FREE      3   // memctl(MC_FREE, pa, size)      kfree_block(pa, size) of held pages
+#define MC_RELEASE   4   // memctl(MC_RELEASE)             free every held page
+#define MC_FRAGMENT  5   // memctl(MC_FRAGMENT)            leave no 2 MB block free (see gini_mem.c)
+#define MC_PTCOUNT   6   // memctl(MC_PTCOUNT, &ptcount)   count this process's leaves in a range
+
+#define MC_NSIZES   10   // 4K, 8K, ... 2M: MAXK + 1
+
+struct memstate {
+  uint64 nfree[MC_NSIZES];       // free blocks of each size (4K first), counted on the lists
+  uint64 freepages;              // pages on the free lists
+  uint64 overlaps;               // blocks handed out holding a page already in use, plus free
+                                 //   blocks holding a page in use or a page on another list
+  uint64 unaccounted;            // pages GINI knows are free that are on no free list
+  uint64 misplaced;              // free blocks at the wrong address, of the wrong size, or with
+                                 //   the wrong mark in page_info
+  uint64 doublefree;             // frees GINI refused: the pages were already free
+  uint64 start;                  // first address the allocator may hand out
+  uint64 boot_nfree[MC_NSIZES];  // what buddy_init() built
+  uint64 ideal_nfree[MC_NSIZES]; // what it should have built
+  uint64 boot_problems;          // overlaps + unaccounted + misplaced at boot
+  uint64 held;                   // pages the tests are holding right now
+};
+
+struct ptcount {
+  uint64 va, len;                // in: the range to look at
+  uint64 l1;                     // out: level-1 leaves (2 MB) touching the range
+  uint64 l0;                     // out: level-0 leaves (4 KB) in the range
+  uint64 l1_misaligned;          // out: level-1 leaves whose physical address is not 2 MB-aligned
+  uint64 l1_unowned;             // out: level-1 leaves over memory the allocator calls free
+};
+"""
+
+_GINI_MEM_C = r"""// kernel/gini_mem.c -- GINI's side of the physical page allocator. Not student code.
+//
+//   * the allocation bitmap (1 bit per page, 1 = in use) that every other GINI view reads, and
+//     the Memory face's free/fragmentation dump;
+//   * the bookkeeping kalloc_block()/kfree_block() do around the student's buddy_alloc() and
+//     buddy_free(): overlaps and refused double frees;
+//   * A-Lab 03's instrument: an audit of the student's free lists against the bitmap, a record of
+//     what buddy_init() built at boot, and memctl(), the system call buddytest and megatest use.
+//
+// The audit never trusts the student's structures to be sane: it bounds every walk and checks
+// every pointer before following it, so a broken allocator is reported, not crashed into.
+
+#include "types.h"
+#include "param.h"
+#include "memlayout.h"
+#include "spinlock.h"
+#include "riscv.h"
+#include "proc.h"
+#include "defs.h"
+#include "buddy.h"
+#include "gini_mem.h"
+
+extern char end[];
+
+// ---------------------------------------------------------------------------- the buddy state
+// Defined here, not in the student's kalloc.c, because this file is compiled into EVERY lab's
+// kernel. A-Lab 03's kalloc.c uses these; every other lab's kalloc.c ignores them.
+struct buddy buddy;
+uint8 page_info[NPAGES];
+
+// Only A-Lab 03's kalloc.c defines these. Weak, so the other labs' kernels still link; memctl()
+// refuses to run without them.
+void *kalloc_block(uint64) __attribute__((weak));
+void  kfree_block(void *, uint64) __attribute__((weak));
+
+// ---------------------------------------------------------------------------- the bitmap
+// Moved here from kalloc.c, unchanged in behaviour. Every definition is WEAK: an A-Lab 01
+// folder armed on an older GINI keeps a kalloc.c that still defines all of it, and its strong
+// copy then wins at link time instead of the kernel failing with "multiple definition".
+//
+// What the bitmap is for (from kalloc.c, where it began): 1 bit per page, and it is what makes a
+// student page allocator SAFE to run -- without it, an allocator that hands back a live page
+// corrupts memory undetectably. 4 KB of state for 128 MiB of RAM, updated inside the lock the
+// allocator already holds, and the data source for the Memory Lab's fragmentation view.
+
+uint8 gini_pagemap[(NPAGES + 7) / 8] __attribute__((weak));
+uint64 gini_ka_shadow __attribute__((weak));
+
+static inline uint64 gini_pg_idx(uint64 pa) { return (pa - KERNBASE) / PGSIZE; }
+static int gini_pg_inrange(uint64 pa) { return pa >= KERNBASE && pa < PHYSTOP; }
+
+__attribute__((weak)) void
+gini_page_set(uint64 pa)
+{
+  if(!gini_pg_inrange(pa)) return;
+  uint64 i = gini_pg_idx(pa);
+  gini_pagemap[i / 8] |= (1 << (i % 8));
+}
+
+__attribute__((weak)) void
+gini_page_clear(uint64 pa)
+{
+  if(!gini_pg_inrange(pa)) return;
+  uint64 i = gini_pg_idx(pa);
+  gini_pagemap[i / 8] &= ~(1 << (i % 8));
+}
+
+__attribute__((weak)) int
+gini_page_isset(uint64 pa)
+{
+  if(!gini_pg_inrange(pa)) return 0;
+  uint64 i = gini_pg_idx(pa);
+  return (gini_pagemap[i / 8] >> (i % 8)) & 1;
+}
+
+// The vm shadow table still names the page allocator; A-Labs never arm it.
+__attribute__((weak)) void *
+gsh_kalloc(void *arg)
+{
+  (void)arg;
+  return kalloc_shadow();
+}
+
+// EXACT, not probabilistic: the page must be aligned, inside RAM, and genuinely free per the
+// bitmap. (xv6's kfree also poisons freed pages with 0x01, which is a cheap secondary check --
+// but the bitmap is authoritative and costs one bit.)
+__attribute__((weak)) int
+gsh_kalloc_valid(void *arg, void *ans)
+{
+  uint64 pa = (uint64)ans;
+  (void)arg;
+  if(pa % PGSIZE)          return 0;
+  if(!gini_pg_inrange(pa)) return 0;
+  if((char *)pa < end)     return 0;
+  return !gini_page_isset(pa);
+}
+
+// Free-page count + the largest CONTIGUOUS free run -- the fragmentation score.
+//
+// Start where the ALLOCATOR starts, not where physical memory starts. The pages below
+// PGROUNDUP(end) are the kernel's own image: they are never freed, so their bits stay 0 -- and a
+// 0 bit means "free". This counted the kernel itself as free memory, about 50 pages of it, on
+// every machine until it was found while building the sysinfo assignment, where a student walks
+// kmem.freelist and gets the right answer: the two disagreed by exactly the size of the kernel
+// image, and the student's number was the correct one.
+__attribute__((weak)) void
+gini_kadump(void)
+{
+  uint64 first = (PGROUNDUP((uint64)end) - KERNBASE) / PGSIZE;
+  uint64 free = 0, run = 0, best = 0;
+  for(uint64 i = first; i < NPAGES; i++){
+    if(gini_page_isset(KERNBASE + i * PGSIZE)){
+      run = 0;
+    } else {
+      free++; run++;
+      if(run > best) best = run;
+    }
+  }
+  printk("KA free %d total %d maxrun %d shadow %d\n",
+        (int)free, (int)NPAGES, (int)best, (int)gini_ka_shadow);
+}
+
+// ---------------------------------------------------------------------------- the wrappers' side
+
+static uint64 gini_overlaps;      // blocks buddy_alloc() returned that held a page in use
+static uint64 gini_doublefree;    // frees refused because the pages were already free
+
+// buddy.lock is held. The pages of [pa, pa + 2^k pages) have just been handed out.
+void
+gini_block_taken(uint64 pa, int k)
+{
+  int clash = 0;
+  for(uint64 p = pa; p < pa + BLOCKSIZE(k); p += PGSIZE){
+    if(gini_page_isset(p))
+      clash = 1;
+    gini_page_set(p);
+  }
+  if(clash)
+    gini_overlaps++;
+}
+
+// buddy.lock is held. Returns 1 if the block may go back to buddy_free(), 0 if any of its pages
+// is already free -- freeing it again would put the same memory on two lists.
+int
+gini_block_given(uint64 pa, int k)
+{
+  for(uint64 p = pa; p < pa + BLOCKSIZE(k); p += PGSIZE)
+    if(!gini_page_isset(p)){
+      gini_doublefree++;
+      return 0;
+    }
+  for(uint64 p = pa; p < pa + BLOCKSIZE(k); p += PGSIZE)
+    gini_page_clear(p);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------- the audit
+
+static uint8 seen[(NPAGES + 7) / 8];  // pages found on a free list during one audit
+
+static int  seen_get(uint64 i) { return (seen[i / 8] >> (i % 8)) & 1; }
+static void seen_set(uint64 i) { seen[i / 8] |= (1 << (i % 8)); }
+
+static uint64
+first_page(void)
+{
+  return PGROUNDUP((uint64)end);
+}
+
+// buddy.lock is held. Walks every free list and checks it against the bitmap and page_info.
+static void
+audit(struct memstate *s)
+{
+  uint64 start = first_page();
+
+  memset(seen, 0, sizeof(seen));
+  for(int k = 0; k <= MAXK; k++){
+    uint64 n = 0;
+    struct block *b = buddy.free[k];
+    while(b){
+      uint64 pa = (uint64)b;
+      if(n >= NPAGES || pa % PGSIZE || pa < start || pa >= PHYSTOP){
+        s->misplaced++;                // a pointer that is not a free page: stop following it
+        break;
+      }
+      n++;
+      if(pa % BLOCKSIZE(k) || pa + BLOCKSIZE(k) > PHYSTOP || page_info[PA2IDX(pa)] != (PI_FREE | k))
+        s->misplaced++;
+      int bad = 0;
+      for(uint64 p = pa; p < pa + BLOCKSIZE(k) && p < PHYSTOP; p += PGSIZE){
+        uint64 i = PA2IDX(p);
+        if(seen_get(i) || gini_page_isset(p))
+          bad = 1;
+        seen_set(i);
+      }
+      if(bad)
+        s->overlaps++;
+      b = b->next;
+    }
+    s->nfree[k] = n;
+    if(n != buddy.nfree[k])
+      s->misplaced++;                  // the counter and the list disagree
+    s->freepages += n << k;
+  }
+  for(uint64 p = start; p < PHYSTOP; p += PGSIZE)
+    if(!gini_page_isset(p) && !seen_get(PA2IDX(p)))
+      s->unaccounted++;
+}
+
+static uint64 boot_nfree[MC_NSIZES], ideal_nfree[MC_NSIZES], boot_problems;
+static struct spinlock held_lock;
+
+// Called by kinit() once buddy_init() has returned. Records what it built, what it should have
+// built, and whether the lists were sound -- buddytest init reports this, because by the time any
+// program runs, the boot state is gone.
+void
+gini_buddy_booted(void)
+{
+  struct memstate s;
+
+  initlock(&held_lock, "memctl");
+
+  // GINI's own reference: the largest aligned block at every step, from first_page() up.
+  uint64 a = first_page();
+  while(a + PGSIZE <= PHYSTOP){
+    int k = MAXK;
+    while(k > 0 && (a % BLOCKSIZE(k) || a + BLOCKSIZE(k) > PHYSTOP))
+      k--;
+    ideal_nfree[k]++;
+    a += BLOCKSIZE(k);
+  }
+
+  memset(&s, 0, sizeof(s));
+  acquire(&buddy.lock);
+  audit(&s);
+  release(&buddy.lock);
+  for(int k = 0; k <= MAXK; k++)
+    boot_nfree[k] = s.nfree[k];
+  boot_problems = s.overlaps + s.unaccounted + s.misplaced;
+}
+
+// ---------------------------------------------------------------------------- memctl()
+
+static uint8 held[(NPAGES + 7) / 8];   // pages a test is holding (allocated through memctl)
+static uint64 nheld;
+
+static int  held_get(uint64 pa) { uint64 i = PA2IDX(pa); return (held[i / 8] >> (i % 8)) & 1; }
+static void held_set(uint64 pa) { uint64 i = PA2IDX(pa); held[i / 8] |= (1 << (i % 8)); nheld++; }
+static void held_clr(uint64 pa) { uint64 i = PA2IDX(pa); held[i / 8] &= ~(1 << (i % 8)); nheld--; }
+
+static void
+hold(uint64 pa, int k)
+{
+  acquire(&held_lock);
+  for(uint64 p = pa; p < pa + BLOCKSIZE(k); p += PGSIZE)
+    held_set(p);
+  release(&held_lock);
+}
+
+// Give back [pa, pa + 2^k pages) if every page of it is held. Returns 0, or -1 if not.
+static int
+unhold(uint64 pa, int k)
+{
+  if(k < 0 || k > MAXK || pa % BLOCKSIZE(k) || pa < first_page() || pa + BLOCKSIZE(k) > PHYSTOP)
+    return -1;
+  acquire(&held_lock);
+  for(uint64 p = pa; p < pa + BLOCKSIZE(k); p += PGSIZE)
+    if(!held_get(p)){
+      release(&held_lock);
+      return -1;
+    }
+  for(uint64 p = pa; p < pa + BLOCKSIZE(k); p += PGSIZE)
+    held_clr(p);
+  release(&held_lock);
+  kfree_block((void *)pa, BLOCKSIZE(k));
+  return 0;
+}
+
+static uint64
+release_all(void)
+{
+  uint64 n = 0;
+  for(uint64 p = first_page(); p < PHYSTOP; p += PGSIZE){
+    acquire(&held_lock);
+    int h = held_get(p);
+    if(h)
+      held_clr(p);
+    release(&held_lock);
+    if(h){
+      kfree_block((void *)p, PGSIZE);
+      n++;
+    }
+  }
+  return n;
+}
+
+// Leave no 2 MB block free, and nearly all of memory free in smaller blocks: take every 2 MB
+// block, keep its first page, and give the other 511 back as pieces of 4K, 8K, ... 1M. No piece can
+// merge back into 2 MB while that first page is held. megatest uses this to check that fork
+// falls back to 4 KB pages; MC_RELEASE undoes it.
+static uint64
+fragment(void)
+{
+  uint64 n = 0;
+  while(n < NPAGES / 512){
+    uint64 pa = (uint64)kalloc_block(MEGAPGSIZE);
+    if(pa == 0)
+      break;
+    hold(pa, 0);
+    for(int j = 0; j < MAXK; j++)
+      kfree_block((void *)(pa + BLOCKSIZE(j)), BLOCKSIZE(j));
+    n++;
+  }
+  return n;
+}
+
+// GINI's own page-table walk -- deliberately not the student's walk().
+static void
+ptcount(pagetable_t pt, struct ptcount *c)
+{
+  uint64 va = c->va, last = c->va + c->len;
+  if(last > MAXVA)
+    last = MAXVA;
+  while(va < last){
+    pte_t e2 = pt[PX(2, va)];
+    if(!(e2 & PTE_V) || PTE_LEAF(e2)){
+      va = (va + (1L << 30)) & ~((1L << 30) - 1);
+      continue;
+    }
+    pte_t e1 = ((pagetable_t)PTE2PA(e2))[PX(1, va)];
+    if(!(e1 & PTE_V)){
+      va = MEGAROUNDDOWN(va) + MEGAPGSIZE;
+      continue;
+    }
+    if(PTE_LEAF(e1)){
+      c->l1++;
+      if(PTE2PA(e1) % MEGAPGSIZE)
+        c->l1_misaligned++;
+      else if(!gini_page_isset(PTE2PA(e1)))
+        c->l1_unowned++;
+      va = MEGAROUNDDOWN(va) + MEGAPGSIZE;
+      continue;
+    }
+    pte_t e0 = ((pagetable_t)PTE2PA(e1))[PX(0, va)];
+    if((e0 & PTE_V) && PTE_LEAF(e0))
+      c->l0++;
+    va = PGROUNDDOWN(va) + PGSIZE;
+  }
+}
+
+uint64
+gini_memctl(void)
+{
+  int op;
+  uint64 a, b;
+
+  argint(0, &op);
+  argaddr(1, &a);
+  argaddr(2, &b);
+  if(kalloc_block == 0 || kfree_block == 0)
+    return -1;                         // not A-Lab 03's kernel
+  switch(op){
+  case MC_STATE: {
+    struct memstate s;
+    memset(&s, 0, sizeof(s));
+    acquire(&buddy.lock);
+    audit(&s);
+    s.overlaps += gini_overlaps;
+    s.doublefree = gini_doublefree;
+    release(&buddy.lock);
+    s.start = first_page();
+    for(int k = 0; k <= MAXK; k++){
+      s.boot_nfree[k] = boot_nfree[k];
+      s.ideal_nfree[k] = ideal_nfree[k];
+    }
+    s.boot_problems = boot_problems;
+    s.held = nheld;
+    return copyout(myproc()->pagetable, myproc()->sz, a, (char *)&s, sizeof(s));
+  }
+  case MC_ALLOC: {
+    int k = -1;
+    for(int j = 0; j <= MAXK; j++)
+      if(BLOCKSIZE(j) == a)
+        k = j;
+    if(k < 0)
+      return 0;
+    uint64 pa = (uint64)kalloc_block(a);
+    if(pa)
+      hold(pa, k);
+    return pa;
+  }
+  case MC_FREE: {
+    for(int j = 0; j <= MAXK; j++)
+      if(BLOCKSIZE(j) == b)
+        return unhold(a, j);
+    return -1;
+  }
+  case MC_RELEASE:
+    return release_all();
+  case MC_FRAGMENT:
+    return fragment();
+  case MC_PTCOUNT: {
+    struct ptcount c;
+    if(copyin(myproc()->pagetable, myproc()->sz, (char *)&c, a, sizeof(c)) < 0)
+      return -1;
+    c.l1 = c.l0 = c.l1_misaligned = c.l1_unowned = 0;
+    ptcount(myproc()->pagetable, &c);
+    return copyout(myproc()->pagetable, myproc()->sz, a, (char *)&c, sizeof(c));
+  }
+  }
+  return -1;
+}
+""".replace("printk(", PRINT + "(")
+
+_BUDDYTEST = r"""// buddytest -- the allocator instrument for A-Lab 03. Do not edit: GINI reads what it prints.
+//
+//   buddytest                 one block of every size, 4K to 2M, then the state of the free lists
+//   buddytest init            what buddy_init() built at boot, against what it should have built
+//   buddytest alloc [seed]    every size, in a random order, each checked as it comes back
+//   buddytest churn [seed]    thousands of random allocations and frees; are the lists back?
+//   buddytest pieces [seed]   a 2 MB block freed a page at a time, in a random order
+//   buddytest guard           a buddy that is free but smaller must not be merged
+//
+// The allocations are made by the kernel, through GINI's memctl() system call, with the same
+// kalloc_block() and kfree_block() the rest of the kernel uses. Every check is made against
+// GINI's own record of which pages are in use, not against what your free lists say.
+//
+// Each subcommand ends with one verdict line, "<name>: ok" or "<name>: FAIL ...".
+
+#include "kernel/types.h"
+#include "user/user.h"
+#include "user/gini.h"
+#include "kernel/gini_mem.h"
+
+#define NSIZES   MC_NSIZES          // 4K, 8K, ... 2M
+#define PG       4096UL
+#define SIZE(k)  (PG << (k))
+
+// "4K", "8K", ... "512K", "1M", "2M"
+static char *
+label(int k)
+{
+  static char *l[] = { "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M" };
+  return l[k];
+}
+
+static struct memstate st;
+
+static uint64 rng;
+
+static uint64
+rnd(void)
+{
+  rng ^= rng << 13;
+  rng ^= rng >> 7;
+  rng ^= rng << 17;
+  return rng;
+}
+
+static void
+seed(int argc, char **argv)
+{
+  rng = argc > 2 ? (uint64)atoi(argv[2]) : (uint64)uptime();
+  rng = rng * 2654435761UL + 88172645463325252UL;
+  if(rng == 0)
+    rng = 1;
+  for(int i = 0; i < 4; i++)
+    rnd();
+}
+
+static void
+state(struct memstate *s)
+{
+  if(memctl(MC_STATE, (uint64)s, 0) != 0){
+    printf("buddytest: memctl failed -- is this GINI's A-Lab 03 kernel?\n");
+    exit(1);
+  }
+}
+
+static void
+freeline(char *title, uint64 *n)
+{
+  printf("%s", title);
+  for(int k = 0; k < NSIZES; k++)
+    printf(" %s:%d", label(k), (int)n[k]);
+  printf("\n");
+}
+
+static int
+same(uint64 *a, uint64 *b)
+{
+  for(int k = 0; k < NSIZES; k++)
+    if(a[k] != b[k])
+      return 0;
+  return 1;
+}
+
+// The two lines that must stay 0 for the whole lab, and the two that GINI also watches.
+static int
+health(struct memstate *s)
+{
+  printf("overlaps: %d\n", (int)s->overlaps);
+  printf("unaccounted: %d\n", (int)s->unaccounted);
+  if(s->misplaced)
+    printf("misplaced: %d\n", (int)s->misplaced);
+  if(s->doublefree)
+    printf("double frees refused: %d\n", (int)s->doublefree);
+  return s->overlaps == 0 && s->unaccounted == 0 && s->misplaced == 0 && s->doublefree == 0;
+}
+
+static void
+release(void)
+{
+  memctl(MC_RELEASE, 0, 0);
+}
+
+// ---------------------------------------------------------------------------- plain
+
+static void
+plain(void)
+{
+  uint64 pa[NSIZES];
+  for(int k = 0; k < NSIZES; k++){
+    pa[k] = memctl(MC_ALLOC, SIZE(k), 0);
+    if(pa[k] == 0)
+      printf("%s: none\n", label(k));
+    else if(pa[k] % SIZE(k))
+      printf("%s: misaligned (%p)\n", label(k), (void *)pa[k]);
+    else
+      printf("%s: ok\n", label(k));
+  }
+  for(int k = 0; k < NSIZES; k++)
+    if(pa[k])
+      memctl(MC_FREE, pa[k], SIZE(k));
+  state(&st);
+  freeline("free:", st.nfree);
+  health(&st);
+}
+
+// ---------------------------------------------------------------------------- init
+
+static void
+init(void)
+{
+  state(&st);
+  printf("start: %p\n", (void *)st.start);
+  freeline("boot free: ", st.boot_nfree);
+  freeline("should be: ", st.ideal_nfree);
+  if(st.boot_problems)
+    printf("boot audit: %d problem(s) -- overlapping, missing or misplaced blocks\n",
+           (int)st.boot_problems);
+  else
+    printf("boot audit: clean\n");
+  if(st.boot_problems == 0 && same(st.boot_nfree, st.ideal_nfree))
+    printf("init: ok\n");
+  else if(st.boot_problems)
+    printf("init: FAIL the free lists at boot were not sound\n");
+  else
+    printf("init: FAIL memory was not given out as the largest aligned blocks\n");
+}
+
+// ---------------------------------------------------------------------------- alloc
+
+static void
+alloc(void)
+{
+  int seq[NSIZES], bad = 0;
+  uint64 pa[NSIZES];
+  struct memstate before;
+
+  for(int k = 0; k < NSIZES; k++)
+    seq[k] = k;
+  for(int i = NSIZES - 1; i > 0; i--){
+    int j = rnd() % (i + 1), t = seq[i];
+    seq[i] = seq[j];
+    seq[j] = t;
+  }
+
+  for(int i = 0; i < NSIZES; i++){
+    int k = seq[i];
+    state(&before);
+    pa[k] = memctl(MC_ALLOC, SIZE(k), 0);
+    state(&st);
+    if(pa[k] == 0){
+      printf("alloc %s: none\n", label(k));
+      bad = 1;
+    } else if(pa[k] % SIZE(k)){
+      printf("alloc %s: at %p, which is not a multiple of its size\n", label(k), (void *)pa[k]);
+      bad = 1;
+    } else if(before.freepages - st.freepages != (1UL << k)){
+      printf("alloc %s: free memory fell by %d pages, not %d\n", label(k),
+             (int)(before.freepages - st.freepages), 1 << k);
+      bad = 1;
+    } else if(st.overlaps != before.overlaps){
+      printf("alloc %s: the block holds a page that was in use or still free\n", label(k));
+      bad = 1;
+    } else {
+      printf("alloc %s: ok\n", label(k));
+    }
+  }
+  for(int k = 0; k < NSIZES; k++)
+    if(pa[k])
+      memctl(MC_FREE, pa[k], SIZE(k));
+  release();
+  state(&st);
+  if(!health(&st))
+    bad = 1;
+  printf(bad ? "alloc: FAIL\n" : "alloc: ok\n");
+}
+
+// ---------------------------------------------------------------------------- churn
+
+#define NHOLD 512
+
+static void
+churn(void)
+{
+  static uint64 hpa[NHOLD];
+  static int hk[NHOLD];
+  int n = 0, allocs = 0, frees = 0;
+  struct memstate before;
+
+  state(&before);
+  freeline("free before:", before.nfree);
+  for(int op = 0; op < 4000; op++){
+    if(n < NHOLD && (n == 0 || rnd() % 100 < 55)){
+      uint64 r = rnd() % 100;
+      int k = r < 50 ? 0 : r < 70 ? 1 : r < 82 ? 2 : r < 90 ? 3 : r < 95 ? 4 : r < 98 ? 6 : 9;
+      uint64 pa = memctl(MC_ALLOC, SIZE(k), 0);
+      if(pa){
+        hpa[n] = pa;
+        hk[n] = k;
+        n++;
+        allocs++;
+      }
+    } else {
+      int i = rnd() % n;
+      memctl(MC_FREE, hpa[i], SIZE(hk[i]));
+      hpa[i] = hpa[n - 1];
+      hk[i] = hk[n - 1];
+      n--;
+      frees++;
+    }
+  }
+  while(n > 0){                        // free the rest in a random order
+    int i = rnd() % n;
+    memctl(MC_FREE, hpa[i], SIZE(hk[i]));
+    hpa[i] = hpa[n - 1];
+    hk[i] = hk[n - 1];
+    n--;
+    frees++;
+  }
+  release();
+  state(&st);
+  freeline("free after: ", st.nfree);
+  printf("blocks: %d allocated, %d freed\n", allocs, frees);
+  int ok = health(&st);
+  if(!ok)
+    printf("churn: FAIL\n");
+  else if(st.freepages != before.freepages)
+    printf("churn: FAIL %d pages did not come back\n", (int)(before.freepages - st.freepages));
+  else if(!same(st.nfree, before.nfree))
+    printf("churn: FAIL every page came back, but not as the blocks it left as\n");
+  else
+    printf("churn: ok\n");
+}
+
+// ---------------------------------------------------------------------------- pieces
+
+static void
+pieces(void)
+{
+  static int perm[512];
+  struct memstate before;
+
+  state(&before);
+  uint64 pa = memctl(MC_ALLOC, SIZE(9), 0);
+  if(pa == 0){
+    printf("pieces: FAIL there is no 2 MB block to start with\n");
+    return;
+  }
+  for(int i = 0; i < 512; i++)
+    perm[i] = i;
+  for(int i = 511; i > 0; i--){
+    int j = rnd() % (i + 1), t = perm[i];
+    perm[i] = perm[j];
+    perm[j] = t;
+  }
+  for(int i = 0; i < 512; i++)
+    memctl(MC_FREE, pa + (uint64)perm[i] * PG, PG);
+  release();
+  state(&st);
+  freeline("free before:", before.nfree);
+  freeline("free after: ", st.nfree);
+  int ok = health(&st);
+  if(!ok)
+    printf("pieces: FAIL\n");
+  else if(st.nfree[9] != before.nfree[9] || !same(st.nfree, before.nfree))
+    printf("pieces: FAIL the 512 pages did not come back together as one 2M block\n");
+  else
+    printf("pieces: ok\n");
+}
+
+// ---------------------------------------------------------------------------- guard
+
+// Four pages, P..P+3 (16K). Free P+2 alone: a free 4K block whose buddy P+3 is in use. Then free
+// P..P+1 (8K): its 8K buddy would start at P+2 -- where there is a free block, but a 4K one, so
+// the two must NOT merge. If they do, a free 16K block holds P+3, which is in use.
+static void
+guard(void)
+{
+  struct memstate before, mid;
+
+  state(&before);
+  uint64 p = memctl(MC_ALLOC, SIZE(2), 0);
+  if(p == 0){
+    printf("guard: FAIL no 16K block\n");
+    return;
+  }
+  memctl(MC_FREE, p + 2 * PG, PG);
+  memctl(MC_FREE, p, SIZE(1));
+  state(&mid);
+  int merged = mid.overlaps != before.overlaps;
+  memctl(MC_FREE, p + 3 * PG, PG);
+  release();
+  state(&st);
+  freeline("free before:", before.nfree);
+  freeline("free after: ", st.nfree);
+  int ok = health(&st);
+  if(merged)
+    printf("guard: FAIL a block merged with a smaller free block\n");
+  else if(!ok)
+    printf("guard: FAIL\n");
+  else if(!same(st.nfree, before.nfree))
+    printf("guard: FAIL the four pages did not come back together\n");
+  else
+    printf("guard: ok\n");
+}
+
+int
+main(int argc, char *argv[])
+{
+  seed(argc, argv);
+  state(&st);                          // exits with a message on a kernel without A-Lab 03
+  release();                           // anything a crashed earlier run left held
+  if(argc < 2)
+    plain();
+  else if(strcmp(argv[1], "init") == 0)
+    init();
+  else if(strcmp(argv[1], "alloc") == 0)
+    alloc();
+  else if(strcmp(argv[1], "churn") == 0)
+    churn();
+  else if(strcmp(argv[1], "pieces") == 0)
+    pieces();
+  else if(strcmp(argv[1], "guard") == 0)
+    guard();
+  else {
+    fprintf(2, "usage: buddytest [init | alloc | churn | pieces | guard] [seed]\n");
+    exit(1);
+  }
+  exit(0);
+}
+"""
+
+_MEGATEST = r"""// megatest -- the megapage instrument for A-Lab 03. Do not edit: GINI reads what it prints.
+//
+//   megatest                  all of the below, one report
+//   megatest map              an 8 MB heap at a 2 MB boundary: which entries map it?
+//   megatest data [seed]      a pattern across the heap, and read()/write() through it
+//   megatest edge [seed]      a heap that starts and ends off a 2 MB boundary
+//   megatest shrink [seed]    shrink into a megapage, then past it
+//   megatest fork [seed]      fork copies megapages, and falls back when there are no 2 MB blocks
+//   megatest leaks            all of the above; is every page, and every 2 MB block, back?
+//
+// Every test runs in a child process of its own, so each one starts from a small heap and ends
+// with an exit() that frees everything. Page-table entries are counted by GINI's own walk of
+// your page table (memctl), not by your walk().
+
+#include "kernel/types.h"
+#include "kernel/fcntl.h"
+#include "user/user.h"
+#include "user/gini.h"
+#include "kernel/gini_mem.h"
+
+#define PG    4096UL
+#define MEGA  (2UL * 1024 * 1024)
+#define HEAP  (4 * MEGA)              // 8 MB
+
+static uint64 rng, seed0;
+
+static uint64
+rnd(void)
+{
+  rng ^= rng << 13;
+  rng ^= rng >> 7;
+  rng ^= rng << 17;
+  return rng;
+}
+
+static uint64
+word(uint64 addr)                      // the pattern: a function of the seed and the address
+{
+  uint64 x = (addr ^ seed0) * 0x9E3779B97F4A7C15UL;
+  return x ^ (x >> 29);
+}
+
+static void
+count(uint64 va, uint64 len, struct ptcount *c)
+{
+  memset(c, 0, sizeof(*c));
+  c->va = va;
+  c->len = len;
+  memctl(MC_PTCOUNT, (uint64)c, 0);
+}
+
+static char *
+grow_to_boundary(void)                 // the heap now ends at a 2 MB boundary
+{
+  uint64 cur = (uint64)sbrk(0);
+  uint64 b = (cur + MEGA - 1) & ~(MEGA - 1);
+  if(b > cur && sbrk(b - cur) == SBRK_ERROR)
+    return 0;
+  return sbrk(0);
+}
+
+static int
+zero(char *p, uint64 len)
+{
+  uint64 *w = (uint64 *)p;
+  for(uint64 i = 0; i < len / 8; i++)
+    if(w[i] != 0)
+      return 0;
+  return 1;
+}
+
+static void
+fill(char *p, uint64 len)
+{
+  uint64 *w = (uint64 *)p;
+  for(uint64 i = 0; i < len / 8; i++)
+    w[i] = word((uint64)&w[i]);
+}
+
+static int
+check(char *p, uint64 len)
+{
+  uint64 *w = (uint64 *)p;
+  for(uint64 i = 0; i < len / 8; i++)
+    if(w[i] != word((uint64)&w[i]))
+      return 0;
+  return 1;
+}
+
+// ---------------------------------------------------------------------------- the tests
+// Each prints its lines and returns 1 if everything it checked was right.
+
+static int
+t_map(int quiet)
+{
+  struct ptcount c;
+  char *base = grow_to_boundary();
+  if(base == 0 || sbrk(HEAP) == SBRK_ERROR){
+    printf("heap: sbrk failed\n");
+    return 0;
+  }
+  count((uint64)base, HEAP, &c);
+  if(!quiet){
+    printf("heap: 8 MB at %p\n", base);
+    printf("leaves 4K: %d\n", (int)c.l0);
+    printf("leaves 2M: %d\n", (int)c.l1);
+    if(c.l1_misaligned)
+      printf("leaves 2M not 2 MB-aligned: %d\n", (int)c.l1_misaligned);
+    if(c.l1_unowned)
+      printf("leaves 2M over free memory: %d\n", (int)c.l1_unowned);
+  }
+  int ok = zero(base, HEAP);
+  if(!ok)
+    printf("heap: new memory is not zero\n");
+  return ok && c.l1 == 4 && c.l0 == 0 && c.l1_misaligned == 0 && c.l1_unowned == 0;
+}
+
+static int
+t_data(void)
+{
+  struct ptcount c;
+  char *base = grow_to_boundary();
+  if(base == 0 || sbrk(HEAP) == SBRK_ERROR){
+    printf("data: sbrk failed\n");
+    return 0;
+  }
+  count((uint64)base, HEAP, &c);
+  if(c.l1 == 0){
+    // Without megapages there is nothing here to test: 4 KB pages always hold their data.
+    printf("data: FAIL the heap has no megapages yet, so there is nothing to test\n");
+    return 0;
+  }
+  fill(base, HEAP);
+  int ok = check(base, HEAP);
+  printf("data: %s\n", ok ? "ok" : "FAIL what was written is not what reads back");
+
+  // read() into the heap -- copyout() through walkaddr() -- at an address well inside the first
+  // megapage, then write() out of the heap -- copyin() -- from inside another.
+  static char want[1024], got[256];   // got: less than a pipe holds (512)
+  int rok = 1;
+  uint64 off = MEGA / 2 + 8 * (rnd() % 1000) + 3;
+  char *dst = base + off;
+  int fd = open("README", O_RDONLY);
+  int n = fd < 0 ? -1 : read(fd, want, sizeof(want));
+  if(fd >= 0)
+    close(fd);
+  fd = open("README", O_RDONLY);
+  int m = fd < 0 ? -1 : read(fd, dst, sizeof(want));
+  if(fd >= 0)
+    close(fd);
+  if(n <= 0 || m != n || memcmp(dst, want, n) != 0)
+    rok = 0;
+  // everything outside what read() wrote must still hold the pattern (8-byte aligned edges)
+  uint64 lo = ((uint64)dst & ~7UL), hi = (((uint64)dst + n + 7) & ~7UL);
+  if(!check(base, lo - (uint64)base) || !check((char *)hi, (uint64)base + HEAP - hi))
+    rok = 0;
+
+  int p[2];
+  char *src = base + 3 * MEGA + 8 * (rnd() % 1000);
+  if(pipe(p) < 0 || write(p[1], src, sizeof(got)) != sizeof(got) ||
+     read(p[0], got, sizeof(got)) != sizeof(got) || memcmp(got, src, sizeof(got)) != 0)
+    rok = 0;
+  close(p[0]);
+  close(p[1]);
+  printf("read into heap: %s\n", rok ? "ok" : "FAIL read() or write() used the wrong place in a megapage");
+  return ok && rok;
+}
+
+static int
+t_edge(void)
+{
+  struct ptcount c;
+  // Start 3 pages below a boundary, end 2 pages past the second boundary after it:
+  // 3 small pages, 2 megapages, 2 small pages.
+  uint64 cur = (uint64)sbrk(0);
+  uint64 b = ((cur + 3 * PG + MEGA - 1) & ~(MEGA - 1));
+  if(sbrk(b - 3 * PG - cur) == SBRK_ERROR){
+    printf("edge: sbrk failed\n");
+    return 0;
+  }
+  char *start = sbrk(0);
+  uint64 len = 3 * PG + 2 * MEGA + 2 * PG;
+  if(sbrk(len) == SBRK_ERROR){
+    printf("edge: sbrk failed\n");
+    return 0;
+  }
+  count((uint64)start, len, &c);
+  if(c.l0 != 5 || c.l1 != 2 || c.l1_misaligned != 0){
+    printf("edge: FAIL expected 3 + 2 small pages around 2 megapages, found %d small and %d mega\n",
+           (int)c.l0, (int)c.l1);
+    return 0;
+  }
+  if(!zero(start, len)){
+    printf("edge: FAIL new memory is not zero\n");
+    return 0;
+  }
+  fill(start, len);
+  if(!check(start, len)){
+    printf("edge: FAIL what was written is not what reads back\n");
+    return 0;
+  }
+  printf("edge: ok\n");
+  return 1;
+}
+
+static int
+t_shrink(void)
+{
+  struct ptcount c;
+  char *base = grow_to_boundary();
+  if(base == 0 || sbrk(HEAP) == SBRK_ERROR){
+    printf("shrink: sbrk failed\n");
+    return 0;
+  }
+  fill(base, HEAP);
+  // Into the last megapage: it must be demoted, and the half that stays must keep its data.
+  sbrk(-(int)(MEGA / 2));
+  count((uint64)base, HEAP, &c);
+  int ok1 = c.l1 == 3 && c.l0 == 256 && check(base, HEAP - MEGA / 2);
+  // Past everything: no leaf may be left.
+  sbrk(-(int)(HEAP - MEGA / 2));
+  count((uint64)base, HEAP, &c);
+  int ok2 = c.l1 == 0 && c.l0 == 0;
+  // Grow again: the memory must be usable, and zero.
+  if(sbrk(HEAP) == SBRK_ERROR)
+    ok2 = 0;
+  else
+    ok2 = ok2 && zero(base, HEAP);
+  if(ok1 && ok2)
+    printf("shrink: ok\n");
+  else if(!ok1)
+    printf("shrink: FAIL shrinking into a megapage should leave 3 megapages and 256 small pages\n");
+  else
+    printf("shrink: FAIL shrinking past the heap should leave no entries, and growing again zeroed memory\n");
+  return ok1 && ok2;
+}
+
+// The child checks what fork gave it, then scribbles over all of it. want2m: leaves expected.
+static int
+forked(char *base, int want2m, char *label)
+{
+  int pid = fork();
+  if(pid < 0){
+    printf("%s: FAIL fork failed\n", label);
+    return 0;
+  }
+  if(pid == 0){
+    struct ptcount c;
+    count((uint64)base, HEAP, &c);
+    int ok = check(base, HEAP) &&
+             (want2m ? (c.l1 == 4 && c.l0 == 0) : (c.l1 == 0 && c.l0 == 2048));
+    if(!ok)
+      printf("%s: the child found %d megapages and %d small pages\n", label, (int)c.l1, (int)c.l0);
+    memset(base, 0x5a, HEAP);
+    exit(ok ? 0 : 1);
+  }
+  int st = 1;
+  wait(&st);
+  int ok = st == 0 && check(base, HEAP);   // the parent's copy must be untouched
+  printf("%s: %s\n", label, ok ? "ok" : "FAIL");
+  return ok;
+}
+
+static int
+t_fork(void)
+{
+  char *base = grow_to_boundary();
+  if(base == 0 || sbrk(HEAP) == SBRK_ERROR){
+    printf("fork: sbrk failed\n");
+    return 0;
+  }
+  fill(base, HEAP);
+  int ok = forked(base, 1, "fork");
+  memctl(MC_FRAGMENT, 0, 0);           // now there is no free 2 MB block anywhere
+  ok = forked(base, 0, "fork without 2M blocks") && ok;
+  memctl(MC_RELEASE, 0, 0);
+  return ok;
+}
+
+// ---------------------------------------------------------------------------- driver
+
+static int
+run(int (*t)(void))
+{
+  int pid = fork();
+  if(pid < 0){
+    printf("megatest: fork failed\n");
+    return 0;
+  }
+  if(pid == 0)
+    exit(t() ? 0 : 1);
+  int st = 1;
+  wait(&st);
+  return st == 0;
+}
+
+static int t_map_loud(void) { return t_map(0); }
+
+static int
+all(void)
+{
+  int ok = run(t_map_loud);
+  ok = run(t_data) && ok;
+  ok = run(t_edge) && ok;
+  ok = run(t_shrink) && ok;
+  ok = run(t_fork) && ok;
+  return ok;
+}
+
+static void
+leaks(void)
+{
+  struct memstate before, after;
+  memctl(MC_STATE, (uint64)&before, 0);
+  all();
+  memctl(MC_RELEASE, 0, 0);
+  memctl(MC_STATE, (uint64)&after, 0);
+  printf("free pages: %d before, %d after\n", (int)before.freepages, (int)after.freepages);
+  printf("2 MB blocks: %d before, %d after\n", (int)before.nfree[9], (int)after.nfree[9]);
+  if(after.freepages != before.freepages)
+    printf("leaks: FAIL %d pages did not come back\n", (int)(before.freepages - after.freepages));
+  else if(after.nfree[9] != before.nfree[9])
+    printf("leaks: FAIL every page came back, but not every 2 MB block\n");
+  else if(after.overlaps || after.unaccounted || after.misplaced || after.doublefree)
+    printf("leaks: FAIL the free lists are not sound\n");
+  else
+    printf("leaks: ok\n");
+}
+
+static void
+verdict(char *name, int ok)
+{
+  printf("%s: %s\n", name, ok ? "ok" : "FAIL");
+}
+
+int
+main(int argc, char *argv[])
+{
+  seed0 = argc > 2 ? (uint64)atoi(argv[2]) : (uint64)uptime();
+  rng = seed0 * 2654435761UL + 1;
+  struct memstate probe;
+  if(memctl(MC_STATE, (uint64)&probe, 0) != 0){
+    printf("megatest: memctl failed -- is this GINI's A-Lab 03 kernel?\n");
+    exit(1);
+  }
+  memctl(MC_RELEASE, 0, 0);            // anything a crashed earlier run left held
+  if(argc < 2)
+    all();
+  else if(strcmp(argv[1], "map") == 0)
+    verdict("map", run(t_map_loud));
+  else if(strcmp(argv[1], "data") == 0)
+    run(t_data);
+  else if(strcmp(argv[1], "edge") == 0)
+    run(t_edge);
+  else if(strcmp(argv[1], "shrink") == 0)
+    run(t_shrink);
+  else if(strcmp(argv[1], "fork") == 0)
+    run(t_fork);
+  else if(strcmp(argv[1], "leaks") == 0)
+    leaks();
+  else {
+    fprintf(2, "usage: megatest [map | data | edge | shrink | fork | leaks] [seed]\n");
+    exit(1);
+  }
+  exit(0);
+}
+"""
+
+# vm.c, GINI's megapage code. Each piece is the image's vm.c as gini-side/kernel/vm.c has it.
+_VM_WALK_LEVEL = """
+// GINI (A-Lab 03), provided: read it, do not change it.
+// Like walk(), but stop at the given level and return the entry for va there. Returns 0 if a
+// table on the way down is missing (and alloc is 0, or kalloc failed), or if a leaf above that
+// level already maps va.
+pte_t *
+walk_level(pagetable_t pagetable, uint64 va, int level, int alloc)
+{
+  if (va >= MAXVA)
+    panic("walk_level");
+
+  for (int l = 2; l > level; l--) {
+    pte_t *pte = &pagetable[PX(l, va)];
+    if (*pte & PTE_V) {
+      if (PTE_LEAF(*pte))
+        return 0;
+      pagetable = (pagetable_t)PTE2PA(*pte);
+    } else {
+      if (!alloc || (pagetable = (pde_t *)kalloc()) == 0)
+        return 0;
+      memset(pagetable, 0, PGSIZE);
+      *pte = PA2PTE(pagetable) | PTE_V;
+    }
+  }
+  return &pagetable[PX(level, va)];
+}
+
+// GINI (A-Lab 03), provided: the level-1 entry for va if it is a megapage, else 0.
+static pte_t *
+megapte(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk_level(pagetable, va, 1, 0);
+  if (pte && (*pte & PTE_V) && PTE_LEAF(*pte))
+    return pte;
+  return 0;
+}
+
+// GINI (A-Lab 03): these three are declared in defs.h too. They are repeated here because a lab
+// folder armed on an older GINI keeps its own defs.h, which has never heard of them, and this
+// file is built in every lab.
+void *kalloc_block(uint64) __attribute__((weak));
+void kfree_block(void *, uint64) __attribute__((weak));
+int demote(pagetable_t, uint64);
+"""
+
+_VM_UNMAP_LOOP = """  uint64 last = va + npages * PGSIZE;
+  for (a = va; a < last; a += PGSIZE) {
+    pte_t *mpte = megapte(pagetable, a);
+    if (mpte) {                    // A-Lab 03: a megapage
+      if (a == MEGAROUNDDOWN(a) && a + MEGAPGSIZE <= last) {
+        if (do_free)
+          kfree_block((void *)PTE2PA(*mpte), MEGAPGSIZE);
+        *mpte = 0;
+        a += MEGAPGSIZE - PGSIZE;  // the loop adds the last PGSIZE
+        continue;
+      }
+      // Only part of it goes: split it into 512 small pages first.
+      if (demote(pagetable, a) != 0)
+        panic("uvmunmap: demote");
+    }
+"""
+
+_VM_DEMOTE = """// GINI (A-Lab 03), provided: replace the megapage that maps va with a level-0 table of 512
+// entries mapping the same 2 MB, with the same permissions. The process sees no difference. Returns 0, or -1 if
+// there was no page for the new table.
+int
+demote(pagetable_t pagetable, uint64 va)
+{
+  pte_t *mpte = megapte(pagetable, va);
+  if (mpte == 0)
+    return 0;
+  pagetable_t t = (pagetable_t)kalloc();
+  if (t == 0)
+    return -1;
+  uint64 pa = PTE2PA(*mpte);
+  uint64 flags = PTE_FLAGS(*mpte);
+  for (int i = 0; i < 512; i++)
+    t[i] = PA2PTE(pa + (uint64)i * PGSIZE) | flags;
+  *mpte = PA2PTE(t) | PTE_V;
+  return 0;
+}
+
+"""
+
+_VM_COPY_MEGA = """    pte_t *mpte = megapte(old, i);
+    if (mpte) {                    // A-Lab 03: a megapage in the parent
+      pa = PTE2PA(*mpte);
+      flags = PTE_FLAGS(*mpte);
+      pte_t *npte = walk_level(new, i, 1, 1);
+      if (npte && (*npte & PTE_V) == 0 && (mem = kalloc_block(MEGAPGSIZE)) != 0) {
+        memmove(mem, (char *)pa, MEGAPGSIZE);
+        *npte = PA2PTE(mem) | flags;
+        i += MEGAPGSIZE - PGSIZE;
+        continue;
+      }
+      // No 2 MB block: give the child 512 small pages holding the same data.
+      for (uint64 j = 0; j < MEGAPGSIZE; j += PGSIZE, i += PGSIZE) {
+        if ((mem = kalloc()) == 0)
+          goto err;
+        memmove(mem, (char *)(pa + j), PGSIZE);
+        if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
+          kfree(mem);
+          goto err;
+        }
+      }
+      i -= PGSIZE;                 // the loop adds it back
+      continue;
+    }
+"""
+
+if (ROOT / "kernel" / "kalloc.c").exists():
+    write_must("kernel/buddy.h", _BUDDY_H)
+    write_must("kernel/gini_mem.h", _GINI_MEM_H)
+    write_must("kernel/gini_mem.c", _GINI_MEM_C)
+    regex_must("Makefile", r"(  \$K/kalloc\.o \\\n)", r"\1  $K/gini_mem.o \\\n", "$K/gini_mem.o")
+
+    # Inside riscv.h's `#ifndef __ASSEMBLER__` is not needed: these are macros only, which the
+    # assembler's preprocessor accepts. At the end, after MAXVA, where the handout points.
+    regex_must("kernel/riscv.h", r"(#define MAXVA \(1L << \(9 \+ 9 \+ 9 \+ 12 - 1\)\)\n)",
+               r"\1" "\n"
+               "// GINI A-Lab 03: megapages. A level-1 leaf maps 2 MB, and its physical address must be a\n"
+               "// multiple of 2 MB. An entry is a leaf if any of R, W or X is set.\n"
+               "#define MEGAPGSIZE (1L << 21)\n"
+               "#define MEGAROUNDUP(sz)  (((sz)+MEGAPGSIZE-1) & ~(MEGAPGSIZE-1))\n"
+               "#define MEGAROUNDDOWN(a) (((a)) & ~(MEGAPGSIZE-1))\n"
+               "#define PTE_LEAF(pte) ((pte) & (PTE_R | PTE_W | PTE_X))\n",
+               "GINI A-Lab 03: megapages")
+
+    # The declarations the handout says "GINI has added". defs.h is the image's in A-Lab 03.
+    regex_must("kernel/defs.h", r"(void            kfree\(void \*\);\n)",
+               r"\1"
+               "// A-Lab 03: a block of 4096, 8192, ... 2 MB bytes. Only A-Lab 03's kalloc.c defines these.\n"
+               "// Weak, so every other lab's kernel still links: vm.c's megapage code that calls them only runs\n"
+               "// when a megapage exists, and only A-Lab 03 ever makes one.\n"
+               "void*           kalloc_block(uint64) __attribute__((weak));\n"
+               "void            kfree_block(void *, uint64) __attribute__((weak));\n"
+               "\n"
+               "// gini_mem.c -- GINI's side of the page allocator (A-Lab 03)\n"
+               "void            gini_buddy_booted(void);\n"
+               "void            gini_block_taken(uint64, int);\n"
+               "int             gini_block_given(uint64, int);\n"
+               "uint64          gini_memctl(void);\n",
+               "A-Lab 03: a block of 4096")
+    regex_must("kernel/defs.h",
+               r"(int             copyout\(pagetable_t, uint64, uint64, char \*, uint64\);\n)",
+               r"\1"
+               "pte_t *         walk_level(pagetable_t, uint64, int, int);   // GINI, A-Lab 03\n"
+               "int             demote(pagetable_t, uint64);                 // GINI, A-Lab 03\n",
+               "walk_level(pagetable_t, uint64, int, int);")
+
+    regex_must("kernel/vm.c", r"(  return &pagetable\[PX\(0, va\)\];\n\}\n)",
+               lambda m: m.group(1) + _VM_WALK_LEVEL,
+               "walk_level(pagetable_t pagetable, uint64 va, int level, int alloc)")
+    regex_must("kernel/vm.c",
+               r"(// Optionally free the physical memory\.\n)(void\nuvmunmap\()",
+               r"\1// GINI (A-Lab 03), provided: this version also unmaps megapages, and demotes one that is only\n"
+               r"// partly inside the range. Read it, do not change it.\n\2",
+               "this version also unmaps megapages")
+    regex_must("kernel/vm.c",
+               r"(panic\(\"uvmunmap: not aligned\"\);\n\n)"
+               r"  for \(a = va; a < va \+ npages \* PGSIZE; a \+= PGSIZE\) \{\n",
+               lambda m: m.group(1) + _VM_UNMAP_LOOP,
+               "Only part of it goes: split it into 512 small pages first.")
+    regex_must("kernel/vm.c",
+               r"(    \*pte = 0;\n  \}\n\}\n\n)(// Allocate PTEs and physical memory to grow)",
+               lambda m: m.group(1) + _VM_DEMOTE + m.group(2),
+               "demote(pagetable_t pagetable, uint64 va)\n{")
+    regex_must("kernel/vm.c",
+               r"(// its memory into a child's page table\.\n)",
+               r"\1// GINI (A-Lab 03), provided: this version also copies megapages, and falls back to 4 KB pages\n"
+               r"// when no 2 MB block is free. Read it, do not change it.\n",
+               "this version also copies megapages")
+    regex_must("kernel/vm.c",
+               r"(  char \*mem;\n\n  for \(i = 0; i < sz; i \+= PGSIZE\) \{\n)(    if \(\(pte = walk\(old, i, 0\)\) == 0\))",
+               lambda m: m.group(1) + _VM_COPY_MEGA + m.group(2),
+               "No 2 MB block: give the child 512 small pages")
+
+    for _name, _src in (("buddytest", _BUDDYTEST), ("megatest", _MEGATEST)):
+        add_uprog(_name, _src)
+        if f"$U/_{_name}\\" not in (ROOT / "Makefile").read_text():
+            failed.append(f"Makefile: _{_name} not registered")
 
 print("GINI xv6 patch:")
 for a in applied:

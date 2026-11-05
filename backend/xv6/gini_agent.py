@@ -48,6 +48,10 @@ SHADOW_REF = "/opt/gini_sched_ref.c"    # pristine stub (outside the bind-mount)
 # line. Each has a pristine reference copy stashed outside the bind-mount, so "has the student
 # edited THIS file?" is answered per subsystem instead of every shadow inheriting the scheduler's
 # answer (which used to mark a vm shadow "present" because gini_sched.c had been touched).
+#: Where gBuilder mounts a machine's A-Lab folders (services/xv6_lab.py MOUNT). The tree's links
+#: into it are the student's files.
+LAB_MOUNT = "/opt/xv6-lab"
+
 SHADOWS = {
     "sched": (XV6_DIR + "/kernel/shadows/gini_sched.c", "/opt/gini_sched_ref.c"),
     "vm":    (XV6_DIR + "/kernel/shadows/gini_vm.c",    "/opt/gini_vm_ref.c"),
@@ -378,7 +382,15 @@ def _qemu_cmd():
             "-global", "virtio-mmio.force-legacy=false",
             "-drive", "file=fs.img,if=none,format=raw,id=x0",
             "-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
-            "-serial", "tcp::4444,server,nowait", "-gdb", "tcp::1234"]
+            # wait=on: the guest does not start until the agent's serial reader is attached.
+            # With `nowait` everything the kernel printed before the reader reconnected -- the
+            # whole boot, about a second's worth -- went nowhere, so a kernel that panicked while
+            # booting left a silent console and nothing for the student to read. That is the
+            # commonest failure in A-Lab 03 (the allocator runs first, and a mistake in it stops
+            # the machine with `panic: kvmmap`), and its handout sends them to read exactly that
+            # line. The reader is always running and retries every second, so a boot waits at
+            # most that long for it.
+            "-serial", "tcp::4444,server=on,wait=on", "-gdb", "tcp::1234"]
 
 
 class Qemu:
@@ -651,6 +663,27 @@ def _touch_sources():
                 os.utime(path, None)
         except Exception:
             pass                     # a read-only file just keeps make's own answer
+    # And every file an A-Lab links into the tree (services/xv6_lab.py link_script): the same bind
+    # mount, so the same stale timestamp. The shadows were covered and the A-Lab files were not,
+    # so Load could still boot the previous kernel, reporting "loaded". The cache is one way in;
+    # the other is a student restoring an older copy of their file -- unzipped, or `cp -p` -- whose
+    # mtime is older than the .o. Found end to end while building A-Lab 03: a replaced kalloc.c
+    # carried its old date, make rebuilt nothing, and the old allocator kept running. utime follows
+    # the link, so it is the student's file that is touched.
+    for sub in ("kernel", "user"):
+        d = os.path.join(XV6_DIR, sub)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(d, name)
+            try:
+                if os.path.islink(path) and os.readlink(path).startswith(LAB_MOUNT + "/") \
+                        and os.path.exists(path):
+                    os.utime(path, None)
+            except Exception:
+                pass                 # same as above: make keeps its own answer for this one
 
 
 def _rebuild():
