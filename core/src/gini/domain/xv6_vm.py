@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field
 
 PGSIZE = 4096
+#: A level-1 leaf maps 2 MB (A-Lab 03's megapages). Every other leaf the Memory face sees is 4 KB.
+MEGAPGSIZE = 2 * 1024 * 1024
 MAXVA = 1 << 38
 TRAMPOLINE = MAXVA - PGSIZE            # 0x3FFFFFF000
 TRAPFRAME = TRAMPOLINE - PGSIZE        # 0x3FFFFFE000
@@ -61,6 +63,14 @@ class Pte:
     perms: str = "----"
     valid: bool = True
     flags: int = 0                 # raw low-10 PTE bits (V R W X U G A D + RSW8/9); 0 if unknown
+    #: Bytes this leaf maps: 4 KB at level 0, 2 MB for a level-1 leaf (a megapage). Defaulted, so
+    #: every older kernel -- which never makes a megapage and never says a leaf's level -- reads
+    #: exactly as before.
+    size: int = PGSIZE
+
+    @property
+    def mega(self) -> bool:
+        return self.size > PGSIZE
 
     @property
     def writable(self) -> bool:
@@ -145,8 +155,11 @@ class ProcVm:
 
     @property
     def resident_pages(self) -> int:
-        """User pages actually backed by physical frames (excludes kernel trampoline/trapframe)."""
-        return sum(1 for p in self.leaves if p.user)
+        """User pages actually backed by physical frames (excludes kernel trampoline/trapframe).
+
+        In 4 KB pages: a megapage is one leaf and 512 pages of memory, and counting it as one
+        would show an 8 MB heap as four pages."""
+        return sum(max(p.size // PGSIZE, 1) for p in self.leaves if p.user)
 
     @property
     def virtual_pages(self) -> int:
@@ -212,7 +225,13 @@ def parse_vmprint(text: str) -> VmSnapshot:
         pte = int(m.group(3), 16)
         pa = int(m.group(4), 16)
         path[depth] = idx
-        if depth == 3:                             # leaf (level 0)
+        if depth == 2 and pte & 0xE:               # a leaf at level 1: a 2 MB megapage
+            # vmprint does not descend into a leaf, so this line is the whole megapage. Read as
+            # a path entry it vanished, and an 8 MB heap of megapages drew as no heap at all.
+            va = (path.get(1, 0) << 30) | (idx << 21)
+            leaves.append(Pte(va=va, pa=pa, perms=perms(pte), valid=bool(pte & 1), flags=pte,
+                              size=MEGAPGSIZE))
+        elif depth == 3:                           # leaf (level 0)
             va = (path.get(1, 0) << 30) | (path.get(2, 0) << 21) | (idx << 12)
             # keep the RAW pte: `perms` only decodes r/w/x/u, but A (accessed) and D (dirty) —
             # the bits every page-replacement algorithm runs on — live in the same word, and
@@ -270,9 +289,16 @@ def parse_faults(text: str) -> list:
 
 
 # -- parser: all-procs page tables (gini_vmdump_all) ------------------------ #
-# `VP <pid> <name> <sz_hex>` header, then `VL <pid> <va_hex> <pa_hex> <flags_int>` per leaf.
+# `VP <pid> <name> <sz_hex>` header, then `VL <pid> <va_hex> <pa_hex> <flags_int> [level]` per leaf.
+# The level (0 = 4 KB, 1 = a 2 MB megapage) came later, with A-Lab 03; an older image leaves it
+# off, and a leaf without it is 4 KB, which on those kernels is the only kind there is.
 _VP = re.compile(r"^VP\s+(\d+)\s+(\S+)\s+(0x[0-9a-fA-F]+)")
-_VL = re.compile(r"^VL\s+(\d+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\d+)")
+_VL = re.compile(r"^VL\s+(\d+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\d+)(?:\s+(\d+))?")
+
+
+def leaf_size(level: int) -> int:
+    """Bytes a leaf maps at an Sv39 level: 4 KB at 0, 2 MB at 1, 1 GB at 2."""
+    return PGSIZE << (9 * max(int(level or 0), 0))
 
 
 def parse_vmall(text: str) -> dict:
@@ -291,7 +317,8 @@ def parse_vmall(text: str) -> dict:
             pid = int(ml.group(1))
             flags = int(ml.group(4))
             pte = Pte(va=int(ml.group(2), 16), pa=int(ml.group(3), 16),
-                      perms=perms(flags), valid=bool(flags & 1), flags=flags)
+                      perms=perms(flags), valid=bool(flags & 1), flags=flags,
+                      size=leaf_size(int(ml.group(5) or 0)))
             procs.setdefault(pid, ProcVm(pid=pid)).leaves.append(pte)
     return procs
 
@@ -325,7 +352,9 @@ def classify_faults(faults: list, vmall: dict | None = None,
     for f in faults:
         pv = (vmall or {}).get(f.pid)
         page_va = f.va & ~(PGSIZE - 1)
-        leaf = next((p for p in pv.leaves if p.va == page_va), None) if pv else None
+        # Containment, not equality: a megapage's one leaf covers 512 page addresses.
+        leaf = next((p for p in pv.leaves if p.va <= page_va < p.va + p.size),
+                    None) if pv else None
         if leaf is not None and not leaf.writable and f.scause == 15:
             f.kind = "cow-write"
         elif leaf is None and pv is not None and page_va < pv.sz:
@@ -408,11 +437,13 @@ def regions_from_leaves(leaves, sz: int = 0) -> list:
     for pte in user:                     # the leading run of executable pages IS the text
         if "x" not in pte.perms:
             break
-        text_end = pte.va + PGSIZE
+        text_end = pte.va + pte.size
     if text_end:
         out.append(Region("text", 0, text_end - 1, perms_at.get(0, "r-x-")))
 
-    top_mapped = (user[-1].va + PGSIZE) if user else 0
+    # The END of the last leaf, by its own size: a heap that ends in a megapage ends 2 MB after the
+    # leaf's address, not 4 KB after it, and assuming 4 KB drew it 2 MB - 4 KB short.
+    top_mapped = (user[-1].va + user[-1].size) if user else 0
     if guard is None:
         # No uvmclear signature, so nothing says where a stack begins. Do NOT invent one: name
         # what is left "data" and let the page table speak for the rest.

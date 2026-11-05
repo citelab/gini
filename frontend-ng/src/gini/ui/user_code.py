@@ -20,6 +20,10 @@ Four things, in the order a student needs them:
    names the GAP and never the fix — "you have not written `entry("sysinfo")` yet" teaches better
    than `undefined reference` at link time, which is where that mistake surfaces otherwise.
 4. **Load**, with the compile log underneath.
+5. **The checks.** For a lab with staged checks (A-Lab 03), Check Part A/B/C and Check all in
+   place of "Check my work", and one row per stage: its verdict, the line that decided it, and
+   what the command printed, a click away. A file GINI builds from its own copy is listed as
+   read-only, with no Revert.
 
 The checklist is a tracker and not a grade, and the difference is load-bearing: every check is a
 pattern over their source, so it answers "have you written the line" and never "does it work".
@@ -55,7 +59,7 @@ from .worker_host import run_off_gui
 WATCH_MS = 1000
 
 _STATE_WORD = {"edited": "edited", "untouched": "untouched",
-               "missing": "not there", "unknown": "—"}
+               "missing": "not there", "unknown": "—", "readonly": "read-only"}
 
 
 def reveal(path) -> bool:
@@ -80,6 +84,7 @@ class UserCode(QDialog):
     test_result = Signal(bool, object)    # (ok, printed lines) from the Run test worker
     grade_result = Signal(object)         # (results,) from the grading worker
     grade_step = Signal(str)              # progress, because a grading run takes ~15 seconds
+    boot_seen = Signal(str, str)          # (state, panic line) once the loaded kernel boots or dies
 
     def __init__(self, parent, theme: ThemeManager, device=None, provider=None,
                  spec=None, live: bool = True, recorder=None, state=None) -> None:
@@ -99,6 +104,8 @@ class UserCode(QDialog):
         self.spec = spec or _lab.active_spec(str(getattr(device, "name", "") or ""))
         self._rows: dict[str, QLabel] = {}
         self._checks: list[tuple] = []
+        self._stage_rows: dict[str, tuple] = {}     # id -> (verdict, summary, transcript, button)
+        self._check_btns: list[QPushButton] = []
 
         t = theme.theme
         title = getattr(self.spec, "title", "User Code")
@@ -112,14 +119,16 @@ class UserCode(QDialog):
         body = QWidget(); self._col = QVBoxLayout(body)
         self._build_files(self._col)
         self._build_wiring(self._col)
+        self._build_stages(self._col)
         self._col.addStretch(1)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
         self._build_build_bar(root)
         self.load_result.connect(self._on_load_result)
+        self.boot_seen.connect(self._on_boot_seen)
         self.test_result.connect(self._on_test_result)
         self.grade_result.connect(self._on_grade_result)
-        self.grade_step.connect(lambda m: self._log.setPlainText(f"Checking… {m}"))
+        self.grade_step.connect(self._on_grade_step)
         standalone(self, f"User Code — {getattr(device, 'name', 'xv6')}")
         self.refresh()
         # Live: re-read when a file (or its pristine copy, which appears on the first Run) changes.
@@ -186,9 +195,16 @@ class UserCode(QDialog):
         state = QLabel("—")
         state.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;"))
         state.setMinimumWidth(80)
-        rev = QPushButton("Revert"); rev.setStyleSheet(self._btn_css())
-        rev.clicked.connect(lambda _c=False, n=f.name: self._ask_revert(n))
-        lay.addWidget(name); lay.addWidget(state); lay.addWidget(where, 1); lay.addWidget(rev)
+        lay.addWidget(name); lay.addWidget(state); lay.addWidget(where, 1)
+        if getattr(f, "readonly", False):
+            # GINI builds its own copy, so there is nothing of the student's to put back.
+            ro = QLabel("GINI's copy — read it, it is not built from your folder")
+            ro.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
+            lay.addWidget(ro)
+        else:
+            rev = QPushButton("Revert"); rev.setStyleSheet(self._btn_css())
+            rev.clicked.connect(lambda _c=False, n=f.name: self._ask_revert(n))
+            lay.addWidget(rev)
         self._rows[f.name] = state
         col.addWidget(row)
 
@@ -296,6 +312,90 @@ class UserCode(QDialog):
             col.addWidget(hint)
             self._checks.append((c, mark, hint))
 
+    # -- staged checks ------------------------------------------------------- #
+    def _build_stages(self, col) -> None:
+        """One row per stage, filled in by a Check: id, verdict, the line that decided it, and
+        what the command printed behind a click. Before any Check the rows say what each stage
+        tests, in the handout's words, so the list doubles as the plan of the lab."""
+        stages = tuple(getattr(self.spec, "stages", ()) or ())
+        if not stages:
+            return
+        t = self.theme.theme
+        col.addWidget(self._section("STAGES"))
+        for st in stages:
+            box = QFrame(); v = QVBoxLayout(box); v.setContentsMargins(8, 2, 8, 2); v.setSpacing(1)
+            top = QHBoxLayout()
+            sid = QLabel(st.id)
+            sid.setStyleSheet(_scss(f"color:{t.text};font-family:monospace;font-size:12px;"
+                                    f"font-weight:600;"))
+            sid.setMinimumWidth(28)
+            verdict = QLabel("·")
+            verdict.setStyleSheet(_scss(f"color:{t.faint};font-size:12px;font-weight:600;"))
+            verdict.setMinimumWidth(64)
+            cmd = QLabel(st.command.replace("{seed}", "<seed>"))
+            cmd.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;font-family:monospace;"))
+            out_btn = QPushButton("output"); out_btn.setStyleSheet(self._btn_css())
+            out_btn.setEnabled(False)
+            top.addWidget(sid); top.addWidget(verdict); top.addWidget(cmd, 1); top.addWidget(out_btn)
+            v.addLayout(top)
+            summary = QLabel(st.label)
+            summary.setWordWrap(True)
+            summary.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;padding-left:34px;"))
+            v.addWidget(summary)
+            transcript = QPlainTextEdit(); transcript.setReadOnly(True)
+            transcript.setMaximumHeight(160); transcript.setVisible(False)
+            transcript.setStyleSheet(
+                _scss(f"QPlainTextEdit{{background:{t.panel2};color:{t.muted};border:1px solid "
+                      f"{t.line};border-radius:6px;font-family:monospace;font-size:11px;}}"))
+            v.addWidget(transcript)
+            out_btn.clicked.connect(lambda _c=False, w=transcript: w.setVisible(not w.isVisible()))
+            col.addWidget(box)
+            self._stage_rows[st.id] = (verdict, summary, transcript, out_btn)
+
+    def _show_stages(self, check) -> None:
+        """Show one Check. Rows it did not run go back to blank: Check Part A after a Check all
+        must not leave the older Part C verdicts on screen beside the new ones."""
+        t = self.theme.theme
+        ran_ids = {r.id for r in check}
+        for st in getattr(self.spec, "stages", ()) or ():
+            if st.id in ran_ids or st.id not in self._stage_rows:
+                continue
+            verdict, summary, transcript, out_btn = self._stage_rows[st.id]
+            verdict.setText("·")
+            verdict.setStyleSheet(_scss(f"color:{t.faint};font-size:12px;font-weight:600;"))
+            summary.setText(st.label)
+            summary.setStyleSheet(_scss(f"color:{t.muted};font-size:11px;padding-left:34px;"))
+            transcript.setPlainText("")
+            transcript.setVisible(False)
+            out_btn.setEnabled(False)
+        for r in check:
+            row = self._stage_rows.get(r.id)
+            if row is None:
+                continue
+            verdict, summary, transcript, out_btn = row
+            colour = {"ok": t.success, "FAIL": t.danger}.get(r.verdict, t.faint)
+            verdict.setText(r.verdict)
+            verdict.setStyleSheet(_scss(f"color:{colour};font-size:12px;font-weight:600;"))
+            summary.setText(r.summary if r.summary else r.stage.label)
+            summary.setStyleSheet(_scss(
+                f"color:{colour if r.verdict == 'FAIL' else t.muted};font-size:11px;"
+                f"padding-left:34px;"))
+            ran = r.verdict != "not run"
+            transcript.setPlainText(("$ " + r.command + "\n" + "\n".join(r.lines)) if ran else "")
+            transcript.setVisible(False)
+            out_btn.setEnabled(ran)
+
+    def _on_grade_step(self, msg: str) -> None:
+        """Progress from the grading worker. For a staged check, the stage starting now is also
+        marked on its row, so the student watches the list fill in rather than a log line."""
+        self._log.setPlainText(f"Checking… {msg}")
+        sid = str(msg).split(":", 1)[0].strip()
+        row = self._stage_rows.get(sid)
+        if row is not None:
+            row[0].setText("running…")
+            row[0].setStyleSheet(_scss(f"color:{self.theme.theme.accent};font-size:12px;"
+                                       f"font-weight:600;"))
+
     # -- build bar ----------------------------------------------------------- #
     def _build_build_bar(self, root) -> None:
         t = self.theme.theme
@@ -324,6 +424,17 @@ class UserCode(QDialog):
         self._grade_btn.setEnabled(bool(self.live and self.provider is not None
                                         and getattr(self.spec, "grade", ())))
         bar.addWidget(self._grade_btn)
+        # A staged lab checks part by part instead: each Check Part X runs that part's stages and
+        # everything they need first; Check all runs every stage. They replace "Check my work".
+        if getattr(self.spec, "stages", ()):
+            self._grade_btn.setVisible(False)
+            for part in (*self.spec.stage_parts(), "all"):
+                b = QPushButton("  Check all" if part == "all" else f"  Check Part {part}")
+                b.setStyleSheet(self._btn_css())
+                b.clicked.connect(lambda _c=False, p=part: self._check(p))
+                b.setEnabled(bool(self.live and self.provider is not None))
+                bar.addWidget(b)
+                self._check_btns.append(b)
         self._progress = QLabel("")
         self._progress.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;"))
         bar.addWidget(self._progress); bar.addStretch(1)
@@ -417,11 +528,52 @@ class UserCode(QDialog):
 
         run_off_gui(self, work)
 
+    def _check(self, part: str) -> None:
+        """Run one part's stages (or all of them) against the running kernel, off the GUI thread.
+
+        Fresh seed per press, shown with the results, so the student can type any stage's command
+        with it and get the same run while they debug."""
+        if self.provider is None or not getattr(self.spec, "stages", ()):
+            return
+        for b in self._check_btns:
+            b.setEnabled(False)
+        self._log.setPlainText("Checking…")
+        prov, spec = self.provider, self.spec
+
+        def work():
+            try:
+                res = _lab.check_stages(spec, prov, part, say=self.grade_step.emit)
+            except Exception as e:        # noqa: BLE001 — a check must not take the face down
+                res = e
+            self.grade_result.emit(res)
+
+        run_off_gui(self, work)
+
+    def _on_stage_result(self, check) -> None:
+        for b in self._check_btns:
+            b.setEnabled(bool(self.live and self.provider is not None))
+        self._show_stages(check)
+        n = check.tally()
+        what = "Check all" if check.part == "all" else f"Check Part {check.part}"
+        lines = [f"{what} — seed {check.seed}: {n['ok']} ok"
+                 + (f", {n['failed']} FAIL" if n["failed"] else "")
+                 + (f", {n['not_run']} not run" if n["not_run"] else ""),
+                 "Type any command with this seed to repeat its run.", ""]
+        lines += [" " + r.line() for r in check]
+        _lab.record_grades(self._recorder, self.spec, check,
+                           device=str(getattr(self.device, "name", "") or ""))
+        self._log.setPlainText("\n".join(lines))
+
     def _on_grade_result(self, res) -> None:
         self._grade_btn.setEnabled(bool(self.live and self.provider is not None
                                         and getattr(self.spec, "grade", ())))
         if isinstance(res, Exception):
+            for b in self._check_btns:
+                b.setEnabled(bool(self.live and self.provider is not None))
             self._log.setPlainText(f"The check could not run — {type(res).__name__}: {res}")
+            return
+        if hasattr(res, "seed") and hasattr(res, "results"):
+            self._on_stage_result(res)
             return
         from ..domain import lab_grade as _g
         t = _g.tally(res)
@@ -445,10 +597,20 @@ class UserCode(QDialog):
 
         def work():
             try:
+                _, cursor = prov.console_since(0)  # before the restart: what follows is this boot
+            except Exception:                 # noqa: BLE001 — no console, no boot watch
+                cursor = None
+            try:
                 ok, log = prov.load()
             except Exception as e:            # noqa: BLE001 — a build must not take the face down
                 ok, log = False, f"{type(e).__name__}: {e}"
             self.load_result.emit(bool(ok), str(log or ""))
+            if ok and cursor is not None:
+                try:
+                    state, line = _lab.watch_boot(prov, cursor)
+                except Exception:             # noqa: BLE001
+                    state, line = "", ""
+                self.boot_seen.emit(state, line)
 
         run_off_gui(self, work)
 
@@ -470,6 +632,18 @@ class UserCode(QDialog):
         else:
             self._log.setPlainText(log or "the build failed and said nothing")
         self.refresh()
+
+    def _on_boot_seen(self, state: str, line: str) -> None:
+        """The loaded kernel built but did not boot. Say so, and say where to look: the handout
+        tells the student to read the panic on the console, and "Loaded — the machine is running
+        your kernel" sent them to a machine that was not running anything."""
+        if state != "panic":
+            return
+        self._say("Loaded, but the kernel did not boot. It stopped with:\n"
+                  f"    {line}\n"
+                  "Read the machine's console (the Terminal) for the lines before it. If you cannot "
+                  "find the cause, Revert the file you changed last and add your changes back one "
+                  "function at a time.", "warn")
 
     # -- state --------------------------------------------------------------- #
     def _signature(self) -> tuple:

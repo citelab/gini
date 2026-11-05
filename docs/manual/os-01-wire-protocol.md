@@ -116,7 +116,8 @@ allocations and stay raw addresses by design.
 VMF handled <n> fellthrough <n>                     vmfault-shadow counters
 KA free <n> total <n> maxrun <n> shadow <n>         page allocator; maxrun = largest contiguous free run
 page table <root>                                   then vmprint of the RUNNING proc:
-..<i>: pte <p> pa <p>                               depth = number of ".." (Sv39 level 2/1/0); leaf at depth 3
+..<i>: pte <p> pa <p>                               depth = number of ".." (Sv39 level 2/1/0); leaf at depth 3,
+                                                    or at depth 2 when R/W/X is set (a megapage)
 ```
 Parser: `xv6_vm.py:178–226`. VA rebuilt `(L2<<30)|(L1<<21)|(idx<<12)`; raw PTE
 kept so A/D and RSW bits survive.
@@ -125,8 +126,10 @@ kept so A/D and RSW bits survive.
 
 ```
 VP <pid> <name> <sz>                                per-proc header; sz = top of heap
-VL <pid> <va> <pa> <flags>                          one leaf; flags = low 10 PTE bits (V R W X U G A D RSW8/9)
+VL <pid> <va> <pa> <flags> [level]                  one leaf; flags = low 10 PTE bits (V R W X U G A D RSW8/9)
 ```
+`level` is 0 for a 4 KB page and 1 for a 2 MB megapage (A-Lab 03). Images older than A-Lab 03 omit
+it; the parser reads a missing level as 0, so `Pte.size` is 4 KB there.
 Parser: `parse_vmall` → `{pid: ProcVm}`. Derived: `shared_frames` (PAs mapped by
 >1 pid, user+valid leaves only), `Pte.cow` = user ∧ ¬writable ∧ RSW≠0.
 

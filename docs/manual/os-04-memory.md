@@ -91,14 +91,17 @@ Applied in order, per fault:
 ## Wire format
 
 `/vm`: `VMF`, `KA`, `page table` + `..N: pte … pa …` (depth = ".." count, leaf
-at depth 3). `/vmall`: `VP pid name sz`, `VL pid va pa flags`. `/faults`:
+at depth 3, or at depth 2 for a megapage). `/vmall`: `VP pid name sz`, `VL pid va pa flags
+level`. `/faults`:
 `FLT pid scause va epc seq` (oldest first, last 256). See
 [os-wire-protocol](os-01-wire-protocol.md).
 
 ## Limits and honesty
 
-- Superpages: `vmprint` treats R/W/X at inner levels as non-recursion; the
-  leafwalk in vmdump_all emits them as leaves.
+- Megapages (A-Lab 03): `vmprint` does not descend into a leaf at level 1, and the
+  leafwalk in vmdump_all emits it as one `VL` line with level 1. Both parsers give such a leaf
+  `size` 2 MB, so the region map ends a heap at the end of its last megapage, and the fault
+  classifier finds a fault's leaf by containment rather than by page address.
 - `parse_faults` drops the `seq` field; the event-merge path (`os_events`) keeps
   it and drops *unstamped* events instead.
 - The sharing table restricts to user+valid leaves so trampoline/trapframe

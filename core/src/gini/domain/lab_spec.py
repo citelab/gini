@@ -48,6 +48,11 @@ class LabFile:
     list the files the way the handout introduces them; `also` names the later parts that come
     back to it ("proc.c — Part A, also Part C"). Both optional: a lab that leaves them out gets one
     flat list, as A-Lab 01 always has.
+
+    `readonly` is a file the student is SHOWN and never builds: A-Lab 03's test programs, which the
+    handout promises are "GINI's own copies, so the results are always about your kernel". It is
+    listed, copied into their folder so they can read it in their own editor, and never linked into
+    the tree, so editing it changes nothing. It still counts among the lab's files.
     """
     name: str
     tree: str
@@ -55,6 +60,7 @@ class LabFile:
     uprog: str = ""
     part: str = ""
     also: str = ""
+    readonly: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,39 @@ class LabRun:
 
 
 @dataclass(frozen=True)
+class Stage:
+    """One staged check: run `command` at the shell and decide pass or fail from what it printed.
+
+    Simpler and stricter than a LabRun's measurement, and meant to be: a stage is one command and
+    one verdict, and stages run in order, each only once everything it `needs` has passed. A
+    broken allocator can take the kernel down, and every stage after a crash would be noise, so a
+    stage whose prerequisite failed is not run at all. The rules themselves are in
+    `domain.lab_stages`; this is only the data.
+
+    `{seed}` in the command is replaced with the check's seed, so a student can repeat any run by
+    typing it. `expect` and `reject` say what the output must and must not hold; left empty they
+    are the usual rule, an exact `<key>: ok` line and no line containing `: FAIL`.
+    """
+    id: str
+    command: str
+    part: str = ""
+    key: str = ""
+    needs: tuple[str, ...] = ()
+    label: str = ""
+    timeout: float = 60.0
+    expect: tuple[str, ...] = ()       # lines that must appear, exactly (after stripping)
+    reject: tuple[str, ...] = ()       # text that must appear in no line
+
+    @property
+    def expected(self) -> tuple[str, ...]:
+        return self.expect or ((f"{self.key}: ok",) if self.key else ())
+
+    @property
+    def rejected(self) -> tuple[str, ...]:
+        return self.reject or ((": FAIL",) if self.key else ())
+
+
+@dataclass(frozen=True)
 class LabSpec:
     id: str
     title: str
@@ -146,6 +185,9 @@ class LabSpec:
     #: Part A and Part B and the face has to use the same words, or a student is reading two
     #: different documents about one assignment.
     part_titles: dict = field(default_factory=dict)
+    #: Staged checks (see Stage), in order. A lab that has them is checked by running them — Check
+    #: Part A/B/C and Check all — instead of by `runs` and `grade`.
+    stages: tuple[Stage, ...] = ()
 
     def part_title(self, part: str) -> str:
         return str(self.part_titles.get(part, "") or "")
@@ -163,6 +205,17 @@ class LabSpec:
 
     def run(self, name: str) -> LabRun | None:
         return next((r for r in self.runs if r.name == name), None)
+
+    def stage(self, sid: str) -> Stage | None:
+        return next((s for s in self.stages if s.id == sid), None)
+
+    def stage_parts(self) -> tuple[str, ...]:
+        """The parts that have stages, in order — one Check button each."""
+        seen: list[str] = []
+        for s in self.stages:
+            if s.part and s.part not in seen:
+                seen.append(s.part)
+        return tuple(seen)
 
     def files_by_part(self) -> tuple[tuple[str, tuple[LabFile, ...]], ...]:
         """The files grouped the way the handout introduces them: [(part, files)], parts in the
@@ -196,7 +249,8 @@ def from_dict(d: dict) -> LabSpec:
     d = d or {}
     files = tuple(LabFile(name=str(f.get("name", "")), tree=str(f.get("tree", "")),
                           seed=str(f.get("seed", "") or ""), uprog=str(f.get("uprog", "") or ""),
-                          part=str(f.get("part", "") or ""), also=str(f.get("also", "") or ""))
+                          part=str(f.get("part", "") or ""), also=str(f.get("also", "") or ""),
+                          readonly=bool(f.get("readonly", False)))
                   for f in (d.get("files") or []) if f.get("name") and f.get("tree"))
     checks = tuple(Check(id=str(c.get("id", "")), label=str(c.get("label", "")),
                          file=str(c.get("file", "")), match=str(c.get("match", "") or ""),
@@ -221,13 +275,22 @@ def from_dict(d: dict) -> LabSpec:
                            policy=None if pol is None else int(pol),
                            sample_at=float(r.get("sample_at", 25.0)),
                            timeout=float(r.get("timeout", 75.0))))
+    stages = tuple(Stage(id=str(s.get("id", "")), command=str(s.get("command", "")),
+                         part=str(s.get("part", "") or ""), key=str(s.get("key", "") or ""),
+                         needs=tuple(str(n) for n in (s.get("needs") or [])),
+                         label=str(s.get("label", "") or ""),
+                         timeout=float(s.get("timeout", 60.0) or 60.0),
+                         expect=tuple(str(x) for x in (s.get("expect") or [])),
+                         reject=tuple(str(x) for x in (s.get("reject") or [])))
+                   for s in (d.get("stages") or []) if s.get("id") not in (None, "")
+                   and s.get("command"))
     return LabSpec(id=str(d.get("id", "")), title=str(d.get("title", "")),
                    summary=str(d.get("summary", "") or ""), hue=str(d.get("hue", "") or ""),
                    test_program=str(d.get("test_program", "") or ""),
                    test_timeout=float(d.get("test_timeout", 12.0) or 12.0),
                    released=bool(d.get("released", True)),
                    syscall_number=int(d.get("syscall_number", 0) or 0),
-                   files=files, checks=checks, grade=grade, runs=tuple(runs),
+                   files=files, checks=checks, grade=grade, runs=tuple(runs), stages=stages,
                    part_titles={str(k): str(v) for k, v in (d.get("parts") or {}).items()})
 
 

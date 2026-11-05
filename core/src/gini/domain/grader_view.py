@@ -50,6 +50,12 @@ def _t(e) -> float:
     return float((e.get("t") if isinstance(e, dict) else getattr(e, "t", 0.0)) or 0.0)
 
 
+#: How a staged check's measurement is named (`services.xv6_lab.record_grades`): "<title> · stage A1".
+#: A stage that was not run is recorded as pending, with the reason as its summary -- "not run —
+#: needs A2" -- and must not be described as a reading that had nothing to compare.
+STAGE_PREFIX = "stage "
+
+
 def _metric_name(name: str) -> str:
     """`"A-Lab 01 — sysinfo · freemem_tracks"` → `"freemem_tracks"`: the lab title is on the page."""
     return name.rsplit(" · ", 1)[-1] if " · " in name else name
@@ -171,8 +177,19 @@ def cook(entries, title: str = "", answers: list | None = None,
             look.append(f"Grading: {f['name']} failed" + (f" — {f['summary']}" if f["summary"]
                                                           else ""))
         for n in pending:
+            if n.startswith(STAGE_PREFIX):
+                look.append(f"Grading: {n} {latest[n].get('summary') or 'not run'}")
+                continue
             look.append(f"Grading: {n} could not be measured (nothing to compare — "
                         f"not a failure)")
+        # The staged checks, in the order they ran, as their final verdicts. GINI computes no mark
+        # from them: which stages make a pass is the TA's.
+        stages = [{"id": n[len(STAGE_PREFIX):],
+                   "verdict": ("not run" if r.get("pending") else "ok" if r.get("ok") else "FAIL"),
+                   "summary": str(r.get("summary", ""))}
+                  for n, r in latest.items() if n.startswith(STAGE_PREFIX)]
+        if stages:
+            out["stages"] = stages
 
     # -- builds (OS labs): Loads, failures, the first working kernel, reverts -------------------
     builds = [e for e in es if _k(e) == ev.BUILD]

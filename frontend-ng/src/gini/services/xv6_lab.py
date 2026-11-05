@@ -599,6 +599,156 @@ def grade_now(spec, machine_name: str, provider, vm=None, say=None):
     return _g.grade(spec, before, after, syscall_names(spec, machine_name))
 
 
+#: How much of a stage's output is kept: judged in full, recorded in full up to this bound.
+#:
+#: NOT console_tap's MAX_LINES. That cap (10) is for a test program's report in the proof, and
+#: applied here it cut `buddytest` off before its `overlaps: 0` line -- so stage 0 failed every
+#: kernel, the model answer included, with "did not print 'overlaps: 0'". Found end to end
+#: against the real agent; the fake machine in the tests printed too little to hit it. A stage's
+#: verdict is read from its WHOLE output (`megatest leaks` prints every other test first), so the
+#: bound is only a guard against a runaway printk loop.
+MAX_STAGE_LINES = 200
+
+#: After a `panic` appears, how long to keep reading before calling the stage over. The kernel
+#: prints the panic and stops; the second is for the lines it was still flushing.
+PANIC_GRACE_S = 1.5
+
+
+def run_stage(provider, stage, command: str, say=None) -> tuple:
+    """Run one staged check's command in the foreground and return `(lines, returned, note)`.
+
+    run_workload's bracket without its mid-run read: the cursor is taken BEFORE the command is
+    typed, and the prompt coming back closes it. Two differences, both about a kernel that dies:
+    a `panic` ends the wait after a short grace rather than at the timeout -- a crashed kernel
+    will not print a prompt, and waiting two minutes to be told so helps nobody -- and a command
+    the agent would not start comes back with a `note` saying why, instead of a misleading
+    "timed out".
+    """
+    import time
+
+    from ..domain.xv6 import run_finished, run_output
+    from .console_tap import MAX_LINE, clean
+    prog, _, args = command.strip().partition(" ")
+    try:
+        _, cursor = provider.console_since(0)
+    except Exception as e:                         # noqa: BLE001 — the machine is not answering
+        return [], False, f"the machine did not answer: {e}"
+    if not provider.run(prog, args, foreground=True):
+        why = getattr(provider, "last_run_error", "") or f"could not start {prog}"
+        return [], False, f"GINI could not start it: {why}"
+    seen, returned, panic_at = "", False, None
+    start = time.monotonic()
+    while time.monotonic() - start < float(stage.timeout):
+        time.sleep(0.4)
+        try:
+            chunk, cursor = provider.console_since(cursor)
+        except Exception:                          # noqa: BLE001 — a dropped read is not a failure
+            continue
+        seen += chunk or ""
+        if run_finished(seen):
+            returned = True
+            break
+        if panic_at is None and "panic" in seen:
+            panic_at = time.monotonic()
+        if panic_at is not None and time.monotonic() - panic_at >= PANIC_GRACE_S:
+            break
+    printed = run_output(clean(seen.encode("utf-8", "replace")), command)
+    lines = [ln[:MAX_LINE] for ln in printed[:MAX_STAGE_LINES]]
+    if len(printed) > MAX_STAGE_LINES:
+        lines.append(f"… {len(printed) - MAX_STAGE_LINES} more line(s)")   # said, as run_test does
+    return lines, returned, ""
+
+
+def kernel_dead(provider) -> tuple[str, str]:
+    """`(panic line, when)` if the kernel is already dead -- it panicked and no prompt came after --
+    else `("", "")`. `when` is "boot" or "an earlier command".
+
+    Asked once, before the first stage. A kernel that panicked cannot run stage 0, and typing
+    `buddytest` at it would only wait out the timeout to learn what the console already says. Read
+    from the console GINI already keeps, so it costs nothing on a healthy machine. "When" is there
+    because the two cases tell the student different things: a panic at boot is in their
+    buddy_init(), one after a prompt is the previous Check's crash, still on screen because nobody
+    has pressed Load since.
+    """
+    try:
+        text = str(provider.console() or "")[-4000:]
+    except Exception:                              # noqa: BLE001 — unknown is not dead
+        return "", ""
+    from .console_tap import clean
+    lines = clean(text.encode("utf-8", "replace")).replace("\r", "").split("\n")
+    last_panic = max((i for i, ln in enumerate(lines) if "panic" in ln), default=-1)
+    if last_panic < 0:
+        return "", ""
+
+    def prompt(ln):
+        return ln.lstrip().startswith("$")
+    if any(prompt(ln) for ln in lines[last_panic + 1:]):
+        return "", ""
+    booted_at = max((i for i, ln in enumerate(lines[:last_panic]) if "kernel is booting" in ln),
+                    default=-1)
+    shell = any(prompt(ln) for ln in lines[max(booted_at, 0):last_panic])
+    return lines[last_panic].strip(), ("an earlier command" if shell else "boot")
+
+
+#: How long, after a Load, to watch the console for the new kernel to reach a shell or to panic.
+BOOT_WAIT_S = 20.0
+
+
+def watch_boot(provider, cursor: int, timeout: float = BOOT_WAIT_S) -> tuple[str, str]:
+    """After a Load: `("booted", "")` once the shell's prompt appears, `("panic", line)` if the
+    kernel panics first, `("", "")` if neither happens within `timeout`.
+
+    The agent's Load returns the moment QEMU restarts, so a kernel that BUILDS and then dies at
+    boot came back as "Loaded — the machine is running your kernel". In A-Lab 03 that is the
+    commonest failure there is -- the allocator runs before anything else, and a mistake in it
+    stops the machine with `panic: kvmmap` -- and the handout tells the student to read the panic.
+    So the panel says it, and points at the console. `cursor` is the console position taken
+    BEFORE the Load, which makes everything after it this boot's output.
+    """
+    import time
+
+    from .console_tap import clean
+    seen, deadline = "", time.monotonic() + float(timeout)
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        try:
+            chunk, cursor = provider.console_since(cursor)
+        except Exception:                          # noqa: BLE001 — unknown, not dead
+            return "", ""
+        seen += chunk or ""
+        text = clean(seen.encode("utf-8", "replace"))
+        lines = text.split("\n")
+        panic = next((ln.strip() for ln in lines if "panic" in ln), "")
+        if panic:
+            return "panic", panic
+        if any(ln.lstrip().startswith("$") for ln in lines):
+            return "booted", ""
+    return "", ""
+
+
+def check_stages(spec, provider, part: str = "all", seed: int | None = None, say=None):
+    """Run the staged checks of `part` ("A", "B", "C" or "all") against the running kernel.
+    Returns a `lab_stages.StageCheck`; record it with `record_grades`.
+
+    One fresh seed per Check, shared by every stage in it and recorded with the results, so the
+    student can type any stage's command with that seed and see the same run.
+    """
+    from ..domain import lab_stages as _st
+    seed = _st.new_seed() if seed is None else int(seed)
+    if provider is None:
+        # The machine is not running (or is the demo feed). Nothing can be run, and every stage
+        # says so: recorded, because "the machine was down at hand-in" is evidence too.
+        return _st.not_run(_st.plan(spec, part), seed, part or "all",
+                           "the machine was not running")
+
+    def execute(stage, command):
+        return run_stage(provider, stage, command, say)
+
+    dead, when = kernel_dead(provider)
+    return _st.run(_st.plan(spec, part), execute, seed, part or "all", dead=dead, say=say,
+                   dead_in=when or "boot")
+
+
 def record_grades(recorder, spec, results, device: str = "") -> None:
     """Put a grading run into the proof chain — one entry per metric, including the unmeasurable.
 
@@ -612,6 +762,9 @@ def record_grades(recorder, spec, results, device: str = "") -> None:
     """
     from ..ui.lab_record import record
     title = getattr(spec, "title", "lab")
+    if hasattr(results, "seed") and hasattr(results, "results"):
+        _record_stages(record, recorder, title, results, device)
+        return
     # What each workload PRINTED, first — one `spawn` per run, marked with the run's name, so
     # the metrics after it can be checked against the transcript they were computed from.
     # A run that produced no reading at all still goes in, empty: it was attempted.
@@ -627,6 +780,25 @@ def record_grades(recorder, spec, results, device: str = "") -> None:
                {"ok": bool(r.ok), "pending": r.ok is None,
                 "measurement": dict(getattr(r, "detail", None) or {}),
                 "summary": f"{r.describe} — {r.summary}" if r.summary else r.describe})
+
+
+def _record_stages(record, recorder, title: str, check, device: str) -> None:
+    """A staged Check in the chain, exactly as A-Lab 02's runs go in: per stage, a `spawn` with
+    what the command printed (the command with its seed filled in), then a `measure` with the
+    verdict. A stage that was not run has nothing to show and gets no spawn -- but it IS recorded,
+    as pending with its reason, because "not run, needs A2" is a different submission from one
+    where nobody ever tried."""
+    from ..domain.lab_stages import NOT_RUN, OK
+    for r in check:
+        if r.verdict != NOT_RUN:
+            record(recorder, "note_spawn", device, r.command, "launch", None, list(r.lines),
+                   False, run=f"stage {r.id}")
+        summary = (f"not run — {r.summary}" if r.verdict == NOT_RUN
+                   else (r.summary or "ok") if r.verdict != OK else "ok")
+        record(recorder, "note_measure", f"{title} · stage {r.id}",
+               {"ok": r.verdict == OK, "pending": r.verdict == NOT_RUN,
+                "measurement": {"stage": r.id, "seed": int(check.seed), "summary": summary},
+                "summary": summary})
 
 
 def syscall_names(spec, machine_name: str) -> dict:
@@ -777,6 +949,22 @@ def link_script(spec) -> str:
         mine = shlex.quote(f"{lab}/{f.name}")
         orig = shlex.quote(f"{pristine}/{f.name}")
         tree = shlex.quote(f.tree)
+        image = shlex.quote(f"{IMAGE_PRISTINE}/{f.tree}")
+        if getattr(f, "readonly", False):
+            # Shown, never built. The image's copy stays in the tree -- that is what the handout
+            # means by "GINI always builds its own copies, so the results are always about your
+            # kernel" -- and the student's folder gets a fresh copy each time, write-protected so
+            # their editor opens it read-only. An edit to it would change nothing anyway, and a
+            # copy kept from an older image would show them a program the kernel no longer runs.
+            # `|| true` on chmod: a Windows bind mount may refuse it, and under `set -e` that
+            # would stop the script before the files after this one were linked.
+            lines += [
+                f"if [ -L {tree} ] && [ -f {image} ]; then rm -f {tree}; cp {image} {tree}; fi",
+                f"if [ -f {image} ]; then",
+                f"  rm -f {mine}; cp {image} {mine}; chmod a-w {mine} 2>/dev/null || true",
+                "fi",
+            ]
+            continue
         # Written as nested `if` blocks rather than `[ -f x ] && cp x y`: under `set -e` a false
         # test at the end of an && chain is a non-zero status, and the script would exit there —
         # silently, on the second Run, having linked only the files before it.
@@ -785,7 +973,6 @@ def link_script(spec) -> str:
         # left, so switching assignments would carry the old one's edits into the new one.
         # The original comes from the image's untouched copy when the image has one; an older
         # image has only the tree, which is honest only while it is not yet a symlink.
-        image = shlex.quote(f"{IMAGE_PRISTINE}/{f.tree}")
         lines += [
             f"if [ ! -f {orig} ] && [ -f {image} ]; then",
             f"  cp {image} {orig}",
@@ -825,6 +1012,9 @@ def state_of(spec, machine_name: str, name: str) -> str:
     mine = read_file(machine_name, name, spec_id)
     if mine is None:
         return "missing"
+    f = spec.file(name) if hasattr(spec, "file") else None
+    if f is not None and getattr(f, "readonly", False):
+        return "readonly"
     orig = pristine_path(machine_name, name, spec_id)
     try:
         return "edited" if mine != orig.read_text(encoding="utf-8", errors="replace") else "untouched"
@@ -840,6 +1030,9 @@ def revert(spec, machine_name: str, name: str) -> tuple[bool, str]:
     as every other edit.
     """
     spec_id = getattr(spec, "id", "")
+    f = spec.file(name) if hasattr(spec, "file") else None
+    if f is not None and getattr(f, "readonly", False):
+        return False, f"{name} is GINI's own copy and cannot be changed, so there is nothing to revert"
     orig = pristine_path(machine_name, name, spec_id)
     if not orig.is_file():
         return False, f"no original of {name} yet — press Run once so GINI can take a copy"

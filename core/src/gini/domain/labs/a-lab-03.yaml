@@ -1,15 +1,399 @@
-# A-Lab 03 — a placeholder, on purpose.
+# A-Lab 03 — buddy allocation and megapages.
+# The student handout (ALab03_Buddy_Student.docx) lives with the course materials; `where`, the
+# hints, the part titles and every stage's label are its words. The handout is the contract: every
+# command, printed line, stage name and dependency below appears in it in exactly this form, so a
+# change here is a change to the handout too.
 #
-# It carries a TILE and nothing else. No topic and no description: what an assignment turns out
-# to be is a teaching decision that is not made yet, and a guess here would be announced to every
-# student the moment they opened the hub. `released: false` shows the card and refuses to arm it.
+# The model answer, seven deliberately wrong versions and what each one printed are kept privately
+# (GINI_ALAB03_SOLUTIONS); the tests that need them skip without it.
 #
-# The id is deliberately the LAB NUMBER rather than the topic. It is the folder name a student's
-# work lives in once anyone has armed it, so naming it after a subject would mean either renaming
-# it later — orphaning the work — or keeping a name the assignment outgrew.
-#
-# To release: add `summary`, `files`, `checks` and `grade`, extend the title with the topic,
-# and delete the `released` line.
+# Why the id is `a-lab-03` and not a topic slug: it is the student's folder name
+# (~/.gini/xv6-lab/<machine>/a-lab-03/), and the placeholder that shipped before this lab already
+# created that folder on machines that armed nothing.
 id: a-lab-03
-title: "A-Lab 03"
-released: false
+title: "A-Lab 03 — buddy allocation and megapages"
+summary: "Replace xv6's page allocator with a buddy allocator, then give processes 2 MB pages."
+
+parts:
+  A: "Splitting"
+  B: "Coalescing"
+  C: "Megapages"
+
+# What "Run buddytest" runs. The staged checks below are what grades.
+test_program: "buddytest"
+test_timeout: 60
+
+# Five files, in the order of the handout's file figure. Only kalloc.c is seeded: the rest are the
+# image's own copies. buddy.h is in the image, not a seed, because gini_mem.c includes it in every
+# lab's build. The two test programs are already in the image's UPROGS, so no `uprog` entries, and
+# they are READ-ONLY: shown to the student, never built from their copy ("GINI always builds its
+# own copies", the handout says).
+files:
+  - name: kalloc.c
+    tree: kernel/kalloc.c
+    part: A
+    also: B
+    seed: |
+      // Physical memory allocator, for user processes, kernel stacks, page-table pages, pipe buffers
+      // and -- in A-Lab 03 -- 2 MB megapages. A buddy allocator: blocks of 4 KB, 8 KB, ... up to 2 MB.
+      //
+      // The top half belongs to GINI. Read it, do not change it.
+      // The bottom half is yours: buddy_init(), buddy_alloc() and buddy_free().
+
+      #include "types.h"
+      #include "param.h"
+      #include "memlayout.h"
+      #include "spinlock.h"
+      #include "riscv.h"
+      #include "defs.h"
+      #include "buddy.h"
+
+      extern char end[]; // first address after kernel.
+                         // defined by kernel.ld.
+
+      // ============================================================================ GINI's part
+
+      void
+      kinit()
+      {
+        initlock(&buddy.lock, "kmem");
+        acquire(&buddy.lock);
+        buddy_init((uint64)end, PHYSTOP);
+        release(&buddy.lock);
+        gini_buddy_booted();                 // GINI: remember what your buddy_init() built
+      }
+
+      // The k for a block size: 4096 -> 0, 8192 -> 1, ... 2 MB -> 9. -1 if size is not one of them.
+      static int
+      size2k(uint64 size)
+      {
+        for(int k = 0; k <= MAXK; k++)
+          if(BLOCKSIZE(k) == size)
+            return k;
+        return -1;
+      }
+
+      // Allocate one block of size bytes: 4096, 8192, ... or 2 MB (MEGAPGSIZE). Returns its address,
+      // or 0 if there is no free block that big.
+      void *
+      kalloc_block(uint64 size)
+      {
+        GINI_SUB(GSUB_MEM);  // GINI-xv6: board probe kalloc
+        uint64 pa;
+        int k = size2k(size);
+
+        if(k < 0)
+          return 0;
+        acquire(&buddy.lock);
+        pa = buddy_alloc(k);
+        if(pa)
+          gini_block_taken(pa, k);           // GINI: mark the pages in use; count an overlap
+        release(&buddy.lock);
+        if(pa)
+          memset((char *)pa, 5, BLOCKSIZE(k)); // fill with junk
+        return (void *)pa;
+      }
+
+      // Free the block of size bytes at pa.
+      void
+      kfree_block(void *pa, uint64 size)
+      {
+        GINI_SUB(GSUB_MEM);  // GINI-xv6: board probe kfree
+        int k = size2k(size);
+        if(k < 0 || ((uint64)pa % BLOCKSIZE(k)) != 0 ||
+           (uint64)pa < PGROUNDUP((uint64)end) || (uint64)pa + BLOCKSIZE(k) > PHYSTOP)
+          panic("kfree");
+
+        // Fill with junk to catch dangling refs -- before buddy_free(), which writes the list
+        // pointers into the block.
+        memset(pa, 1, BLOCKSIZE(k));
+
+        acquire(&buddy.lock);
+        if(gini_block_given((uint64)pa, k))  // GINI: mark the pages free; refuse a double free
+          buddy_free((uint64)pa, k);
+        release(&buddy.lock);
+      }
+
+      // The old interface: one page.
+      void *
+      kalloc(void)
+      {
+        return kalloc_block(PGSIZE);
+      }
+
+      void
+      kfree(void *pa)
+      {
+        kfree_block(pa, PGSIZE);
+      }
+
+      // The helpers. The caller holds buddy.lock.
+
+      void
+      block_push(uint64 pa, int k)
+      {
+        struct block *b = (struct block *)pa;
+        b->prev = 0;
+        b->next = buddy.free[k];
+        if(b->next)
+          b->next->prev = b;
+        buddy.free[k] = b;
+        buddy.nfree[k]++;
+      }
+
+      uint64
+      block_pop(int k)
+      {
+        struct block *b = buddy.free[k];
+        if(b == 0)
+          return 0;
+        buddy.free[k] = b->next;
+        if(b->next)
+          b->next->prev = 0;
+        buddy.nfree[k]--;
+        return (uint64)b;
+      }
+
+      void
+      block_remove(uint64 pa, int k)
+      {
+        struct block *b = (struct block *)pa;
+        if(b->prev)
+          b->prev->next = b->next;
+        else
+          buddy.free[k] = b->next;
+        if(b->next)
+          b->next->prev = b->prev;
+        buddy.nfree[k]--;
+      }
+
+      // ============================================================================ your part
+      // The starter versions are the old xv6 free list: every page is a block of its own (k = 0, 4 KB),
+      // and nothing larger can be had. Replace all three.
+
+      // Give every page in [start, end) to the allocator, as the largest blocks it can.
+      void
+      buddy_init(uint64 start, uint64 end)
+      {
+        for(uint64 pa = PGROUNDUP(start); pa + PGSIZE <= end; pa += PGSIZE){
+          page_info[PA2IDX(pa)] = PI_FREE | 0;
+          block_push(pa, 0);
+        }
+      }
+
+      // Return the address of a free block of 2^k pages, or 0 if there is none.
+      uint64
+      buddy_alloc(int k)
+      {
+        if(k != 0)
+          return 0;
+        uint64 pa = block_pop(0);
+        if(pa)
+          page_info[PA2IDX(pa)] = 0;
+        return pa;
+      }
+
+      // The block of 2^k pages at pa is free again.
+      void
+      buddy_free(uint64 pa, int k)
+      {
+        page_info[PA2IDX(pa)] = PI_FREE | k;
+        block_push(pa, k);
+      }
+  - name: buddy.h
+    tree: kernel/buddy.h
+    part: A
+  # The image's vm.c, which carries GINI's megapage code (walk_level, megapte, demote, and the
+  # uvmunmap/uvmcopy that handle a 2 MB leaf). The student's three changes are not in it.
+  - name: vm.c
+    tree: kernel/vm.c
+    part: C
+  - name: buddytest.c
+    tree: user/buddytest.c
+    part: A
+    readonly: true
+  - name: megatest.c
+    tree: user/megatest.c
+    part: C
+    readonly: true
+
+# The progress tracker: patterns over the student's source, not grades. Each is red on the starter
+# and green on the model answer (test_alab03.py checks both when the solutions are present).
+# `(?s)\nf\s*\([^)]*\)\s*\{(?:(?!\n\}).)*` means "inside the body of function f" -- xv6 style, with
+# the closing brace in column 0. The same idiom as A-Lab 02's join_wakeup.
+checks:
+  - id: init_largest
+    part: A
+    label: "Start-up uses the largest blocks"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_init\s*\([^)]*\)\s*\{(?:(?!\n\}).)*MAXK'
+    hint: "At each address use the largest block that both begins at a multiple of its size and
+      ends at or before end, up to MAXK."
+  - id: init_aligned
+    part: A
+    label: "A block starts at a multiple of its size"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_init\s*\([^)]*\)\s*\{(?:(?!\n\}).)*%\s*BLOCKSIZE\s*\('
+    hint: "start is not a multiple of 2 MB, because it is wherever the kernel image happened to
+      end. A block may only begin at a multiple of its own size."
+  - id: alloc_search
+    part: A
+    label: "Look for a larger block when a list is empty"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_alloc\s*\([^)]*\)\s*\{(?:(?!\n\}).)*\b(nfree|free)\s*\[\s*\w+\s*\]'
+    hint: "Find the smallest j ≥ k whose free list is not empty; if there is none, return 0."
+  - id: alloc_split
+    part: A
+    label: "Split, and put the other half back"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_alloc\s*\([^)]*\)\s*\{(?:(?!\n\}).)*block_push\s*\('
+    hint: "Every split puts one half back on a free list: keep one half, and put the other on the
+      free list for its size."
+  - id: free_buddy
+    part: B
+    label: "Find the buddy"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_free\s*\([^)]*\)\s*\{(?:(?!\n\}).)*BUDDY\s*\('
+    hint: "Two buddies differ in exactly one bit of their address, the bit worth their size.
+      buddy.h has a macro for it."
+  - id: free_samesize
+    part: B
+    label: "Merge only with a buddy of the same size"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_free\s*\([^)]*\)\s*\{(?:(?!\n\}).)*(PI_K\s*\(|0x0f)'
+    hint: "Check both conditions. A buddy that is free but smaller is part of a block that has
+      been split, and the rest of that block is still in use."
+  - id: free_remove
+    part: B
+    label: "Take the buddy off its list"
+    where: kernel/kalloc.c
+    file: kalloc.c
+    match: '(?s)\nbuddy_free\s*\([^)]*\)\s*\{(?:(?!\n\}).)*block_remove\s*\('
+    hint: "Before two buddies become one block, the buddy has to leave the free list it is on."
+  - id: walk_leaf
+    part: C
+    label: "walk() stops at a megapage"
+    where: kernel/vm.c
+    file: vm.c
+    match: '(?s)\nwalk\s*\([^)]*\)\s*\{(?:(?!\n\}).)*PTE_LEAF\s*\('
+    hint: "Once megapages exist, walk() must stop when it meets a leaf at level 1, instead of
+      treating 2 MB of data as if it were a page table."
+  - id: walkaddr_offset
+    part: C
+    label: "The offset inside a megapage"
+    where: kernel/vm.c
+    file: vm.c
+    match: '(?s)\nwalkaddr\s*\([^)]*\)\s*\{(?:(?!\n\}).)*MEGAPGSIZE'
+    hint: "A read() into a megapage lands at its start unless you add the offset of va inside it."
+  - id: uvmalloc_mega
+    part: C
+    label: "Map megapages when a heap grows"
+    where: kernel/vm.c
+    file: vm.c
+    match: '(?s)\nuvmalloc\s*\([^)]*\)\s*\{(?:(?!\n\}).)*MEGAPGSIZE'
+    hint: "Map 4 KB pages up to a 2 MB boundary, then one megapage for every whole 2 MB range that
+      fits below newsz, then 4 KB pages for whatever is left."
+  - id: megapage_zero
+    part: C
+    label: "A new megapage starts out zero"
+    where: kernel/vm.c
+    file: vm.c
+    match: 'memset\s*\([^;]*MEGAPGSIZE'
+    hint: "The new memory must be zero, like every page a process is given."
+
+# The staged checks: one command and one verdict each, in order, each run only when everything it
+# needs has passed (domain/lab_stages.py). `{seed}` is a fresh random number per Check, recorded
+# with the results. Timeouts: every stage of the model answer finished in under 2 s in QEMU here,
+# and in under 15 s on the build plan's machine; 60 s and 120 s leave a slow laptop plenty of room.
+# A timeout only costs time when a kernel HANGS -- a panic ends the wait at once.
+stages:
+  - id: "0"
+    part: ""
+    command: "buddytest"
+    key: ""
+    needs: []
+    label: "the kernel boots, and nothing overlaps, goes missing or sits in the wrong place"
+    timeout: 60
+    expect: ["overlaps: 0", "unaccounted: 0"]
+    reject: ["misplaced:", "double frees refused:"]
+  - id: A1
+    part: A
+    command: "buddytest init"
+    key: init
+    needs: ["0"]
+    label: "buddytest init (start-up). Every free block starts at a multiple of its own size, every
+      page above the kernel is on exactly one free list, and all of memory above the first 2 MB
+      boundary is in 2 MB blocks."
+    timeout: 60
+  - id: A2
+    part: A
+    command: "buddytest alloc {seed}"
+    key: alloc
+    needs: [A1]
+    label: "buddytest alloc (allocation). One block of every size from 4 KB to 2 MB, in a random
+      order, each starting at a multiple of its size, overlapping nothing, and taking exactly its
+      own size off the free memory."
+    timeout: 60
+  - id: B1
+    part: B
+    command: "buddytest churn {seed}"
+    key: churn
+    needs: [A2]
+    label: "buddytest churn (merge). After a random mix of allocations and frees, the free lists
+      are exactly what they were before."
+    timeout: 60
+  - id: B2
+    part: B
+    command: "buddytest pieces {seed}"
+    key: pieces
+    needs: [A2]
+    label: "buddytest pieces. A 2 MB block freed one page at a time, in a random order, comes back
+      as one 2 MB block."
+    timeout: 60
+  - id: B3
+    part: B
+    command: "buddytest guard"
+    key: guard
+    needs: [A2]
+    label: "buddytest guard (wrong size). A block is not merged with a buddy that is free but
+      smaller."
+    timeout: 60
+  - id: C1
+    part: C
+    command: "megatest map"
+    key: map
+    needs: [A2]
+    label: "megatest map. An 8 MB heap that starts at a 2 MB boundary uses four level-1 leaves and
+      no level-0 leaves, and its memory starts out zero. GINI walks your page table itself to
+      confirm it."
+    timeout: 120
+  - id: C2
+    part: C
+    command: "megatest data {seed}"
+    key: data
+    needs: [C1]
+    label: "megatest data. A pattern written across the heap reads back unchanged, and read() and
+      write() through the heap use the right place in each megapage."
+    timeout: 120
+  - id: C3
+    part: C
+    command: "megatest edge {seed}"
+    key: edge
+    needs: [C1]
+    label: "megatest edge. A heap that does not start at a 2 MB boundary gets 4 KB pages up to the
+      boundary, megapages after it, and 4 KB pages for the rest."
+    timeout: 120
+  - id: C4
+    part: C
+    command: "megatest leaks {seed}"
+    key: leaks
+    needs: [B1, B2, B3, C1, C2, C3]
+    label: "megatest leaks. After all of megatest's tests, every page has come back, and so has
+      every 2 MB block."
+    timeout: 120

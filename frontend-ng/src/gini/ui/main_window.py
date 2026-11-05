@@ -3110,16 +3110,24 @@ class MainWindow(QMainWindow):
         the metrics from the others.
         """
         from ..services.compiler import _role
-        from ..services.xv6_lab import active_spec, grade_now, record_grades
+        from ..services.xv6_lab import active_spec, check_stages, grade_now, record_grades
         for dev in list(self.ctx.topology.devices.values()):
             if _role(dev.type_key) != "xv6":
                 continue
             try:
                 spec = active_spec(dev.name)
-                if spec is None or not getattr(spec, "grade", ()):
+                if spec is None or not (getattr(spec, "grade", ()) or getattr(spec, "stages", ())):
                     continue
                 ms = self.ctx.machine_states.get(dev.id)
                 live = ms is not None and getattr(ms, "mode", "") == "real" and self._running
+                if getattr(spec, "stages", ()):
+                    # A staged lab (A-Lab 03): hand-in runs Check all one last time and keeps it,
+                    # with everything each stage printed. A machine that is down gets every stage
+                    # recorded as not run, with that reason, rather than nothing at all.
+                    record_grades(self.proof_recorder, spec,
+                                  check_stages(spec, ms.provider if live else None, "all"),
+                                  device=dev.name)
+                    continue
                 record_grades(
                     self.proof_recorder, spec,
                     grade_now(spec, dev.name,
