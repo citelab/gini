@@ -1704,7 +1704,14 @@ class MainWindow(QMainWindow):
                         self.canvas, self.theme,
                         routers=lambda: [d.name for d in self.ctx.topology.devices.values()
                                          if d.type_key in ("router", "firewall")],
-                        query=self.element_query_checked)
+                        query=self.element_query_checked,
+                        # the map: who is on which segment, and where each sits on the canvas
+                        addressing=lambda: getattr(self.ctx, "addressing", {}) or {},
+                        positions=lambda: {d.name: (d.x, d.y)
+                                           for d in self.ctx.topology.devices.values()},
+                        # asked only about machines on SHARED LANs, where a router cannot
+                        # say which machine joined
+                        host_shell=self._machine_shell)
                 self._mhud.show_topright()
             elif getattr(self, "_mhud", None) is not None:
                 self._mhud.close()
