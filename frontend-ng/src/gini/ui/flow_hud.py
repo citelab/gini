@@ -9,6 +9,15 @@ were dropped (retransmitted). RTT and delivery rate ride along the top.
 The widget is pure rendering over a `FlowTracker` (domain/flows.py); the controller
 polls `ss -tin` on each running station, parses it, and feeds the tracker. See the
 Flow HUD in Chapter "TCP Congestion Control".
+
+**Which flow is plotted.** It used to be chosen ONCE — the largest cwnd at the moment a
+selection was first needed — and then kept for as long as that flow existed. The in-app
+terminal's own connection was always the first one there and never went away, so iperf3 was
+plotted only when a student happened to click its chip. Now the panel FOLLOWS the traffic: with
+nothing pinned it plots whichever flow moved the most bytes in the last poll, and keeps the last
+one on screen while everything is idle so a finished run can still be read. A click PINS a flow,
+and the pin lasts as long as that socket is open; when it closes, following resumes, so the next
+iperf3 run appears without another click.
 """
 from __future__ import annotations
 
@@ -16,7 +25,7 @@ from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from ..domain.flows import FlowTracker, parse_ss
+from ..domain.flows import STATION_CMD, FlowTracker, station_flows
 from .glass import apply_glass, paint_glass_panel
 from .worker_host import run_off_gui
 
@@ -30,6 +39,7 @@ class FlowHud(QWidget):
         self.theme = theme
         self._tracker: FlowTracker | None = None
         self._selected: str | None = None
+        self._pinned = False               # True once the student clicked a chip (see docstring)
         self._chip_rects: list[tuple[QRectF, str]] = []
         self.window_s = _WINDOW_S          # seconds of cwnd history shown (set from Settings)
         self.resize(460, 340)
@@ -38,14 +48,26 @@ class FlowHud(QWidget):
 
     def set_tracker(self, tracker: FlowTracker) -> None:
         self._tracker = tracker
-        flows = tracker.active() if tracker else []
-        keys = {f.key for f in flows}
-        # auto-select the busiest flow if nothing valid is selected
-        if self._selected not in keys:
-            self._selected = None
-            if flows:
-                self._selected = max(flows, key=lambda f: (f.cwnd[-1] if f.cwnd else 0)).key
+        self._selected = self._choose(tracker)
         self.update()
+
+    def _choose(self, tracker: FlowTracker | None) -> str | None:
+        """The flow to plot after this poll. See the module docstring for the rule."""
+        if tracker is None:
+            return None
+        if self._pinned and tracker.is_live(self._selected):
+            return self._selected
+        self._pinned = False
+        busy = tracker.busiest()
+        if busy is not None:
+            return busy.key
+        if self._selected in tracker.series:
+            return self._selected                  # idle: keep the last run on screen
+        recent = tracker.last_busy()
+        if recent is not None:
+            return recent.key
+        flows = tracker.active()
+        return flows[0].key if flows else None
 
     # -- paint ------------------------------------------------------------- #
     def paintEvent(self, _e) -> None:  # noqa: N802
@@ -151,6 +173,7 @@ class FlowHud(QWidget):
         for r, key in self._chip_rects:
             if r.contains(pos):
                 self._selected = key
+                self._pinned = True
                 self.update()
                 return
 
@@ -215,7 +238,7 @@ class FlowHudController(QObject):
                 samples = []
                 for name in names:
                     try:
-                        samples.extend(parse_ss(self._query(name, "ss -tin"), host=name))
+                        samples.extend(station_flows(self._query(name, STATION_CMD), host=name))
                     except Exception:
                         pass
                 self.samples_ready.emit(samples, tnow)
