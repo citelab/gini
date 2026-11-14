@@ -44,7 +44,20 @@ static const char *verdict_name(gr_action_t a)
     }
 }
 
+static int gr_control_locked(const char *line, char *out, size_t outlen);
+
+/* Every gpipe command runs under the pipeline lock (gr_pipeline.c): the forwarding thread is
+ * running these modules while a student edits them. */
 int gr_control(const char *line, char *out, size_t outlen)
+{
+    int r;
+    gr_pipeline_lock();
+    r = gr_control_locked(line, out, outlen);
+    gr_pipeline_unlock();
+    return r;
+}
+
+static int gr_control_locked(const char *line, char *out, size_t outlen)
 {
     gr_pipeline_t *pl = gr_default_pipeline();
     char buf[256];
@@ -116,7 +129,10 @@ int gr_control(const char *line, char *out, size_t outlen)
         /* [i:type] for a module with no argument, [i:type:arg] otherwise. The type never
          * contains ':' and the arg is read to the closing bracket, so an arg that itself has a
          * colon (classify's cidr:dscp) still parses on the far side. */
-        for (i = 0; i < pl->count; i++)
+        /* snprintf returns what it WOULD have written: past a full buffer n ran beyond outlen,
+         * outlen - n wrapped to a huge size_t, and the next call wrote off the end of the
+         * caller's stack buffer. Stop at the edge instead. */
+        for (i = 0; i < pl->count && n < (int)outlen; i++)
         {
             const char *a = pl->modules[i]->params;
             if (a && a[0])
@@ -124,7 +140,8 @@ int gr_control(const char *line, char *out, size_t outlen)
             else
                 n += snprintf(out + n, outlen - n, " -> [%d:%s]", i, pl->modules[i]->type);
         }
-        snprintf(out + n, outlen - n, " -> route -> rewrite");
+        if (n < (int)outlen)
+            snprintf(out + n, outlen - n, " -> route -> rewrite");
     }
     else if (strcmp(tok, "clear") == 0)
     {
@@ -152,7 +169,7 @@ int gr_control(const char *line, char *out, size_t outlen)
             return gr_cp_status(out, outlen);
         else if (sub && strcmp(sub, "stop") == 0)
         {
-            gr_cp_stop_all();
+            gr_cp_detach_all();
             snprintf(out, outlen, "control plane stopped (all modules removed)");
         }
         else if (sub && strcmp(sub, "del") == 0)      /* one module, by its cp list index */

@@ -12,6 +12,7 @@
 #include "message.h"
 #include "grouter.h"
 #include "ip.h"
+#include "gr_crash.h"
 
 /*
  * roundrobin.c -- the gRouter packet scheduler.
@@ -82,7 +83,7 @@ static void rrStep(pktcore_t *pcore)
 {
 	List *keylst = map_keys(pcore->queues);
 	int qcount = list_length(keylst);
-	int nextqid = pcore->lastqid;
+	int nextqid;
 	int rstatus = EXIT_FAILURE;
 	char *nextqkey;
 	simplequeue_t *nextq;
@@ -94,13 +95,18 @@ static void rrStep(pktcore_t *pcore)
 		list_release(keylst);
 		return;
 	}
+	/* After a queue is deleted lastqid can name a slot past the end; the loop below stops only
+	 * when it comes back round to lastqid, so it never stopped. */
+	if (pcore->lastqid < 0 || pcore->lastqid >= qcount)
+		pcore->lastqid = 0;
+	nextqid = pcore->lastqid;
 
 	do
 	{
 		nextqid = (1 + nextqid) % qcount;
 		nextqkey = list_item(keylst, nextqid);
 		nextq = map_get(pcore->queues, nextqkey);
-		rstatus = readQueue(nextq, (void **)&in_pkt, &pktsize);
+		rstatus = nextq ? readQueue(nextq, (void **)&in_pkt, &pktsize) : EXIT_FAILURE;
 		if (rstatus == EXIT_SUCCESS)
 		{
 			pcore->lastqid = nextqid;
@@ -124,6 +130,8 @@ static void drrStep(pktcore_t *pcore)
 	while ((key = (char *)lister_next(klster)))
 	{
 		q = map_get(pcore->queues, key);
+		if (q == NULL)
+			continue;
 		if (q->cursize == 0)
 		{
 			q->deficit = 0.0;               /* idle queue keeps no credit */
@@ -150,6 +158,7 @@ static void drrStep(pktcore_t *pcore)
  */
 void *packetScheduler(void *pc)
 {
+	gr_crash_name_thread("gr-sched");
 	pktcore_t *pcore = (pktcore_t *)pc;
 
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
@@ -162,10 +171,15 @@ void *packetScheduler(void *pc)
 
 		pthread_testcancel();
 
+		/* One pass under the configuration read lock: the queue names from map_keys() belong to
+		 * the map, and `queue del` used to free one mid-pass -- map_get(freed) -> NULL -> SIGSEGV
+		 * here. A CLI change now waits for the pass to end (milliseconds). */
+		gr_cfg_rdlock();
 		if (rconfig.schedpolicy == GR_SCHED_DRR)
 			drrStep(pcore);
 		else
 			rrStep(pcore);
+		gr_cfg_unlock();
 	}
 	return NULL;
 }

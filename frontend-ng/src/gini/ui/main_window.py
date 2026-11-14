@@ -2773,6 +2773,28 @@ class MainWindow(QMainWindow):
             self.ctx.bus.runtime_status.emit(self._gloader.status(wd))
         run_off_gui(self, worker)
 
+    def _note_router_exit(self, name: str, st) -> None:
+        """Say so, once, when a router that was running stops on its own -- and where its crash
+        report is. A red node alone said nothing, and the report (gr_crash.c) is written to
+        ~/.gini/captures precisely because Stop deletes the container's own log."""
+        seen = self.__dict__.setdefault("_routers_seen_up", set())
+        told = self.__dict__.setdefault("_routers_exit_told", set())
+        if st == "running":
+            seen.add(name)
+            told.discard(name)
+            return
+        if not st or name not in seen or name in told:
+            return
+        told.add(name)
+        from ..app.paths import recent_crash_report
+        from ..services.compiler import _svc
+        report = recent_crash_report(_svc(name))
+        if report is not None:
+            self.ctx.log(f"{name} crashed. Its crash report is {report} -- please send it to "
+                         "your instructor or TA. Stop and Run brings the router back.", "error")
+        else:
+            self.ctx.log(f"{name} stopped on its own. Stop and Run brings it back.", "error")
+
     def _on_runtime_status(self, states) -> None:
         from ..services.compiler import _role, _svc
         any_up = any(v == "running" for v in (states or {}).values())
@@ -2826,6 +2848,8 @@ class MainWindow(QMainWindow):
             elif role in ("router", "ovs", "controller", "service", "compute", "k8scluster",
                           "xv6", "oszoo"):
                 st = states.get(_svc(node.inst.name))            # each its own container
+                if role in ("router", "ovs"):
+                    self._note_router_exit(node.inst.name, st)
                 # OS Zoo card tracks its emulator: the container stays up while QEMU/DOSBox/
                 # Basilisk runs, so "running" here means the guest is actually up.
                 node.set_status("running" if st == "running"

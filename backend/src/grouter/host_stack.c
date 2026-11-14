@@ -34,19 +34,41 @@ int host_stack_input(gpacket_t *pkt)
     return 0;   /* not a host-stack protocol (ICMP etc. handled by the core) */
 }
 
+/*
+ * The pbuf lwIP reads one incoming packet through. It used to be a bare malloc: `ref`, `next`
+ * and `flags` were whatever the heap held, and udp_input/tcp_input end in pbuf_free(), which
+ * decrements ref and, if that reached 0, walked the garbage `next` -- a segfault on some packets
+ * to the router (a traceroute to it, nc/iperf at its address) and not others. Now it is zeroed,
+ * and ref starts at 2: lwIP's pbuf_free takes it to 1 and leaves the memory alone (otherwise it
+ * would push this malloc'd struct into lwIP's own pool), and the caller frees it afterwards.
+ */
+static struct pbuf *host_pbuf(void *payload, int len)
+{
+    struct pbuf *p = calloc(1, sizeof(struct pbuf));
+    if (p == NULL)
+        return NULL;
+    p->payload = payload;
+    p->len = (u16_t)len;
+    p->tot_len = p->len;
+    p->type = PBUF_REF;
+    p->ref = 2;
+    p->next = NULL;
+    return p;
+}
+
 /* UDP processing via lwIP (moved from ip.c). */
 int UDPProcess(gpacket_t *in_pkt)
 {
     verbose(2, "[UDPProcess]:: packet received for processing...");
 
-    struct pbuf *p = malloc(sizeof(struct pbuf));
-    p->payload = in_pkt->data.data;
-    p->len = ((ip_packet_t *)(in_pkt->data.data))->ip_hdr_len * 4 + UDP_HLEN;
-    p->tot_len = p->len;
-    p->type = PBUF_REF;
+    struct pbuf *p = host_pbuf(in_pkt->data.data,
+                               ((ip_packet_t *)(in_pkt->data.data))->ip_hdr_len * 4 + UDP_HLEN);
+    if (p == NULL)
+        return EXIT_FAILURE;
 
     udp_input(p, in_pkt, route_tbl[in_pkt->frame.src_interface].netmask,
               route_tbl[in_pkt->frame.src_interface].network);
+    free(p);
     return EXIT_SUCCESS;
 }
 
@@ -55,13 +77,16 @@ int TCPProcess(gpacket_t *in_pkt)
 {
     verbose(2, "[TCPProcess]:: packet received for processing...");
 
-    struct pbuf *p = malloc(sizeof(struct pbuf));
-    p->payload = in_pkt->data.data;
-    p->len = ntohs(((ip_packet_t *)(in_pkt->data.data))->ip_pkt_len);
-    p->tot_len = p->len;
-    p->type = PBUF_REF;
+    int len = ntohs(((ip_packet_t *)(in_pkt->data.data))->ip_pkt_len);
+    struct pbuf *p;
+
+    if (len > (int)sizeof(in_pkt->data.data))     /* a length field larger than the packet */
+        return EXIT_FAILURE;
+    if ((p = host_pbuf(in_pkt->data.data, len)) == NULL)
+        return EXIT_FAILURE;
 
     tcp_input(p, in_pkt);
+    free(p);
     return EXIT_SUCCESS;
 }
 

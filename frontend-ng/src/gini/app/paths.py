@@ -30,6 +30,21 @@ def captures_dir() -> Path:
     return gini_home() / "captures"
 
 
+def recent_crash_report(router: str, within_s: float = 300.0, now: float | None = None):
+    """The newest ``<router>-crash-*.txt`` in captures_dir() written in the last ``within_s``
+    seconds, or None. The gRouter writes one on a fatal signal (backend gr_crash.c, via
+    run_grouter.py's GR_CRASH_DIR=/captures); gBuilder names it when a router stops on its own,
+    because the file is the only record that survives Stop."""
+    import time
+    d = captures_dir()
+    now = time.time() if now is None else now
+    try:
+        hits = [p for p in d.glob(f"{router}-crash-*.txt") if now - p.stat().st_mtime <= within_s]
+    except OSError:
+        return None
+    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
+
+
 def oszoo_cache_dir() -> Path:
     """Host directory for OS Zoo guest images. Bind-mounted into each OS Zoo container at
     ``/zoo/cache``, so a historical OS's ISO/disk downloads once and is reused across runs

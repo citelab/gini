@@ -15,8 +15,10 @@ ROUTER_CONFIG = {
 """
 from __future__ import annotations
 
+import glob
 import ipaddress
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -143,6 +145,109 @@ def grouter_cmd(conf: str, confdir: str, name: str, openflow_port: int | None = 
     return argv
 
 
+#: Where the router's crash reports and its rotating log go: /captures is the host's
+#: ~/.gini/captures, bind-mounted by gBuilder, and it survives Stop. The container's own log does
+#: not -- Stop is `compose down`, which deletes the container and its log with it, so a crash was
+#: only ever diagnosable by someone who thought to run `docker logs` BEFORE pressing Stop.
+CRASH_DIR = os.environ.get("GINI_CRASH_DIR", "/captures")
+#: Size at which <name>.log rolls over to <name>.log.1. Two files, so at most twice this on disk.
+LOG_BYTES = int(os.environ.get("GINI_ROUTER_LOG_BYTES", str(1 << 20)))
+#: Crash reports kept per router name; older ones are deleted at start and after a crash.
+KEEP_REPORTS = 5
+
+
+def crash_dir() -> str | None:
+    """CRASH_DIR if this container can write there, else None (no file, stderr only)."""
+    d = CRASH_DIR
+    return d if d and os.path.isdir(d) and os.access(d, os.W_OK) else None
+
+
+def keep_newest_reports(d: str, name: str, keep: int = KEEP_REPORTS) -> None:
+    """Delete all but the newest `keep` <name>-crash-*.txt in d. Capped, like everything here."""
+    reports = sorted(glob.glob(os.path.join(d, f"{name}-crash-*.txt")),
+                     key=lambda p: os.path.getmtime(p), reverse=True)
+    for old in reports[keep:]:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+
+
+class RotatingTee:
+    """Copy the router's output to the container's stdout AND to <dir>/<name>.log.
+
+    The log is capped: past `limit` bytes it is renamed to <name>.log.1 (replacing the previous
+    one) and a fresh file starts, so the disk never holds more than 2 x limit for a router. The
+    point is the lines just before a crash, which a crash report's backtrace does not show --
+    what the router printed while it was still alive.
+    """
+
+    def __init__(self, d: str, name: str, limit: int = LOG_BYTES, out=None):
+        self.path = os.path.join(d, f"{name}.log")
+        self.limit = limit
+        self.out = out if out is not None else sys.stdout.buffer
+        self.f = None
+        self._open()
+
+    def _open(self) -> None:
+        try:
+            self.f = open(self.path, "ab")
+        except OSError:
+            self.f = None
+
+    def write(self, chunk: bytes) -> None:
+        try:
+            self.out.write(chunk)
+            self.out.flush()
+        except (OSError, ValueError):
+            pass
+        if self.f is None:
+            return
+        try:
+            self.f.write(chunk)
+            self.f.flush()
+            if self.f.tell() >= self.limit:
+                self.f.close()
+                os.replace(self.path, self.path + ".1")
+                self._open()
+        except OSError:
+            self.f = None              # a full disk must not take the router down with it
+
+    def close(self) -> None:
+        if self.f is not None:
+            self.f.close()
+
+
+def pump(fd: int, tee: RotatingTee) -> None:
+    """Copy fd to tee until EOF (the router exited and its end of the pipe closed)."""
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except InterruptedError:
+            continue
+        except OSError:
+            return
+        if not chunk:
+            return
+        tee.write(chunk)
+
+
+def exit_reason(rc: int | None) -> str:
+    """`crashed (SIGSEGV)` for a signal, `exited (1)` otherwise."""
+    if rc is not None and rc < 0:
+        try:
+            return f"crashed ({signal.Signals(-rc).name})"
+        except ValueError:
+            return f"crashed (signal {-rc})"
+    return f"exited ({rc})"
+
+
+def newest_report(d: str, name: str, since: float) -> str | None:
+    reports = [p for p in glob.glob(os.path.join(d, f"{name}-crash-*.txt"))
+               if os.path.getmtime(p) >= since - 1]
+    return max(reports, key=os.path.getmtime) if reports else None
+
+
 def clear_stale_pidfile(confdir: str, name: str) -> None:
     """Remove <confdir>/<name>.pid before starting.
 
@@ -200,17 +305,39 @@ def main() -> int:
     of_port = of.get("port") if isinstance(of, dict) else (6633 if of else None)
     cmd = grouter_cmd(conf, confdir, name, openflow_port=of_port)
     print(f"[{name}] exec: {' '.join(cmd)}", file=sys.stderr)
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
-    rc = proc.wait()
+    cdir = crash_dir()
+    started = time.time()
+    if cdir:
+        keep_newest_reports(cdir, name)
+        sys.stderr.flush()
+        tee = RotatingTee(cdir, name)
+        tee.write(f"==== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n".encode())
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                env={**os.environ, "GR_CRASH_DIR": cdir})
+        pump(proc.stdout.fileno(), tee)
+        rc = proc.wait()
+        tee.write(f"==== {name} {exit_reason(rc)} {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n"
+                  .encode())
+        tee.close()
+        report = newest_report(cdir, name, started) if rc is not None and rc < 0 else None
+        if report:
+            keep_newest_reports(cdir, name)
+            print(f"[{name}] gRouter {exit_reason(rc)}; crash report: "
+                  f"{os.path.basename(report)} in GINI's captures folder (~/.gini/captures)",
+                  file=sys.stderr)
+    else:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        rc = proc.wait()
     # Do NOT silently hold a dead router "running" — that masks failures and shows a
     # green node in the GUI while nothing forwards. Propagate the exit so the container
     # stops and the node turns red. Set GINI_HOLD_ON_EXIT=1 to keep it up for debugging.
     if os.environ.get("GINI_HOLD_ON_EXIT") == "1":
-        print(f"[{name}] gRouter exited ({rc}); holding container (GINI_HOLD_ON_EXIT).",
+        print(f"[{name}] gRouter {exit_reason(rc)}; holding container (GINI_HOLD_ON_EXIT).",
               file=sys.stderr)
         while True:
             time.sleep(3600)
-    print(f"[{name}] gRouter exited ({rc}); stopping container.", file=sys.stderr)
+    print(f"[{name}] gRouter {exit_reason(rc)}; stopping container.", file=sys.stderr)
     return rc if rc is not None else 1
 
 

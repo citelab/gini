@@ -26,6 +26,7 @@
 #include "openflow_ctrl_iface.h"
 #include "openflow_pkt_proc.h"
 #include "gr_control_plane.h"   /* B2: control-plane module thread */
+#include "gr_crash.h"
 
 router_config rconfig = {.router_name=NULL, .gini_home=NULL, .cli_flag=0, .config_file=NULL, .config_dir=NULL, .openflow=0, .ghandler=0, .clihandler= 0, .scheduler=0, .worker=0, .openflow_worker=0, .openflow_controller_iface=0, .openflow_flowtable_timeout=0, .schedcycle=0, .schedpolicy=GR_SCHED_RR};
 pktcore_t *pcore;
@@ -66,32 +67,24 @@ void shutdownRouter();
 int isPIDAlive(int pid);
 
 
-// On a fatal signal, dump a native backtrace straight to fd 2 (bypasses stdio
-// buffering, so it survives the crash and shows up in `docker logs`). Diagnostic aid
-// for the legacy datapath — build with -rdynamic for function names.
-static void gini_fatal_handler(int sig)
-{
-	void *frames[40];
-	int n = backtrace(frames, 40);
-	const char msg[] = "\n[gRouter] FATAL signal — backtrace:\n";
-	ssize_t _w = write(2, msg, sizeof(msg) - 1); (void)_w;
-	backtrace_symbols_fd(frames, n, 2);
-	signal(sig, SIG_DFL);
-	raise(sig);                 // re-raise so the exit code still reflects the signal
-}
-
 int main(int ac, char *av[])
 {
 	char rpath[MAX_NAME_LEN];
 	int status, *jstatus;
 	simplequeue_t *outputQ, *workQ, *openflowWorkQ, *qtoa;
 
-	signal(SIGSEGV, gini_fatal_handler);
-	signal(SIGABRT, gini_fatal_handler);
-	signal(SIGBUS, gini_fatal_handler);
+	// A fatal signal writes a crash report to fd 2 and, under $GR_CRASH_DIR, to a file that
+	// outlives the container (gr_crash.c). Installed first so a crash during setup is caught too,
+	// then again once the router knows its name, which goes into the report and the file name.
+	gr_crash_install(NULL);
+	// A write to a socket whose reader has gone (POX restarting under an OpenFlow switch, a
+	// console client closing mid-reply) raises SIGPIPE, whose default action ends the process
+	// with no report. Every such write already checks its return value.
+	signal(SIGPIPE, SIG_IGN);
 
 	// setup the program properties
 	setupProgram(ac, av);
+	gr_crash_install(rconfig.router_name);
 	// creates a PID file under router_name.pid in the current directory
 	status = makePIDFile(rconfig.router_name, rpath);
 	// shutdown the router on receiving SIGUSR1 or SIGUSR2

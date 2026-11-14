@@ -158,7 +158,7 @@ void* fromRawDev(void *arg)
 //		printf("FROM RAW IP %s\n", buf);
         // check for filtering.. if the it should be filtered.. then drop
      
-	if (filteredPacket(filter, in_pkt))
+	if (gr_filtered(in_pkt))
         {
             verbose(2, "[fromRawDev]:: Packet filtered..!");
             free(in_pkt);

@@ -67,6 +67,18 @@ void *packetProcessor(void *pc);
 
 int enqueuePacket(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize, uint8_t openflow);
 
+/*
+ * The configuration lock: the queues map, the class-name cache, the classifier and the filter
+ * table. The data plane (classifying, filtering, enqueuing, one scheduler pass) holds it for
+ * reading; the CLI's class/queue/qdisc/filter commands hold it for writing. Before it existed the
+ * CLI freed classes, queues and their names while the scheduler and the rx threads were using
+ * them -- `queue del` during a flood crashed the scheduler. Readers must not nest it.
+ */
+void gr_cfg_rdlock(void);
+void gr_cfg_wrlock(void);
+void gr_cfg_unlock(void);
+int gr_filtered(gpacket_t *pkt);
+
 // Scheduler entry point (roundrobin.c): a single thread that dispatches packets
 // from the per-class queues using the policy in rconfig.schedpolicy (RR or DRR).
 void *packetScheduler(void *pc);

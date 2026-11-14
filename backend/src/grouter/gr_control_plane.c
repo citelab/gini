@@ -23,6 +23,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <arpa/inet.h>   /* htons */
+#include "gr_crash.h"
 
 #define GR_CP_MAX_MODULES 8
 #define GR_CP_MAX_TIMERS  32
@@ -125,6 +126,12 @@ static int svc_send_raw(int iface, const uchar *dst_mac, int prot,
     pkt->frame.arp_bcast = 1;
     if (dst_mac) memcpy(pkt->data.header.dst, dst_mac, 6);
     pkt->data.header.prot = htons((ushort)prot);
+    /* A Lua script's string can be any length; the frame holds sizeof(pkt->data.data). */
+    if (len > (int)sizeof(pkt->data.data) || iface < 0 || findInterface(iface) == NULL)
+    {
+        free(pkt);
+        return -1;
+    }
     if (payload && len > 0)
         memcpy(pkt->data.data, payload, len);
     if (IPSend2Output(pkt) != EXIT_SUCCESS) { free(pkt); return -1; }
@@ -388,6 +395,7 @@ static void bury(void)
 /* ---- the control thread -------------------------------------------------- */
 static void *gr_cp_loop(void *unused)
 {
+	gr_crash_name_thread("gr-ctlplane");
     (void)unused;
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     pthread_once(&cp_cond_once, cp_cond_init);
@@ -596,6 +604,27 @@ int gr_cp_del(int index, char *out, size_t outlen)
     pthread_mutex_unlock(&cp_lock);
     snprintf(out, outlen, "control module [%d] %s removed", index, what);
     return 0;
+}
+
+/*
+ * `gpipe cp stop`, from the CLI. It used to call gr_cp_stop_all, which runs every module's stop()
+ * -- lua_close -- and frees it on the CLI thread, while the control thread could be inside that
+ * module's tick or packet callback with a snapshot of the list. That is the use-after-free `cp del`
+ * was already built to avoid, so this does what `cp del` does for each module: park them, and let
+ * the control thread bury them between turns.
+ */
+void gr_cp_detach_all(void)
+{
+    int running;
+    pthread_once(&cp_cond_once, cp_cond_init);
+    pthread_mutex_lock(&cp_lock);
+    while (g_nmod > 0)
+        detach_locked(0);
+    running = g_running;
+    pthread_cond_signal(&cp_cond);
+    pthread_mutex_unlock(&cp_lock);
+    if (!running)
+        bury();                              /* no control thread to do it */
 }
 
 void gr_cp_stop_all(void)

@@ -51,6 +51,33 @@ void delayCmd(void);    /* link-delay command */
 #include <limits.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include "gr_crash.h"
+
+/*
+ * A student who leaves off the last word of a command -- `queue mod f -weight`, `ping -3`,
+ * `route add -dev tun1 -net` -- must get a message, not a dead router. Every handler takes the
+ * word after a flag with strtok(), which returns NULL when the line ends, and used to pass that
+ * straight to atoi/atof/strcpy. These forms treat a missing word as "missing", and a word too long
+ * for its buffer (class names are MAX_DNAME_LEN) as an error rather than a stack overwrite.
+ */
+static int cli_atoi(const char *s) { return s ? atoi(s) : 0; }
+static double cli_atof(const char *s) { return s ? atof(s) : 0.0; }
+
+static int cli_word(char *dst, size_t len, const char *src, const char *what)
+{
+    if (src == NULL)
+    {
+        printf("missing %s\n", what);
+        return 0;
+    }
+    if (strlen(src) >= len)
+    {
+        printf("%s '%s' is too long (at most %d characters)\n", what, src, (int)len - 1);
+        return 0;
+    }
+    strcpy(dst, src);
+    return 1;
+}
 
 
 Map *cli_map;
@@ -200,7 +227,10 @@ void parseACLICmd(char *str)
     cli_entry_t *clie;
     char orig_str[MAX_TMPBUF_LEN];
 
-    strcpy(orig_str, str);
+    gr_crash_note_cmd(str);         /* before tokenizing: a crash report lists what was typed */
+    /* The control socket takes lines up to 4 KB and a `source` file the same; this buffer is
+     * MAX_TMPBUF_LEN. A strcpy here overran the stack on any line of 256 characters or more. */
+    snprintf(orig_str, sizeof orig_str, "%s", str);
     token = strtok(str, " \n");
     if (token == NULL)
         return;
@@ -400,8 +430,8 @@ void registerCLI(char *key, void (*handler)(),
 
 // some macro defintions...
 #define GET_NEXT_PARAMETER(X, Y)			if (((next_tok = strtok(NULL, " \n")) == NULL) ||  \
-        (strcmp(next_tok, X) != 0)) { error(Y); return; }; \
-        next_tok = strtok(NULL, " \n")
+        (strcmp(next_tok, X) != 0)) { printf("%s\n", Y); return; }; \
+        if ((next_tok = strtok(NULL, " \n")) == NULL) { printf("%s\n", Y); return; }
 #define GET_THIS_PARAMETER(X, Y)           	if (((next_tok = strtok(NULL, " \n")) == NULL) ||  \
         (strstr(next_tok, X) == NULL)) { error(Y); return; }
 #define GET_THIS_OR_THIS_PARAMETER(X, Z, Y) if (((next_tok = strtok(NULL, " \n")) == NULL) ||  \
@@ -487,8 +517,9 @@ void ifconfigCmd()
             return;
         }		
 
-        strcpy(dev_name, next_tok);
-        sscanf(dev_name, "%[a-z]", dev_type);
+        if (!cli_word(dev_name, sizeof dev_name, next_tok, "interface name"))
+            return;
+        sscanf(dev_name, "%31[a-z]", dev_type);
         interface = gAtoi(dev_name);
 
         if ((interface == 0) && (strcmp(dev_type, "eth") == 0))
@@ -500,18 +531,20 @@ void ifconfigCmd()
         if (strcmp(dev_type, "eth") == 0)
         {
             GET_NEXT_PARAMETER("-socket", "ifconfig:: missing -socket spec ..");
-            strcpy(con_sock, next_tok);
+            if (!cli_word(con_sock, sizeof con_sock, next_tok, "socket"))
+                return;
         } else if(strcmp(dev_type, "tun") == 0)
         {
             GET_NEXT_PARAMETER("-dstip", "ifconfig:: missing -dstip spec ..");
             Dot2IP(next_tok, dst_ip);
             GET_NEXT_PARAMETER("-dstport", "ifconfig:: missing -dstport spec ..");
-            dst_port = (short int)atoi(next_tok);
+            dst_port = (short int)cli_atoi(next_tok);
         } else if (strcmp(dev_type, "raw") == 0)
         {
             printf("Checking bridge \n");
             GET_NEXT_PARAMETER("-bridge", "ifconfig:: missing -bridge spec ..");
-            strcpy(raw_bridge, next_tok);			
+            if (!cli_word(raw_bridge, sizeof raw_bridge, next_tok, "bridge"))
+                return;			
         }
 
         GET_NEXT_PARAMETER("-addr", "ifconfig:: missing -addr spec ..");
@@ -523,28 +556,25 @@ void ifconfigCmd()
         }
 
         while ((next_tok = strtok(NULL, " \n")) != NULL)
-            if (!strcmp("-gateway", next_tok))
+            if (!strcmp("-gateway", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
             {
-                next_tok = strtok(NULL, " \n");
                 Dot2IP(next_tok, gw_addr);
-            } else if (!strcmp("-mtu", next_tok))
+            } else if (!strcmp("-mtu", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
             {
-                next_tok = strtok(NULL, " \n");
-                mtu = atoi(next_tok);
+                mtu = cli_atoi(next_tok);
             } else if (!strcmp("-netmask", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
             {
                 Dot2IP(next_tok, mask);                 // router order, like -addr
                 mask_given = 1;
             } else if (!strcmp("-metric", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
             {
-                metric = atoi(next_tok);
+                metric = cli_atoi(next_tok);
                 metric_given = 1;
-            } else if (!strcmp("-srcport", next_tok))
+            } else if (!strcmp("-srcport", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
             {
                 // literal local UDP bind port (portable fabric); when given,
                 // -dstport is also taken literally (no BASEPORTNUM/name offset).
-                next_tok = strtok(NULL, " \n");
-                src_port = atoi(next_tok);
+                src_port = cli_atoi(next_tok);
             }
 
         if (strcmp(dev_type, "eth") == 0)
@@ -575,7 +605,8 @@ void ifconfigCmd()
     else if (!strcmp(next_tok, "del"))
     {
         GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
-        strcpy(dev_name, next_tok);
+        if (!cli_word(dev_name, sizeof dev_name, next_tok, "interface name"))
+            return;
         interface = gAtoi(next_tok);
         destroyInterfaceByIndex(interface);
         deleteMTUEntry(MTU_tbl, interface);
@@ -583,7 +614,8 @@ void ifconfigCmd()
     else if (!strcmp(next_tok, "up"))
     {
         GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
-        strcpy(dev_name, next_tok);
+        if (!cli_word(dev_name, sizeof dev_name, next_tok, "interface name"))
+            return;
         interface = gAtoi(next_tok);
         upInterface(interface);
 
@@ -591,14 +623,16 @@ void ifconfigCmd()
     else if (!strcmp(next_tok, "down"))
     {
         GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
-        strcpy(dev_name, next_tok);
+        if (!cli_word(dev_name, sizeof dev_name, next_tok, "interface name"))
+            return;
         interface = gAtoi(next_tok);
         downInterface(interface);
     }
     else if (!strcmp(next_tok, "mod"))
     {
         GET_IFACE_PARAMETER("ifconfig:: missing or unknown interface (e.g. tun1) ..");
-        strcpy(dev_name, next_tok);
+        if (!cli_word(dev_name, sizeof dev_name, next_tok, "interface name"))
+            return;
         interface = gAtoi(next_tok);
 
         while ((next_tok = strtok(NULL, " \n")) != NULL)
@@ -611,11 +645,11 @@ void ifconfigCmd()
                 printf("ifconfig mod:: -gateway is not applied after add; use "
                        "route add -dev %s -net 0.0.0.0 -netmask 0.0.0.0 -gw <gw>\n", dev_name);
             } else if (!strcmp("-mtu", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
-                mtu = atoi(next_tok), mtu_given = 1;
+                mtu = cli_atoi(next_tok), mtu_given = 1;
             else if (!strcmp("-netmask", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
                 Dot2IP(next_tok, mask), mask_given = 1;
             else if (!strcmp("-metric", next_tok) && (next_tok = strtok(NULL, " \n")) != NULL)
-                metric = atoi(next_tok), metric_given = 1;
+                metric = cli_atoi(next_tok), metric_given = 1;
 
         if (mask_given && (iface = findInterface(interface)) != NULL)
             COPY_IP(iface->netmask, mask);
@@ -717,10 +751,10 @@ void delayCmd(void)
         return;
     }
 
-    double base = atof(a);
-    char *b = strtok(NULL, " \n");  double jit  = b ? atof(b) : 0.0;
-    char *c = strtok(NULL, " \n");  double corr = c ? atof(c) : 0.0;
-    char *d = strtok(NULL, " \n");  int   limit = d ? atoi(d) : 0;
+    double base = cli_atof(a);
+    char *b = strtok(NULL, " \n");  double jit  = b ? cli_atof(b) : 0.0;
+    char *c = strtok(NULL, " \n");  double corr = c ? cli_atof(c) : 0.0;
+    char *d = strtok(NULL, " \n");  int   limit = d ? cli_atoi(d) : 0;
 
     gr_delay_set(egress, base, jit, corr, limit);
     printf("%s delay set: base %.1f ms  jitter %.1f ms  corr %.2f  limit %d\n",
@@ -746,7 +780,8 @@ void routeCmd()
         if (!strcmp(next_tok, "add"))
         {
             GET_NEXT_PARAMETER("-dev", "route:: missing device name ..");
-            strcpy(dev_name, next_tok);
+            if (!cli_word(dev_name, sizeof dev_name, next_tok, "device name"))
+                return;
             interface = gAtoi(next_tok);
 
             GET_NEXT_PARAMETER("-net", "route:: missing network address ..");
@@ -762,7 +797,11 @@ void routeCmd()
                     (!strcmp("-gw", next_tok)))
             {
                 next_tok = strtok(NULL, " \n");
-                Dot2IP(next_tok, nxth_addr);
+                if (Dot2IP(next_tok, nxth_addr) != EXIT_SUCCESS)
+                {
+                    printf("route:: -gw needs an address (a.b.c.d)\n");
+                    return;
+                }
             }
             gr_route_add(net_addr, net_mask, nxth_addr, interface);
         }
@@ -790,7 +829,18 @@ void routeCmd()
             }
             else
             {
-                del_route = gAtoi(next_tok);
+                /* An index from `route show`, and only that. gAtoi collects every digit in the
+                 * word, so `route del 10.0.2.0/24` meant index 10020024 -- written past the end
+                 * of the 20-entry table, and the router died. */
+                char *end = NULL;
+                long n = next_tok ? strtol(next_tok, &end, 10) : -1;
+                if (next_tok == NULL || *end != '\0' || n < 0 || n >= MAX_ROUTES)
+                {
+                    printf("route:: usage: route del <number from route show>  |  "
+                           "route del -net <network> -netmask <mask>\n");
+                    return;
+                }
+                del_route = (int)n;
                 gr_route_del(del_route);
             }
         }
@@ -866,6 +916,15 @@ void gncTerminate() {
  */
 void gncCmd() {
 
+    /* gnc reads what to send from the router's own stdin. In GINI the router is a daemon (stdin
+     * is /dev/null, commands come over the control socket), so gnc read garbage, never returned,
+     * held the console for good, and re-initialised lwIP's pools under the packet path. */
+    if (!rconfig.cli_flag)
+    {
+        printf("gnc needs the router's interactive console, which GINI routers do not have; "
+               "use nc on a machine instead\n");
+        return;
+    }
     // initialize LWIP code
     memp_init();
     pbuf_init();
@@ -886,7 +945,7 @@ void gncCmd() {
             next_tok = next_arg(" \n");
             if (next_tok == NULL)
                 return;
-            uint16_t port = atoi(next_tok);
+            uint16_t port = cli_atoi(next_tok);
 
             // create and initialize pcb to listen to TCP connections at the specified port
             struct tcp_pcb * pcb = tcp_new();
@@ -926,7 +985,7 @@ void gncCmd() {
             next_tok = next_arg(" \n");
             if (next_tok == NULL)
                 return;
-            u16_t port = atoi(next_tok);
+            u16_t port = cli_atoi(next_tok);
 
             // create and initialize pcb to make a TCP connection at the specified host and port
             struct tcp_pcb * pcb = tcp_new();
@@ -971,7 +1030,7 @@ void gncCmd() {
             next_tok = next_arg(" \n");
             if (next_tok == NULL)
                 return;
-            uint16_t port = atoi(next_tok);
+            uint16_t port = cli_atoi(next_tok);
 
             // create and initialze pcb to listen to UDP connections at the specified port
             struct udp_pcb * pcb = udp_new();
@@ -1011,7 +1070,7 @@ void gncCmd() {
             next_tok = next_arg(" \n");
             if (next_tok == NULL)
                 return;
-            uint16_t port = atoi(next_tok);
+            uint16_t port = cli_atoi(next_tok);
 
             // create pcb and set its remote ip and remote port
             struct udp_pcb * pcb = udp_new();
@@ -1102,21 +1161,31 @@ ip_spec_t *parseIPSpec(char *instr)
     char *saveptr, *saveptr2;
     int i=4;
 
+    if (instr == NULL)
+        return NULL;
     ips = (ip_spec_t *) malloc(sizeof(ip_spec_t));
     bzero(ips, sizeof(ip_spec_t));
 
     ipaddr = strtok_r(instr, " /", &saveptr);
+    if (ipaddr == NULL)
+    {
+        free(ips);
+        return NULL;
+    }
     preflen = strtok_r(NULL, " /", &saveptr);
     if (preflen == NULL)
         ips->preflen = 32;
     else
-        ips->preflen = atoi(preflen);
+        ips->preflen = cli_atoi(preflen);
+    /* compareIP2Spec builds the mask in a 4-byte array indexed by preflen/8: /40 wrote past it. */
+    if (ips->preflen < 0 || ips->preflen > 32)
+        ips->preflen = 32;
     for (str2 = ipaddr; i--; str2 = NULL)
     {
         ipnum = strtok_r(str2, ".", &saveptr2);
         if (ipnum == NULL) break;
 
-        ips->ip_addr[i] = atoi(ipnum);
+        ips->ip_addr[i] = cli_atoi(ipnum);
     }
 
     return ips;
@@ -1128,14 +1197,18 @@ port_range_t *parsePortRangeSpec(char *instr)
     port_range_t *prs;
     char *savestr, *port;
 
+    if (instr == NULL)
+        return NULL;
     prs = (port_range_t *) malloc(sizeof(port_range_t));
     bzero(prs, sizeof(port_range_t));
 
     port = strtok_r(instr, "-", &savestr);
-    prs->minport = atoi(port);
+    prs->minport = cli_atoi(port);
 
+    /* `-port 80` is the port 80, not a range with a NULL upper end -- which crashed the router
+     * the first time a student wrote the obvious thing. */
     port = strtok_r(NULL, "-", &savestr);
-    prs->maxport = atoi(port);
+    prs->maxport = port ? cli_atoi(port) : prs->minport;
 
     return prs;
 }
@@ -1147,70 +1220,93 @@ port_range_t *parsePortRangeSpec(char *instr)
  * class del class_name
  * class show
  * packet_spec = -net ipaddr/prevlen -port lower-upper -prot number
+ *
+ * Every word a flag needs is checked before it is used: a class command missing its last word
+ * used to hand NULL to strcpy/atoi and take the router down with it. The parser is one loop over
+ * the words, so `-src ( ... ) -dst ( ... )` sets both sides -- the old nested loop swallowed
+ * the `-dst` and wrote the destination spec over the source one.
  */
-void classCmd()
+#define CLASS_USAGE "usage: class add <name> [-src ( -net a.b.c.d[/len] -port lo[-hi] -prot n -tos n )]" \
+                    " [-dst ( ... )] | class del <name> | class show"
+
+static void classCmd_locked(void)
 {
-    char *next_tok;
-    char tmpbuf[MAX_TMPBUF_LEN];
+    char *next_tok, *val;
     char cname[MAX_DNAME_LEN];
-    int sside;
+    int sside = 1;
     ip_spec_t *ips;
     port_range_t *pps;
 
     next_tok = strtok(NULL, " \n");
-    if (next_tok != NULL)
+    if (next_tok == NULL)
     {
-        if (!strcmp(next_tok, "add"))
-        {
-            next_tok = strtok(NULL, " \n");
-            strcpy(cname, next_tok);
-            addClassDef(classifier, cname);
-
-            while ((next_tok = strtok(NULL, " \n")) != NULL)
-            {
-                if (!strcmp(next_tok, "-src")) sside = 1;
-                if (!strcmp(next_tok, "-dst")) sside = 0;
-
-                while ((next_tok = strtok(NULL, "( )\n")) != NULL)
-                {
-                    if (!strcmp(next_tok, "-net"))
-                    {
-                        next_tok = strtok(NULL, " )\n");
-                        ips = parseIPSpec(next_tok);
-                        insertIPSpec(classifier, cname, sside, ips);
-                    }
-                    if (!strcmp(next_tok, "-port"))
-                    {
-                        next_tok = strtok(NULL, " )\n");
-                        pps = parsePortRangeSpec(next_tok);
-                        insertPortRangeSpec(classifier, cname, sside, pps);
-                    }
-                    if (!strcmp(next_tok, "-prot"))
-                    {
-                        next_tok = strtok(NULL, " )\n");
-                        insertProtSpec(classifier, cname, gAtoi(next_tok));
-                    }
-                    if (!strcmp(next_tok, "-tos"))
-                    {
-                        next_tok = strtok(NULL, " )\n");
-                        insertTOSSpec(classifier, cname, gAtoi(next_tok));
-                    }
-                }
-            }
-        }
-        else if (!strcmp(next_tok, "del"))
-        {
-            next_tok = strtok(NULL, " \n");
-            if (next_tok != NULL)
-            {
-                strcpy(cname, next_tok);
-                delClassDef(classifier, cname);
-            }
-        }
-        else if (!strcmp(next_tok, "show"))
-            printClassifier(classifier);
+        printf("%s\n", CLASS_USAGE);
+        return;
     }
-    return;
+    if (!strcmp(next_tok, "add"))
+    {
+        if (!cli_word(cname, sizeof cname, strtok(NULL, " \n"), "class name"))
+            return;
+        if (!addClassDef(classifier, cname))
+        {
+            printf("class %s already exists; `class del %s` first to redefine it\n", cname, cname);
+            return;
+        }
+        while ((next_tok = strtok(NULL, "( )\n")) != NULL)
+        {
+            if (!strcmp(next_tok, "-src")) { sside = 1; continue; }
+            if (!strcmp(next_tok, "-dst")) { sside = 0; continue; }
+            if (strcmp(next_tok, "-net") && strcmp(next_tok, "-port") &&
+                strcmp(next_tok, "-prot") && strcmp(next_tok, "-tos"))
+            {
+                printf("class add:: ignoring unknown word '%s'\n%s\n", next_tok, CLASS_USAGE);
+                continue;
+            }
+            if ((val = strtok(NULL, " )\n")) == NULL)
+            {
+                printf("class add:: %s needs a value\n%s\n", next_tok, CLASS_USAGE);
+                return;
+            }
+            if (!strcmp(next_tok, "-net"))
+            {
+                if ((ips = parseIPSpec(val)) != NULL)
+                    insertIPSpec(classifier, cname, sside, ips);
+            }
+            else if (!strcmp(next_tok, "-port"))
+            {
+                if ((pps = parsePortRangeSpec(val)) != NULL)
+                    insertPortRangeSpec(classifier, cname, sside, pps);
+            }
+            else if (!strcmp(next_tok, "-prot"))
+                insertProtSpec(classifier, cname, gAtoi(val));
+            else
+                insertTOSSpec(classifier, cname, gAtoi(val));
+        }
+    }
+    else if (!strcmp(next_tok, "del"))
+    {
+        if (!cli_word(cname, sizeof cname, strtok(NULL, " \n"), "class name"))
+            return;
+        if (!strcmp(cname, "default"))
+        {
+            printf("class default cannot be deleted: unclassified traffic needs it\n");
+            return;
+        }
+        delClassDef(classifier, cname);
+    }
+    else if (!strcmp(next_tok, "show"))
+        printClassifier(classifier);
+    else
+        printf("%s\n", CLASS_USAGE);
+}
+
+/* The data plane reads classes, queues and filters on every packet; the CLI changes them. Each
+ * of these commands runs whole under the configuration write lock (packetcore.c). */
+void classCmd()
+{
+    gr_cfg_wrlock();
+    classCmd_locked();
+    gr_cfg_unlock();
 }
 
 
@@ -1225,7 +1321,15 @@ void classCmd()
  * filter stats
  * filter flush
  */
+static void filterCmd_locked(void);
 void filterCmd()
+{
+    gr_cfg_wrlock();
+    filterCmd_locked();
+    gr_cfg_unlock();
+}
+
+static void filterCmd_locked(void)
 {
     char *next_tok;
     char tmpbuf[MAX_TMPBUF_LEN];
@@ -1258,13 +1362,18 @@ void filterCmd()
         {
             if ((next_tok = strtok(NULL, " \n")) != NULL)
             {
-                rulenum = atoi(next_tok);
+                rulenum = cli_atoi(next_tok);
                 if ((rulenum < 0) || (rulenum >= filter->rulecnt))
                 {
                     printf("Invalid rule number %d \n", rulenum);
                     return;
                 }
                 next_tok = strtok(NULL, " \n");
+                if (next_tok == NULL)
+                {
+                    printf("usage: filter move <rule> up | down | top | bottom\n");
+                    return;
+                }
                 moveRule(filter, rulenum, next_tok);
             }
         }
@@ -1272,7 +1381,7 @@ void filterCmd()
         {
             if ((next_tok = strtok(NULL, " \n")) != NULL)
             {
-                rulenum = atoi(next_tok);
+                rulenum = cli_atoi(next_tok);
                 if ((rulenum < 0) || (rulenum >= filter->rulecnt))
                 {
                     printf("Invalid rule number %d \n", rulenum);
@@ -1324,36 +1433,63 @@ void haltCmd()
  * ping [-num] IP_addr [-size payload size]
  */
 
+/*
+ * ping [-num] IP_addr [-size payload size]
+ *
+ * Bounded, because of where the output goes. The router has no terminal of its own: a command's
+ * output is captured and handed back when the command FINISHES (gr_rctl.c), and the control socket
+ * runs one command at a time. A bare `ping a.b.c.d` used to mean INT_MAX pings -- no output, ever,
+ * and every console and HUD on that router frozen behind it. Now it means 4, and -num is capped.
+ * -size is capped to what one 1500-byte packet holds; a larger one was written past the buffer.
+ */
+#define PING_DEFAULT_TRIES  4
+#define PING_MAX_TRIES      30
+#define PING_MAX_PAYLOAD    (DEFAULT_MTU - 20 - 8)
+
 void pingCmd()
 {
     char *next_tok = strtok(NULL, " \n");
-    int tries, pkt_size;
+    int tries = PING_DEFAULT_TRIES, pkt_size = 64;
     uchar ip_addr[4];
     char tmpbuf[MAX_TMPBUF_LEN];
 
-    if (next_tok == NULL)
-        return;
-
-    if (next_tok[0] == '-')
+    if (next_tok != NULL && next_tok[0] == '-')
     {
         tries = gAtoi(next_tok);
         next_tok = strtok(NULL, " \n");
-    } else
-        tries = INT_MAX;
-    Dot2IP(next_tok, ip_addr);
+    }
+    if (Dot2IP(next_tok, ip_addr) != EXIT_SUCCESS)
+    {
+        printf("usage: ping [-count] a.b.c.d [-size bytes]   e.g. ping -3 10.0.1.10\n");
+        return;
+    }
+    if (tries < 1)
+        tries = 1;
+    if (tries > PING_MAX_TRIES)
+    {
+        printf("ping:: at most %d pings at a time here (each command's output appears when it "
+               "ends)\n", PING_MAX_TRIES);
+        tries = PING_MAX_TRIES;
+    }
     verbose(2, "[pingCmd]:: ping command sent, tries = %d, IP = %s",
             tries, IP2Dot(tmpbuf, ip_addr));
 
-    if ((next_tok = strtok(NULL, " \n")) != NULL)
+    if ((next_tok = strtok(NULL, " \n")) != NULL && !strcmp(next_tok, "-size"))
     {
-        if (!strcmp(next_tok, "-size"))
+        next_tok = strtok(NULL, " \n");
+        if (next_tok == NULL)
         {
-            next_tok = strtok(NULL, " \n");
-            pkt_size = atoi(next_tok);
-        } else
-            pkt_size = 64;
-    } else
-        pkt_size = 64;
+            printf("ping:: -size needs a number of bytes\n");
+            return;
+        }
+        pkt_size = cli_atoi(next_tok);
+        if (pkt_size < 0 || pkt_size > PING_MAX_PAYLOAD)
+        {
+            printf("ping:: -size must be 0..%d (one packet; the router's ping does not fragment)\n",
+                   PING_MAX_PAYLOAD);
+            return;
+        }
+    }
     ICMPDoPing(ip_addr, pkt_size, tries);
 }
 
@@ -1375,7 +1511,7 @@ void setCmd()
     {
         if ((next_tok = strtok(NULL, " \n")) != NULL)
         {
-            cyclelen = atoi(next_tok);
+            cyclelen = cli_atoi(next_tok);
             if (cyclelen >=0)
                 rconfig.schedcycle = cyclelen;
             else
@@ -1386,7 +1522,7 @@ void setCmd()
     {
         if ((next_tok = strtok(NULL, " \n")) != NULL)
         {
-            level = atoi(next_tok);
+            level = cli_atoi(next_tok);
             if ((level >= 0) && (level <= 6))
                 gr_rctl_set_verbosity(level);
             else
@@ -1397,7 +1533,7 @@ void setCmd()
     {
         if ((next_tok = strtok(NULL, " \n")) != NULL)
         {
-            rawmode = atoi(next_tok);
+            rawmode = cli_atoi(next_tok);
             if ((rawmode == 0) || (rawmode == 1))
                 setTimeMode(rawmode);
             else
@@ -1407,7 +1543,7 @@ void setCmd()
         {
             if ((next_tok = strtok(NULL, " \n")) != NULL)
             {
-                updateinterval = atoi(next_tok);
+                updateinterval = cli_atoi(next_tok);
                 if (updateinterval >=2)
                     setUpdateInterval(updateinterval);
                 else
@@ -1728,85 +1864,128 @@ void getCmd()
  * queue mod queue_number [-weight value] [-delay delay_microsec]
  * queue stats [queue_number]
  */
-void queueCmd()
+#define QUEUE_USAGE "usage: queue add <class> <qdisc> [-size n] [-weight w] [-delay us] |" \
+                    " queue del <class> | queue mod <class> -weight w | -qdisc q | queue show | queue stats"
+
+static void queueCmd_locked(void)
 {
-    char *next_tok;
+    char *next_tok, *val;
     char cname[MAX_DNAME_LEN], qdisc[MAX_DNAME_LEN];
     // the following parameters are set to default values which are sometimes overwritten
     int num_slots = 0;   // means, set to default
     double weight = 1.0, delay = 2.0;
 
-
-    if ((next_tok = strtok(NULL, " \n")) != NULL)
+    if ((next_tok = strtok(NULL, " \n")) == NULL)
     {
-        if (!strcmp(next_tok, "add"))
-        {
-            next_tok = strtok(NULL, " \n");
-            strcpy(cname, next_tok);
-            if (getClassDef(classifier, cname) == NULL)
-            {
-                verbose(1, "[queue]:: class name %s not defined ..", cname);
-                return;
-            }
-            next_tok = strtok(NULL, " \n");
-            strcpy(qdisc, next_tok);
-            if (lookupQDisc(pcore->qdiscs, qdisc) < 0)
-            {
-                verbose(1, "[queue]:: qdisc %s not defined .. ", qdisc);
-                return;
-            }
-
-            while ((next_tok = strtok(NULL, " \n")) != NULL)
-            {
-                if (!strcmp(next_tok, "-size"))
-                {
-                    next_tok = strtok(NULL, " \n");
-                    num_slots = atoi(next_tok);
-                }
-                else if (!strcmp(next_tok, "-weight"))
-                {
-                    next_tok = strtok(NULL, " \n");
-                    weight = atof(next_tok);
-                }
-                else if (!strcmp(next_tok, "-delay"))
-                {
-                    next_tok = strtok(NULL, " \n");
-                    delay = atof(next_tok);
-                }
-            }
-            addPktCoreQueue(pcore, cname, qdisc, weight, delay, num_slots);
-        }
-        else if (!strcmp(next_tok, "show"))
-            printAllQueues(pcore);
-        else if (!strcmp(next_tok, "del"))
-        {
-            if ((next_tok = strtok(NULL, " \n")) != NULL)
-                delPktCoreQueue(pcore, next_tok);
-        }
-        else if (!strcmp(next_tok, "mod"))
-        {
-            if ((next_tok = strtok(NULL, " \n")) != NULL)
-            {
-                strcpy(cname, next_tok);
-                if ((next_tok = strtok(NULL, " \n")) != NULL)
-                {
-                    if (!strcmp(next_tok, "-weight"))
-                    {
-                        next_tok = strtok(NULL, " \n");
-                        weight = atof(next_tok);
-                        modifyQueueWeight(pcore, cname, weight);
-                    }
-                    else if (!strcmp(next_tok, "-qdisc"))
-                    {
-                        next_tok = strtok(NULL, " \n");
-                        modifyQueueDiscipline(pcore, cname, next_tok);
-                    }
-                }
-            }
-        }
-        else if (!strcmp(next_tok, "stats"))
-            printQueueStats(pcore);
+        printf("%s\n", QUEUE_USAGE);
+        return;
     }
+    if (!strcmp(next_tok, "add"))
+    {
+        if (!cli_word(cname, sizeof cname, strtok(NULL, " \n"), "class name") ||
+            !cli_word(qdisc, sizeof qdisc, strtok(NULL, " \n"), "qdisc (e.g. taildrop)"))
+        {
+            printf("%s\n", QUEUE_USAGE);
+            return;
+        }
+        /* These two said so with verbose(1), which the control socket silences while a command
+         * runs: the student saw nothing, and the queue silently did not exist. */
+        if (getClassDef(classifier, cname) == NULL)
+        {
+            printf("queue add:: class %s is not defined; `class add %s ...` first\n", cname, cname);
+            return;
+        }
+        if (lookupQDisc(pcore->qdiscs, qdisc) < 0)
+        {
+            printf("queue add:: qdisc %s is not defined (see `qdisc show`)\n", qdisc);
+            return;
+        }
+        if (getCoreQueue(pcore, cname) != NULL)
+        {
+            printf("queue add:: queue %s exists; `queue del %s` first, or `queue mod`\n",
+                   cname, cname);
+            return;
+        }
+
+        while ((next_tok = strtok(NULL, " \n")) != NULL)
+        {
+            if (strcmp(next_tok, "-size") && strcmp(next_tok, "-weight") && strcmp(next_tok, "-delay"))
+            {
+                printf("queue add:: ignoring unknown option '%s'\n", next_tok);
+                continue;
+            }
+            if ((val = strtok(NULL, " \n")) == NULL)
+            {
+                printf("queue add:: %s needs a value\n", next_tok);
+                return;
+            }
+            if (!strcmp(next_tok, "-size"))
+                num_slots = cli_atoi(val);
+            else if (!strcmp(next_tok, "-weight"))
+                weight = cli_atof(val);
+            else
+                delay = cli_atof(val);
+        }
+        if (num_slots < 0 || num_slots > MAX_QUEUE_SIZE || weight <= 0.0)
+        {
+            printf("queue add:: -size must be 1..%d and -weight above 0\n", MAX_QUEUE_SIZE);
+            return;
+        }
+        addPktCoreQueue(pcore, cname, qdisc, weight, delay, num_slots);
+    }
+    else if (!strcmp(next_tok, "show"))
+        printAllQueues(pcore);
+    else if (!strcmp(next_tok, "del"))
+    {
+        if (!cli_word(cname, sizeof cname, strtok(NULL, " \n"), "queue name"))
+            return;
+        if (!strcmp(cname, "default"))
+            printf("queue default cannot be deleted: unclassified traffic needs it\n");
+        else if (delPktCoreQueue(pcore, cname) != EXIT_SUCCESS)
+            printf("queue del:: no queue %s\n", cname);
+    }
+    else if (!strcmp(next_tok, "mod"))
+    {
+        if (!cli_word(cname, sizeof cname, strtok(NULL, " \n"), "queue name"))
+            return;
+        if (getCoreQueue(pcore, cname) == NULL)
+        {
+            printf("queue mod:: no queue %s\n", cname);
+            return;
+        }
+        next_tok = strtok(NULL, " \n");
+        val = next_tok ? strtok(NULL, " \n") : NULL;
+        if (next_tok == NULL || val == NULL)
+            printf("usage: queue mod <class> -weight w | -qdisc q\n");
+        else if (!strcmp(next_tok, "-weight"))
+        {
+            weight = cli_atof(val);
+            if (weight <= 0.0)
+                printf("queue mod:: -weight must be above 0\n");
+            else
+                modifyQueueWeight(pcore, cname, weight);
+        }
+        else if (!strcmp(next_tok, "-qdisc"))
+        {
+            if (lookupQDisc(pcore->qdiscs, val) < 0 || strlen(val) >= MAX_DNAME_LEN)
+                printf("queue mod:: qdisc %s is not defined (see `qdisc show`)\n", val);
+            else
+                modifyQueueDiscipline(pcore, cname, val);
+        }
+        else
+            printf("usage: queue mod <class> -weight w | -qdisc q\n");
+    }
+    else if (!strcmp(next_tok, "stats"))
+        printQueueStats(pcore);
+    else
+        printf("%s\n", QUEUE_USAGE);
+}
+
+void queueCmd()
+{
+    gr_cfg_wrlock();
+    queueCmd_locked();
+    gr_cfg_unlock();
 }
 
 
@@ -1818,40 +1997,49 @@ void queueCmd()
  * qdisc add dropfront
  * qdisc add red -min minval -max maxval -pmax pmaxval
  */
-void qdiscCmd()
+static void qdiscCmd_locked(void)
 {
-    char *next_tok = strtok(NULL, " \n");
+    char *next_tok = strtok(NULL, " \n"), *val;
     double pmax = 0.9;
     double minval = 0.0, maxval = 1.0;
 
-    if (!strcmp(next_tok, "show"))
+    if (next_tok == NULL || !strcmp(next_tok, "show"))
         printQdiscs(pcore->qdiscs);
     else if (!strcmp(next_tok, "add"))
     {
         next_tok = strtok(NULL, " \n");
-        if (!strcmp(next_tok, "red"))
+        if (next_tok == NULL || strcmp(next_tok, "red"))
         {
-            while ((next_tok = strtok(NULL, " \n")) != NULL)
-            {
-                if (!strcmp(next_tok, "-min"))
-                {
-                    next_tok = strtok(NULL, " \n");
-                    minval = atof(next_tok);
-                }
-                if (!strcmp(next_tok, "-max"))
-                {
-                    next_tok = strtok(NULL, " \n");
-                    maxval = atof(next_tok);
-                }
-                if (!strcmp(next_tok, "-pmax"))
-                {
-                    next_tok = strtok(NULL, " \n");
-                    pmax = atof(next_tok);
-                }
-            }
-            addRED(pcore->qdiscs, minval, maxval, pmax);
+            printf("usage: qdisc add red [-min f] [-max f] [-pmax p]  (taildrop is built in)\n");
+            return;
         }
+        while ((next_tok = strtok(NULL, " \n")) != NULL)
+        {
+            if ((val = strtok(NULL, " \n")) == NULL)
+            {
+                printf("qdisc add red:: %s needs a value\n", next_tok);
+                return;
+            }
+            if (!strcmp(next_tok, "-min"))
+                minval = cli_atof(val);
+            else if (!strcmp(next_tok, "-max"))
+                maxval = cli_atof(val);
+            else if (!strcmp(next_tok, "-pmax"))
+                pmax = cli_atof(val);
+            else
+                printf("qdisc add red:: ignoring unknown option '%s'\n", next_tok);
+        }
+        addRED(pcore->qdiscs, minval, maxval, pmax);
     }
+    else
+        printf("usage: qdisc show | qdisc add red [-min f] [-max f] [-pmax p]\n");
+}
+
+void qdiscCmd()
+{
+    gr_cfg_wrlock();
+    qdiscCmd_locked();
+    gr_cfg_unlock();
 }
 
 

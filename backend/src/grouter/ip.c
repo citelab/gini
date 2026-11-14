@@ -86,12 +86,14 @@ void IPIncomingPacket(gpacket_t *in_pkt)
 		// every tick, and no router ever heard a neighbour.
 		GR_WATCH(in_pkt, GW_LOCAL, -1, -1);
 		IPProcessBcastPacket(in_pkt);
+		free(in_pkt);                  /* the control plane copies what it keeps */
 	} else if (COMPARE_IP(gNtohl(tmpbuf, ip_pkt->ip_dst), bcast_ip) == 0)
 	{
 		// TODO: rudimentary 'broadcast IP address' check
 		verbose(2, "[IPIncomingPacket]:: not repeat broadcast (final destination %s), packet thrown",
 		       IP2Dot(tmpbuf, gNtohl((tmpbuf+20), ip_pkt->ip_dst)));
 		IPProcessBcastPacket(in_pkt);
+		free(in_pkt);
 	} else
 	{
 		// Destinated to someone else
@@ -331,6 +333,7 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 		if (_gv.action == GR_DROP)
 		{
 			GR_WATCH(in_pkt, GW_DROP, -1, gr_pipeline_stopped_at);
+			free(in_pkt);                  /* no module frees a packet it drops */
 			return EXIT_FAILURE;
 		}
 		if (_gv.action != GR_CONTINUE)
@@ -365,7 +368,11 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 			   in_pkt->frame.nxth_ip_addr,
 			   &(in_pkt->frame.dst_interface)) == EXIT_FAILURE)
 	{
+		/* Freed now. Every packet that found no route used to leak, and a flood into a route
+		 * withdrawn by a link failure grew the router by ~1.5 KB a packet until the kernel
+		 * killed it -- a "crash" with no backtrace. */
 		GR_WATCH(in_pkt, GW_NOROUTE, -1, -1);
+		free(in_pkt);
 		return EXIT_FAILURE;
 	}
 	GR_WATCH(in_pkt, GW_FWD, in_pkt->frame.dst_interface, -1);
@@ -402,22 +409,19 @@ int IPProcessForwardingPacket(gpacket_t *in_pkt)
 		break;
 
 	case MORE_FRAGS:
-		// fragment processing...
+		// fragment processing: each fragment is its own packet, owned by the output queue once
+		// sent; the original is ours to free. (The fragments used to be freed after queuing,
+		// and freed again by the output thread.)
 		num_frags = fragmentIPPacket(in_pkt, pkt_frags);
 
-		verbose(2, "[IPProcessForwardingPacket]:: IP packet needs fragmentation");
-		// forward each fragment
+		verbose(2, "[IPProcessForwardingPacket]:: IP packet needs fragmentation into %d", num_frags);
 		for (i = 0; i < num_frags; i++)
-		{
 			if (IPSend2Output(pkt_frags[i]) == EXIT_FAILURE)
-			{
-				verbose(1, "[IPProcessForwardingPacket]:: processForwardIPPacket(): Could not forward packets ");
-				return EXIT_FAILURE;
-			}
-		}
-		deallocateFragments(pkt_frags, num_frags);
-		break;
+				free(pkt_frags[i]);
+		free(in_pkt);
+		return num_frags > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 	default:
+		free(in_pkt);
 		return EXIT_FAILURE;
 	}
 	return EXIT_SUCCESS;
@@ -431,7 +435,10 @@ int IPCheck4Errors(gpacket_t *in_pkt)
 
 	// check for valid version and checksum.. silently drop the packet if not.
 	if (IPVerifyPacket(ip_pkt) == EXIT_FAILURE)
+	{
+		free(in_pkt);
 		return EXIT_FAILURE;
+	}
 
 	// Decrement TTL, if TTL <= 0, send to ICMP module with TTL-expired command
 	// return EXIT_FAILURE
@@ -475,7 +482,10 @@ int IPCheck4Fragmentation(gpacket_t *in_pkt)
 
 	if (link_mtu < ntohs(ip_pkt->ip_pkt_len))                 // need fragmentation
 	{
-		if (TEST_DF_BITS(ip_pkt->ip_frag_off))    // DF is set: destination unreachable
+		/* The field is in network order. Testing it raw looked at the wrong byte, so DF was
+		 * never seen and every oversized DF packet -- most of what Linux sends -- went to the
+		 * fragmenter instead of getting "fragmentation needed" back. */
+		if (TEST_DF_BITS(ntohs(ip_pkt->ip_frag_off)))    // DF is set: destination unreachable
 			return FRAGS_ERROR;
 		return MORE_FRAGS;
 	} else
@@ -539,8 +549,8 @@ int IPProcessMyPacket(gpacket_t *in_pkt)
 		// does not consume, so the existing ICMP/host-stack handling below is unchanged.
 		gr_cp_deliver(in_pkt);
 
-		// Is packet ICMP? send it to the ICMP module
-		// further processing with appropriate type code
+		// Is packet ICMP? send it to the ICMP module, which owns it from here
+		// (an echo request's buffer becomes the reply).
 
 		if (ip_pkt->ip_prot == ICMP_PROTOCOL) {
 			ICMPProcessPacket(in_pkt);
@@ -549,10 +559,15 @@ int IPProcessMyPacket(gpacket_t *in_pkt)
 
 		// UDP/TCP addressed to the router -> the (optional) host stack (lwIP),
 		// sealed behind host_stack_input(). Pure forwarder: -DGR_NO_HOST_STACK.
+		// lwIP is done with the packet when this returns (any reply is a new packet).
 		if (host_stack_input(in_pkt))
+		{
+			free(in_pkt);
 			return EXIT_SUCCESS;
+		}
 
 	}
+	free(in_pkt);                          /* every other packet to the router leaked */
 	return EXIT_FAILURE;
 }
 

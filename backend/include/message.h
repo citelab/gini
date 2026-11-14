@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 
-#define MAX_IPREVLENGTH_ICMP            50       // maximum previous header sent back
+#define MAX_IPREVLENGTH_ICMP            68       // previous header sent back: up to 60 bytes of IP header (IHL 15) + 8 of payload. Was 50, and a packet carrying IP options overflowed the stack buffer when the router quoted it in an ICMP error
 
 
 #define MAX_MESSAGE_SIZE                sizeof(gpacket_t)

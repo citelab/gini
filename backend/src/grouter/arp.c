@@ -26,6 +26,10 @@ int tbl_replace_indx;            // overwrite this element if no free space in A
 int buf_replace_indx;            // overwrite this element if no free space in ARP buffer
 arp_entry_t ARPtable[MAX_ARP];		                // ARP table
 arp_buffer_entry_t ARPbuffer[MAX_ARP_BUFFERS];   	// ARP buffer for unresolved packets
+/* The output thread adds to ARPbuffer (ARPResolve) and the worker takes from it (an ARP reply,
+ * ARPFlushBuffer); nothing serialised the two, and a slot read between `is_empty = FALSE` and its
+ * packet being stored handed out the slot's previous, already-sent packet a second time. */
+static pthread_mutex_t arpbuf_lock = PTHREAD_MUTEX_INITIALIZER;
 
 
 extern pktcore_t *pcore;
@@ -122,6 +126,7 @@ void ARPProcess(gpacket_t *pkt)
   if ((ntohs(apkt->hw_addr_type) != ETHERNET_PROTOCOL) || (ntohs(apkt->arp_prot) != IP_PROTOCOL))
   {
     verbose(2, "[ARPProcess]:: unknown hwtype or protocol, dropping ARP packet");
+    free(pkt);                       /* every ARP that was not a request to us leaked */
     return;
   }
 
@@ -139,6 +144,7 @@ void ARPProcess(gpacket_t *pkt)
 
     verbose(2, "[APRProcess]:: packet destined for %s, dropping",
         IP2Dot(tmpbuf, gNtohl((uchar *)tmpbuf, apkt->dst_ip_addr)));
+    free(pkt);
     return;
   }
 
@@ -180,9 +186,13 @@ void ARPProcess(gpacket_t *pkt)
     verbose(2, "[ARPProcess]:: packet was ARP REPLY... ");
     ARPFlushBuffer(gNtohl((uchar *)tmpbuf, apkt->src_ip_addr), apkt->src_hw_addr);
     verbose(2, "[ARPProcess]:: flushed the ARP buffer ... ");
+    free(pkt);                       /* the waiting packets went out; the reply itself is done */
   }
   else
+  {
     verbose(2, "[ARPProcess]:: unknown ARP type");
+    free(pkt);
+  }
 
   return;
 }
@@ -424,23 +434,29 @@ void ARPAddBuffer(gpacket_t *in_pkt)
   // duplicate the packet..
   cppkt = duplicatePacket(in_pkt);
 
+  pthread_mutex_lock(&arpbuf_lock);
   // Find an empty slot
   for (i = 0; i < MAX_ARP_BUFFERS; i++){
     if (ARPbuffer[i].is_empty == TRUE)
     {
-      ARPbuffer[i].is_empty = FALSE;
       ARPbuffer[i].wait_msg = cppkt;
+      ARPbuffer[i].is_empty = FALSE;
+      pthread_mutex_unlock(&arpbuf_lock);
       verbose(2, "[addARPBuffer]:: packet stored in entry %d", i);
       return;
     }
   }
 
-  // No empty spot? Replace a packet, we need to deallocate the old packet
+  /* No empty slot: replace the oldest, in turn. This used ARPbuffer[i] with i == MAX_ARP_BUFFERS,
+   * one past the end -- the first bytes of the ARP table read as a pointer and handed to free().
+   * So the 51st packet waiting on a next hop that never answers (a ping to a wrong address, a
+   * flood to a machine still booting) killed the router. buf_replace_indx was always the intent. */
+  i = buf_replace_indx;
   free(ARPbuffer[i].wait_msg);
   ARPbuffer[i].wait_msg = cppkt;
-  verbose(2, "[addARPBuffer]:: buffer full, packet buffered to replaced entry %d",
-      buf_replace_indx);
   buf_replace_indx = (buf_replace_indx + 1) % MAX_ARP_BUFFERS; // adjust for FIFO
+  pthread_mutex_unlock(&arpbuf_lock);
+  verbose(2, "[addARPBuffer]:: buffer full, packet buffered to replaced entry %d", i);
 
   return;
 }
@@ -459,6 +475,7 @@ int ARPGetBuffer(gpacket_t **out_pkt, uchar *nexthop)
   char tmpbuf[MAX_TMPBUF_LEN];
 
   // Search for packet in buffer
+  pthread_mutex_lock(&arpbuf_lock);
   for (i = 0; i < MAX_ARP_BUFFERS; i++)
   {
     if (ARPbuffer[i].is_empty == TRUE) continue;
@@ -466,12 +483,15 @@ int ARPGetBuffer(gpacket_t **out_pkt, uchar *nexthop)
     {
       // match found
       *out_pkt =  ARPbuffer[i].wait_msg;
+      ARPbuffer[i].wait_msg = NULL;
       ARPbuffer[i].is_empty = TRUE;
+      pthread_mutex_unlock(&arpbuf_lock);
       verbose(2, "[ARPGetBuffer]:: found packet matching nexthop %s at entry %d",
           IP2Dot(tmpbuf, nexthop), i);
       return EXIT_SUCCESS;
     }
   }
+  pthread_mutex_unlock(&arpbuf_lock);
   verbose(2, "[ARPGetBuffer]:: no match for nexthop %s", IP2Dot(tmpbuf, nexthop));
   return EXIT_FAILURE;
 }

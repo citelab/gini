@@ -62,29 +62,37 @@ char *IP2Dot(char *buf, uchar ip_addr[])
 
 
 
+/*
+ * The three parsers below take whatever word a student typed -- or NULL, when a command ends
+ * before its value (`route add -dev tun1 -net`). They used to hand NULL to sscanf/strlen and
+ * kill the router; now NULL or a malformed word gives zeros and EXIT_FAILURE. Every unparsed
+ * field is zero rather than whatever was on the stack.
+ */
 int Dot2IP(char *buf, uchar ip_addr[])
 {
-        unsigned int iip_addr[4];
-        int i;
+        unsigned int iip_addr[4] = {0, 0, 0, 0};
+        int i, n = 0;
 
-        sscanf(buf, "%u.%u.%u.%u", &(iip_addr[3]), &(iip_addr[2]), &(iip_addr[1]), &(iip_addr[0]));
+        if (buf != NULL)
+                n = sscanf(buf, "%u.%u.%u.%u", &(iip_addr[3]), &(iip_addr[2]), &(iip_addr[1]), &(iip_addr[0]));
 
         for (i=0; i < 4; i++) ip_addr[i] = iip_addr[i];
-        return EXIT_SUCCESS;
+        return n == 4 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 
 // This is unaltered by the endianess. We treat the MAC as a string.
 int Colon2MAC(char *buf, uchar mac_addr[])
 {
-        unsigned int imac_addr[6];
-        int i;
+        unsigned int imac_addr[6] = {0, 0, 0, 0, 0, 0};
+        int i, n = 0;
 
-        sscanf(buf, "%x:%x:%x:%x:%x:%x", &(imac_addr[0]), &(imac_addr[1]), &(imac_addr[2]),
-	       &(imac_addr[3]), &(imac_addr[4]), &(imac_addr[5]));
+        if (buf != NULL)
+                n = sscanf(buf, "%x:%x:%x:%x:%x:%x", &(imac_addr[0]), &(imac_addr[1]), &(imac_addr[2]),
+	               &(imac_addr[3]), &(imac_addr[4]), &(imac_addr[5]));
 
         for (i=0; i < 6; i++) mac_addr[i] = imac_addr[i];
-        return EXIT_SUCCESS;
+        return n == 6 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 
@@ -103,6 +111,8 @@ int gAtoi(char *str)
 	int val = 0;
 	int indx = 1, i;
 
+	if (str == NULL)
+		return 0;
 	for (i = strlen(str); i >= 0; i--)
 	{
 		if ((str[i] <= '9') && (str[i] >= '0'))

@@ -50,15 +50,14 @@ void ICMPProcessPacket(gpacket_t *in_pkt)
 	case ICMP_ECHO_REPLY:
 		verbose(2, "[ICMPProcessPacket]:: ICMP processing for ECHO reply");
 		ICMPProcessEchoReply(in_pkt);
+		free(in_pkt);                  /* the reply only updates the ping statistics */
 		break;
 
-	case ICMP_REDIRECT:
-	case ICMP_SOURCE_QUENCH:
-	case ICMP_TIMESTAMP:
-	case ICMP_TIMESTAMPREPLY:
-	case ICMP_INFO_REQUEST:
-	case ICMP_INFO_REPLY:
+	default:
+		/* Redirects, unreachables, time-exceeded and the rest addressed to the router: nothing
+		 * here acts on them, and they used to leak. */
 		verbose(2, "[ICMPProcessPacket]:: ICMP processing for type %d not implemented ", icmphdr->type);
+		free(in_pkt);
 		break;
 	}
 }
@@ -314,10 +313,16 @@ void ICMPProcessFragNeeded(gpacket_t *in_pkt, int interface_mtu)
 	icmphdr->type = ICMP_DEST_UNREACH;
 	icmphdr->code = ICMP_FRAG_NEEDED; 
 	icmphdr->checksum = 0;
-	icmphdr->un.frag.mtu = interface_mtu;
+	/* Both on the wire in network order, and the unused half zero. The MTU went out in host
+	 * order (1000 arrived as 59395), and the reply kept the ORIGINAL datagram's total length, so
+	 * the receiver checksummed ~1200 bytes of ICMP that this computed over 36, found it wrong,
+	 * and threw it away: path-MTU discovery through a smaller link never learned anything. */
+	icmphdr->un.frag.__unused = 0;
+	icmphdr->un.frag.mtu = htons((ushort)interface_mtu);
 	memcpy(((uchar *)icmphdr + 8), prevbytes, iprevlen);    // OLD ip header + 64 bits of original pkt 
 	cksum = checksum((uchar *)icmphdr, (8 + iprevlen)/2 );
 	icmphdr->checksum = htons(cksum);
+	ipkt->ip_pkt_len = htons(iphdrlen + 8 + iprevlen);
 
 	verbose(2, "[processFragNeeded]:: Sending... ICMP Frag needed message ");
 
@@ -333,8 +338,13 @@ void ICMPDisplayPingStats() {
 	char tmpbuf[64];
 	printf("\n");
 	printf("--- %s ping statistics ---\n", IP2Dot(tmpbuf, pstat.dst_ip));
-	printf("%d packets transmitted, %d packets received, %.1f%% packet loss\n", pstat.ntransmitted, pstat.nreceived, 1.0 - pstat.ntransmitted/(double)pstat.nreceived);
-	printf("round-trip min/avg/max = %.3f/%.3f/%.3f ms\n", pstat.tmin, pstat.tsum/pstat.nreceived, pstat.tmax);
+	/* Loss was 1 - sent/received (a fraction, inverted, and -inf with no replies), and the
+	 * averages divided by zero when nothing came back. */
+	printf("%d packets transmitted, %d packets received, %.1f%% packet loss\n",
+	       pstat.ntransmitted, pstat.nreceived,
+	       pstat.ntransmitted > 0 ? 100.0 * (pstat.ntransmitted - pstat.nreceived) / pstat.ntransmitted : 0.0);
+	if (pstat.nreceived > 0)
+		printf("round-trip min/avg/max = %.3f/%.3f/%.3f ms\n", pstat.tmin, pstat.tsum/pstat.nreceived, pstat.tmax);
 }
 
 /*

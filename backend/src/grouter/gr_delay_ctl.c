@@ -2,6 +2,7 @@
  * gr_delay_ctl.c  —  owns the two runtime delay lines and their (re)configuration.
  * See gr_delay_ctl.h. The emit callbacks live in packetcore.c (ingress) and gnet.c (egress).
  */
+#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -32,7 +33,15 @@ void gr_delay_off(int egress)
     gr_delayline_t **slot = egress ? &gr_egress_line : &gr_ingress_line;
     gr_delayline_t  *old  = *slot;
     *slot = NULL;              /* fast path bypasses first ... */
-    if (old) gr_delay_destroy(old);   /* ... then tear the line down */
+    /* ... then a grace period before tearing the line down. A forwarding thread that loaded the
+     * pointer just before it went NULL is a few instructions from gr_delay_push(); freeing the
+     * line under it locked a destroyed mutex in freed memory. Turning a delay off is a CLI act,
+     * so a tenth of a second here costs nothing. */
+    if (old)
+    {
+        usleep(100000);
+        gr_delay_destroy(old);
+    }
 }
 
 static int describe_one(char *buf, int n, const char *name, gr_delayline_t *dl)

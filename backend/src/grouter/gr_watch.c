@@ -85,11 +85,13 @@ void gr_watch_note(gpacket_t *pkt, char fate, int out_if, int module)
     else if (module >= 0)
     {
         gr_pipeline_t *p = gr_default_pipeline();
+        gr_pipeline_lock();                /* a `gpipe clear` may be freeing that module */
         if (module < p->count && p->modules[module] && p->modules[module]->type)
         {
             strncpy(e->mtype, p->modules[module]->type, sizeof e->mtype - 1);
             e->mtype[sizeof e->mtype - 1] = '\0';
         }
+        gr_pipeline_unlock();
     }
     memcpy(e->src, ip->ip_src, 4);
     memcpy(e->dst, ip->ip_dst, 4);
@@ -164,6 +166,44 @@ static void watch_dump(unsigned long long since)
                c.seq, c.ms, c.fate, c.in_if, c.out_if, c.module, c.mtype[0] ? c.mtype : "-",
                c.src[0], c.src[1], c.src[2], c.src[3], c.dst[0], c.dst[1], c.dst[2], c.dst[3],
                c.arp ? GW_PROTO_ARP : c.proto, c.ttl, c.len, c.sport, c.dport);
+    }
+}
+
+/*
+ * The newest `max` entries, newest first, for a crash report (gr_crash.c). Called from a signal
+ * handler: no stdio, no locks, nothing allocated -- snprintf into a stack buffer and write().
+ * Same fields as `watch dump`, with a header naming them, since nobody will have the Router
+ * Lab's decoder open when they read a crash file.
+ */
+void gr_watch_crash_dump(int fd, int max)
+{
+    unsigned long long top = next_seq, s, lo;
+    char line[256];
+    int n;
+    static const char hdr[] =
+        "seq ms fate in_if out_if module type src dst proto ttl len sport dport\n"
+        "  fate: F forwarded, D dropped by a module, N no route, T TTL expired, L for the router,\n"
+        "        A ARP arrived, S sent by the router\n";
+
+    n = (int)write(fd, hdr, sizeof hdr - 1);
+    (void)n;
+    lo = (top > (unsigned long long)max) ? top - max + 1 : 1;
+    if (top > GR_WATCH_N && lo < top - GR_WATCH_N + 1)
+        lo = top - GR_WATCH_N + 1;
+    for (s = top; s >= lo && s > 0; s--)
+    {
+        gr_watch_ent_t *e = &ring[s % GR_WATCH_N];
+        if (e->seq != s)
+            continue;
+        n = snprintf(line, sizeof line,
+                     "%llu %llu %c %d %d %d %s %d.%d.%d.%d %d.%d.%d.%d %u %u %u %u %u\n",
+                     e->seq, e->ms, e->fate, e->in_if, e->out_if, e->module,
+                     e->mtype[0] ? e->mtype : "-",
+                     e->src[0], e->src[1], e->src[2], e->src[3],
+                     e->dst[0], e->dst[1], e->dst[2], e->dst[3],
+                     e->arp ? GW_PROTO_ARP : e->proto, e->ttl, e->len, e->sport, e->dport);
+        if (n > 0)
+            n = (int)write(fd, line, (size_t)(n < (int)sizeof line ? n : (int)sizeof line - 1));
     }
 }
 

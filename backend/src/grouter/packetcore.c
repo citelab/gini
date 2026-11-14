@@ -35,6 +35,7 @@
 #include "ip.h"
 #include "sdn.h"
 #include "gr_delay_ctl.h"
+#include "gr_crash.h"
 
 extern classlist_t *classifier;
 extern filtertab_t *filter;
@@ -57,8 +58,39 @@ pktcorecnamecache_t *createPktCoreCnameCache()
 }
 
 
+/* Writer-preferring: the data plane takes this for reading thousands of times a second, and
+ * with glibc's default (reader preference) a `queue del` could wait behind them for ever. */
+static pthread_rwlock_t gr_cfg_lock;
+
+static void gr_cfg_init(void)
+{
+	pthread_rwlockattr_t a;
+	pthread_rwlockattr_init(&a);
+	pthread_rwlockattr_setkind_np(&a, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+	pthread_rwlock_init(&gr_cfg_lock, &a);
+	pthread_rwlockattr_destroy(&a);
+}
+
+void gr_cfg_rdlock(void) { pthread_rwlock_rdlock(&gr_cfg_lock); }
+void gr_cfg_wrlock(void) { pthread_rwlock_wrlock(&gr_cfg_lock); }
+void gr_cfg_unlock(void) { pthread_rwlock_unlock(&gr_cfg_lock); }
+
+/* filteredPacket for callers outside enqueuePacket (the rx drivers, the legacy module): the
+ * filter rules it walks are freed by `filter del`/`flush`, so it reads them under the lock. */
+int gr_filtered(gpacket_t *pkt)
+{
+	int r;
+	gr_cfg_rdlock();
+	r = filteredPacket(filter, pkt);
+	gr_cfg_unlock();
+	return r;
+}
+
+
 void insertCnameCache(pktcorecnamecache_t *pcache, char *cname)
 {
+	if (pcache->numofentries >= MAX_QUEUE_SIZE)
+		return;
 	pcache->cname[pcache->numofentries] = strdup(cname);
 	pcache->numofentries++;
 }
@@ -80,7 +112,10 @@ int deleteCnameCache(pktcorecnamecache_t *pcache, char *cname)
 	if (found)
 	{
 		free(pcache->cname[j]);
-		for (i = j; j < (pcache->numofentries-1); j++)
+		/* This loop counted j and copied with i, so i never moved: deleting one class dropped
+		 * the NEXT one from the cache (its traffic silently went to default) and left a freed
+		 * name in the last slot for tagPacket to strcmp on every packet. */
+		for (i = j; i < (pcache->numofentries-1); i++)
 			pcache->cname[i] = pcache->cname[i+1];
 		pcache->numofentries--;
 	}
@@ -101,6 +136,7 @@ pktcore_t *createPacketCore(char *rname, simplequeue_t *outQ, simplequeue_t *wor
 	}
 
 	pcore->pcache = createPktCoreCnameCache();
+	gr_cfg_init();
 
 
 	strcpy(pcore->name, rname);
@@ -135,6 +171,11 @@ int addPktCoreQueue(pktcore_t *pcore, char *qname, char *qdisc, double qweight, 
 	simplequeue_t *pktq;
 	qentrytype_t *qentry;
 
+	/* A second queue under the same name was half-added -- map_add refused it, the name cache
+	 * took it -- and a later `queue del` then left traffic tagged for a queue that no longer
+	 * existed, which fatal()'d the router on the next packet. */
+	if (map_get(pcore->queues, qname) != NULL)
+		return EXIT_FAILURE;
 
 	if ((pktq = createSimpleQueue(qname, pcore->maxqsize, 0, 0)) == NULL)
 	{
@@ -304,31 +345,29 @@ void modifyQueueDiscipline(pktcore_t *pcore, char *qname, char *qdisc)
 
 int delPktCoreQueue(pktcore_t *pcore, char *qname)
 {
-	List *keylst;
-	Lister *klster;
-	char *nxtkey;
-	int deleted;
+	simplequeue_t *q;
+	void *pkt;
+	int size, drained = 0;
 
-	keylst = map_keys(pcore->queues);
-	klster = lister_create(keylst);
-	deleted = 0;
-
-	while (nxtkey = ((char *)lister_next(klster)))
-	{
-		if (!strcmp(qname, nxtkey))
-		{
-			map_remove(pcore->queues, qname);
-			deleted = 1;
-			deleteCnameCache(pcore->pcache, qname);
-		}
-	}
-	lister_release(klster);
-	list_release(keylst);
-
-	if (deleted)
-		return EXIT_SUCCESS;
-	else
+	/* Called with the configuration lock held for writing (queueCmd), so no scheduler pass or
+	 * enqueue is inside this queue. Its waiting packets are freed and taken off packetcnt --
+	 * left in place they kept the scheduler awake for packets that no longer existed. */
+	if (!strcmp(qname, "default") || (q = map_get(pcore->queues, qname)) == NULL)
 		return EXIT_FAILURE;
+	while (q->cursize > 0 && readQueue(q, &pkt, &size) == EXIT_SUCCESS)
+	{
+		free(pkt);
+		drained++;
+	}
+	pthread_mutex_lock(&(pcore->qlock));
+	pcore->packetcnt -= drained;
+	if (pcore->packetcnt < 0)
+		pcore->packetcnt = 0;
+	pthread_mutex_unlock(&(pcore->qlock));
+	map_remove(pcore->queues, qname);
+	deleteCnameCache(pcore->pcache, qname);
+	pcore->lastqid = 0;
+	return EXIT_SUCCESS;
 }
 
 
@@ -355,7 +394,8 @@ pthread_t PktCoreSchedulerInit(pktcore_t *pcore)
 
 int PktCoreWorkerInit(pktcore_t *pcore)
 {
-	int threadstat, threadid;
+	int threadstat;
+	pthread_t threadid;             /* was int: pthread_create wrote 8 bytes into 4 */
 
 	threadstat = pthread_create((pthread_t *)&threadid, NULL, (void *)packetProcessor, (void *)pcore);
 
@@ -371,6 +411,7 @@ int PktCoreWorkerInit(pktcore_t *pcore)
 
 void *packetProcessor(void *pc)
 {
+	gr_crash_name_thread("gr-worker");
 	pktcore_t *pcore = (pktcore_t *)pc;
 	gpacket_t *in_pkt;
 	int pktsize;
@@ -406,7 +447,8 @@ void *packetProcessor(void *pc)
 
 int PktCoreOpenflowWorkerInit(pktcore_t *pcore)
 {
-	int threadstat, threadid;
+	int threadstat;
+	pthread_t threadid;             /* was int: pthread_create wrote 8 bytes into 4 */
 
 	threadstat = pthread_create((pthread_t *)&threadid, NULL,
 	                            (void *)openflowPacketProcessor,
@@ -496,9 +538,11 @@ static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 		char *qkey;
 		simplequeue_t *thisq;
 
+		gr_cfg_rdlock();
 		// check for filtering.. if the it should be filtered.. then drop
 		if (filteredPacket(filter, in_pkt))
 		{
+			gr_cfg_unlock();
 			verbose(2, "[enqueuePacket]:: Packet filtered..!");
 			free(in_pkt);
 			return EXIT_FAILURE;
@@ -517,10 +561,13 @@ static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 		pthread_mutex_lock(&(pcore->qlock));
 
 		thisq = map_get(pcore->queues, qkey);
+		if (thisq == NULL)                     /* a class without a queue: the default one takes it */
+			thisq = map_get(pcore->queues, "default");
 		if (thisq == NULL)
 		{
-			fatal("[enqueuePacket]:: Invalid %s key presented for queue retrieval", qkey);
+			/* was fatal(), i.e. exit(1): one packet with no queue ended the router */
 			pthread_mutex_unlock(&(pcore->qlock));
+			gr_cfg_unlock();
 			free(in_pkt);
 			return EXIT_FAILURE;             // packet dropped..
 		}
@@ -533,6 +580,7 @@ static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 			thisq->pkts_drop++; thisq->bytes_drop += gpktByteLen(in_pkt);
 			free(in_pkt);
 			pthread_mutex_unlock(&(pcore->qlock));
+			gr_cfg_unlock();
 			return EXIT_FAILURE;
 		}
 
@@ -542,16 +590,28 @@ static int enqueuePacket_now(pktcore_t *pcore, gpacket_t *in_pkt, int pktsize,
 			thisq->pkts_drop++; thisq->bytes_drop += gpktByteLen(in_pkt);
 			free(in_pkt);
 			pthread_mutex_unlock(&(pcore->qlock));
+			gr_cfg_unlock();
 			return EXIT_FAILURE;
 		}
 
+		/* The write happens under qlock too. It used to follow the unlock, so two rx threads
+		 * could both pass the "full?" check, one write fail -- the packet leaked and packetcnt
+		 * stayed one too high for good, and the scheduler never slept again. */
+		verbose(2, "[enqueuePacket]:: Adding packet.. ");
+		if (writeQueue(thisq, in_pkt, pktsize) != EXIT_SUCCESS)
+		{
+			thisq->pkts_drop++; thisq->bytes_drop += gpktByteLen(in_pkt);
+			pthread_mutex_unlock(&(pcore->qlock));
+			gr_cfg_unlock();
+			free(in_pkt);
+			return EXIT_FAILURE;
+		}
 		pcore->packetcnt++;
 		thisq->pkts_in++; thisq->bytes_in += gpktByteLen(in_pkt);
 		if (pcore->packetcnt == 1)
 			pthread_cond_signal(&(pcore->schwaiting)); // wake up scheduler if it was waiting..
 		pthread_mutex_unlock(&(pcore->qlock));
-		verbose(2, "[enqueuePacket]:: Adding packet.. ");
-		writeQueue(thisq, in_pkt, pktsize);
+		gr_cfg_unlock();
 		return EXIT_SUCCESS;
 	}
 }

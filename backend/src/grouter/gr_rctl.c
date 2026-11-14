@@ -22,6 +22,7 @@
 
 #include "cli.h"        /* parseACLICmd */
 #include "gr_rctl.h"
+#include "gr_crash.h"
 
 #define RCTL_MAX   65536
 #define RCTL_END   "\n__END__\n"
@@ -156,6 +157,7 @@ static void serve_client(int fd)
  * still serialized by rctl_lock inside gr_rctl_exec, so concurrency here is safe. */
 static void *client_thread(void *arg)
 {
+	gr_crash_name_thread("gr-cli");
     int fd = (int)(long)arg;
     struct timeval rcv = { 3600, 0 };   /* reap leaked/idle clients after an hour */
     struct timeval snd = { 10, 0 };     /* a stuck reader can't hold a thread forever */

@@ -7,6 +7,7 @@ container looked 'running' only because the supervisor used to hold it open).
 
   GROUTER_BIN=/path/to/grouter python3 test_run_grouter.py
 """
+import io
 import os
 import re
 import subprocess
@@ -136,3 +137,43 @@ if __name__ == "__main__":
     print("ok")
     test_openflow_mode_adds_flag_and_drops_routes()
     print("test_run_grouter: ALL PASS")
+
+
+# --- a crash leaves a report and a capped log where Stop cannot delete them -------------------
+
+def test_only_the_newest_crash_reports_are_kept(tmp_path):
+    for i in range(8):
+        p = tmp_path / f"r1-crash-{1000 + i}.txt"
+        p.write_text("x")
+        os.utime(p, (1000 + i, 1000 + i))
+    (tmp_path / "r2-crash-1.txt").write_text("another router's report is not ours to delete")
+    run_grouter.keep_newest_reports(str(tmp_path), "r1", keep=5)
+    left = sorted(p.name for p in tmp_path.glob("r1-crash-*.txt"))
+    assert left == [f"r1-crash-{1000 + i}.txt" for i in range(3, 8)]
+    assert (tmp_path / "r2-crash-1.txt").exists()
+
+
+def test_the_router_log_rolls_over_at_its_cap_and_keeps_one_old_file(tmp_path):
+    out = io.BytesIO()
+    tee = run_grouter.RotatingTee(str(tmp_path), "r1", limit=100, out=out)
+    for i in range(30):
+        tee.write(f"line {i:02d}\n".encode())          # 8 bytes each: 240 in all
+    tee.close()
+    assert out.getvalue().count(b"\n") == 30             # the container log still sees everything
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["r1.log", "r1.log.1"]
+    assert all(p.stat().st_size <= 100 + 8 for p in tmp_path.iterdir())
+    assert (tmp_path / "r1.log").read_bytes().endswith(b"line 29\n")
+
+
+def test_an_exit_by_signal_is_called_a_crash():
+    assert run_grouter.exit_reason(-11) == "crashed (SIGSEGV)"
+    assert run_grouter.exit_reason(-6) == "crashed (SIGABRT)"
+    assert run_grouter.exit_reason(1) == "exited (1)"
+
+
+def test_no_writable_captures_folder_means_no_report_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_grouter, "CRASH_DIR", str(tmp_path / "missing"))
+    assert run_grouter.crash_dir() is None
+    monkeypatch.setattr(run_grouter, "CRASH_DIR", str(tmp_path))
+    assert run_grouter.crash_dir() == str(tmp_path)

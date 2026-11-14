@@ -122,6 +122,7 @@ int  gr_cp_add(const char *name, const char *args, char *out, size_t outlen);
 int  gr_cp_del(int index, char *out, size_t outlen);
 
 /* Stop + unregister every loaded control module. Backs `gpipe cp stop`. */
+void gr_cp_detach_all(void);   /* `cp stop`: park every module for the control thread */
 void gr_cp_stop_all(void);
 
 /* Human-readable list of loaded control modules. Backs `gpipe cp list`. */

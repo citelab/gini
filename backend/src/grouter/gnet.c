@@ -28,6 +28,7 @@
 #include "gr_delay_ctl.h"
 #include "gr_state.h"          /* withdraw / restore an interface's connected route */
 #include "gr_control_plane.h"  /* tell control-plane modules a link changed */
+#include "gr_crash.h"
 
 #define MAX_MTU 1500
 #define BASEPORTNUM 60000
@@ -212,6 +213,10 @@ int deleteInterface(int indx)
 
 interface_t *findInterface(int indx)
 {
+	/* Indices come from CLI words and from Lua scripts (route_add, send, emit); an out-of-range
+	 * one read past the table. */
+	if (indx < 0 || indx >= MAX_INTERFACES)
+		return NULL;
 	return netarray.elem[indx];
 }
 
@@ -646,9 +651,13 @@ int destroyInterface(interface_t *iface)
 	ARPDeleteEntry(iface->ip_addr);
 
 	verbose(2, "[destroyInterface]:: cancelling the fromdev handler.. ");
-	if (iface->state == INTERFACE_UP)
+	/* By whether the reader RUNS, not whether the link is up: `ifconfig down` no longer stops
+	 * the reader, so `down` then `del` freed the interface under a live fromTunDev. */
+	if (iface->rx_running || iface->state == INTERFACE_UP)
 	{
 		pthread_cancel(iface->threadid);        // cancel the running thread
+		pthread_join(iface->threadid, NULL);
+		iface->rx_running = 0;
 		// close socket
 		close(iface->iface_fd);
 	}
@@ -924,6 +933,7 @@ int GNETInit(pthread_t *ghandler, char *config_dir, char *rname, simplequeue_t *
 
 void *GNETHandler(void *outq)
 {
+	gr_crash_name_thread("gr-gnet");
 	char tmpbuf[MAX_NAME_LEN];
 	interface_t *iface;
 	uchar mac_addr[6];
@@ -975,10 +985,11 @@ void *GNETHandler(void *outq)
 			}
 		}
 
-		if (gr_egress_line != NULL)
+		gr_delayline_t *eline = gr_egress_line;   /* read ONCE: `delay egress off` may clear it */
+		if (eline != NULL)
 		{
 			/* egress link delay: hold, then send in order on the delay thread */
-			if (!gr_delay_push(gr_egress_line, in_pkt))
+			if (!gr_delay_push(eline, in_pkt))
 				free(in_pkt);            /* holding queue full -> drop */
 		}
 		else

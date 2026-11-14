@@ -60,8 +60,14 @@ void printMTUTable(mtu_entry_t mtable[])
  * Find the MTU of the given interface. Return -1 if the interface
  * was not found in the table
  */
+/* The MTU table has MAX_MTU slots and interface indices come from CLI words and Lua scripts;
+ * every function here used to index it unchecked. */
+#define MTU_INDEX_OK(i)  ((i) >= 0 && (i) < MAX_MTU)
+
 int findMTU(mtu_entry_t mtable[], int index)
 {
+	if (!MTU_INDEX_OK(index))
+		return -1;
 	if (mtable[index].is_empty != TRUE) 
 		return mtable[index].mtu;
 	verbose(2, "[findMTU]:: No entry found in MTU table for index %d ", index);
@@ -76,6 +82,8 @@ int findMTU(mtu_entry_t mtable[], int index)
 int findInterfaceIP(mtu_entry_t mtable[], int index, 
 		    uchar *ip_addr)
 {
+	if (!MTU_INDEX_OK(index))
+		return EXIT_FAILURE;
 	if (mtable[index].is_empty != TRUE)
 	{
 		COPY_IP(ip_addr, mtable[index].ip_addr);
@@ -117,6 +125,8 @@ int findAllInterfaceIPs(mtu_entry_t mtable[], uchar buf[][4])
 
 void deleteMTUEntry(mtu_entry_t mtable[], int index)
 {
+	if (!MTU_INDEX_OK(index))
+		return;
 	if (mtable[index].is_empty != TRUE)
 	{
 		mtable[index].is_empty = TRUE;
@@ -142,6 +152,8 @@ void addMTUEntry(mtu_entry_t mtable[], int index,
 		mtu=DEFAULT_MTU;
 	}
 
+	if (!MTU_INDEX_OK(index))
+		return;
 	mtable[index].is_empty = FALSE;
 	mtable[index].mtu = mtu;
 	COPY_IP(mtable[index].ip_addr, ip_addr);

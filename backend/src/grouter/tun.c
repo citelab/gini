@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include "gr_crash.h"
 
 extern pktcore_t *pcore;
 extern classlist_t *classifier;
@@ -32,6 +33,7 @@ extern router_config rconfig;
 
 void *toTunDev(void *arg)
 {
+	gr_crash_name_thread("gr-tx");
 	gpacket_t *inpkt = (gpacket_t *)arg;
 	interface_t *iface;
 	arp_packet_t *apkt;
@@ -69,6 +71,7 @@ void *toTunDev(void *arg)
 
 void* fromTunDev(void *arg)
 {
+	gr_crash_name_thread("gr-rx");
     interface_t *iface = (interface_t *) arg;
     interface_array_t *iarr = (interface_array_t *)iface->iarray;
     uchar bcast_mac[] = MAC_BCAST_ADDR;
@@ -152,7 +155,7 @@ void* fromTunDev(void *arg)
         COPY_IP(in_pkt->frame.src_ip_addr, iface->ip_addr);
 
         // check for filtering.. if the it should be filtered.. then drop
-        if (filteredPacket(filter, in_pkt))
+        if (gr_filtered(in_pkt))
         {
             verbose(2, "[fromTunDev]:: Packet filtered..!");
             free(in_pkt);

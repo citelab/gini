@@ -16,6 +16,7 @@
 #include <pthread.h>
 
 #include "gr_delay.h"
+#include "gr_crash.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -128,6 +129,7 @@ static double sample_delay_ms(gr_delayline_t *dl)
 
 static void *release_loop(void *arg)
 {
+	gr_crash_name_thread("gr-delay");
     gr_delayline_t *dl = (gr_delayline_t *)arg;
     pthread_mutex_lock(&dl->lock);
     while (dl->running)
@@ -275,7 +277,7 @@ void gr_delay_destroy(gr_delayline_t *dl)
     pthread_join(dl->thread, NULL);
 
     dnode_t *n = dl->head;
-    while (n) { dnode_t *nx = n->next; free(n); n = nx; }  /* drop any still held (not emitted) */
+    while (n) { dnode_t *nx = n->next; free(n->pkt); free(n); n = nx; }  /* drop any still held: the packets too, which leaked */
 
     pthread_cond_destroy(&dl->cv);
     pthread_mutex_destroy(&dl->lock);

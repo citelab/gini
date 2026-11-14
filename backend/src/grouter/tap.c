@@ -115,7 +115,7 @@ void* fromTapDev(void *arg)
 		COPY_IP(in_pkt->frame.src_ip_addr, iface->ip_addr);
 
 		// check for filtering.. if the it should be filtered.. then drop
-		if (filteredPacket(filter, in_pkt))
+		if (gr_filtered(in_pkt))
 		{
 			verbose(2, "[fromTapDev]:: Packet filtered..!");
 			free(in_pkt);

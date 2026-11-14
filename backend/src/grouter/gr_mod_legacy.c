@@ -12,6 +12,7 @@
 #include "gr_modules.h"
 #include "filter.h"      /* filteredPacket, filtertab_t */
 #include <stdlib.h>
+#include "packetcore.h"
 
 extern filtertab_t *filter;   /* the router's global filter table (grouter.c) */
 
@@ -19,7 +20,7 @@ static gr_verdict_t filter_process(gr_module_t *self, gpacket_t *pkt)
 {
     (void)self;
     gr_verdict_t v = { GR_CONTINUE, -1 };
-    if (filter && filteredPacket(filter, pkt))
+    if (filter && gr_filtered(pkt))
         v.action = GR_DROP;
     return v;
 }

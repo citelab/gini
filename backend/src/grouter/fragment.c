@@ -44,60 +44,64 @@ int needFragmentation(gpacket_t *pkt)
 
 
 /*
- * with the current data structures, fragmentation is a hypothetical
- * requirement! the gpacket_t datastructure has a hardcoded limit for
- * IP packets. therefore, we cannot have larger frames to require
- * fragmentation. may be we can remove this hardcoding and dynamically
- * create the payload -- this will require dynamic memory allocations and
- * deallocations. 
+ * Split pkt into fragments that fit the egress MTU, per RFC 791. Returns how many were made and
+ * stored in frags[] (each its own allocation, owned by the caller -- normally handed straight to
+ * IPSend2Output, which takes ownership), or 0 if it cannot be done. pkt itself is not modified
+ * or freed.
+ *
+ * This was written for a datagram that could not actually exceed gpacket_t, and never ran
+ * correctly once one could: one malloc for all fragments but the pointers for fragments 1..n
+ * left uninitialised (a write through a stack pointer), the offset stored in bytes instead of
+ * 8-byte units and in host order, DF SET on every fragment, sizes computed from the total
+ * length including the header, and the fragments freed after being queued for output, which
+ * then freed them again. The first packet that needed fragmenting killed the router.
  */
 int fragmentIPPacket(gpacket_t *pkt, gpacket_t **frags)
 {
-	ip_packet_t *ip_pkt = (ip_packet_t *)pkt->data.data;	
-	int link_mtu, num_frags, i;
-	int frag_offset, frag_len;
-	ip_packet_t *this_ippkt;
-	uchar *ipdata_ptr;
+	ip_packet_t *ip_pkt = (ip_packet_t *)pkt->data.data;
+	int hlen = ip_pkt->ip_hdr_len << 2;
+	int total = ntohs(ip_pkt->ip_pkt_len);
+	int data_len = total - hlen;
+	int link_mtu = findMTU(MTU_tbl, pkt->frame.dst_interface);
+	int field = ntohs(ip_pkt->ip_frag_off);
+	int base_off = (field & IP_OFFMASK) * 8;          /* this may itself be a fragment */
+	int orig_mf = field & IP_MF;
+	int max_data, off, len, n = 0, i;
+	uchar *ipdata = (uchar *)ip_pkt + hlen;
 
-	link_mtu = findMTU(MTU_tbl, pkt->frame.dst_interface);
-	
-	num_frags = (int) ceil(((double) ntohs(ip_pkt->ip_pkt_len))/((double) link_mtu));
-	frag_len = ntohs(ip_pkt->ip_pkt_len)/num_frags;
+	if (link_mtu <= hlen + 8 || data_len <= 0 || total > (int)sizeof(pkt->data.data))
+		return 0;
+	max_data = ((link_mtu - hlen) / 8) * 8;           /* all but the last carry a multiple of 8 */
+	if ((data_len + max_data - 1) / max_data > MAX_FRAGMENTS)
+		return 0;
 
-	*frags = (gpacket_t *) malloc(sizeof(gpacket_t) * num_frags);
-	if (*frags == NULL)
-		verbose(1, "[fragmentIPPacket]:: unable to allocate memory ");
-
-	frag_offset = 0;
-	ipdata_ptr = (uchar *)ip_pkt + (ip_pkt->ip_hdr_len << 2);
-
-	for (i = 0; i < (num_frags -1); i++)
+	for (off = 0; off < data_len; off += len)
 	{
-		memcpy(frags[i], pkt, sizeof(gpacket_t));
-		this_ippkt = (ip_packet_t *)frags[i]->data.data;
-		this_ippkt->ip_frag_off = frag_offset;
-		memcpy(((uchar *)this_ippkt + (this_ippkt->ip_hdr_len << 2)), 
-		       (ipdata_ptr + frag_offset), frag_len);
-		SET_MF_BITS(this_ippkt->ip_frag_off);
-		SET_DF_BITS(this_ippkt->ip_frag_off);
-		this_ippkt->ip_pkt_len = htons((ip_pkt->ip_hdr_len << 2) + frag_len);
-		this_ippkt->ip_cksum = 0;
-		this_ippkt->ip_cksum = htons(checksum((uchar *)this_ippkt, this_ippkt->ip_hdr_len *2));
-		frag_offset += frag_len;
-	}
-	frag_len = ntohs(ip_pkt->ip_pkt_len) - frag_offset;
-	memcpy(frags[i], pkt, sizeof(gpacket_t));
-	this_ippkt = (ip_packet_t *)frags[i]->data.data;
-	this_ippkt->ip_frag_off = frag_offset;
-	memcpy(((uchar *)this_ippkt + (this_ippkt->ip_hdr_len << 2)), 
-	       (ipdata_ptr + frag_offset), frag_len);
-	RESET_MF_BITS(this_ippkt->ip_frag_off);
-	RESET_DF_BITS(this_ippkt->ip_frag_off);
-	this_ippkt->ip_pkt_len = htons((ip_pkt->ip_hdr_len << 2) + frag_len);
-	this_ippkt->ip_cksum = 0;
-	this_ippkt->ip_cksum = htons(checksum((uchar *)this_ippkt, this_ippkt->ip_hdr_len *2));
+		gpacket_t *f;
+		ip_packet_t *fip;
+		int last;
 
-	return num_frags;
+		len = data_len - off < max_data ? data_len - off : max_data;
+		last = (off + len >= data_len);
+		if ((f = (gpacket_t *)malloc(sizeof(gpacket_t))) == NULL)
+		{
+			for (i = 0; i < n; i++)
+				free(frags[i]);
+			return 0;
+		}
+		memcpy(f, pkt, sizeof(gpacket_t));
+		fip = (ip_packet_t *)f->data.data;
+		memcpy((uchar *)fip + hlen, ipdata + off, len);
+		field = ((base_off + off) / 8) & IP_OFFMASK;
+		if (!last || orig_mf)
+			field |= IP_MF;
+		fip->ip_frag_off = htons(field);                  /* DF clear: we are fragmenting */
+		fip->ip_pkt_len = htons(hlen + len);
+		fip->ip_cksum = 0;
+		fip->ip_cksum = htons(checksum((uchar *)fip, fip->ip_hdr_len * 2));
+		frags[n++] = f;
+	}
+	return n;
 }
 
 

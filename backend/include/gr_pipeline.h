@@ -26,6 +26,9 @@ void         gr_pipeline_init(gr_pipeline_t *p);
 int          gr_pipeline_add(gr_pipeline_t *p, gr_module_t *m);   /* index, or -1 if full */
 void         gr_pipeline_clear(gr_pipeline_t *p);                 /* destroy all modules   */
 gr_verdict_t gr_pipeline_run(gr_pipeline_t *p, gpacket_t *pkt);
+/* Held by gr_pipeline_run for a whole run and by every edit (gr_control). Recursive. */
+void         gr_pipeline_lock(void);
+void         gr_pipeline_unlock(void);
 extern __thread int gr_pipeline_stopped_at;   /* see gr_pipeline.c */
 
 /* The process-wide pipeline (one router = one process). The forwarding path runs it;
