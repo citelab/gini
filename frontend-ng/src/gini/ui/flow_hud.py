@@ -18,6 +18,13 @@ nothing pinned it plots whichever flow moved the most bytes in the last poll, an
 one on screen while everything is idle so a finished run can still be read. A click PINS a flow,
 and the pin lasts as long as that socket is open; when it closes, following resumes, so the next
 iperf3 run appears without another click.
+
+**How often it reads.** Each poll reads every station's sockets ten times, 100 ms apart, inside
+one `docker exec` per station (`flows.STATION_CMD`), with the stations read in parallel so their
+bursts cover the same second; the next poll starts as soon as one finishes. Polling once a second
+drew a zigzag of correct points on any path short enough for Reno's sawtooth to repeat several
+times a second. On a path shorter still the HUD says so (`flows.aliased`) rather than leave a
+student reading the zigzag as TCP behaviour.
 """
 from __future__ import annotations
 
@@ -25,12 +32,13 @@ from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from ..domain.flows import STATION_CMD, FlowTracker, station_flows
+from ..domain.flows import STATION_CMD, FlowTracker, aliased, station_bursts
 from .glass import apply_glass, paint_glass_panel
 from .worker_host import run_off_gui
 
 _CHIP_H = 22
 _WINDOW_S = 60          # the cwnd plot shows only the most recent 60 s (a scrolling window)
+_ALIASED = "each tooth is only a few readings wide · add delay on a router to see AIMD clearly"
 
 
 class FlowHud(QWidget):
@@ -167,6 +175,13 @@ class FlowHud(QWidget):
                 p.drawLine(int(prev[0]), int(prev[1]), int(cur[0]), int(cur[1]))
             prev = cur
 
+        # the samples are right but too sparse for the teeth: say so, on the plot itself
+        if aliased(f, t0):
+            p.setFont(QFont(self.font().family(), 7))
+            p.setPen(QColor(t.accent_for("amber")))
+            p.drawText(QRectF(area.left() + 4, area.top() + 2, area.width() - 8, 12),
+                       Qt.AlignLeft, _ALIASED)
+
     # -- interaction ------------------------------------------------------- #
     def mousePressEvent(self, e) -> None:  # noqa: N802
         pos = e.position() if hasattr(e, "position") else e.pos()
@@ -192,10 +207,12 @@ class FlowHudController(QObject):
         self._fhud.show_topright()                 # toggle off -> self._fhud.close()
     """
 
-    samples_ready = Signal(object, float)          # (list[FlowSample], tnow)
+    samples_ready = Signal(object)                 # list[(time, list[FlowSample])]
 
     def __init__(self, parent, theme, machines, query, window_getter=None,
-                 interval_ms: int = 900) -> None:
+                 interval_ms: int = 100) -> None:
+        # A poll takes about a second (the burst in STATION_CMD), and `refresh` skips while one
+        # is running — so a short interval means "start the next as soon as this one is done".
         super().__init__(parent)
         self.hud = FlowHud(parent, theme)
         self._machines = machines
@@ -207,12 +224,12 @@ class FlowHudController(QObject):
         self._poll = QTimer(self); self._poll.timeout.connect(self.refresh)
         self._interval = interval_ms
 
-    def _on_samples(self, samples, tnow: float) -> None:
+    def _on_samples(self, readings) -> None:
         try:
             self.hud.window_s = int(self._window_getter())
         except Exception:
             pass
-        self._tracker.ingest(samples, tnow)
+        self._tracker.ingest_bursts(readings)
         self.hud.set_tracker(self._tracker)
 
     def refresh(self) -> None:
@@ -232,16 +249,27 @@ class FlowHudController(QObject):
             return                              # topology in flux — skip this tick, not fatal
         self._busy = True
 
-        def work():
+        query = self._query
+
+        def one(name):
             try:
-                tnow = time.monotonic()
-                samples = []
-                for name in names:
-                    try:
-                        samples.extend(station_flows(self._query(name, STATION_CMD), host=name))
-                    except Exception:
-                        pass
-                self.samples_ready.emit(samples, tnow)
+                text = query(name, STATION_CMD)
+                return station_bursts(text, name, time.monotonic())
+            except Exception:                       # noqa: BLE001 — one station, one poll
+                return []
+
+        def work():
+            # In parallel so every station's burst covers the same second; one after another,
+            # the sender would be read for 1/N of the time. The pool is joined before `work`
+            # returns, so no thread outlives the poll (and run_off_gui still owns the widget).
+            from concurrent.futures import ThreadPoolExecutor
+            try:
+                readings = []
+                if names:
+                    with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
+                        for got in pool.map(one, names):
+                            readings.extend(got)
+                self.samples_ready.emit(readings)
             finally:
                 self._busy = False
         run_off_gui(self, work)

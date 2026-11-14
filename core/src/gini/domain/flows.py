@@ -24,6 +24,18 @@ iperf3 ran in the chip next to it. So the poll also asks for eth0's addresses
 initial cwnd of 10, which beats an iperf3 control connection and ties with everything else; and
 `delivery_rate` on an app-limited socket is a burst estimate (the terminal reported 3.8 Gbps
 while idle). `bytes_acked` between two polls is what the sender actually got across.
+
+**Ten readings a second, one exec.** Reno's sawtooth repeats every (cwnd/2) round trips, which
+on a GINI fabric with no added delay is a few hundred milliseconds. Read once a second, every
+point landed in a different tooth and the plot was a zigzag of correct values — measured against
+a 20 ms trace of the same socket, 19 of 20 points matched it and the shape was still unreadable.
+A `docker exec` costs tens of milliseconds, so ten of them a second per station is not the
+answer: `STATION_CMD` instead reads the sockets ten times, 100 ms apart, inside ONE exec, and
+stamps each reading with the container's /proc/uptime. `station_bursts` turns those stamps into
+the caller's clock by anchoring the last one at the moment the exec returned.
+
+That is still too slow for a path with no delay at all (teeth every few tens of milliseconds),
+which is a property of the path, not a bug: `aliased()` notices it and the HUD says to add delay.
 """
 from __future__ import annotations
 
@@ -32,10 +44,17 @@ from dataclasses import dataclass, field
 
 _ADDR = re.compile(r"^(.*):(\d+)$")
 
-# What the Flow HUD runs in each station: eth0's addresses first, then the sockets. One exec,
-# not two, because each exec is a round-trip through Docker and the poll is under a second.
-# `ip` failing (a stripped image) prints nothing, which leaves every socket in — the old view.
-STATION_CMD = "ip -o addr show dev eth0 2>/dev/null; ss -tin"
+# What the Flow HUD runs in each station: eth0's addresses first, then BURST readings of the
+# sockets, GAP_S apart, each after a `@@ <uptime>` line. One exec, because each exec is a
+# round-trip through Docker. `ip` failing (a stripped image) prints nothing, which leaves every
+# socket in. `read … < /proc/uptime` rather than `date`: busybox's date has no sub-second field,
+# and `read` is a shell builtin, so a stamp costs no process.
+BURST = 10
+GAP_S = 0.1
+STATION_CMD = ("ip -o addr show dev eth0 2>/dev/null; i=0; while :; do "
+               "read up _ < /proc/uptime; echo \"@@ $up\"; ss -tin; i=$((i+1)); "
+               f"[ $i -ge {BURST} ] && break; sleep {GAP_S}; done")
+_STAMP = re.compile(r"^@@ ([\d.]+)\s*$")
 
 _INET = re.compile(r"\binet6?\s+([0-9A-Fa-f.:]+)/")
 
@@ -153,6 +172,45 @@ def station_flows(text: str, host: str = "") -> list[FlowSample]:
     return [s for s in parse_ss(text, host) if s.local_ip not in mgmt]
 
 
+def station_bursts(text: str, host: str, t_end: float) -> list[tuple[float, list[FlowSample]]]:
+    """One station's `STATION_CMD` output as `(time, samples)` readings on the caller's clock.
+
+    `t_end` is when the exec returned; the last reading is placed there and the others before it
+    by their uptime differences. The error is the exec's return trip, the same for every reading,
+    so the spacing between points is exact. Output with no stamps (plain `ss -tin`) is one reading
+    at `t_end`."""
+    mgmt = management_ips(text)
+    chunks: list[tuple[float, list[str]]] = []
+    for line in (text or "").splitlines():
+        m = _STAMP.match(line)
+        if m:
+            chunks.append((float(m.group(1)), []))
+        elif chunks:
+            chunks[-1][1].append(line)
+    if not chunks:
+        return [(t_end, station_flows(text, host))]
+    last = chunks[-1][0]
+    return [(t_end - (last - up),
+             [s for s in parse_ss("\n".join(lines), host) if s.local_ip not in mgmt])
+            for up, lines in chunks]
+
+
+def aliased(f: "FlowSeries", since: float) -> bool:
+    """Is this flow's sawtooth too fast for the HUD to draw faithfully?
+
+    Two ways to tell, either is enough. Reno's model: a tooth lasts (peak cwnd / 2) round trips,
+    and under a second is fewer than ten readings per tooth — measured on a 5 ms path, about
+    three, which draws a recognisable sawtooth with its peaks and troughs clipped. And the data: when most readings
+    carry a fresh loss, consecutive points are in different teeth whatever the model says (CUBIC
+    on a short path behaves like Reno, by design, so the model holds for it too)."""
+    pts = [c for t, c in zip(f.t, f.cwnd) if t >= since]
+    drops = [d for d in f.drops if d >= since]
+    if len(pts) < 5 or not drops:
+        return False
+    tooth_s = max(pts) / 2 * f.rtt_ms / 1000
+    return tooth_s < BURST * GAP_S or len(drops) >= 0.4 * len(pts)
+
+
 @dataclass
 class FlowSeries:
     """A single flow's history, built up across polls, for the Flow HUD plot."""
@@ -165,12 +223,12 @@ class FlowSeries:
     rtt_ms: float = 0.0
     ssthresh: int = 0
     delivery_mbps: float = 0.0
-    sent_bps: float = 0.0       # bytes acked since the previous poll, as bits per second
+    sent_bps: float = 0.0       # bytes acked over the latest poll, as bits per second
     last_busy: float = -1.0     # when this flow last moved any bytes
     _last_retrans: int = -1
     _last_acked: int = -1
     RETAIN_S: float = 330.0     # keep enough history to cover the largest Flow HUD window (a circular buffer)
-    MAXPTS: int = 600           # hard safety cap on point count
+    MAXPTS: int = 4000          # hard safety cap: RETAIN_S at ten readings a second
 
     def add(self, s: FlowSample, tnow: float) -> None:
         self.cc = s.cc or self.cc
@@ -203,11 +261,15 @@ class FlowSeries:
 
 
 class FlowTracker:
-    """Ingests successive `parse_ss` results into per-flow time series.
+    """Ingests successive polls into per-flow time series.
 
-    Each poll may report a flow twice (once from each endpoint). We keep the sender's view as
-    the representative for that connection: the side whose peer has acknowledged more bytes,
-    and on a tie (no data yet, or an `ss` too old to print bytes_acked) the larger cwnd.
+    A poll is a list of `(time, samples)` readings from any number of stations (`ingest_bursts`),
+    or one reading (`ingest`). It may see a connection from both endpoints. We keep ONE endpoint's
+    readings as the series for that connection — the sender's: the side whose peer has
+    acknowledged more bytes, and on a tie (no data yet, or an `ss` too old to print bytes_acked)
+    the larger cwnd. Choosing per endpoint rather than per reading matters now that the two
+    stations' readings are taken at different instants: interleaving them would draw the
+    receiver's cwnd of 10 between every pair of the sender's points.
 
     A connection that ends stops appearing in `ss`, so its series is dropped once it has been
     unseen for IDLE_S. Without that, finishing a transfer and starting another leaves the old
@@ -215,34 +277,53 @@ class FlowTracker:
     """
     IDLE_S = 10.0        # unseen for this long => the socket is gone; retire the chip
     LIVE_S = 3.0         # seen this recently => the socket is still open (a poll is ~1 s)
+    BUSY_BPS = 8_000     # below this a flow is idle: a terminal echo or iperf3's control chatter
 
     def __init__(self) -> None:
         self.series: dict[str, FlowSeries] = {}
         self.now = 0.0
 
     def ingest(self, samples: list[FlowSample], tnow: float) -> None:
-        self.now = tnow
-        best: dict[frozenset, FlowSample] = {}
-        for s in samples:
-            pk = s.pair_key
-            if pk not in best or (s.bytes_acked, s.cwnd) > (best[pk].bytes_acked,
-                                                            best[pk].cwnd):
-                best[pk] = s
-        for pk, s in best.items():
+        """One reading, all stations at `tnow`."""
+        self.ingest_bursts([(tnow, samples)])
+
+    def ingest_bursts(self, readings: list[tuple[float, list[FlowSample]]]) -> None:
+        """One poll: `(time, samples)` readings, from any number of stations, in any order."""
+        self.now = max([self.now] + [t for t, _ in readings])
+        views: dict[frozenset, dict[tuple, list[tuple[float, FlowSample]]]] = {}
+        for t, samples in readings:
+            for s in samples:
+                views.setdefault(s.pair_key, {}).setdefault((s.host, s.key), []).append((t, s))
+        updated = set()
+        for pk, by_view in views.items():
+            seq = sorted(max(by_view.values(),
+                             key=lambda v: (v[-1][1].bytes_acked, v[-1][1].cwnd)),
+                         key=lambda ts: ts[0])
             key = "|".join(sorted(pk))
             fs = self.series.get(key)
             if fs is None:
-                fs = FlowSeries(key=key, label=s.label, cc=s.cc)
+                fs = FlowSeries(key=key, label=seq[0][1].label, cc=seq[0][1].cc)
                 self.series[key] = fs
-            fs.add(s, tnow)
+            t0, acked0 = ((fs.t[-1], fs._last_acked) if fs.t
+                          else (seq[0][0], seq[0][1].bytes_acked))
+            for t, s in seq:
+                if not fs.t or t > fs.t[-1]:       # a reading never goes back in time
+                    fs.add(s, t)
+            # the rate over the whole poll, not its last 100 ms: one quiet reading in a burst
+            # must not hand the plot to another flow
+            span = fs.t[-1] - t0
+            fs.sent_bps = (max(0, fs._last_acked - acked0) * 8 / span) if span > 0 else 0.0
+            if fs.sent_bps < self.BUSY_BPS:
+                fs.sent_bps = 0.0
+            updated.add(key)
         # a flow missing from this poll moved nothing in it — otherwise a finished run keeps its
         # last rate and goes on outbidding the run that replaced it
-        for f in self.series.values():
-            if f.t and f.t[-1] != tnow:
+        for k, f in self.series.items():
+            if k not in updated:
                 f.sent_bps = 0.0
         # retire flows whose sockets have disappeared from ss
         for k in [k for k, f in self.series.items()
-                  if f.t and (tnow - f.t[-1]) > self.IDLE_S]:
+                  if f.t and (self.now - f.t[-1]) > self.IDLE_S]:
             self.series.pop(k, None)
 
     def active(self, since: float | None = None) -> list[FlowSeries]:

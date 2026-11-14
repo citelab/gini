@@ -106,3 +106,75 @@ def test_a_clicked_chip_holds_while_its_socket_is_open_and_lets_go_when_it_close
     t.ingest(station_flows(_m2(_iperf(150_000_000)), "M2"), 3.0 + FlowTracker.LIVE_S + 1)
     assert "33170" in t.series[_choose(hud, t)].label         # control closed: follow again
     assert hud._pinned is False
+
+
+# --- ten readings a second -------------------------------------------------------------------
+# Read once a second, a short path's Reno sawtooth (teeth a few hundred ms apart) was drawn as a
+# zigzag of correct points. STATION_CMD now takes ten readings per exec, each after a
+# `@@ <uptime>` stamp.
+
+from gini.domain.flows import BURST, STATION_CMD, aliased, station_bursts  # noqa: E402
+
+
+def _burst(stamps_and_socks):
+    return _IP + "".join(f"@@ {up}\n" + _HDR + _TERMINAL + socks for up, socks in stamps_and_socks)
+
+
+def test_the_station_command_takes_a_burst_of_stamped_readings():
+    assert "/proc/uptime" in STATION_CMD and f"-ge {BURST} ]" in STATION_CMD
+    assert STATION_CMD.startswith("ip -o addr show dev eth0")
+
+
+def test_readings_are_placed_on_the_callers_clock_by_their_uptime():
+    out = _burst([(1000.00, _iperf(0)), (1000.10, _iperf(1_000_000)), (1000.21, _iperf(2_000_000))])
+    got = station_bursts(out, "M2", t_end=50.0)
+    assert [round(t, 2) for t, _ in got] == [49.79, 49.89, 50.0]
+    assert all([s.label for s in ss] == ["10.0.2.10:33170 -> 10.0.1.10:5201"] for _, ss in got)
+
+
+def test_output_without_stamps_is_one_reading_at_the_end():
+    got = station_bursts(_m2(_iperf(5)), "M2", t_end=7.0)
+    assert len(got) == 1 and got[0][0] == 7.0 and len(got[0][1]) == 1
+
+
+def test_the_receivers_readings_never_land_between_the_senders():
+    """The two stations are read at different instants. Choosing the sender per reading would
+    put the receiver's cwnd of 10 between every pair of the sender's points."""
+    sender = station_bursts(_burst([(10.0 + i / 10, _iperf(i * 1_000_000, cwnd=60 + i))
+                                    for i in range(10)]), "M2", t_end=100.95)
+    receiver = station_bursts(_burst([(20.0 + i / 10, _sock("10.0.1.10:5201", "10.0.2.10:33170"))
+                                      for i in range(10)]), "M1", t_end=101.0)
+    t = FlowTracker()
+    t.ingest_bursts(sender + receiver)
+    [f] = t.active()
+    assert f.cwnd == [60 + i for i in range(10)]
+    assert f.sent_bps > 0
+
+
+def test_a_quiet_reading_inside_a_busy_burst_does_not_make_the_flow_idle():
+    readings = [(float(i) / 10, station_flows(_m2(_iperf(min(i, 8) * 1_000_000)), "M2"))
+                for i in range(10)]                        # the last two readings moved nothing
+    t = FlowTracker()
+    t.ingest_bursts(readings)
+    assert t.busiest() is not None
+
+
+def _series(cwnds, rtt_ms, drop_every):
+    from gini.domain.flows import FlowSeries
+    f = FlowSeries(key="k", label="k", rtt_ms=rtt_ms)
+    f.t = [i / 10 for i in range(len(cwnds))]
+    f.cwnd = list(cwnds)
+    f.drops = [f.t[i] for i in range(0, len(cwnds), drop_every)] if drop_every else []
+    return f
+
+
+def test_a_short_path_that_loses_packets_is_flagged_as_too_fast_to_draw():
+    assert aliased(_series([60, 110, 75, 95] * 10, rtt_ms=3.6, drop_every=2), since=0.0)
+
+
+def test_a_long_path_with_seconds_between_losses_is_not():
+    assert not aliased(_series(list(range(60, 120)) * 2, rtt_ms=80, drop_every=60), since=0.0)
+
+
+def test_no_losses_means_no_sawtooth_to_alias():
+    assert not aliased(_series([6400] * 40, rtt_ms=0.02, drop_every=0), since=0.0)
