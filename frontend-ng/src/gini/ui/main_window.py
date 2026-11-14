@@ -1890,6 +1890,7 @@ class MainWindow(QMainWindow):
             workdir_fn=lambda: str(getattr(self, "_workdir", "") or ""),
             running_fn=lambda: bool(getattr(self, "_running", False)),
             record_fn=lambda dev, cmd, out: self.proof_recorder.note_command(dev, cmd, out),
+            history_fn=lambda dev, cmd: self._machine_shell(dev, cmd),
         )
         termd = QDockWidget("Terminal", self)
         termd.setObjectName("dock_terminal")

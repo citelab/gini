@@ -17,6 +17,16 @@ WHAT IT DOES AND DOES NOT DO. Cursor keys, control characters, colour, bold and 
 is the bar these labs need: reading `tcpdump` output, driving the gRouter CLI, editing with a
 line editor. Full-screen curses applications like vim are NOT a goal — that was always a bonus of
 the xterm.js route rather than a requirement, and buying it back cost more than it was worth.
+
+WHERE THE SCROLLBACK COMES FROM. Not only from what passes through here. Every element's terminal
+runs inside tmux (so a session survives switching elements), and tmux does not pass every line on:
+output that arrives faster than it redraws is collapsed into a jump to the final screen. `seq 1
+300` reached this widget as one `CSI 30 S` and lines 272-300 -- the other 271 lines existed only in
+tmux's own history, and the scroll bar scrolled over blank lines. Reattaching after a switch lost
+everything above the screen the same way. So the widget takes a HISTORY SOURCE: when the student
+starts scrolling back, it asks tmux for its history (`capture-pane`, one docker exec, off the GUI
+thread) and that replaces the partial scrollback. Lines that do pass through still land locally,
+so the view never waits on the fetch to start scrolling.
 """
 from __future__ import annotations
 
@@ -136,11 +146,32 @@ def _emulator(columns: int, lines: int):
     return screen, _Stream(screen)
 
 
+def rows_from_capture(text: str, columns: int) -> list:
+    """`tmux capture-pane -p -e` output -> screen rows of pyte Chars, oldest first.
+
+    Fed through a scratch pyte screen so colour and bold survive and a row is exactly what the
+    live screen's rows are. Tall enough for every line even if one wraps (a line can be wider than
+    the pane was when it was written). Pure: no Qt, safe on the worker thread.
+    """
+    import pyte
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if not lines:
+        return []
+    cols = max(1, int(columns))
+    height = sum(1 + len(ln) // cols for ln in lines) + 1
+    scr = pyte.Screen(cols, height)
+    pyte.Stream(scr).feed("\r\n".join(lines) + "\r\n")
+    return [scr.buffer[y] for y in range(scr.cursor.y)]
+
+
 class TerminalView(QWidget):
     """Renders a pyte screen and emits the bytes a key press should send."""
 
     key_bytes = Signal(bytes)          # user typed something; hand it to the transport
     size_changed = Signal(int, int)    # (columns, rows) — the PTY needs to be told
+    _history_loaded = Signal(object, int)   # (rows or None, generation) from the fetch thread
 
     def __init__(self, theme=None, parent=None) -> None:
         super().__init__(parent)
@@ -189,6 +220,15 @@ class TerminalView(QWidget):
         self._syncing_bar = False
         self._style_bar()
         self._sync_bar()
+
+        # The history source (see the module docstring). `_history_gen` changes whenever the
+        # terminal is re-pointed or reset, so a fetch that returns for the PREVIOUS element is
+        # dropped instead of pasting one machine's history into another's terminal.
+        self._history_source = None
+        self._history_gen = 0
+        self._history_busy = False
+        self._history_want = 0                         # lines the student asked for meanwhile
+        self._history_loaded.connect(self._apply_history)
 
     # -- geometry ----------------------------------------------------------- #
     def _metrics(self) -> None:
@@ -387,6 +427,8 @@ class TerminalView(QWidget):
 
     def reset(self) -> None:
         self._screen.reset()
+        self._history_gen += 1                        # a fetch in flight is for what was here
+        self._history_busy = False
         self._scroll = 0
         self._sync_bar()
         self.update()
@@ -464,8 +506,62 @@ class TerminalView(QWidget):
 
     # -- scrollback ---------------------------------------------------------- #
     def _set_scroll(self, lines: int) -> None:
-        """Clamp to what there is: 0 is the live screen, `len(history.top)` is the oldest line."""
-        self._scroll = max(0, min(len(self._screen.history.top), int(lines)))
+        """Clamp to what there is: 0 is the live screen, `len(history.top)` is the oldest line.
+
+        Leaving the live screen is the moment to fetch tmux's history. It is checked against the
+        REQUEST, before clamping: right after a reattach the local scrollback is empty, the clamp
+        holds the view at 0, and the first wheel notch has to fetch anyway or nothing ever would.
+        """
+        want = int(lines)
+        if want > 0 and self._scroll == 0:
+            self._fetch_history(want)
+        self._scroll = max(0, min(len(self._screen.history.top), want))
+        self._sync_bar()
+        self.update()
+
+    # -- history from tmux ---------------------------------------------------- #
+    def set_history_source(self, fn) -> None:
+        """`fn() -> str`: tmux's history for the element this terminal now shows, ANSI included,
+        oldest line first. Called on a worker thread; None turns fetching off."""
+        self._history_source = fn
+        self._history_gen += 1
+        self._history_busy = False
+
+    def _fetch_history(self, want: int = 0) -> None:
+        self._history_want = max(self._history_want, want)
+        if self._history_source is None or self._history_busy:
+            return
+        self._history_busy = True
+        gen, cols, source = self._history_gen, self._screen.columns, self._history_source
+
+        def work():
+            rows = None
+            try:
+                text = source() or ""
+                if text.strip():
+                    rows = rows_from_capture(text, cols)
+            except Exception:                         # noqa: BLE001 - keep the local scrollback
+                rows = None
+            self._history_loaded.emit(rows, gen)
+
+        from .worker_host import run_off_gui
+        run_off_gui(self, work)
+
+    def _apply_history(self, rows, gen: int) -> None:
+        """Replace the partial scrollback with tmux's. `_scroll` counts back from the live
+        screen, and tmux's history ends exactly where its screen -- our screen -- begins, so the
+        view stays on the same lines."""
+        if gen != self._history_gen:
+            return                                    # re-pointed since: not this terminal's
+        self._history_busy = False
+        want, self._history_want = self._history_want, 0
+        if rows:
+            top = self._screen.history.top
+            top.clear()
+            top.extend(rows[-(top.maxlen or len(rows)):])
+            self._sel_anchor = self._sel_head = None  # document rows have just moved
+            self._scroll = max(self._scroll, min(want, len(top)))
+            self._scroll = min(self._scroll, len(top))
         self._sync_bar()
         self.update()
 

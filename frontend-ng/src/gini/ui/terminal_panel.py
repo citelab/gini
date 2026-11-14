@@ -37,7 +37,16 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
-from ..services.orchestrator import TERMINALS_FILE
+from ..services.orchestrator import TERMINALS_FILE, TMUX_SESSION
+
+#: tmux's history for the session every element's terminal runs in, oldest line first, colour
+#: included -- and NOTHING when there is none yet. That last part is why the size is read first:
+#: with an empty history `capture-pane -S -N -E -1` does not return nothing, it returns the
+#: screen's first line, which would then appear twice. Capped at the pane's own scrollback.
+HISTORY_CMD = (
+    f"n=$(tmux display -p -t {TMUX_SESSION} '#{{history_size}}' 2>/dev/null) || exit 0; "
+    '[ "${n:-0}" -gt 0 ] 2>/dev/null || exit 0; [ "$n" -gt 5000 ] && n=5000; '
+    f"tmux capture-pane -p -e -S -$n -E -1 -t {TMUX_SESSION}")
 
 
 def _scss(s: str) -> str:
@@ -59,9 +68,13 @@ class TerminalPanel(QWidget):
     MAX_PROBES = 40                       # ~24s
 
     def __init__(self, theme, workdir_fn=None, running_fn=None, record_fn=None,
-                 parent=None) -> None:
+                 history_fn=None, parent=None) -> None:
         super().__init__(parent)
         self.theme = theme
+        # (device, shell command) -> its output, run inside that element's container. Injected
+        # like the others: it is how the terminal reads tmux's history (HISTORY_CMD), which holds
+        # the lines tmux never passed to the screen. None: scrollback is what passed through.
+        self.history_fn = history_fn
         # (device, cmd, [output lines]) -> None. Injected, like workdir_fn: this panel does not
         # know what a proof chain is, and must not start importing one to find out.
         self.record_fn = record_fn
@@ -222,6 +235,7 @@ class TerminalPanel(QWidget):
         self._end_tap()                    # a command still awaiting its output is closed out
         self._connected_to = ""
         self._client.disconnect_from()
+        self._view.set_history_source(None)
         self._view.reset()
 
     def _on_failed(self, why: str) -> None:
@@ -233,6 +247,8 @@ class TerminalPanel(QWidget):
 
     def _embed(self, url: str, name: str, cmd: str) -> None:
         kind = "router CLI" if "grconsole" in cmd else "shell"
+        hf = self.history_fn
+        self._view.set_history_source((lambda: hf(name, HISTORY_CMD)) if hf else None)
         self._title.setText(f"Terminal  ·  {name}")
         # The port stays on screen: it is the one thing that makes a wrong-element or
         # not-yet-listening terminal diagnosable without reading gini-terminals.json by hand.
