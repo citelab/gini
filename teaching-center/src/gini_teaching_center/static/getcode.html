@@ -164,6 +164,10 @@ fetch(`/api/activity?course=${encodeURIComponent(course)}&lab=${encodeURICompone
       <div class="code">${esc(d.code)}</div>
       <dl>
         <dt>Enter it in</dt><dd>gBuilder, before you start</dd>
+        ${d.min_gini
+          ? `<dt>You need</dt><dd><b>GINI ${esc(d.min_gini)} or newer</b> — gBuilder's File ▸ About GINI
+               shows yours. An older one is told to update and will not start this code.</dd>`
+          : ''}
         ${Number(d.session_minutes) > 0
           ? `<dt>You then have</dt><dd>${d.session_minutes} minutes to finish</dd>`
           : `<dt>You have</dt><dd><b>until ${when(d.valid_until)}</b> to finish — this lab has a

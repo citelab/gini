@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS activity (
   -- a student who has lab3's link can read lab4's brief before it is set. It also gates a DRAFT,
   -- so a lab can be handed to TAs to run end to end before anyone else can reach it.
   release_code    TEXT DEFAULT '',
+  -- The oldest GINI this lab can be done with, e.g. '6.22.12'; '' for any. A code is refused at
+  -- arm time to a gBuilder older than this -- and to one that does not say its version at all,
+  -- which is every gBuilder from before this column, i.e. exactly the ones it is for.
+  min_gini        TEXT DEFAULT '',
   created         REAL DEFAULT 0,
   released        REAL DEFAULT 0
 );
@@ -694,7 +698,7 @@ class Store:
     def activity_put(self, rec: dict) -> None:
         cols = ("id", "course", "lab", "title", "brief", "status", "vend_until",
                 "session_minutes", "grace_minutes", "show_n", "one_sitting", "release_code",
-                "created", "released")
+                "min_gini", "created", "released")
         self._run(f"INSERT OR REPLACE INTO activity({','.join(cols)}) "
                   f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
 

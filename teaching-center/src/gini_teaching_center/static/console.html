@@ -187,6 +187,12 @@ hand-in time: everyone is then due when code vending stops, however early they b
           time spent recording. Ticked, gBuilder shows no Pause button and the minutes per attempt
           run on the clock. A recording that was resumed anyway is flagged in the report, not
           refused.</div>
+        <label style="margin-top:12px">Minimum GINI version <span style="font-weight:400;opacity:.7">— blank = any</span></label>
+        <input id="a-mingini" placeholder="e.g. 6.22.12" autocomplete="off" spellcheck="false">
+        <div class="note">A student whose gBuilder is older is told to update it, with the command
+          to do so, and the code does not start. This includes every gBuilder from before this
+          setting existed. It is checked when the code is entered, so raise it before students
+          start; work already under way is not interrupted.</div>
         <label style="margin-top:16px">Questions</label>
         <div class="note">Short answers, in the student's own words. Write a few; each student is
           asked a random selection of them, fixed when their code is issued. The answers you give
@@ -622,6 +628,7 @@ async function loadActs(){
         <td class="mono">${esc(a.lab)}<td>${esc(a.title)}
         <td><span class="tag ${a.status==='released'?'live':'draft'}">${esc(a.status)}</span>
             ${Number(a.one_sitting) ? '<span class="tag draft" style="margin-left:6px" title="Students cannot pause this lab">one sitting</span>' : ''}
+            ${a.min_gini ? `<span class="tag draft" style="margin-left:6px" title="Older gBuilders are told to update">GINI ≥ ${esc(a.min_gini)}</span>` : ''}
         <td class="mono">${a.vended}<td class="mono">${a.submitted}
         <td>${a.status==='released'
               ? `<button class="flat" data-lab="${esc(a.lab)}" onclick="release(this.dataset.lab,false)">Close</button>`
@@ -670,6 +677,7 @@ function actBody(){
           session_minutes: m === '' ? null : parseInt(m, 10),
           grace_minutes: g === '' ? null : parseInt(g, 10),
           one_sitting: $('#a-onesit').checked,
+          min_gini: $('#a-mingini').value.trim(),
           questions: readQs(),
           show_n: parseInt($('#a-shown').value, 10) || 0};
 }
@@ -701,6 +709,7 @@ function editAct(json){
   $('#a-mins').value = a.session_minutes == null ? 60 : Number(a.session_minutes);
   $('#a-grace').value = Number(a.grace_minutes) || 0;
   $('#a-onesit').checked = !!Number(a.one_sitting);
+  $('#a-mingini').value = a.min_gini || '';
   // datetime-local wants exactly YYYY-MM-DDTHH:mm in LOCAL time, which toISOString would shift.
   if (a.vend_until) {
     const d = new Date(a.vend_until*1000 - new Date().getTimezoneOffset()*60000);
@@ -754,7 +763,7 @@ async function saveAct(){
 function clearAct(){
   ['a-lab','a-title','a-brief','a-vend'].forEach(i=>$('#'+i).value='');
   $('#a-mins').value = '60';
-  $('#a-grace').value = '0'; $('#a-onesit').checked = false;
+  $('#a-grace').value = '0'; $('#a-onesit').checked = false; $('#a-mingini').value = '';
   $('#a-qs').innerHTML = ''; $('#a-shown').value = '0';
   $('#a-heading').textContent = 'New lab';
 }

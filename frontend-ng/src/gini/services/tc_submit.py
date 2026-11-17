@@ -257,8 +257,30 @@ def check_code(url: str, code: str) -> dict:
     if not url:
         return {"ok": False, "error": "No course server is configured."}
     _require_tls(url)
-    _, r = _get(url, "/api/activity?code=" + urllib.parse.quote(code))
+    # This gBuilder's version, so a lab with a minimum can refuse an older one (reason
+    # UPDATE_GINI, answered with `min_gini`). A server from before that check ignores it.
+    from ..version import gini_version
+    _, r = _get(url, "/api/activity?code=" + urllib.parse.quote(code)
+                + "&gini=" + urllib.parse.quote(gini_version()))
     return r if isinstance(r, dict) else {"ok": False, "error": "Unexpected reply."}
+
+
+#: The Teaching Center's reason for "this gBuilder is too old for this lab".
+UPDATE_GINI = "update_gini"
+
+
+def upgrade_command() -> str:
+    """The command that upgrades THIS install. pipx keeps each app in its own environment under a
+    `pipx/venvs` directory, and `pip install --upgrade` run anywhere else would upgrade a different
+    copy and change nothing; for any other install, this interpreter's own pip is the one that
+    installed gBuilder."""
+    import sys
+    if "pipx" in sys.prefix.replace("\\", "/").split("/"):
+        return "pipx upgrade gini-toolkit"
+    exe = sys.executable or "python3"
+    if " " in exe:
+        exe = f'"{exe}"'
+    return f"{exe} -m pip install --upgrade gini-toolkit"
 
 
 def submit(url: str, code: str, proof: dict, topology: dict | None = None,

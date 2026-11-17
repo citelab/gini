@@ -257,7 +257,14 @@ class Handler(BaseHTTPRequestHandler):
                 # valid codes.
                 self._send(403, {"ok": False, "reason": why, "error": _act.message(why)})
                 return
+            # A good code from a gBuilder too old for this lab. Checked only AFTER the code, so it
+            # says nothing about codes that a refusal above would not already have said.
+            old = _act.gini_too_old(act, self._q("gini"))
+            if old:
+                self._send(403, old)
+                return
             self._send(200, {"ok": True, "activity": act["id"], "title": act["title"],
+                             "min_gini": act.get("min_gini") or "",
                              "brief": act.get("brief", ""),
                              "session_minutes": act["session_minutes"],
                              "grace_minutes": act.get("grace_minutes") or 0,
@@ -298,6 +305,7 @@ class Handler(BaseHTTPRequestHandler):
                          "code": Ticket(issued["code"]).pretty,
                          "vend_until": act["vend_until"], "valid_until": issued["valid_until"],
                          "session_minutes": act["session_minutes"],
+                         "min_gini": act.get("min_gini") or "",
                          "pausable": _act.pausable(act)})
 
     def _submit(self) -> None:
@@ -727,6 +735,12 @@ class Handler(BaseHTTPRequestHandler):
         # default, so a lab saved by an older console is pausable, as every lab was before.
         sent = b.get("one_sitting")
         one_sitting = int(prev.get("one_sitting") or 0) if sent is None else int(bool(sent))
+        # Absent (an older console) leaves it alone; sent blank clears it.
+        min_gini = (prev.get("min_gini") or "") if b.get("min_gini") is None \
+            else _act.min_gini_value(b.get("min_gini"))
+        if min_gini is None:
+            return {"ok": False, "error": "The minimum GINI version should look like 6.22.12, "
+                                          "or be left blank."}
         _STORE.activity_put({
             "id": aid, "course": course, "lab": lab, "show_n": show_n,
             # Minted on first save and kept. An edit must NOT rotate it: the link is already in a
@@ -737,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
             "brief": b.get("brief", prev.get("brief", "")),
             "status": prev.get("status", "draft"),
             "vend_until": vend, "session_minutes": mins, "grace_minutes": grace,
-            "one_sitting": one_sitting,
+            "one_sitting": one_sitting, "min_gini": min_gini,
             "created": prev.get("created") or time.time(),
             "released": prev.get("released", 0)})
         _STORE.questions_put(aid, questions)

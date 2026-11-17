@@ -59,6 +59,9 @@ ALREADY_USED = "already_used"
 ALREADY_CLAIMED = "already_claimed"
 NO_SUCH_RECEIPT = "no_such_receipt"
 BAD_LINK = "bad_link"
+#: The code is good, but this gBuilder is older than the lab's `min_gini` (or did not say). Its own
+#: reason, so a current gBuilder can show a pop-up with the upgrade command instead of a line.
+UPDATE_GINI = "update_gini"
 
 _MESSAGES = {
     NO_ACTIVITY: "There is no activity here. Check the link your instructor gave you.",
@@ -83,6 +86,42 @@ _MESSAGES = {
 
 def message(reason: str) -> str:
     return _MESSAGES.get(reason, "That code cannot be used.")
+
+
+# --------------------------------------------------------------------------- #
+# the oldest GINI a lab can be done with
+# --------------------------------------------------------------------------- #
+def min_gini_value(text) -> str | None:
+    """A teacher's "minimum GINI version" field -> what to store: "" for none, "6.22.12" for a
+    version, None if it cannot be read. Kept as typed, minus spaces and a leading v."""
+    from gini.domain.versions import version_tuple
+    t = str(text or "").strip().lstrip("vV")
+    if not t:
+        return ""
+    if version_tuple(t) is None or not t.replace(".", "").isdigit() or t.count(".") > 2:
+        return None
+    return t
+
+
+def gini_too_old(activity: dict | None, client_version: str) -> dict | None:
+    """The refusal for a gBuilder older than the lab needs, or None if it may arm.
+
+    `client_version` is what gBuilder sent with the code. Every gBuilder before this check sends
+    nothing, and those are precisely the students the check exists for, so "no version" is refused
+    like an old one. They cannot show a pop-up, but they already put a refusal's `error` in front
+    of the student and do not arm, so the sentence is written to stand alone: what is needed, what
+    they have, and the command that fixes it.
+    """
+    from gini.domain.versions import at_least
+    need = str((activity or {}).get("min_gini") or "").strip()
+    if not need or at_least(client_version, need):
+        return None
+    have = str(client_version or "").strip()
+    yours = f"this gBuilder is {have}" if have else "this gBuilder is older than that"
+    return {"ok": False, "reason": UPDATE_GINI, "min_gini": need, "your_gini": have,
+            "error": f"This lab needs GINI {need} or newer, and {yours}. Update it with "
+                     f"'pipx upgrade gini-toolkit' (or 'pip install --upgrade gini-toolkit'), "
+                     f"reopen gBuilder, and enter the code again."}
 
 
 def activity_id(course: str, lab: str) -> str:

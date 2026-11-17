@@ -269,6 +269,8 @@ class ProofStrip(QWidget):
         if answer and not answer.get("ok"):
             self._say(answer.get("error", "That code cannot be used."), bad=True)
             self.refresh(keep_hint=True)
+            if answer.get("reason") == tc_submit.UPDATE_GINI:
+                self._ask_to_update(answer)
             return
         if not answer:
             # The code may be perfectly good and the wifi bad. Recording locally is the only
@@ -278,6 +280,37 @@ class ProofStrip(QWidget):
             return
         if self._arm_locally(typed, keep_hint=True):
             self._announce(answer)
+
+    def _ask_to_update(self, answer: dict) -> None:
+        """The course says this lab needs a newer GINI. A pop-up, not just the strip's one line:
+        the student cannot start the lab at all until they act, and what they must do -- a command
+        to run, then reopen gBuilder -- is more than a status line holds. Nothing is armed."""
+        from ..version import gini_version
+        need = str(answer.get("min_gini") or "a newer version")
+        cmd = tc_submit.upgrade_command()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Update GINI for this lab")
+        box.setText(f"This lab needs GINI {need} or newer. This gBuilder is {gini_version()}.")
+        # The command on a line of its own that never wraps: broken at `--upgrade` it was easy
+        # to copy half of. Rich text for that, and the box widened so the line fits.
+        from html import escape
+        box.setInformativeText(
+            "<p>The code has not been started, so nothing is lost. Close gBuilder and run this "
+            "in a terminal:</p>"
+            f"<pre style='margin:8px 0'>{escape(cmd)}</pre>"
+            "<p>Then open gBuilder again and enter the same code. gBuilder will offer to "
+            "refresh its machines for the new version.</p>")
+        box.setStyleSheet("QLabel#qt_msgbox_informativelabel{min-width:460px;}")
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        copy = box.addButton("Copy the command", QMessageBox.ActionRole)
+        box.addButton("Close", QMessageBox.RejectRole)
+        self._update_box = box                 # reachable from tests; the pop-up is modal
+        box.exec()
+        if box.clickedButton() is copy:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(cmd)
+            self._say(f"Copied: {cmd}", bad=False)
 
     def fetch_questions(self) -> None:
         """Ask the course server for the armed code's questions again.
