@@ -3195,6 +3195,11 @@ _GINI_SYSCALL_H = """// GINI's own system calls -- part of the machine, not of a
 #define SYS_gini_getrtime    65   // getrtime(pid)
 #define SYS_gini_settick     66   // settick(ms)
 #define SYS_gini_memctl      67   // memctl(op, a, b) -- A-Lab 03 (gini_mem.c)
+#define SYS_gini_sem_init    68   // sem_init(value)  -- A-Lab 04 (gini_sem.c)
+#define SYS_gini_sem_free    69   // sem_free(id)
+#define SYS_gini_sem_wait    70   // sem_wait(id)
+#define SYS_gini_sem_post    71   // sem_post(id)
+#define SYS_gini_semctl      72   // semctl(op, a, b)
 """
 
 _GINI_SYS_C = """// kernel/gini_sys.c — GINI's own system calls (see gini_syscall.h). Not student code.
@@ -3218,6 +3223,9 @@ _GINI_SYS_C = """// kernel/gini_sys.c — GINI's own system calls (see gini_sysc
 
 // A-Lab 03 (gini_mem.c). In defs.h too, and repeated for the same reason as the include above.
 uint64 gini_memctl(void);
+// A-Lab 04 (gini_sem.c): the four semaphore calls, and the instrument the tests read.
+uint64 gini_sem_syscall(int);
+uint64 gini_semctl(void);
 
 extern struct proc proc[NPROC];
 extern int sched_policy;
@@ -3256,6 +3264,13 @@ gini_syscall(int num)
   }
   case SYS_gini_memctl:
     return gini_memctl();
+  case SYS_gini_sem_init:
+  case SYS_gini_sem_free:
+  case SYS_gini_sem_wait:
+  case SYS_gini_sem_post:
+    return gini_sem_syscall(num);
+  case SYS_gini_semctl:
+    return gini_semctl();
   }
   PRINTF("%d %s: unknown GINI sys call %d\\n", myproc()->pid, myproc()->name, num);
   return -1;
@@ -3269,6 +3284,13 @@ int settick(int ms);    // ms <= 0: the tick length in ms; else set it (10..1000
 
 // A-Lab 03: GINI's allocator instrument (kernel/gini_mem.c, kernel/gini_mem.h)
 uint64 memctl(int op, uint64 a, uint64 b);
+
+// A-Lab 04: semaphores (kernel/sem.c, yours) and GINI's instrument (kernel/gini_sem.c)
+int sem_init(int value);   // a new semaphore with this count: its id, or -1
+int sem_free(int id);
+int sem_wait(int id);      // 0, or -1 (not in use, or killed while waiting)
+int sem_post(int id);
+int semctl(int op, uint64 a, uint64 b);
 """
 
 _GINI_USYS_S = """# GINI's own system calls (kernel/gini_syscall.h) -- kept out of usys.pl, which is a student file.
@@ -3291,6 +3313,31 @@ settick:
 .global memctl
 memctl:
  li a7, SYS_gini_memctl
+ ecall
+ ret
+.global sem_init
+sem_init:
+ li a7, SYS_gini_sem_init
+ ecall
+ ret
+.global sem_free
+sem_free:
+ li a7, SYS_gini_sem_free
+ ecall
+ ret
+.global sem_wait
+sem_wait:
+ li a7, SYS_gini_sem_wait
+ ecall
+ ret
+.global sem_post
+sem_post:
+ li a7, SYS_gini_sem_post
+ ecall
+ ret
+.global semctl
+semctl:
+ li a7, SYS_gini_semctl
  ecall
  ret
 """
@@ -4836,6 +4883,1730 @@ if (ROOT / "kernel" / "kalloc.c").exists():
         add_uprog(_name, _src)
         if f"$U/_{_name}\\" not in (ROOT / "Makefile").read_text():
             failed.append(f"Makefile: _{_name} not registered")
+
+# ---------------------------------------------------------------------------------------------
+# 8) A-LAB 04 — SEMAPHORES AND COOPERATING PROCESSES. GINI's half of the lab, in EVERY lab's image.
+#
+#    There is one image, so this is in every lab's kernel. The student OWNS kernel/sem.c (Parts A
+#    and C) and user/coop.c (Part B); the image carries the STARTER of each, in which every call
+#    fails, so that every other lab still links. GINI OWNS:
+#
+#      kernel/sem.h           the table's struct and NSEM. Students read it, never change it.
+#      kernel/gini_sem.h      semctl()'s ops and event codes, shared with the two test programs.
+#      kernel/gini_sem.c      sems[] with every lock initialised at boot, the four system calls
+#                             (each checks the id and calls the student's function), semctl() --
+#                             the instrument the tests read -- and the jitter.
+#      user/coop.h            the Part B interface.
+#      user/semtest.c         the test programs. READ-ONLY in the lab: GINI reads what they print,
+#      user/cooptest.c        and the handout quotes it. cooptest links the student's coop.c.
+#      user/semshow.h         what both print about a stuck semaphore (`semtest show`).
+#
+#    The jitter is what makes the tests find timing bugs in seconds: when a test turns it on, every
+#    semaphore call waits a random time and yields before returning, and sleep_prepare() waits a
+#    random time before it records the channel. Off unless a test turns it on (SC_RESET turns it
+#    off), and correct code gives the same results either way, only more slowly.
+#
+#    Declarations are local (main.c, proc.c), not in defs.h: an A-Lab 01 or 02 folder keeps its own
+#    defs.h, and an A-Lab 02 folder its own proc.c -- which then has no jitter hook. That is fine:
+#    only A-Lab 04's tests turn jitter on. Gated on main.c, which the boot hooks need and every real
+#    tree has; the patcher's unit tests use trees without one. Every edit is a must: a kernel that
+#    silently lost one cannot run the lab.
+# ---------------------------------------------------------------------------------------------
+_SEM_H = r"""// kernel/sem.h -- the semaphore table. A-Lab 04. GINI's file: read it, do not change it.
+//
+// A semaphore is a count that processes can wait on. sem_wait() takes one from the count, and if
+// the count is 0 it sleeps until a sem_post() puts one back. The kernel keeps NSEM of them in one
+// table, and a semaphore's id is its index in the table. A process that forks passes its ids to
+// its children simply because the children get a copy of its variables.
+
+#define NSEM 32
+
+struct sem {
+  struct spinlock lock;   // protects every field below
+  int used;               // 1 while the semaphore is allocated (sem_init), 0 when it is free
+  int value;              // the count. Never negative.
+  uint ticket;            // Part C: the next ticket to hand to a process that has to wait
+  uint serving;           // Part C: the ticket whose turn it is
+};
+
+extern struct sem sems[NSEM];   // GINI's (gini_sem.c). Every lock is initialised at boot.
+
+// Yours (kernel/sem.c). GINI's system calls check that id is between 0 and NSEM-1 before they
+// call you, so you never see an id outside the table. Each returns 0 on success, -1 on failure.
+int sem_init(int value);   // a free semaphore with this count: its id, or -1 if none is free
+int sem_free(int id);      // give the semaphore back to the table
+int sem_wait(int id);      // take one from the count, sleeping until there is one to take
+int sem_post(int id);      // put one back, and wake whoever is waiting
+"""
+
+_GINI_SEM_H = r"""// kernel/gini_sem.h -- what semctl() does. GINI's, shared by the kernel and the A-Lab 04 test
+// programs (semtest, cooptest). Not student code.
+
+#define SC_RESET    1   // semctl(SC_RESET, 0, 0)        free every semaphore, clear log and counters
+#define SC_STATE    2   // semctl(SC_STATE, &st, 0)      fill a struct semstate
+#define SC_WAITERS  3   // semctl(SC_WAITERS, id, 0)     processes waiting on semaphore id
+#define SC_VALUE    4   // semctl(SC_VALUE, id, 0)       its count, or -1 if it is not in use
+#define SC_LOG      5   // semctl(SC_LOG, code, arg)     add an event for this process to the log
+#define SC_READLOG  6   // semctl(SC_READLOG, buf, max)  copy the log out; returns how many events
+#define SC_COUNT    7   // semctl(SC_COUNT, code, 0)     how many events in the log have this code
+#define SC_JITTER   8   // semctl(SC_JITTER, n, 0)       n > 0: after every semaphore call, and in
+                        //                               sleep_prepare(), wait a random 0..n spins
+#define SC_EXITED   9   // semctl(SC_EXITED, pid, 0)     1 if that process has exited (or is gone), else 0
+#define SC_MYJITTER 10  // semctl(SC_MYJITTER, n, 0)     SC_JITTER for the calling process only (-1: undo)
+#define SC_SNAPSHOT 11  // semctl(SC_SNAPSHOT, slots, 0) fill struct semslot[NSEM]: what semtest show prints
+#define SC_RECENT   12  // semctl(SC_RECENT, buf, max)   the last SEMRECENT semaphore calls, oldest first
+
+#define SEMLOG 8192     // test events the kernel keeps; one more is counted in `dropped`
+#define SEMRECENT 64    // GINI's record of the last semaphore system calls (a ring)
+#define SEMSHOWPIDS 6   // sleepers listed per semaphore in a snapshot
+
+// Event codes. GINI's system calls record the first five (in the ring); the test programs log the rest.
+#define EV_INIT     1   // arg: id returned (or -1)
+#define EV_FREE     2   // arg: id
+#define EV_WAITIN   3   // arg: id  -- the process called sem_wait()
+#define EV_WAITOUT  4   // arg: id  -- sem_wait() returned (val: what it returned)
+#define EV_POST     5   // arg: id
+#define EV_TEST     16  // codes from here up belong to the test programs
+
+struct semevent {
+  uint seq;     // order of the event among all events since SC_RESET
+  short pid;
+  short code;
+  int arg;
+  int val;      // EV_WAITOUT: the return value. Otherwise the semaphore's count just after.
+};
+
+struct semslot {     // one semaphore, as SC_SNAPSHOT sees it
+  int used;
+  int value;
+  uint ticket;
+  uint serving;
+  int nasleep;       // processes asleep on it
+  int asleep[SEMSHOWPIDS];
+};
+
+struct semstate {
+  uint64 ops;        // semaphore system calls since SC_RESET
+  uint64 negative;   // times a semaphore's count was seen below zero
+  uint64 nlog;       // test events logged
+  uint64 dropped;    // test events not logged because the log was full
+  int inuse;         // semaphores allocated now
+  int waiting;       // processes waiting on any semaphore now
+  int ncpu;          // CPUs this machine booted
+  int nsem;          // NSEM
+};
+"""
+
+_GINI_SEM_C = r"""// kernel/gini_sem.c -- GINI's half of A-Lab 04. Not student code: read it if you like, do not
+// change it.
+//
+//   * The semaphore table, sems[], with every lock initialised at boot (gini_seminit).
+//   * The four system calls, sem_init/sem_free/sem_wait/sem_post. Each checks that the id is in
+//     the table, calls YOUR function in kernel/sem.c, and records what happened.
+//   * semctl(), the instrument semtest and cooptest read: how many processes are waiting on a
+//     semaphore, its count, and a log of events in the order they happened. The tests check
+//     their rules against this log, not against what a process prints.
+
+#include "types.h"
+#include "param.h"
+#include "memlayout.h"
+#include "riscv.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "defs.h"
+#include "gini_syscall.h"
+#include "sem.h"
+#include "gini_sem.h"
+
+struct sem sems[NSEM];
+
+extern struct proc proc[NPROC];
+
+static struct spinlock loglock;          // protects everything below
+static struct semevent semlog[SEMLOG];
+static uint nlog, seq;
+static uint64 ops, negative, dropped;
+static int ncpu;
+
+// Jitter. The tests turn it on so that the rare orders -- the ones that expose a lost wakeup, a
+// deadlock or a stolen turn -- happen in seconds instead of once a week. Just before a semaphore
+// call returns to the process, it waits a random time and then gives up the CPU (yield), so that
+// another process can run in between. sleep_prepare() waits a random time before it
+// records the channel (it holds a lock there, so it cannot yield). Correct code gives the same
+// results either way, only more slowly.
+static int jitter;
+static int myjitter[NPROC];      // per process slot, + 1 (0: use `jitter`)
+static uint64 jrng = 88172645463325252UL;
+
+void
+gini_semjitter(int mayyield)
+{
+  struct proc *p = myproc();
+  int n = jitter;
+  if(p && myjitter[p - proc])
+    n = myjitter[p - proc] - 1;
+  if(n <= 0)
+    return;
+  uint64 x = __sync_fetch_and_add(&jrng, 0x9E3779B97F4A7C15UL);
+  x ^= x >> 29;
+  x *= 0xBF58476D1CE4E5B9UL;
+  x ^= x >> 32;
+  for(volatile uint64 i = (x >> 1) % n; i > 0; i--)
+    ;
+  if(mayyield)
+    yield();
+}
+
+// The Process Tree's sleep-channel names. Weak: the registry lives in trap.c, which an A-Lab 01
+// folder owns, so an older copy may not have it.
+void gini_chan_add(void *lo, void *hi, char *name) __attribute__((weak));
+
+void
+gini_seminit(void)
+{
+  for(int i = 0; i < NSEM; i++)
+    initlock(&sems[i].lock, "sem");
+  initlock(&loglock, "semlog");
+  if(gini_chan_add)
+    gini_chan_add(sems, &sems[NSEM], "a semaphore");  // a waiter's channel is inside sems[]
+}
+
+// Every hart calls this once on its way to the scheduler.
+void
+gini_semcpu(void)
+{
+  __sync_fetch_and_add(&ncpu, 1);
+}
+
+// Two logs. The test programs' own events (SC_LOG) go into semlog[], which they read back to check
+// what happened. GINI's record of the system calls goes into a ring of the last SEMRECENT calls, so
+// that the newest calls are always there to show (SC_RECENT), however long a test has run.
+static struct semevent recent[SEMRECENT];
+static uint nrecent;
+
+static void
+logevent(int code, int arg, int val)
+{
+  struct semevent *e = 0;
+  acquire(&loglock);
+  if(code < EV_TEST)
+    e = &recent[nrecent++ % SEMRECENT];
+  else if(nlog < SEMLOG)
+    e = &semlog[nlog++];
+  else
+    dropped++;
+  if(e){
+    e->seq = seq;
+    e->pid = myproc() ? myproc()->pid : 0;
+    e->code = code;
+    e->arg = arg;
+    e->val = val;
+  }
+  seq++;
+  release(&loglock);
+}
+
+// The count of semaphore id right now. Also counts a negative one: it must never happen.
+static int
+peek(int id)
+{
+  struct sem *s = &sems[id];
+  acquire(&s->lock);
+  int v = s->used ? s->value : -1;
+  if(s->used && s->value < 0){
+    acquire(&loglock);
+    negative++;
+    release(&loglock);
+  }
+  release(&s->lock);
+  return v;
+}
+
+// Processes asleep on a channel inside sems[id], whatever field of it they chose to sleep on.
+static int
+waiters(int id)
+{
+  char *lo = (char *)&sems[id], *hi = (char *)&sems[id + 1];
+  int n = 0;
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state == SLEEPING && (char *)p->chan >= lo && (char *)p->chan < hi)
+      n++;
+    release(&p->lock);
+  }
+  return n;
+}
+
+static int
+badid(int id)
+{
+  return id < 0 || id >= NSEM;
+}
+
+uint64
+gini_sem_syscall(int num)
+{
+  int a, r;
+  argint(0, &a);
+  acquire(&loglock);
+  ops++;
+  release(&loglock);
+
+  if(num != SYS_gini_sem_init && badid(a))
+    return -1;
+  switch(num){
+  case SYS_gini_sem_init:
+    r = sem_init(a);
+    logevent(EV_INIT, r, (r >= 0 && r < NSEM) ? peek(r) : -1);
+    break;
+  case SYS_gini_sem_free:
+    r = sem_free(a);
+    logevent(EV_FREE, a, r);
+    break;
+  case SYS_gini_sem_wait:
+    logevent(EV_WAITIN, a, 0);
+    r = sem_wait(a);
+    logevent(EV_WAITOUT, a, r);
+    peek(a);
+    break;
+  case SYS_gini_sem_post:
+    r = sem_post(a);
+    logevent(EV_POST, a, peek(a));
+    break;
+  default:
+    return -1;
+  }
+  gini_semjitter(1);
+  return r;
+}
+
+// ---------------------------------------------------------------------------- semctl()
+
+uint64
+gini_semctl(void)
+{
+  int op;
+  uint64 a, b;
+  argint(0, &op);
+  argaddr(1, &a);
+  argaddr(2, &b);
+  struct proc *p = myproc();
+
+  switch(op){
+  case SC_RESET:
+    for(int i = 0; i < NSEM; i++){
+      struct sem *s = &sems[i];
+      acquire(&s->lock);
+      s->used = 0;
+      s->value = 0;
+      s->ticket = 0;
+      s->serving = 0;
+      release(&s->lock);
+    }
+    acquire(&loglock);
+    nlog = seq = nrecent = 0;
+    ops = negative = dropped = 0;
+    release(&loglock);
+    jitter = 0;
+    memset(myjitter, 0, sizeof(myjitter));
+    return 0;
+
+  case SC_MYJITTER:
+    myjitter[p - proc] = (int)a < 0 ? 0 : (int)a + 1;
+    return 0;
+
+  case SC_EXITED:
+    for(struct proc *q = proc; q < &proc[NPROC]; q++){
+      acquire(&q->lock);
+      if(q->pid == (int)a && q->state != UNUSED && q->state != ZOMBIE){
+        release(&q->lock);
+        return 0;
+      }
+      release(&q->lock);
+    }
+    return 1;
+
+  case SC_JITTER:
+    jitter = (int)a < 0 ? 0 : (int)a;
+    return 0;
+
+  case SC_STATE: {
+    struct semstate st;
+    memset(&st, 0, sizeof(st));
+    for(int i = 0; i < NSEM; i++){
+      if(peek(i) >= 0)
+        st.inuse++;
+      st.waiting += waiters(i);
+    }
+    acquire(&loglock);
+    st.ops = ops;
+    st.negative = negative;
+    st.nlog = nlog;
+    st.dropped = dropped;
+    release(&loglock);
+    st.ncpu = ncpu;
+    st.nsem = NSEM;
+    return copyout(p->pagetable, p->sz, a, (char *)&st, sizeof(st));
+  }
+
+  case SC_WAITERS:
+    return badid(a) ? -1 : waiters(a);
+
+  case SC_VALUE:
+    return badid(a) ? -1 : peek(a);
+
+  case SC_LOG:
+    if(a < EV_TEST)
+      return -1;
+    logevent(a, b, 0);
+    return 0;
+
+  case SC_READLOG: {
+    acquire(&loglock);
+    uint n = nlog;
+    release(&loglock);
+    if(n > b)
+      n = b;
+    // The log only grows until the next SC_RESET, so the first n events are stable.
+    if(copyout(p->pagetable, p->sz, a, (char *)semlog, n * sizeof(struct semevent)) < 0)
+      return -1;
+    return n;
+  }
+
+  case SC_RECENT: {             // the last calls, oldest first (a page, not the 4 KB kernel stack)
+    struct semevent *out = (struct semevent *)kalloc();
+    if(out == 0)
+      return -1;
+    acquire(&loglock);
+    uint n = nrecent < SEMRECENT ? nrecent : SEMRECENT;
+    for(uint i = 0; i < n; i++)
+      out[i] = recent[(nrecent - n + i) % SEMRECENT];
+    release(&loglock);
+    if(n > b)
+      n = b;
+    int r = copyout(p->pagetable, p->sz, a, (char *)out, n * sizeof(struct semevent));
+    kfree(out);
+    return r < 0 ? -1 : n;
+  }
+
+  case SC_SNAPSHOT: {           // every semaphore, and who is asleep on it
+    struct semslot *out = (struct semslot *)kalloc();
+    if(out == 0)
+      return -1;
+    memset(out, 0, NSEM * sizeof(struct semslot));
+    for(int i = 0; i < NSEM; i++){
+      struct sem *s = &sems[i];
+      char *lo = (char *)s, *hi = (char *)(s + 1);
+      acquire(&s->lock);
+      out[i].used = s->used;
+      out[i].value = s->value;
+      out[i].ticket = s->ticket;
+      out[i].serving = s->serving;
+      for(struct proc *q = proc; q < &proc[NPROC]; q++){
+        acquire(&q->lock);
+        if(q->state == SLEEPING && (char *)q->chan >= lo && (char *)q->chan < hi){
+          if(out[i].nasleep < SEMSHOWPIDS)
+            out[i].asleep[out[i].nasleep] = q->pid;
+          out[i].nasleep++;
+        }
+        release(&q->lock);
+      }
+      release(&s->lock);
+    }
+    int r = copyout(p->pagetable, p->sz, a, (char *)out, NSEM * sizeof(struct semslot));
+    kfree(out);
+    return r < 0 ? -1 : NSEM;
+  }
+
+  case SC_COUNT: {
+    int n = 0;
+    acquire(&loglock);
+    for(uint i = 0; i < nlog; i++)
+      if(semlog[i].code == a)
+        n++;
+    release(&loglock);
+    return n;
+  }
+  }
+  return -1;
+}
+"""
+
+_SEM_STARTER = r"""// kernel/sem.c -- your semaphores. A-Lab 04.
+//
+// The table, sems[NSEM], is GINI's (kernel/gini_sem.c), and so are the four system calls that call
+// these functions. Every semaphore's lock was initialised at boot. Read kernel/sem.h first.
+//
+// The starter versions do nothing and fail. Replace all four.
+
+#include "types.h"
+#include "param.h"
+#include "memlayout.h"
+#include "riscv.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "defs.h"
+#include "sem.h"
+
+// Find a free semaphore, give it the count value, and return its id. Return -1 if value is
+// negative or no semaphore is free.
+int
+sem_init(int value)
+{
+  return -1;
+}
+
+// Give semaphore id back to the table. Return -1 if it is not in use.
+int
+sem_free(int id)
+{
+  return -1;
+}
+
+// Take one from the count of semaphore id. If the count is 0, sleep until there is one to take.
+// Return -1 if the semaphore is not in use, or if the process is killed while it waits.
+int
+sem_wait(int id)
+{
+  return -1;
+}
+
+// Put one back on the count of semaphore id, and wake the processes waiting on it.
+// Return -1 if the semaphore is not in use.
+int
+sem_post(int id)
+{
+  return -1;
+}
+"""
+
+_COOP_H = r"""// user/coop.h -- processes that cooperate through semaphores. A-Lab 04, Part B.
+// GINI's file: read it, do not change it. You write these functions in user/coop.c, and GINI's
+// cooptest calls them from many processes at once.
+//
+// Each _init() runs once, in the parent, before it forks. It creates the semaphores the pattern
+// needs and keeps their ids in variables of coop.c. Every child gets a copy of those variables
+// when it forks, and so it knows the same ids. No memory is shared: only the semaphores are.
+
+#define MAXCOOP 8
+
+// 1. Turns. n processes, numbered 0..n-1, take turns in order: 0, 1, ..., n-1, 0, 1, ...
+void turns_init(int n);
+void turn_begin(int i);       // process i waits here until it is its turn
+void turn_end(int i);         // process i is done with its turn: it is the next process's turn
+
+// 2. Barrier. n worker processes, numbered 0..n-1, meet at the barrier in every round. No worker
+// leaves the barrier in a round until all n have arrived in that round. One more process, the
+// coordinator, runs the barrier: it calls barrier_coordinate() once per round.
+void barrier_init(int n);
+void barrier_wait(int i);     // worker i: arrive, and return when the barrier lets it go
+void barrier_coordinate(void);// the coordinator: one whole round of the barrier
+
+// 3. Dining philosophers. n philosophers sit at a round table with one fork between each pair.
+// Philosopher i needs fork i (on the left) and fork (i+1) % n (on the right) to eat. Two
+// neighbours must never eat at the same time, and the table must never deadlock.
+void philo_init(int n);
+void pickup(int i);           // philosopher i takes both forks, waiting if it must
+void putdown(int i);          // philosopher i puts both forks back
+"""
+
+_COOP_STARTER = r"""// user/coop.c -- your cooperation patterns. A-Lab 04, Part B. Read user/coop.h first.
+//
+// Use only the semaphore system calls: sem_init(), sem_wait(), sem_post() and sem_free().
+// Keep the ids of the semaphores you create in the variables of this file.
+//
+// The starter versions do nothing, so nothing waits for anything. Replace them.
+
+#include "kernel/types.h"
+#include "user/user.h"
+#include "user/gini.h"
+#include "user/coop.h"
+
+// ---------------------------------------------------------------------------- 1. turns
+
+void
+turns_init(int n)
+{
+}
+
+void
+turn_begin(int i)
+{
+}
+
+void
+turn_end(int i)
+{
+}
+
+// ---------------------------------------------------------------------------- 2. barrier
+
+void
+barrier_init(int n)
+{
+}
+
+void
+barrier_wait(int i)
+{
+}
+
+void
+barrier_coordinate(void)
+{
+}
+
+// ---------------------------------------------------------------------------- 3. philosophers
+
+void
+philo_init(int n)
+{
+}
+
+void
+pickup(int i)
+{
+}
+
+void
+putdown(int i)
+{
+}
+"""
+
+_SEMSHOW_H = r"""// user/semshow.h -- what `semtest show` prints, and what semtest and cooptest print when they find
+// processes stuck. GINI's file, included by both test programs. Not student code.
+//
+// A lost wakeup has a signature you can see: a semaphore whose count is above 0, with processes
+// still asleep on it. The post that should have woken one of them has already happened, and no
+// other post is coming.
+
+// Print every semaphore in use, who is asleep on it, and the last `nrecent` semaphore calls.
+// Returns how many semaphores look like a lost wakeup (count above 0, processes still asleep).
+static int
+semshow(int nrecent)
+{
+  static struct semslot slot[64];
+  static struct semevent rec[SEMRECENT];
+  int n = semctl(SC_SNAPSHOT, (uint64)slot, 0), lost = 0, shown = 0;
+  printf("semaphores in use (count, processes asleep on it):\n");
+  for(int i = 0; i < n; i++){
+    if(!slot[i].used)
+      continue;
+    shown++;
+    printf("  sem %d: count %d, asleep:", i, slot[i].value);
+    if(slot[i].nasleep == 0)
+      printf(" none");
+    for(int j = 0; j < slot[i].nasleep && j < SEMSHOWPIDS; j++)
+      printf(" %d", slot[i].asleep[j]);
+    if(slot[i].nasleep > SEMSHOWPIDS)
+      printf(" and %d more", slot[i].nasleep - SEMSHOWPIDS);
+    if(slot[i].ticket != slot[i].serving || slot[i].ticket)
+      printf("  (ticket %d, serving %d)", slot[i].ticket, slot[i].serving);
+    if(slot[i].value > 0 && slot[i].nasleep > 0){
+      printf("  <- count above 0, yet asleep: a lost wakeup?");
+      lost++;
+    }
+    printf("\n");
+  }
+  if(shown == 0)
+    printf("  none\n");
+  if(nrecent > 0){
+    int m = semctl(SC_RECENT, (uint64)rec, SEMRECENT);
+    if(m <= 0)
+      return lost;
+    int from = m > nrecent ? m - nrecent : 0;
+    printf("last semaphore calls (oldest first):\n");
+    for(int i = from; i < m; i++){
+      struct semevent *e = &rec[i];
+      printf("  pid %d ", e->pid);
+      if(e->code == EV_INIT)
+        printf("sem_init() -> %d, count %d\n", e->arg, e->val);
+      else if(e->code == EV_FREE)
+        printf("sem_free(%d) -> %d\n", e->arg, e->val);
+      else if(e->code == EV_WAITIN)
+        printf("sem_wait(%d) called\n", e->arg);
+      else if(e->code == EV_WAITOUT)
+        printf("sem_wait(%d) returned %d\n", e->arg, e->val);
+      else if(e->code == EV_POST)
+        printf("sem_post(%d), count now %d\n", e->arg, e->val);
+    }
+  }
+  return lost;
+}
+"""
+
+_SEMTEST = r"""// semtest -- the semaphore instrument for A-Lab 04. Do not edit: GINI reads what it prints.
+//
+//   semtest                 what this machine has: CPUs, semaphores, and the health lines
+//   semtest basic           one process: counts, freeing, a full table, ids that are not in use
+//   semtest block [seed]    a waiter sleeps and a post wakes it; thousands of round trips
+//   semtest mutex [seed]    processes take turns in a critical section, guarded by a semaphore
+//   semtest kill            a process killed while it waits leaves, and takes nothing
+//   semtest fifo [seed]     waiters are served in the order they started to wait (Part C)
+//   semtest all [seed]      all of the above
+//   semtest show            every semaphore in use, who is asleep on it, and the last calls
+//
+// Every test runs its processes as children and watches them from the parent, so a semaphore
+// that never wakes anyone shows up as a FAIL, not as a machine that hangs. What the processes did
+// is read from GINI's log in the kernel (semctl), in the order it happened.
+//
+// Each subcommand ends with one verdict line, "<name>: ok" or "<name>: FAIL ...".
+
+#include "kernel/types.h"
+#include "user/user.h"
+#include "user/gini.h"
+#include "kernel/fcntl.h"
+#include "kernel/gini_sem.h"
+#include "user/semshow.h"
+
+#define NSEMMAX 64                  // more than any table GINI builds
+
+#define EV_STEP    (EV_TEST + 0)    // arg: which step of a test a child has reached
+#define EV_GOT     (EV_TEST + 1)    // arg: child number -- its sem_wait() returned
+#define EV_DONE    (EV_TEST + 2)    // arg: child number -- it finished its work
+#define EV_ENTER   (EV_TEST + 3)    // arg: child number -- inside the critical section
+#define EV_EXIT    (EV_TEST + 4)    // arg: child number -- leaving it
+
+#define NSEMS 32                    // GINI's NSEM (kernel/sem.h)
+#define STUCK 300                   // ticks (of 10 ms) with no semaphore activity: stuck
+
+static struct semstate st;
+static struct semevent *ev;         // a copy of the log
+static int oldtick;
+
+static uint64 rng;
+static uint64
+rnd(void)
+{
+  rng ^= rng << 13;
+  rng ^= rng >> 7;
+  rng ^= rng << 17;
+  return rng;
+}
+
+static void
+seed(int argc, char **argv)
+{
+  rng = argc > 2 ? (uint64)atoi(argv[2]) : (uint64)uptime();
+  rng = rng * 2654435761UL + 88172645463325252UL;
+  if(rng == 0)
+    rng = 1;
+  for(int i = 0; i < 4; i++)
+    rnd();
+}
+
+static void
+spin(int n)
+{
+  for(volatile int i = 0; i < n; i++)
+    ;
+}
+
+static void
+state(void)
+{
+  if(semctl(SC_STATE, (uint64)&st, 0) != 0){
+    printf("semtest: semctl failed -- is this GINI's A-Lab 04 kernel?\n");
+    exit(1);
+  }
+}
+
+static void
+note(int code, int arg)
+{
+  semctl(SC_LOG, code, arg);
+}
+
+static int
+count(int code)
+{
+  return semctl(SC_COUNT, code, 0);
+}
+
+static int
+readlog(void)
+{
+  return semctl(SC_READLOG, (uint64)ev, SEMLOG);
+}
+
+// Wait until `n` events with this code are in the log. Gives up after STUCK ticks in which no
+// semaphore call was made at all, so a slow machine is never mistaken for a stuck one.
+static int
+await(int code, int n)
+{
+  uint64 ops = (uint64)-1;
+  int quiet = 0;
+  while(count(code) < n){
+    state();
+    if(st.ops != ops){
+      ops = st.ops;
+      quiet = 0;
+    } else if(++quiet > STUCK){
+      return 0;
+    }
+    pause(1);
+  }
+  return 1;
+}
+
+// Wait until `n` processes are waiting on semaphore id, for at most `ticks`.
+static int
+await_waiters(int id, int n, int ticks)
+{
+  for(int t = 0; t < ticks; t++){
+    if(semctl(SC_WAITERS, id, 0) == n)
+      return 1;
+    pause(1);
+  }
+  return semctl(SC_WAITERS, id, 0) == n;
+}
+
+static int kids[64], nkids;
+
+static int
+child(void)
+{
+  int pid = fork();
+  if(pid < 0){
+    printf("semtest: fork failed\n");
+    exit(1);
+  }
+  if(pid > 0)
+    kids[nkids++] = pid;
+  return pid;
+}
+
+// Kill whatever is still running and collect every child, so the next test starts clean. A
+// killed child asleep on a semaphore leaves once it is woken, so keep posting to every semaphore
+// that has a process asleep on it. If a child still has not left after 3 s, nothing wakes it, and
+// waiting for it would hang this test too: say so, and leave it.
+static void
+reap(void)
+{
+  int left = 0;
+  for(int i = 0; i < nkids; i++)
+    kill(kids[i]);
+  for(int t = 0; t < 300; t++){
+    left = 0;
+    for(int i = 0; i < nkids; i++)
+      if(!semctl(SC_EXITED, kids[i], 0))
+        left++;
+    if(left == 0)
+      break;
+    for(int id = 0; id < NSEMS; id++)
+      if(semctl(SC_WAITERS, id, 0) > 0)
+        sem_post(id);
+    pause(1);
+  }
+  if(left > 0)
+    printf("%d process(es) could not be stopped: asleep on a semaphore, and nothing wakes them\n",
+           left);
+  for(int i = 0; i < nkids - left; i++)
+    wait(0);
+  nkids = 0;
+}
+
+#define JITTER 300000               // spins (about 0.3 ms at most): see SC_JITTER in gini_sem.h
+
+static void
+reset(void)
+{
+  reap();
+  semctl(SC_RESET, 0, 0);
+  semctl(SC_JITTER, JITTER, 0);
+}
+
+// The health lines. Printed by every test; a negative count is always a FAIL.
+static int
+health(void)
+{
+  state();
+  printf("negative counts: %d\n", (int)st.negative);
+  if(st.dropped)
+    printf("log full: %d events not recorded\n", (int)st.dropped);
+  return st.negative == 0;
+}
+
+static int
+fail(char *name, char *why)
+{
+  state();
+  if(st.waiting > 0)                   // somebody is asleep: show who, on what, and the last calls
+    semshow(8);
+  reap();
+  health();
+  printf("%s: FAIL %s\n", name, why);
+  return 0;
+}
+
+static int
+pass(char *name)
+{
+  reap();
+  if(!health()){
+    printf("%s: FAIL a semaphore's count went below zero\n", name);
+    return 0;
+  }
+  printf("%s: ok\n", name);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------- basic
+
+// A child that finds a problem says why, and leaves.
+static void
+bail(char *why)
+{
+  printf("%s\n", why);
+  note(EV_DONE, 1);
+  exit(1);
+}
+
+static int
+t_basic(void)
+{
+  reset();
+  // The checks run in a child, so a sem_wait() that sleeps when it should not cannot hang us.
+  if(child() == 0){
+    int s = sem_init(2);
+    note(EV_STEP, 1);
+    if(s < 0)
+      bail("sem_init(2) returned -1");
+    if(semctl(SC_VALUE, s, 0) != 2)
+      bail("after sem_init(2) the count is not 2");
+    note(EV_STEP, 2);
+    if(sem_wait(s) != 0 || sem_wait(s) != 0)
+      bail("sem_wait() did not return 0, with a count of 2");
+    if(semctl(SC_VALUE, s, 0) != 0)
+      bail("after two sem_wait()s the count is not 0");
+    note(EV_STEP, 3);
+    if(sem_post(s) != 0 || sem_post(s) != 0 || sem_post(s) != 0)
+      bail("sem_post() did not return 0");
+    if(semctl(SC_VALUE, s, 0) != 3)
+      bail("after three sem_post()s the count is not 3");
+    if(sem_init(-1) != -1)
+      bail("sem_init(-1) did not return -1");
+    note(EV_STEP, 4);
+    if(sem_free(s) != 0)
+      bail("sem_free() of a semaphore in use did not return 0");
+    if(semctl(SC_VALUE, s, 0) != -1)
+      bail("a freed semaphore is still in use");
+    if(sem_free(s) != -1 || sem_wait(s) != -1 || sem_post(s) != -1)
+      bail("a call on a semaphore that is not in use did not return -1");
+    note(EV_STEP, 5);
+    int ids[NSEMMAX], n = 0;
+    while(n < NSEMMAX && (ids[n] = sem_init(n)) >= 0)
+      n++;
+    printf("table: %d semaphores\n", n);
+    if(n != st.nsem)
+      bail("the table did not give out every semaphore exactly once");
+    for(int i = 0; i < n; i++)
+      for(int j = 0; j < i; j++)
+        if(ids[i] == ids[j])
+          bail("sem_init() gave out the same id twice");
+    for(int i = 0; i < n; i++)
+      if(semctl(SC_VALUE, ids[i], 0) != i)
+        bail("a semaphore does not have the count it was given");
+    for(int i = 0; i < n; i++)
+      sem_free(ids[i]);
+    if(sem_init(1) < 0)
+      bail("after freeing every semaphore, sem_init() still fails");
+    note(EV_DONE, 0);
+    exit(0);
+  }
+  if(!await(EV_DONE, 1)){
+    if(count(EV_STEP) == 2)
+      return fail("basic", "sem_wait() did not return, although the count was 2");
+    return fail("basic", "the test stopped");
+  }
+  int status = -1;
+  wait(&status);
+  nkids = 0;
+  if(status != 0)
+    return fail("basic", "see the line above");
+  return pass("basic");
+}
+
+// ---------------------------------------------------------------------------- block
+
+#define ROUNDS 2000
+
+static int
+t_block(void)
+{
+  reset();
+
+  // 1. One waiter. It must sleep -- not spin -- and one post must wake it.
+  int s = sem_init(0);
+  if(s < 0)
+    return fail("block", "sem_init(0) failed");
+  if(child() == 0){
+    int r = sem_wait(s);
+    note(EV_GOT, r);
+    exit(0);
+  }
+  if(!await_waiters(s, 1, 200)){
+    if(count(EV_GOT))
+      return fail("block", "sem_wait() returned, although the count was 0");
+    return fail("block", "the waiter is not asleep on the semaphore: sem_wait() must sleep, not spin");
+  }
+  if(count(EV_GOT))
+    return fail("block", "sem_wait() returned, although the count was 0");
+  printf("one waiter: asleep\n");
+  sem_post(s);
+  if(!await(EV_GOT, 1))
+    return fail("block", "sem_post() did not wake the waiter");
+  if(semctl(SC_VALUE, s, 0) != 0)
+    return fail("block", "the waiter woke, but the count is not back to 0");
+  printf("one post: woke it\n");
+
+  // 2. Three waiters and one post: exactly one goes.
+  reset();
+  s = sem_init(0);
+  for(int i = 0; i < 3; i++)
+    if(child() == 0){
+      int r = sem_wait(s);
+      note(EV_GOT, r);
+      exit(0);
+    }
+  if(!await_waiters(s, 3, 200))
+    return fail("block", "three waiters did not all go to sleep");
+  sem_post(s);
+  if(!await(EV_GOT, 1))
+    return fail("block", "a post did not wake any of three waiters");
+  pause(20);
+  if(count(EV_GOT) != 1)
+    return fail("block", "one post let more than one waiter through");
+  if(semctl(SC_WAITERS, s, 0) != 2)
+    return fail("block", "after one post, the two other waiters are not asleep");
+  sem_post(s);
+  sem_post(s);
+  if(!await(EV_GOT, 3))
+    return fail("block", "two more posts did not wake the other two waiters");
+  printf("three waiters, three posts: one each\n");
+
+  // 3. A burst: six waiters asleep, then six posts in a row. Every waiter must get through, even
+  //    when the posts come faster than the waiters wake.
+  //    They join the line in the opposite order to the one they were made in.
+  reset();
+  s = sem_init(0);
+  int join[6];
+  for(int i = 0; i < 6; i++){
+    join[i] = sem_init(0);
+    if(child() == 0){
+      sem_wait(join[i]);
+      int r = sem_wait(s);
+      note(EV_GOT, r);
+      exit(0);
+    }
+  }
+  for(int i = 5; i >= 0; i--){
+    sem_post(join[i]);
+    if(!await_waiters(s, 6 - i, 200))
+      return fail("block", "six waiters did not all go to sleep");
+  }
+  semctl(SC_MYJITTER, 0, 0);          // the posts come back to back, faster than anyone wakes
+  for(int i = 0; i < 6; i++)
+    sem_post(s);
+  semctl(SC_MYJITTER, -1, 0);
+  if(!await(EV_GOT, 6)){
+    printf("burst: %d of 6 waiters got through, and the count is %d\n", count(EV_GOT),
+           semctl(SC_VALUE, s, 0));
+    return fail("block", "after six posts in a row, a waiter is still asleep although the count is not 0");
+  }
+  printf("six waiters, six posts in a row: all through\n");
+
+  // 4. Ping-pong. Two processes wake each other ROUNDS times. A wakeup that is lost leaves
+  //    both asleep for good.
+  reset();
+  int a = sem_init(0), b = sem_init(0);
+  if(child() == 0){
+    for(int i = 0; i < ROUNDS; i++){
+      sem_post(a);
+      sem_wait(b);
+      if(rnd() % 4 == 0)
+        spin(rnd() % 20000);
+    }
+    note(EV_DONE, 0);
+    exit(0);
+  }
+  rnd();
+  if(child() == 0){
+    for(int i = 0; i < ROUNDS; i++){
+      sem_wait(a);
+      if(rnd() % 4 == 0)
+        spin(rnd() % 20000);
+      sem_post(b);
+    }
+    note(EV_DONE, 1);
+    exit(0);
+  }
+  if(!await(EV_DONE, 2)){
+    state();
+    printf("ping-pong: stuck after %d semaphore calls, with %d process(es) asleep\n",
+           (int)st.ops, st.waiting);
+    return fail("block", "a wakeup was lost: both processes are asleep, waiting for each other");
+  }
+  printf("ping-pong: %d round trips\n", ROUNDS);
+  return pass("block");
+}
+
+// ---------------------------------------------------------------------------- mutex
+
+#define NMUTEX 4
+#define ITERS  60
+
+static int
+readcount(void)
+{
+  char buf[16];
+  int fd = open("semcount", 0);
+  if(fd < 0)
+    return -1;
+  int n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  buf[n < 0 ? 0 : n] = 0;
+  return atoi(buf);
+}
+
+static void
+writecount(int v)
+{
+  int fd = open("semcount", O_WRONLY | O_CREATE | O_TRUNC);
+  fprintf(fd, "%d\n", v);
+  close(fd);
+}
+
+static int
+t_mutex(void)
+{
+  reset();
+  writecount(0);
+  int m = sem_init(1);
+  if(m < 0)
+    return fail("mutex", "sem_init(1) failed");
+  for(int k = 0; k < NMUTEX; k++){
+    rnd();
+    if(child() == 0){
+      pause(1);
+      for(int i = 0; i < ITERS; i++){
+        sem_wait(m);
+        note(EV_ENTER, k);
+        int v = readcount();
+        spin(rnd() % 30000);
+        writecount(v + 1);
+        note(EV_EXIT, k);
+        sem_post(m);
+        spin(rnd() % 30000);
+      }
+      note(EV_DONE, k);
+      exit(0);
+    }
+  }
+  if(!await(EV_DONE, NMUTEX))
+    return fail("mutex", "the processes stopped: they are all waiting, and nobody is inside");
+  reap();
+  int n = readlog(), inside = 0, most = 0;
+  for(int i = 0; i < n; i++){
+    if(ev[i].code == EV_ENTER && ++inside > most)
+      most = inside;
+    if(ev[i].code == EV_EXIT)
+      inside--;
+  }
+  int c = readcount();
+  printf("count: %d of %d\n", c, NMUTEX * ITERS);
+  printf("most inside at once: %d\n", most);
+  unlink("semcount");
+  if(most > 1)
+    return fail("mutex", "two processes were inside the critical section at the same time");
+  if(c != NMUTEX * ITERS)
+    return fail("mutex", "updates were lost");
+  return pass("mutex");
+}
+
+// ---------------------------------------------------------------------------- kill
+
+static int
+t_kill(void)
+{
+  reset();
+  int s = sem_init(0);
+  int pid = child();
+  if(pid == 0){
+    int r = sem_wait(s);
+    note(EV_GOT, r);
+    exit(0);
+  }
+  if(!await_waiters(s, 1, 200))
+    return fail("kill", "the waiter is not asleep on the semaphore");
+  kill(pid);
+  pause(10);
+  sem_post(s);
+  // The killed process must leave without taking the post: the count stays 1.
+  int t;
+  for(t = 0; t < 200 && semctl(SC_WAITERS, s, 0) != 0; t++)
+    pause(1);
+  if(t == 200)
+    return fail("kill", "the killed process is still waiting");
+  int status;
+  wait(&status);
+  nkids = 0;
+  int v = semctl(SC_VALUE, s, 0);
+  printf("count after the post: %d\n", v);
+  if(v != 1)
+    return fail("kill", "the killed process took from the count: it must leave with nothing");
+  return pass("kill");
+}
+
+// ---------------------------------------------------------------------------- fifo
+
+#define NFIFO 6
+
+static int
+t_fifo(void)
+{
+  reset();
+  int go[NFIFO], order[NFIFO];
+  int target = sem_init(0);
+  for(int k = 0; k < NFIFO; k++)
+    go[k] = sem_init(0);
+  for(int k = 0; k < NFIFO; k++)
+    if(child() == 0){
+      sem_wait(go[k]);            // wait to be told to join the line
+      sem_wait(target);
+      note(EV_GOT, k);
+      exit(0);
+    }
+  // A random order, unlike the order the children were made in.
+  for(int i = 0; i < NFIFO; i++)
+    order[i] = i;
+  for(int i = NFIFO - 1; i > 0; i--){
+    int j = rnd() % (i + 1), t = order[i];
+    order[i] = order[j];
+    order[j] = t;
+  }
+  for(int i = 0; i < NFIFO; i++){
+    sem_post(go[order[i]]);
+    if(!await_waiters(target, i + 1, 200))
+      return fail("fifo", "a process that started to wait is not asleep on the semaphore");
+  }
+  printf("arrived:");
+  for(int i = 0; i < NFIFO; i++)
+    printf(" %d", order[i]);
+  printf("\n");
+  for(int i = 0; i < NFIFO; i++){
+    sem_post(target);
+    if(!await(EV_GOT, i + 1))
+      return fail("fifo", "a post did not let any waiter through");
+  }
+  int n = readlog(), j = 0, ok = 1;
+  printf("served: ");
+  for(int i = 0; i < n; i++)
+    if(ev[i].code == EV_GOT){
+      printf(" %d", ev[i].arg);
+      if(j < NFIFO && ev[i].arg != order[j])
+        ok = 0;
+      j++;
+    }
+  printf("\n");
+  if(!ok)
+    return fail("fifo", "the waiters were not served in the order they arrived");
+  return pass("fifo");
+}
+
+// ---------------------------------------------------------------------------- main
+
+int
+main(int argc, char *argv[])
+{
+  seed(argc, argv);
+  state();                             // exits with a message on a kernel without A-Lab 04
+  ev = malloc(SEMLOG * sizeof(struct semevent));
+  oldtick = settick(0);
+  settick(10);                         // a short tick, so processes really do interleave
+  int ok = 1;
+  if(argc < 2){
+    printf("cpus: %d\n", st.ncpu);
+    printf("semaphores: %d\n", st.nsem);
+    semctl(SC_RESET, 0, 0);
+    ok = health();
+  } else if(strcmp(argv[1], "basic") == 0)
+    ok = t_basic();
+  else if(strcmp(argv[1], "block") == 0)
+    ok = t_block();
+  else if(strcmp(argv[1], "mutex") == 0)
+    ok = t_mutex();
+  else if(strcmp(argv[1], "kill") == 0)
+    ok = t_kill();
+  else if(strcmp(argv[1], "fifo") == 0)
+    ok = t_fifo();
+  else if(strcmp(argv[1], "show") == 0){
+    settick(oldtick);
+    semshow(16);                       // no reset: show the machine as it is
+    exit(0);
+  } else if(strcmp(argv[1], "all") == 0){
+    ok = t_basic();
+    ok = t_block() && ok;
+    ok = t_mutex() && ok;
+    ok = t_kill() && ok;
+    ok = t_fifo() && ok;
+    printf(ok ? "all: ok\n" : "all: FAIL\n");
+  } else {
+    fprintf(2, "usage: semtest [basic | block | mutex | kill | fifo | all | show] [seed]\n");
+    settick(oldtick);
+    exit(1);
+  }
+  semctl(SC_RESET, 0, 0);
+  settick(oldtick);
+  exit(ok ? 0 : 1);
+}
+"""
+
+_COOPTEST = r"""// cooptest -- the cooperation instrument for A-Lab 04, Part B. Do not edit: GINI reads what it
+// prints. It calls the functions you write in user/coop.c from many processes at once.
+//
+//   cooptest                 all three
+//   cooptest turns [seed]    4 processes take 25 turns each, always in order 0, 1, 2, 3, 0, ...
+//   cooptest barrier [seed]  4 workers meet at a barrier 8 times; nobody leaves a round early
+//   cooptest philo [seed]    5 philosophers eat 20 meals each; neighbours never eat at once
+//   cooptest all [seed]      the same as no argument
+//
+// Every process notes what it does in GINI's log in the kernel (semctl), and the checks are made
+// on that log, in the order things happened. The parent only watches: if nothing happens for a
+// few seconds, the processes are stuck, and the test says so instead of hanging.
+//
+// Each subcommand ends with one verdict line, "<name>: ok" or "<name>: FAIL ...".
+
+#include "kernel/types.h"
+#include "user/user.h"
+#include "user/gini.h"
+#include "user/coop.h"
+#include "kernel/gini_sem.h"
+#include "user/semshow.h"
+
+#define EV_TURN    (EV_TEST + 10)   // arg: process number
+#define EV_ARRIVE  (EV_TEST + 11)   // arg: round * 16 + worker
+#define EV_LEAVE   (EV_TEST + 12)   // arg: round * 16 + worker
+#define EV_EAT     (EV_TEST + 13)   // arg: philosopher -- has both forks
+#define EV_FULL    (EV_TEST + 14)   // arg: philosopher -- done eating, about to put them down
+#define EV_DONE    (EV_TEST + 15)   // arg: process number -- finished
+
+#define NSEMS 32                    // GINI's NSEM (kernel/sem.h)
+#define STUCK 300                   // ticks (of 10 ms) with no semaphore activity: stuck
+
+static struct semstate st;
+static struct semevent *ev;
+
+static uint64 rng;
+static uint64
+rnd(void)
+{
+  rng ^= rng << 13;
+  rng ^= rng >> 7;
+  rng ^= rng << 17;
+  return rng;
+}
+
+static void
+seed(int argc, char **argv)
+{
+  rng = argc > 2 ? (uint64)atoi(argv[2]) : (uint64)uptime();
+  rng = rng * 2654435761UL + 88172645463325252UL;
+  if(rng == 0)
+    rng = 1;
+  for(int i = 0; i < 4; i++)
+    rnd();
+}
+
+static void
+spin(int n)
+{
+  for(volatile int i = 0; i < n; i++)
+    ;
+}
+
+static void
+state(void)
+{
+  if(semctl(SC_STATE, (uint64)&st, 0) != 0){
+    printf("cooptest: semctl failed -- is this GINI's A-Lab 04 kernel?\n");
+    exit(1);
+  }
+}
+
+static void
+note(int code, int arg)
+{
+  semctl(SC_LOG, code, arg);
+}
+
+static int
+count(int code)
+{
+  return semctl(SC_COUNT, code, 0);
+}
+
+// Wait until `n` EV_DONE events are in the log, unless nothing at all happens for STUCK ticks.
+static int
+await_done(int n)
+{
+  uint64 ops = (uint64)-1, nlog = 0;
+  int quiet = 0;
+  while(count(EV_DONE) < n){
+    state();
+    if(st.ops != ops || st.nlog != nlog){
+      ops = st.ops;
+      nlog = st.nlog;
+      quiet = 0;
+    } else if(++quiet > STUCK){
+      return 0;
+    }
+    pause(1);
+  }
+  return 1;
+}
+
+static int kids[64], nkids;
+
+static int
+child(void)
+{
+  rnd();                               // each child gets a different stream of random numbers
+  int pid = fork();
+  if(pid < 0){
+    printf("cooptest: fork failed\n");
+    exit(1);
+  }
+  if(pid > 0)
+    kids[nkids++] = pid;
+  return pid;
+}
+
+// Kill whatever is still running and collect every child, so the next test starts clean. A
+// killed child asleep on a semaphore leaves once it is woken, so keep posting to every semaphore
+// that has a process asleep on it. If a child still has not left after 3 s, nothing wakes it, and
+// waiting for it would hang this test too: say so, and leave it.
+static void
+reap(void)
+{
+  int left = 0;
+  for(int i = 0; i < nkids; i++)
+    kill(kids[i]);
+  for(int t = 0; t < 300; t++){
+    left = 0;
+    for(int i = 0; i < nkids; i++)
+      if(!semctl(SC_EXITED, kids[i], 0))
+        left++;
+    if(left == 0)
+      break;
+    for(int id = 0; id < NSEMS; id++)
+      if(semctl(SC_WAITERS, id, 0) > 0)
+        sem_post(id);
+    pause(1);
+  }
+  if(left > 0)
+    printf("%d process(es) could not be stopped: asleep on a semaphore, and nothing wakes them\n",
+           left);
+  for(int i = 0; i < nkids - left; i++)
+    wait(0);
+  nkids = 0;
+}
+
+#define JITTER 1000000              // spins (about 1 ms at most): see SC_JITTER in gini_sem.h
+
+static void
+reset(void)
+{
+  reap();
+  semctl(SC_RESET, 0, 0);
+  semctl(SC_JITTER, JITTER, 0);
+}
+
+static int
+health(void)
+{
+  state();
+  printf("negative counts: %d\n", (int)st.negative);
+  if(st.dropped)
+    printf("log full: %d events not recorded\n", (int)st.dropped);
+  return st.negative == 0;
+}
+
+static int
+fail(char *name, char *why)
+{
+  reap();
+  health();
+  printf("%s: FAIL %s\n", name, why);
+  return 0;
+}
+
+static int
+pass(char *name)
+{
+  reap();
+  if(!health()){
+    printf("%s: FAIL a semaphore's count went below zero\n", name);
+    return 0;
+  }
+  printf("%s: ok\n", name);
+  return 1;
+}
+
+static int
+stuck(char *name, char *why)
+{
+  state();
+  printf("stuck: %d process(es) asleep on a semaphore, and nothing has happened for 3 s\n",
+         st.waiting);
+  semshow(8);
+  return fail(name, why);
+}
+
+// ---------------------------------------------------------------------------- turns
+
+#define NTURNS 4
+#define ROUNDS 25
+
+static int
+t_turns(void)
+{
+  reset();
+  turns_init(NTURNS);
+  // Start the processes in a random order, so the order of fork() is no help.
+  int order[NTURNS];
+  for(int i = 0; i < NTURNS; i++)
+    order[i] = i;
+  for(int i = NTURNS - 1; i > 0; i--){
+    int j = rnd() % (i + 1), t = order[i];
+    order[i] = order[j];
+    order[j] = t;
+  }
+  for(int k = 0; k < NTURNS; k++){
+    int i = order[k];
+    if(child() == 0){
+      pause(1);                         // start together, on the next tick
+      for(int r = 0; r < ROUNDS; r++){
+        spin(rnd() % 200000);
+        turn_begin(i);
+        note(EV_TURN, i);
+        spin(rnd() % 50000);
+        turn_end(i);
+      }
+      note(EV_DONE, i);
+      exit(0);
+    }
+  }
+  if(!await_done(NTURNS))
+    return stuck("turns", "the processes stopped: every one of them is waiting for its turn");
+  reap();
+  int n = semctl(SC_READLOG, (uint64)ev, SEMLOG), j = 0, bad = -1;
+  for(int e = 0; e < n; e++)
+    if(ev[e].code == EV_TURN){
+      if(bad < 0 && ev[e].arg != j % NTURNS)
+        bad = j;
+      j++;
+    }
+  printf("turns: %d taken\n", j);
+  if(bad >= 0){
+    for(int e = 0, t = 0; e < n; e++)
+      if(ev[e].code == EV_TURN && t++ == bad){
+        printf("turn %d went to process %d, not %d\n", bad, ev[e].arg, bad % NTURNS);
+        break;
+      }
+    return fail("turns", "the processes did not take their turns in order");
+  }
+  if(j != NTURNS * ROUNDS)
+    return fail("turns", "some turns were not taken");
+  return pass("turns");
+}
+
+// ---------------------------------------------------------------------------- barrier
+
+#define NWORKERS 4
+#define NROUNDS  8
+
+static int
+t_barrier(void)
+{
+  reset();
+  barrier_init(NWORKERS);
+  if(child() == 0){                     // the coordinator
+    for(int r = 0; r < NROUNDS; r++)
+      barrier_coordinate();
+    note(EV_DONE, NWORKERS);
+    exit(0);
+  }
+  for(int i = 0; i < NWORKERS; i++)
+    if(child() == 0){
+      // Slow workers are slow everywhere, even inside your barrier_wait(): GINI makes their
+      // semaphore calls take up to 5 ms. Worker 0 is never slowed.
+      semctl(SC_MYJITTER, i == 0 ? 0 : 5000000, 0);
+      pause(1);
+      for(int r = 0; r < NROUNDS; r++){
+        spin(rnd() % (i == 0 ? 20000 : 600000)); // worker 0 is always the fast one
+        note(EV_ARRIVE, r * 16 + i);
+        barrier_wait(i);
+        note(EV_LEAVE, r * 16 + i);
+      }
+      note(EV_DONE, i);
+      exit(0);
+    }
+  if(!await_done(NWORKERS + 1))
+    return stuck("barrier", "the workers and the coordinator stopped, waiting for each other");
+  reap();
+  int n = semctl(SC_READLOG, (uint64)ev, SEMLOG);
+  int arrived[NROUNDS], left[NROUNDS], early = -1;
+  for(int r = 0; r < NROUNDS; r++)
+    arrived[r] = left[r] = 0;
+  for(int e = 0; e < n; e++){
+    int r = ev[e].arg / 16;
+    if(ev[e].code == EV_ARRIVE && r < NROUNDS)
+      arrived[r]++;
+    if(ev[e].code == EV_LEAVE && r < NROUNDS){
+      if(arrived[r] < NWORKERS && early < 0){
+        early = r;
+        printf("round %d: worker %d left when only %d of %d had arrived\n",
+               r, ev[e].arg % 16, arrived[r], NWORKERS);
+      }
+      left[r]++;
+    }
+  }
+  printf("rounds: %d\n", NROUNDS);
+  if(early >= 0)
+    return fail("barrier", "a worker left the barrier before every worker had arrived");
+  for(int r = 0; r < NROUNDS; r++)
+    if(left[r] != NWORKERS)
+      return fail("barrier", "not every worker left every round");
+  return pass("barrier");
+}
+
+// ---------------------------------------------------------------------------- philo
+
+#define NPHIL  5
+#define MEALS  20
+
+static int
+t_philo(void)
+{
+  reset();
+  philo_init(NPHIL);
+  for(int i = 0; i < NPHIL; i++)
+    if(child() == 0){
+      pause(1);
+      for(int m = 0; m < MEALS; m++){
+        spin(rnd() % 20000);            // think, briefly: hungry philosophers make deadlock likely
+        pickup(i);
+        note(EV_EAT, i);
+        spin(rnd() % 600000);
+        note(EV_FULL, i);
+        putdown(i);
+      }
+      note(EV_DONE, i);
+      exit(0);
+    }
+  if(!await_done(NPHIL)){
+    printf("meals eaten: %d of %d\n", count(EV_FULL), NPHIL * MEALS);
+    return stuck("philo", "the table deadlocked: every philosopher is waiting for a fork");
+  }
+  reap();
+  int n = semctl(SC_READLOG, (uint64)ev, SEMLOG);
+  int eating[NPHIL], meals = 0, clash = 0;
+  for(int i = 0; i < NPHIL; i++)
+    eating[i] = 0;
+  for(int e = 0; e < n; e++){
+    int i = ev[e].arg;
+    if(ev[e].code == EV_EAT){
+      if(!clash && (eating[(i + 1) % NPHIL] || eating[(i + NPHIL - 1) % NPHIL])){
+        clash = 1;
+        printf("philosopher %d started to eat while a neighbour was eating\n", i);
+      }
+      eating[i] = 1;
+    }
+    if(ev[e].code == EV_FULL){
+      eating[i] = 0;
+      meals++;
+    }
+  }
+  printf("meals eaten: %d of %d\n", meals, NPHIL * MEALS);
+  if(clash)
+    return fail("philo", "two neighbours ate at the same time");
+  if(meals != NPHIL * MEALS)
+    return fail("philo", "not every meal was eaten");
+  return pass("philo");
+}
+
+// ---------------------------------------------------------------------------- main
+
+int
+main(int argc, char *argv[])
+{
+  seed(argc, argv);
+  state();
+  ev = malloc(SEMLOG * sizeof(struct semevent));
+  int oldtick = settick(0);
+  settick(10);
+  int ok = 1;
+  char *what = argc > 1 ? argv[1] : "all";
+  if(strcmp(what, "turns") == 0)
+    ok = t_turns();
+  else if(strcmp(what, "barrier") == 0)
+    ok = t_barrier();
+  else if(strcmp(what, "philo") == 0)
+    ok = t_philo();
+  else if(strcmp(what, "all") == 0){
+    ok = t_turns();
+    ok = t_barrier() && ok;
+    ok = t_philo() && ok;
+    printf(ok ? "all: ok\n" : "all: FAIL\n");
+  } else {
+    fprintf(2, "usage: cooptest [turns | barrier | philo | all] [seed]\n");
+    settick(oldtick);
+    exit(1);
+  }
+  semctl(SC_RESET, 0, 0);
+  settick(oldtick);
+  exit(ok ? 0 : 1);
+}
+"""
+
+if (ROOT / "kernel" / "main.c").exists():
+    for _rel, _text in (("kernel/sem.h", _SEM_H), ("kernel/gini_sem.h", _GINI_SEM_H),
+                        ("kernel/gini_sem.c", _GINI_SEM_C), ("kernel/sem.c", _SEM_STARTER),
+                        ("user/coop.h", _COOP_H), ("user/coop.c", _COOP_STARTER),
+                        ("user/semshow.h", _SEMSHOW_H)):
+        write_must(_rel, _text)
+    regex_must("Makefile", r"(  \$K/gini_sys\.o \\\n)", r"\1  $K/sem.o \\\n  $K/gini_sem.o \\\n",
+               "$K/gini_sem.o")
+    for _name, _src in (("semtest", _SEMTEST), ("cooptest", _COOPTEST)):
+        add_uprog(_name, _src)
+        if f"$U/_{_name}\\" not in (ROOT / "Makefile").read_text():
+            failed.append(f"Makefile: _{_name} not registered")
+    # cooptest is built from GINI's cooptest.c AND the student's coop.c, so it needs its own rule;
+    # the default `_%: %.o` rule would link cooptest.o alone.
+    regex_must("Makefile", r"(\$U/_forktest: \$U/forktest\.o \$\(ULIB\)\n)",
+               "$U/_cooptest: $U/cooptest.o $U/coop.o $(ULIB)\n"
+               "\t$(LD) $(LDFLAGS) -T $U/user.ld -o $U/_cooptest $U/cooptest.o $U/coop.o $(ULIB)\n\n"
+               r"\1",
+               "$U/_cooptest: $U/cooptest.o $U/coop.o")
+
+    regex_must("kernel/main.c", r"(volatile static int started = 0;\n)",
+               r"\1" "\n"
+               "void gini_seminit(void);   // GINI A-Lab 04 (gini_sem.c). Here, not in defs.h: an A-Lab 01\n"
+               "void gini_semcpu(void);    // or 02 folder keeps its own defs.h.\n",
+               "void gini_seminit(void);")
+    regex_must("kernel/main.c", r"(    fileinit\(\);[^\n]*\n)",
+               r"\1    gini_seminit();     // GINI A-Lab 04: the semaphore table\n",
+               "    gini_seminit();")
+    regex_must("kernel/main.c", r"(\n)(  scheduler\(\);\n)",
+               r"\1  gini_semcpu();      // GINI A-Lab 04: count the harts\n\2",
+               "  gini_semcpu();")
+
+    regex_must("kernel/proc.c", r"(\n)(void\nsleep_prepare\(void \*chan\)\n\{\n  struct proc \*p = myproc\(\);\n)",
+               r"\1void gini_semjitter(int);   // GINI A-Lab 04 (gini_sem.c)\n\n\2"
+               r"\n  gini_semjitter(0);  // GINI A-Lab 04: the tests can widen the window before p->chan is set\n",
+               "gini_semjitter(0);")
 
 # 7) SLEEP AND WAKEUP — the Machine Lab's Sleep & Wakeup face (docs/design/sleep-lab.md).
 #

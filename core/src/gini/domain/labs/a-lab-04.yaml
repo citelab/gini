@@ -1,15 +1,340 @@
-# A-Lab 04 — a placeholder, on purpose.
+# A-Lab 04 — semaphores and cooperating processes.
+# The student handout (ALab04_Semaphores_Student.docx) lives with the course materials; the part
+# titles, every stage's label and the hints are its words. The handout is the contract: every
+# command, printed line, stage name and dependency below appears in it in exactly this form, so a
+# change here is a change to the handout too.
 #
-# It carries a TILE and nothing else. No topic and no description: what an assignment turns out
-# to be is a teaching decision that is not made yet, and a guess here would be announced to every
-# student the moment they opened the hub. `released: false` shows the card and refuses to arm it.
+# The model answer, and the tests that check this file against it, are kept privately, outside
+# this repository.
 #
-# The id is deliberately the LAB NUMBER rather than the topic. It is the folder name a student's
-# work lives in once anyone has armed it, so naming it after a subject would mean either renaming
-# it later — orphaning the work — or keeping a name the assignment outgrew.
-#
-# To release: add `summary`, `files`, `checks` and `grade`, extend the title with the topic,
-# and delete the `released` line.
+# The id stays `a-lab-04`: it is the student's folder name, and the placeholder that shipped before
+# this lab already created that folder on machines that armed nothing.
 id: a-lab-04
-title: "A-Lab 04"
-released: false
+title: "A-Lab 04 — semaphores and cooperating processes"
+summary: "Build semaphores in the kernel, make processes cooperate with them, then make them fair."
+
+parts:
+  A: "Semaphores"
+  B: "Cooperation"
+  C: "Fairness"
+
+# What "Run semtest" runs. The staged checks below are what grades.
+test_program: "semtest"
+test_timeout: 120
+
+# Six files, in the order of the handout's file figure. sem.c and coop.c are seeded; the rest are
+# the image's own copies. The two test programs are in the image's UPROGS, so no `uprog` entries,
+# and they are READ-ONLY: shown, never built from the student's copy. cooptest is linked with the
+# student's coop.c by the image's Makefile (gini_patch.py, section 8), so coop.c is linked into
+# the tree like any other student file and Load rebuilds _cooptest when it changes.
+files:
+  - name: sem.c
+    tree: kernel/sem.c
+    part: A
+    also: C
+    seed: |
+      // kernel/sem.c -- your semaphores. A-Lab 04.
+      //
+      // The table, sems[NSEM], is GINI's (kernel/gini_sem.c), and so are the four system calls that call
+      // these functions. Every semaphore's lock was initialised at boot. Read kernel/sem.h first.
+      //
+      // The starter versions do nothing and fail. Replace all four.
+
+      #include "types.h"
+      #include "param.h"
+      #include "memlayout.h"
+      #include "riscv.h"
+      #include "spinlock.h"
+      #include "proc.h"
+      #include "defs.h"
+      #include "sem.h"
+
+      // Find a free semaphore, give it the count value, and return its id. Return -1 if value is
+      // negative or no semaphore is free.
+      int
+      sem_init(int value)
+      {
+        return -1;
+      }
+
+      // Give semaphore id back to the table. Return -1 if it is not in use.
+      int
+      sem_free(int id)
+      {
+        return -1;
+      }
+
+      // Take one from the count of semaphore id. If the count is 0, sleep until there is one to take.
+      // Return -1 if the semaphore is not in use, or if the process is killed while it waits.
+      int
+      sem_wait(int id)
+      {
+        return -1;
+      }
+
+      // Put one back on the count of semaphore id, and wake the processes waiting on it.
+      // Return -1 if the semaphore is not in use.
+      int
+      sem_post(int id)
+      {
+        return -1;
+      }
+  - name: sem.h
+    tree: kernel/sem.h
+    part: A
+  - name: coop.c
+    tree: user/coop.c
+    part: B
+    seed: |
+      // user/coop.c -- your cooperation patterns. A-Lab 04, Part B. Read user/coop.h first.
+      //
+      // Use only the semaphore system calls: sem_init(), sem_wait(), sem_post() and sem_free().
+      // Keep the ids of the semaphores you create in the variables of this file.
+      //
+      // The starter versions do nothing, so nothing waits for anything. Replace them.
+
+      #include "kernel/types.h"
+      #include "user/user.h"
+      #include "user/gini.h"
+      #include "user/coop.h"
+
+      // ---------------------------------------------------------------------------- 1. turns
+
+      void
+      turns_init(int n)
+      {
+      }
+
+      void
+      turn_begin(int i)
+      {
+      }
+
+      void
+      turn_end(int i)
+      {
+      }
+
+      // ---------------------------------------------------------------------------- 2. barrier
+
+      void
+      barrier_init(int n)
+      {
+      }
+
+      void
+      barrier_wait(int i)
+      {
+      }
+
+      void
+      barrier_coordinate(void)
+      {
+      }
+
+      // ---------------------------------------------------------------------------- 3. philosophers
+
+      void
+      philo_init(int n)
+      {
+      }
+
+      void
+      pickup(int i)
+      {
+      }
+
+      void
+      putdown(int i)
+      {
+      }
+  - name: coop.h
+    tree: user/coop.h
+    part: B
+  - name: semtest.c
+    tree: user/semtest.c
+    part: A
+    readonly: true
+  - name: cooptest.c
+    tree: user/cooptest.c
+    part: B
+    readonly: true
+
+# The progress tracker: patterns over the student's source, not grades. Each is red on the starter
+# and green on the model answer (checked privately, against the model answer).
+# `(?s)\nf\s*\([^)]*\)\s*\{(?:(?!\n\}).)*` means "inside the body of function f" -- xv6 style, with
+# the closing brace in column 0, as in A-Lab 03.
+checks:
+  - id: init_free
+    part: A
+    label: "Find a semaphore that is not in use"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_init\s*\([^)]*\)\s*\{(?:(?!\n\}).)*(?:!\s*s->used|used\s*==\s*0|!\s*sems\s*\[[^\]]*\]\.used)'
+    hint: "Take the lock before you test whether a semaphore is in use. Two processes can call sem_init() at the same moment, and without the lock both could find the same free semaphore."
+  - id: init_negative
+    part: A
+    label: "Refuse a negative count"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_init\s*\([^)]*\)\s*\{(?:(?!\n\}).)*value\s*<\s*0'
+    hint: "If value is negative, sem_init() fails and returns -1."
+  - id: wait_loop
+    part: A
+    label: "Check the count again after every wakeup"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_wait\s*\([^)]*\)\s*\{(?:(?!\n\}).)*\bwhile\s*\('
+    hint: "While the count is 0, sleep and look again. A post wakes every waiter, and only one of them can take the count."
+  - id: wait_sleep
+    part: A
+    label: "Sleep instead of spinning"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_wait\s*\([^)]*\)\s*\{(?:(?!\n\}).)*sleep_prepare\s*\('
+    hint: "A waiter must give up the CPU. Read acquiresleep() in sleeplock.c."
+  - id: wait_killed
+    part: A
+    label: "A killed process stops waiting"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_wait\s*\([^)]*\)\s*\{(?:(?!\n\}).)*killed\s*\('
+    hint: "If this process has been killed, it stops waiting, releases the lock and returns -1. A killed waiter leaves and takes nothing."
+  - id: post_wakeup
+    part: A
+    label: "Wake the waiters"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_post\s*\([^)]*\)\s*\{(?:(?!\n\}).)*wakeup\s*\('
+    hint: "Add one to the count, and wake every process waiting on the semaphore. Use the address of the semaphore as the channel in both sleep_prepare() and wakeup(): the two must agree."
+  - id: turns_sems
+    part: B
+    label: "One semaphore per process"
+    where: user/coop.c
+    file: coop.c
+    match: '(?s)\nturns_init\s*\([^)]*\)\s*\{(?:(?!\n\}).)*sem_init\s*\('
+    hint: "Give each process a semaphore of its own. The one for process 0 starts at 1 and the others at 0."
+  - id: barrier_each
+    part: B
+    label: "A go semaphore for each worker"
+    where: user/coop.c
+    file: coop.c
+    match: '(?s)\nbarrier_init\s*\([^)]*\)\s*\{(?:(?!\n\}).)*\bfor\s*\((?:(?!\n\}).)*sem_init\s*\('
+    hint: "Give each worker a go semaphore of its own. With one shared go semaphore, a fast worker can take a slow worker's post and leave the next round early."
+  - id: philo_forks
+    part: B
+    label: "Take both forks"
+    where: user/coop.c
+    file: coop.c
+    match: '(?s)\npickup\s*\([^)]*\)\s*\{(?:(?!\n\}).)*sem_wait\s*\((?:(?!\n\}).)*sem_wait\s*\('
+    hint: "Philosopher i needs fork i on the left and fork (i + 1) % n on the right to eat. A fork is a semaphore that starts at 1."
+  - id: fair_ticket
+    part: C
+    label: "Take a ticket"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_wait\s*\([^)]*\)\s*\{(?:(?!\n\}).)*ticket\s*(\+\+|\+=)'
+    hint: "Each process that waits takes a ticket with the next number, the way a deli counter works."
+  - id: fair_serving
+    part: C
+    label: "Move the sign on to the next ticket"
+    where: kernel/sem.c
+    file: sem.c
+    match: '(?s)\nsem_wait\s*\([^)]*\)\s*\{(?:(?!\n\}).)*serving\s*(\+\+|\+=)'
+    hint: "When a process has had its turn, the sign moves on to the next number, and the next ticket must be woken to see that."
+
+# The staged checks: one command and one verdict each, in order, each run only when everything it
+# needs has passed (domain/lab_stages.py). `{seed}` is a fresh random number per Check, recorded
+# with the results. The model answer took about 5 s for A2, 9 s for A3, 14 s for C2 and under 2 s
+# for the rest, on 2 harts in QEMU: the timeouts leave a slow laptop plenty of room, and only cost
+# time when a kernel hangs. The tests never hang by design -- every one watches its children and
+# FAILs after 3 s without a semaphore call -- except a sem_wait() that spins, which the handout
+# describes.
+stages:
+  - id: "0"
+    part: ""
+    command: "semtest"
+    key: ""
+    needs: []
+    label: "the kernel boots, and GINI's semaphore table answers"
+    timeout: 60
+    expect: ["negative counts: 0"]
+    reject: ["log full:"]
+  - id: A1
+    part: A
+    command: "semtest basic"
+    key: basic
+    needs: [0]
+    label: "semtest basic (the table). Semaphores are created with their count, taken and given
+      back without waiting, freed, and every one in the table can be used."
+    timeout: 60
+  - id: A2
+    part: A
+    command: "semtest block {seed}"
+    key: block
+    needs: [A1]
+    label: "semtest block (sleep and wakeup). Waiters sleep instead of spinning, a post wakes
+      one of them, a burst of posts lets all of them through, and no wakeup is lost in thousands
+      of round trips."
+    timeout: 120
+  - id: A3
+    part: A
+    command: "semtest mutex {seed}"
+    key: mutex
+    needs: [A1]
+    label: "semtest mutex (mutual exclusion). A semaphore used as a lock lets one process in at
+      a time, and no update is lost."
+    timeout: 120
+  - id: A4
+    part: A
+    command: "semtest kill"
+    key: kill
+    needs: [A1]
+    label: "semtest kill (killed while waiting). A killed waiter leaves and takes nothing."
+    timeout: 60
+  - id: B1
+    part: B
+    command: "cooptest turns {seed}"
+    key: turns
+    needs: [A2, A3]
+    label: "cooptest turns (turns). Every turn is taken, in order."
+    timeout: 120
+  - id: B2
+    part: B
+    command: "cooptest barrier {seed}"
+    key: barrier
+    needs: [A2, A3]
+    label: "cooptest barrier (barrier). No worker leaves a round before every worker has arrived
+      in it."
+    timeout: 120
+  - id: B3
+    part: B
+    command: "cooptest philo {seed}"
+    key: philo
+    needs: [A2, A3]
+    label: "cooptest philo (dining philosophers). Neighbours never eat at once, and the table
+      never deadlocks."
+    timeout: 120
+  - id: C1
+    part: C
+    command: "semtest fifo {seed}"
+    key: fifo
+    needs: [A2]
+    label: "semtest fifo (first come, first served). Waiters are served in the order they
+      arrived."
+    timeout: 60
+  - id: C2
+    part: C
+    command: "semtest all {seed}"
+    key: all
+    needs: [A1, A2, A3, A4, C1]
+    label: "semtest all (every semaphore test). All of Part A's tests pass on the fair
+      semaphore."
+    timeout: 240
+  - id: C3
+    part: C
+    command: "cooptest all {seed}"
+    key: all
+    needs: [B1, B2, B3, C1]
+    label: "cooptest all (every pattern). All of Part B's patterns work on the fair semaphore."
+    timeout: 240
