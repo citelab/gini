@@ -434,6 +434,75 @@ def test_lock_contention_ratio():
     assert ls["kmem"].contention < 0.01
 
 
+# What a real two-hart kernel printed after `semtest basic` (A-Lab 04 image): fifteen names, one of
+# them with a space in it.
+_LOCK_DUMP_REAL = """LOCKCPU 8
+LOCK cons 30 0
+LOCK sleep lock 2152 0
+LOCK pr 8 0
+LOCK kmem 33128 0
+LOCK nextpid 4 0
+LOCK wait_lock 9 0
+LOCK proc 74370 6374
+LOCK time 9 0
+LOCK bcache 1314 0
+LOCK itable 31 0
+LOCK ftable 20 0
+LOCK sem 840 0
+LOCK semlog 170 0
+LOCK virtio_disk 162 50403
+LOCK log 34 0"""
+
+
+def test_a_lock_whose_name_has_a_space_is_not_dropped():
+    """xv6's sleeplock.c names its inner spinlock "sleep lock". A one-word pattern skipped the
+    line, so every sleep lock in the kernel was missing from the Lock Lab."""
+    ls = {l.name: l for l in parse_locks(_LOCK_DUMP_REAL)}
+    assert len(ls) == 15
+    assert ls["sleep lock"].acquires == 2152 and ls["sleep lock"].spins == 0
+    assert ls["virtio_disk"].spins == 50403 and ls["proc"].acquires == 74370
+
+
+def test_among_uncontended_locks_the_busiest_make_the_panel():
+    """Eight bars, and on a quiet machine nearly every lock has zero spins. Alphabetical order put
+    `ftable` (20 acquires) on the panel and `sleep lock` (2,152) off it."""
+    from gini.ui.lock_lab import bar_rows
+    shown = [r[0] for r in bar_rows(parse_locks(_LOCK_DUMP_REAL))]
+    assert shown[:2] == ["virtio_disk", "proc"]
+    assert shown[2:6] == ["kmem", "sleep lock", "bcache", "sem"]
+    assert "ftable" not in shown
+
+
+def test_the_note_counts_cores_only_when_the_kernel_said():
+    from gini.ui.lock_lab import cores_prefix
+    assert cores_prefix(2) == "2 cores  ·  "
+    assert cores_prefix(0) == ""            # unknown: a kernel without the hart count
+
+
+def test_the_kernel_reports_the_harts_that_booted_not_ncpu(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import test_sleep_lab as SLT
+    patcher = Path(__file__).resolve().parents[2] / "backend" / "xv6" / "gini_patch.py"
+    k = SLT._tree(tmp_path)
+    (k / "spinlock.h").write_text("// Mutual exclusion lock.\nstruct spinlock {\n"
+                                  "  struct cpu *cpu; // The cpu holding the lock.\n};\n")
+    (k / "spinlock.c").write_text("void\ninitlock(struct spinlock *lk, char *name)\n{\n}\n")
+    (k / "main.c").write_text("volatile static int started = 0;\n\nvoid\nmain()\n{\n"
+                              "    fileinit();         // file table\n\n  scheduler();\n}\n")
+    # main.c also switches on A-Lab 04's section, which this bare tree cannot satisfy (and says
+    # so in the exit code); only the lock edits are under test here.
+    subprocess.run([sys.executable, str(patcher), str(tmp_path)], capture_output=True,
+                   text=True, check=False)
+    spin = (k / "spinlock.c").read_text()
+    assert 'LOCKCPU %d\\n", gini_harts);' in spin and "NCPU)" not in spin.split("gini_lockdump")[1]
+    main = (k / "main.c").read_text()
+    assert "void gini_hartup(void);" in main
+    assert main.index("gini_hartup();") < main.index("  scheduler();")
+
+
 def test_parse_locks_empty_on_older_kernel():
     assert parse_locks("") == []
     assert parse_lock_cpus("") == 0

@@ -1056,10 +1056,23 @@ gini_lockreset(void)
   }
 }
 
+// The harts that actually booted. NCPU is only the most the kernel was compiled for (8), so
+// LOCKCPU used to say "8" on every machine, and the panel's one explanation that matters most --
+// on ONE core contention is impossible -- could never appear. main.c calls gini_hartup() on each
+// hart just before its scheduler starts. 0 means the hook is missing: LOCKCPU then says 0, and
+// the panel reads that as "unknown" rather than as a number of cores.
+int gini_harts;
+
+void
+gini_hartup(void)
+{
+  __sync_fetch_and_add(&gini_harts, 1);
+}
+
 void
 gini_lockdump(void)
 {
-  %(P)s("LOCKCPU %%d\\n", NCPU);
+  %(P)s("LOCKCPU %%d\\n", gini_harts);
   for(int i = 0; i < GINI_NLOCK; i++){
     if(gini_locks[i].name == 0)
       continue;
@@ -1068,6 +1081,15 @@ gini_lockdump(void)
   }
 }
 """ % {"P": PRINT}, "GINI-xv6: lock contention telemetry")
+
+# Each hart counts itself in on its way to the scheduler (see gini_hartup). Declared in main.c,
+# not defs.h: an A-Lab 01/02 folder keeps its own defs.h. main.c is no lab's file.
+regex_once("kernel/main.c", r"(\n)(  scheduler\(\);\n)",
+           r"\1  gini_hartup();      // GINI: count the harts that booted (LOCKCPU)\n\2",
+           "gini_hartup();")
+regex_once("kernel/main.c", r"(volatile static int started = 0;\n)",
+           r"\1void gini_hartup(void);   // GINI (spinlock.c)\n",
+           "void gini_hartup(void);")
 
 # 4) defs.h — prototypes for the non-static additions. The syscall counter/ring types + externs
 # live here (declared BEFORE syscall() uses them; defined in syscall.c).

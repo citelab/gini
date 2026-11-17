@@ -1151,7 +1151,10 @@ class LockStat:
         return (self.spins / self.acquires) if self.acquires else 0.0
 
 
-_LOCK_RE = re.compile(r"^LOCK (\S+) (\d+) (\d+)\s*$", re.M)
+# The name is everything between `LOCK ` and the two counters, read from the right: xv6 names
+# its sleep locks' inner spinlock "sleep lock", and a one-word pattern dropped that line -- the
+# panel never showed a lock the kernel takes thousands of times.
+_LOCK_RE = re.compile(r"^LOCK (.+?) (\d+) (\d+)\s*$", re.M)
 _LOCKCPU_RE = re.compile(r"LOCKCPU (\d+)")
 
 
@@ -1163,12 +1166,16 @@ def parse_locks(text: str) -> list:
     64. Empty list on a kernel without the telemetry."""
     out = [LockStat(name=m.group(1), acquires=int(m.group(2)), spins=int(m.group(3)))
            for m in _LOCK_RE.finditer(text or "")]
-    out.sort(key=lambda s: (-s.spins, s.name))
+    # Ties -- and on a quiet machine nearly every lock ties at zero spins -- go to the busiest:
+    # alphabetical order put `ftable` (20 acquires) on the panel and `sleep lock` (2,000) off it.
+    out.sort(key=lambda s: (-s.spins, -s.acquires, s.name))
     return out
 
 
 def parse_lock_cpus(text: str) -> int:
-    """The kernel's NCPU, so the Lock Lab can say 'contention is impossible on 1 core'."""
+    """The harts that booted, so the Lock Lab can say 'contention is impossible on 1 core'.
+    0 when unknown: no line, or a kernel whose main.c lacks the count. An image built before the
+    count printed NCPU here (8, whatever the machine's size), which reads as 8."""
     m = _LOCKCPU_RE.search(text or "")
     return int(m.group(1)) if m else 0
 

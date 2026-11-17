@@ -18,7 +18,7 @@ unit-testable without Qt; the controller polls `/locks` off the GUI thread.
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
@@ -41,6 +41,11 @@ def bar_rows(locks, limit: int = 8) -> list:
     worst = max((l.contention for l in top), default=0.0)
     return [(l.name, l.acquires, l.spins, l.contention,
              (l.contention / worst) if worst else 0.0) for l in top]
+
+
+def cores_prefix(ncpu: int) -> str:
+    """"2 cores  ·  " for the note, or nothing when the kernel did not say how many booted."""
+    return f"{ncpu} cores  ·  " if ncpu > 1 else ""
 
 
 class ContentionBars(QWidget):
@@ -69,7 +74,7 @@ class ContentionBars(QWidget):
             p.drawText(self.rect(), Qt.AlignCenter,
                        "no lock telemetry — rebuild the xv6 image")
             return
-        lblw, numw = 96, 150
+        lblw, numw = 112, 200     # room for "sleep lock" and "74,370 acq"
         for i, (name, acq, spins, ratio, frac) in enumerate(self._rows):
             y = 6 + i * self.ROW_H
             p.setFont(QFont("monospace", 9))
@@ -83,11 +88,14 @@ class ContentionBars(QWidget):
             p.setBrush(QColor(t.accent_for("red" if hot else "green")))
             p.drawRoundedRect(QRectF(track.left(), track.top(),
                                      max(2.0, track.width() * frac), track.height()), 3, 3)
-            p.setFont(QFont("monospace", 8))
+            small = QFont("monospace", 8)
+            p.setFont(small)
             p.setPen(QColor(t.muted))
-            p.drawText(int(track.right()) + 8, y, numw, self.ROW_H - 6,
+            room = max(40, self.width() - int(track.right()) - 14)
+            p.drawText(int(track.right()) + 8, y, room, self.ROW_H - 6,
                        Qt.AlignVCenter | Qt.AlignLeft,
-                       f"{ratio:5.2f} spins/acq   {acq:,} acq")
+                       QFontMetrics(small).elidedText(f"{ratio:5.2f} spins/acq   {acq:,} acq",
+                                                      Qt.ElideRight, room))
 
 
 class LockLab(QDialog):
@@ -140,7 +148,7 @@ class LockLab(QDialog):
         cap.setStyleSheet(_scss(f"color:{t.muted};font-size:12px;border:none;"))
         bl.addWidget(cap)
         self._bars = ContentionBars(theme)
-        bl.addWidget(self._bars)
+        bl.addWidget(self._bars, 1)       # the bars take the height, not the caption
         root.addWidget(box, 1)
 
         hint = QLabel(
@@ -203,11 +211,11 @@ class LockLab(QDialog):
                 "Size to L (2 cores) or XL (4) in the Inspector, then Reboot.")
         elif worst.contention >= HOT:
             self._note.setText(
-                f"{ncpu} cores  ·  hottest lock: {worst.name} at {worst.contention:.2f} "
+                f"{cores_prefix(ncpu)}hottest lock: {worst.name} at {worst.contention:.2f} "
                 f"spins per acquire — cores are spending real time waiting on it.")
         else:
             self._note.setText(
-                f"{ncpu} cores  ·  nothing is badly contended (worst: {worst.name} at "
+                f"{cores_prefix(ncpu)}nothing is badly contended (worst: {worst.name} at "
                 f"{worst.contention:.2f} spins/acq). Add parallel work to create pressure.")
 
     def _reset(self) -> None:
