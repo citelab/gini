@@ -45,6 +45,8 @@ DEFAULT_PREFIX = 0x17
 COMMANDS = {
     "a": ("arm_trap", True),      # PREFIX a <kind>\n   — arm the one-shot trap capture (§11)
     "r": ("board_reset", False),  # PREFIX r            — #4 boardreset, homeless until now
+    "s": ("sleep_dump", False),   # PREFIX s            — the Sleep Lab's dump (gini_sleepdump)
+    "x": ("sleep_reset", False),  # PREFIX x            — zero the Sleep Lab's counters
 }
 
 NEWLINE = 0x0a

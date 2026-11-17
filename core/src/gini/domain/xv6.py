@@ -1171,3 +1171,96 @@ def parse_lock_cpus(text: str) -> int:
     """The kernel's NCPU, so the Lock Lab can say 'contention is impossible on 1 core'."""
     m = _LOCKCPU_RE.search(text or "")
     return int(m.group(1)) if m else 0
+
+
+# -- sleep and wakeup (gini_sleepdump; the Sleep Lab's feed) ------------------------------------ #
+@dataclass
+class Sleeper:
+    """A process with a channel set: asleep on it, or armed (sleep_prepare() has run and sleep()
+    has not put it to sleep yet). `seconds` is how long it has been asleep -- None while armed, and
+    on a kernel whose proc.c has no GINI hooks, which cannot time a sleep. `gap` is how long before
+    it armed itself a wakeup on the same channel had found nobody (None: there was none)."""
+    pid: int
+    name: str
+    asleep: bool
+    chan: int
+    index: int
+    channel: str
+    seconds: float | None = None
+    gap: float | None = None
+
+
+@dataclass
+class ChanStat:
+    """One sleep channel's counters since the last Reset. `name` is the registry's name for it;
+    "other" collects every unregistered channel (pipes, mostly)."""
+    index: int
+    name: str
+    sleeps: int = 0
+    wakeups: int = 0
+    empty: int = 0          # wakeups that found nobody armed or asleep on the channel
+    woken: int = 0          # processes those wakeups woke
+    resleeps: int = 0       # woken processes that slept on it again almost at once
+    longest: float = 0.0    # seconds: the longest single sleep so far
+
+    @property
+    def activity(self) -> int:
+        return self.sleeps + self.wakeups
+
+    @property
+    def resleep_ratio(self) -> float:
+        """Back to sleep per process woken. High means wakeups rouse many processes for something
+        only one of them can have -- the reason the wait loop is a `while`."""
+        return (self.resleeps / self.woken) if self.woken else 0.0
+
+
+@dataclass
+class SleepView:
+    """`ok` is False on a kernel without the telemetry (an image older than the Sleep Lab).
+    `hooks` is False when the kernel's proc.c is a student copy without GINI's hooks: the sleepers
+    are still listed, from the process table, but nothing is timed or counted."""
+    ok: bool = False
+    hooks: bool = False
+    now: float = 0.0
+    sleepers: list = field(default_factory=list)
+    channels: list = field(default_factory=list)
+
+
+_SLEEPNOW_RE = re.compile(r"^SLEEPNOW (\d+) (\d+)\s*$", re.M)
+_SLEEPHOOKS_RE = re.compile(r"^SLEEPHOOKS ([01])\s*$", re.M)
+_SLEEPER_RE = re.compile(
+    r"^SLEEPER (\d+) (asleep|armed) (0x[0-9a-fA-F]+|\d+) (\d+) (-?\d+) (\d+) ?(.*?)\s*$", re.M)
+_SLEEPCH_RE = re.compile(
+    r"^SLEEPCH (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (.+?)\s*$", re.M)
+
+
+def parse_sleep(text: str) -> SleepView:
+    """`gini_sleepdump` (Ctrl-W s) -> SleepView. Times arrive in the kernel's timebase (10 MHz)
+    and leave as seconds. Sleepers come longest asleep first, armed ones last. An empty view on an
+    older build, like `parse_locks`."""
+    text = text or ""
+    m = _SLEEPNOW_RE.search(text)
+    if not m:
+        return SleepView()
+    now_t, hz = int(m.group(1)), int(m.group(2)) or 10_000_000
+    hm = _SLEEPHOOKS_RE.search(text)
+    hooks = bool(hm and hm.group(1) == "1")
+    channels = [ChanStat(index=int(c.group(1)), name=c.group(8), sleeps=int(c.group(2)),
+                         wakeups=int(c.group(3)), empty=int(c.group(4)), woken=int(c.group(5)),
+                         resleeps=int(c.group(6)), longest=int(c.group(7)) / hz)
+                for c in _SLEEPCH_RE.finditer(text)]
+    names = {c.index: c.name for c in channels}
+    sleepers = []
+    for r in _SLEEPER_RE.finditer(text):
+        chan = int(r.group(3), 0)
+        idx = int(r.group(6))
+        name = names.get(idx, "other")
+        since, gap = int(r.group(4)), int(r.group(5))
+        asleep = r.group(2) == "asleep"
+        sleepers.append(Sleeper(
+            pid=int(r.group(1)), name=r.group(7) or "?", asleep=asleep, chan=chan, index=idx,
+            channel=f"0x{chan:x}" if name == "other" else name,
+            seconds=(max(0, now_t - since) / hz) if (asleep and since) else None,
+            gap=(gap / hz) if gap >= 0 else None))
+    sleepers.sort(key=lambda s: (not s.asleep, -(s.seconds or 0.0), s.pid))
+    return SleepView(ok=True, hooks=hooks, now=now_t / hz, sleepers=sleepers, channels=channels)

@@ -4815,6 +4815,268 @@ if (ROOT / "kernel" / "kalloc.c").exists():
         if f"$U/_{_name}\\" not in (ROOT / "Makefile").read_text():
             failed.append(f"Makefile: _{_name} not registered")
 
+# 7) SLEEP AND WAKEUP — the Machine Lab's Sleep & Wakeup face (docs/design/sleep-lab.md).
+#
+# A kernel waits in two ways. A CPU can SPIN on a lock, which the lock telemetry (3f) shows. Or a
+# process can SLEEP: give up the CPU until somebody calls wakeup() on the channel it chose. Sleeping
+# is everywhere in xv6 and completely invisible -- a sleeping process looks exactly like one with
+# nothing to do, and a sleep/wakeup bug (a lost wakeup, the wrong channel, an `if` that should be a
+# `while`) shows up only as a machine that stops making progress.
+#
+# Where the numbers live, and why there. NOT in struct proc: A-Lab 02 students own proc.h and
+# proc.c, so a new field would break every A-Lab 02 folder. GINI keeps its own array, indexed by
+# proc SLOT (p - proc), in its own file. proc.c gets three one-line hooks, declared in proc.c itself
+# (an A-Lab 01 folder keeps its own defs.h). A student's proc.c simply has no hooks: the counters
+# stay zero and the dump says so (SLEEPHOOKS 0), which the panel explains. Nothing fails to build.
+#
+# The channel names come from the sleep-channel registry (4h6), which lives in trap.c -- an A-Lab 01
+# file. So the index lookup is added NEXT to the registry, and gini_sleep.c references it weakly:
+# an older student trap.c without it counts every channel under "other" instead of not linking.
+#
+# Times are r_time(), the 10 MHz timebase, not ticks: GINI's tick is long (0.5 s by default) and
+# most sleeps are far shorter than one.
+append_once("kernel/trap.c", """
+// GINI-xv6 SLEEP LAB: the registry's index for a channel (-1 if it is not registered), and the
+// name of entry i (0 past the end). gini_sleep.c counts per entry; it references these weakly.
+int
+gini_chan_index(void *chan)
+{
+  if(chan == 0)
+    return -1;
+  for(int i = 0; i < gini_nchan; i++)
+    if(chan >= gini_chans[i].lo && chan < gini_chans[i].hi)
+      return i;
+  return -1;
+}
+
+char*
+gini_chan_nth(int i)
+{
+  return (i >= 0 && i < gini_nchan) ? gini_chans[i].name : 0;
+}
+""", "GINI-xv6 SLEEP LAB: the registry's index")
+
+_GINI_SLEEP_C = """// kernel/gini_sleep.c -- GINI's sleep and wakeup telemetry, for the Machine Lab's Sleep & Wakeup
+// face. Not student code.
+//
+// Three hooks in proc.c feed it: sleep_prepare() (a process arms itself on a channel), sleep()
+// (it really goes to sleep, and later comes back) and wakeup() (somebody wakes a channel). From
+// those it keeps, per channel: how many sleeps, how many wakeups, how many of those found nobody,
+// how many processes they woke, how many went straight back to sleep on the same channel, and the
+// longest single sleep. Per process slot: when it went to sleep, and how long before it armed
+// itself a wakeup on the same channel had found nobody -- the lost-wakeup hint.
+//
+// Ctrl-W s prints it (gini_sleepdump), Ctrl-W x zeroes the counters (gini_sleepreset).
+
+#include "types.h"
+#include "param.h"
+#include "memlayout.h"
+#include "riscv.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "defs.h"
+
+#define GSL_NCH     16      // registry entries counted (the registry holds 12), the last is "other"
+#define GSL_OTHER   (GSL_NCH - 1)
+#define GSL_EMPTY   64      // the last wakeup that found nobody, remembered by channel address
+#define GSL_HZ      10000000
+#define GSL_RESLEEP (GSL_HZ / 1000)   // back to sleep within 1 ms of running again
+
+struct gini_sleeper {
+  uint64 since;      // r_time() when it went to sleep; 0 while it is not asleep
+  void *chan;        // the channel it went to sleep on
+  void *wokefrom;    // the channel a wakeup() last woke it from
+  uint64 wokeat;     // when it ran again after that wakeup
+  long gap;          // when it armed: time since a wakeup on that channel found nobody; -1: none
+};
+
+struct gini_chanstat {
+  uint64 sleeps;     // times a process really went to sleep on it
+  uint64 wakeups;    // calls to wakeup() on it
+  uint64 empty;      // wakeups that found nobody armed or asleep on it
+  uint64 woken;      // processes those wakeups woke
+  uint64 resleeps;   // processes woken from it that slept on it again almost at once
+  uint64 longest;    // the longest single sleep, in r_time() units
+};
+
+struct gini_sleeper gini_sleepers[NPROC];
+struct gini_chanstat gini_chanstats[GSL_NCH];
+static struct { void *chan; uint64 at; } gini_emptyat[GSL_EMPTY];
+static int gini_sleephooks;   // set the first time a hook runs: this kernel's proc.c has them
+
+extern struct proc proc[NPROC];
+
+// The registry (trap.c). Weak: an A-Lab 01 student's trap.c may be older than these.
+int gini_chan_index(void *chan) __attribute__((weak));
+char *gini_chan_nth(int i) __attribute__((weak));
+
+static int
+chidx(void *chan)
+{
+  int i = gini_chan_index ? gini_chan_index(chan) : -1;
+  return (i >= 0 && i < GSL_OTHER) ? i : GSL_OTHER;
+}
+
+static int
+ehash(void *chan)
+{
+  uint64 a = (uint64)chan;
+  return (int)((a >> 3) ^ (a >> 11)) & (GSL_EMPTY - 1);
+}
+
+// sleep_prepare(chan), with p->lock held and p->chan just set.
+void
+gini_sleep_prepare(struct proc *p, void *chan)
+{
+  struct gini_sleeper *s = &gini_sleepers[p - proc];
+  uint64 now = r_time();
+  int e = ehash(chan);
+
+  gini_sleephooks = 1;
+  if(s->wokefrom == chan && s->wokeat && now - s->wokeat < GSL_RESLEEP)
+    __sync_fetch_and_add(&gini_chanstats[chidx(chan)].resleeps, 1);
+  s->wokefrom = 0;
+  s->wokeat = 0;
+  s->gap = gini_emptyat[e].chan == chan ? (long)(now - gini_emptyat[e].at) : -1;
+}
+
+// sleep(), with p->lock held, state SLEEPING, just before sched().
+void
+gini_sleep_begin(struct proc *p)
+{
+  struct gini_sleeper *s = &gini_sleepers[p - proc];
+  s->chan = p->chan;
+  s->since = r_time();
+  __sync_fetch_and_add(&gini_chanstats[chidx(s->chan)].sleeps, 1);
+}
+
+// sleep(), back from sched(): woken, or killed.
+void
+gini_sleep_end(struct proc *p)
+{
+  struct gini_sleeper *s = &gini_sleepers[p - proc];
+  uint64 now = r_time();
+  if(s->since){
+    struct gini_chanstat *c = &gini_chanstats[chidx(s->chan)];
+    uint64 d = now - s->since;
+    if(d > c->longest)
+      c->longest = d;           // a race here can only lose a near-equal maximum
+  }
+  s->since = 0;
+  if(s->wokefrom)
+    s->wokeat = now;            // "back to sleep" is measured from when it ran again
+}
+
+// wakeup(chan) found p armed or asleep on chan, with p->lock held.
+void
+gini_woke(struct proc *p, void *chan)
+{
+  struct gini_sleeper *s = &gini_sleepers[p - proc];
+  s->wokefrom = chan;
+  s->wokeat = r_time();         // replaced by the time it runs, if it had really gone to sleep
+}
+
+// The end of every wakeup(chan): n processes were armed or asleep on it.
+void
+gini_wakeup(void *chan, int n)
+{
+  struct gini_chanstat *c = &gini_chanstats[chidx(chan)];
+  __sync_fetch_and_add(&c->wakeups, 1);
+  if(n){
+    __sync_fetch_and_add(&c->woken, n);
+    return;
+  }
+  __sync_fetch_and_add(&c->empty, 1);
+  int e = ehash(chan);
+  gini_emptyat[e].chan = chan;
+  gini_emptyat[e].at = r_time();
+}
+
+void
+gini_sleepreset(void)
+{
+  memset(gini_chanstats, 0, sizeof(gini_chanstats));
+  memset(gini_emptyat, 0, sizeof(gini_emptyat));
+}
+
+// Names last: a channel name has spaces in it.
+//   SLEEPNOW <now> <hz>
+//   SLEEPHOOKS <0|1>
+//   SLEEPER <pid> <asleep|armed> <chan> <since> <gap> <index> <process name>
+//   SLEEPCH <index> <sleeps> <wakeups> <empty> <woken> <resleeps> <longest> <channel name>
+void
+gini_sleepdump(void)
+{
+  PRINTF("SLEEPNOW %lu %d\\n", r_time(), GSL_HZ);
+  PRINTF("SLEEPHOOKS %d\\n", gini_sleephooks);
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    void *chan = p->chan;
+    if(p->state == UNUSED || chan == 0)
+      continue;
+    struct gini_sleeper *s = &gini_sleepers[p - proc];
+    int asleep = p->state == SLEEPING;
+    PRINTF("SLEEPER %d %s %p %lu %ld %d %s\\n", p->pid, asleep ? "asleep" : "armed", chan,
+           asleep ? s->since : 0, gini_sleephooks ? s->gap : -1L, chidx(chan), p->name);
+  }
+  for(int i = 0; i < GSL_NCH; i++){
+    char *name = i == GSL_OTHER ? "other" : (gini_chan_nth ? gini_chan_nth(i) : 0);
+    if(name == 0)
+      continue;
+    struct gini_chanstat *c = &gini_chanstats[i];
+    PRINTF("SLEEPCH %d %lu %lu %lu %lu %lu %lu %s\\n", i, c->sleeps, c->wakeups, c->empty,
+           c->woken, c->resleeps, c->longest, name);
+  }
+}
+"""
+
+# Telemetry, not a lab: a moved anchor SKIPS (and says so in the build log) rather than stopping the
+# image, as the lock telemetry does. But the object file and the hooks must come together -- a hook
+# without gini_sleep.o in the Makefile does not link -- so the hooks are applied only once the
+# Makefile carries it.
+regex_once("Makefile", r"(  \$K/proc\.o \\\n)", r"\1  $K/gini_sleep.o \\\n", "$K/gini_sleep.o")
+_mk = ROOT / "Makefile"
+if _mk.exists() and "$K/gini_sleep.o" in _mk.read_text():
+    write_must("kernel/gini_sleep.c", _GINI_SLEEP_C.replace("PRINTF", PRINT))
+
+    # The three hooks. Declared here rather than in defs.h (an A-Lab 01 folder keeps its own defs.h).
+    regex_once("kernel/proc.c", r"(\n// Register current process as waiting for wakeups on chan\.\n)",
+               "\n// GINI-xv6 SLEEP LAB (gini_sleep.c): what sleep and wakeup did, for the Sleep & Wakeup face.\n"
+               "void gini_sleep_prepare(struct proc *, void *);\n"
+               "void gini_sleep_begin(struct proc *);\n"
+               "void gini_sleep_end(struct proc *);\n"
+               "void gini_woke(struct proc *, void *);\n"
+               "void gini_wakeup(void *, int);\n"
+               r"\1",
+               "GINI-xv6 SLEEP LAB (gini_sleep.c)")
+    regex_once("kernel/proc.c", r"(    panic\(\"sleep_prepare: zero chan\"\);\n  p->chan = chan;\n)",
+               r"\1  gini_sleep_prepare(p, chan);   // GINI: the Sleep Lab\n",
+               "gini_sleep_prepare(p, chan);")
+    regex_once("kernel/proc.c", r"(    p->state = SLEEPING;\n)(    sched\(\);\n)",
+               r"\1    gini_sleep_begin(p);   // GINI: the Sleep Lab\n\2"
+               r"    gini_sleep_end(p);     // GINI\n",
+               "gini_sleep_begin(p);")
+    regex_once("kernel/proc.c",
+               r"(wakeup\(void \*chan\)\n\{\n(?:.*\n)*?  struct proc \*p;\n)"
+               r"((?:.*\n)*?      p->chan = 0;\n)"
+               r"((?:.*\n)*?    release\(&p->lock\);\n  \}\n)(\})",
+               r"\1  int gn = 0;   // GINI: processes this wakeup found\n"
+               r"\2      gini_woke(p, chan);   // GINI: the Sleep Lab\n      gn++;\n"
+               r"\3  gini_wakeup(chan, gn);   // GINI\n\4",
+               "gini_wakeup(chan, gn);")
+
+    # The dump and the reset, behind the command mux (4f5): two free printable selectors.
+    regex_once("kernel/console.c",
+               r"(    if\(c == 'r'\)\{ gini_boardreset\(\); release\(&cons\.lock\); return; \}[^\n]*\n)",
+               r"\1    if(c == 's'){ gini_obs_begin(); gini_sleepdump(); gini_obs_end();"
+               r" release(&cons.lock); return; }  // the Sleep Lab's dump\n"
+               r"    if(c == 'x'){ gini_sleepreset(); release(&cons.lock); return; }"
+               r"  // zero the Sleep Lab's counters\n",
+               "gini_sleepdump();")
+    regex_once("kernel/console.c", r"(\n#include \"defs\.h\"\n)",
+               r"\1\nvoid gini_sleepdump(void);    // GINI-xv6 SLEEP LAB (gini_sleep.c)\n"
+               r"void gini_sleepreset(void);\n",
+               "void gini_sleepdump(void);")
+
 print("GINI xv6 patch:")
 for a in applied:
     print("  applied:", a)

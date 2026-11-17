@@ -927,6 +927,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(_SERIAL.dump(b"\x05"), ctype="text/plain")   # Ctrl-E -> gini_faultdump()
         elif path == "/locks":                        # Ctrl-L -> gini_lockdump() (contention)
             self._send(_SERIAL.dump(b"\x0c"), ctype="text/plain")
+        elif path == "/sleep":                        # Ctrl-W s -> gini_sleepdump() (the Sleep Lab)
+            self._send(_SERIAL.dump(b"\x17s"), ctype="text/plain")
         elif path == "/programs":
             # What THIS agent will accept. The agent ships inside the image, so after a program is
             # added to the source the running container still holds the old list until the image is
@@ -1158,6 +1160,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"ok": ok, "log": log})
         elif u.path == "/locks/reset":                # Ctrl-Z -> zero the lock counters
             self._send({"ok": bool(_SERIAL.write("\x1a"))})
+        elif u.path == "/sleep/reset":                # Ctrl-W x -> zero the Sleep Lab's counters
+            self._send({"ok": bool(_SERIAL.write("\x17x"))})
         elif u.path == "/console/clear":              # blank the Screen (baseline to now)
             _SERIAL.clear_console()
             self._send({"ok": True})

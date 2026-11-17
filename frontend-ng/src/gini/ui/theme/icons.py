@@ -24,6 +24,9 @@ _BODY: dict[str, str] = {
     # a padlock — spinlock contention (Lock Lab)
     "locks": '<rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/>'
              '<path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/><path d="M12 14v2.5"/>',
+    # a crescent moon with a small "z" — a process asleep on a channel (Sleep Lab)
+    "sleep": '<path d="M15.5 19.2A8 8 0 0 1 9.3 4.6a6.6 6.6 0 0 0 9.5 9.2 8 8 0 0 1-3.3 5.4z"/>'
+             '<path d="M14 4.5h4l-4 4.5h4"/>',
     # IEC power symbol — a broken ring with a vertical bar (reboot / reset a machine)
     "power": '<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>',
     # dynamic routing: two circulating arrows — routers exchanging routes (RIP/OSPF)

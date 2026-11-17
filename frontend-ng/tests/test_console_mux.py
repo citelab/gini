@@ -117,11 +117,11 @@ def test_single_byte_commands_still_fire():
 # -- interleave: a human keystroke lands inside an agent sequence ------------- #
 def test_human_byte_between_prefix_and_selector_aborts_cleanly():
     d = dec()
-    # agent: PREFIX 'r' (board_reset). human 'x' slips in after the prefix.
-    ev = d.feed_bytes(bytes([PREFIX, ord("x"), ord("r")]))
-    # no wrong command; the human 'x' reaches console; the bare 'r' is just a letter.
+    # agent: PREFIX 'r' (board_reset). human 'q' (not a selector) slips in after the prefix.
+    ev = d.feed_bytes(bytes([PREFIX, ord("q"), ord("r")]))
+    # no wrong command; the human 'q' reaches console; the bare 'r' is just a letter.
     assert cmds(ev) == []
-    assert console(ev) == b"xr"
+    assert console(ev) == b"qr"
 
 
 def test_human_digit_mid_argument_aborts_without_firing():

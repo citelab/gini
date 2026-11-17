@@ -367,12 +367,18 @@ class Band:
 # student on the wrong theme. The largest set that stays apart (ΔE >= 26) in every theme is eight:
 # blue, green, purple, amber, pink, slate, orange, red.
 #
-# Eight hues and twelve faces, so some must repeat, and the bands decide where. A band is a layer
+# Eight hues and thirteen faces, so some must repeat, and the bands decide where. A band is a layer
 # of the machine and is what a student navigates by, so the rule is: **distinct within a band, and
 # never repeated in an adjacent one**. Every repeat here is at least two bands apart — far enough
 # that they are never on screen as neighbours. test_machine_lab_hues.py enforces all of it,
 # including that every theme actually defines every hue used rather than silently falling back to
 # its primary accent.
+#
+# A ninth hue, `teal`, joined when the Sleep & Wakeup face made the kernel band six wide: six
+# kernel hues plus the three of the band above it is nine, one more than the eight. Teal is apart
+# from every other hue in every theme EXCEPT `cyan` (6.1 in Brand), so cyan must never be used here
+# while teal is; the hue test enforces that pair. Teal went to the Syscall Builder, which freed
+# purple for the kernel band, the one arrangement that moves only one existing face.
 LAYERS = (
     Band("THIS ASSIGNMENT", (
         Face("usercode", "compile", "User Code",
@@ -390,7 +396,7 @@ LAYERS = (
              "Live histogram (last 60s) + strace-style trace.", "blue", "_open_syscall_lab"),
         Face("builder", "builder", "Syscall Builder",
              "Add your own syscall — real kernel edits generated.",
-             "purple", "_open_syscall_builder"),
+             "teal", "_open_syscall_builder"),
         Face("fingerprints", "fingerprints", "Process Fingerprints",
              "Each process's behavioral signature + a classify game.",
              "amber", "_open_fingerprints"),
@@ -406,6 +412,8 @@ LAYERS = (
              "Live trap mix (syscall/fault/timer) + step one.", "orange", "_open_trap_lab"),
         Face("locks", "locks", "Locks & Contention",
              "Which locks cores are spinning on, live.", "pink", "_open_lock_lab"),
+        Face("sleep", "sleep", "Sleep & Wakeup",
+             "Who is asleep, on what, and for how long.", "purple", "_open_sleep_lab"),
     ), boundary="supervisor mode  ·  the kernel"),
     Band("HARDWARE", (
         Face("cpu", "cpu", "CPU & Registers",
@@ -812,6 +820,17 @@ class MachineLab(QDialog):
         self._locklab = LockLab(self, self.theme, device=self.device,
                                 provider=self.state.provider, live=self.live)
         self._locklab.show(); self._locklab.raise_()
+
+    def _open_sleep_lab(self) -> None:
+        """Sleeping: the other way a kernel waits, and the invisible one. Reads only the kernel's
+        own sleep and wakeup, so it works on every lab's kernel; a student proc.c without GINI's
+        hooks still lists who is asleep, and the panel says why nothing is counted."""
+        self._retire("_sleeplab")
+        self._rec("note_lab_open", self._dev_name(), "Sleep")
+        from .sleep_lab import SleepLab
+        self._sleeplab = SleepLab(self, self.theme, device=self.device,
+                                  provider=self.state.provider, live=self.live)
+        self._sleeplab.show(); self._sleeplab.raise_()
 
     def _open_trap_lab(self) -> None:
         # The Traps room: the live trap-cause histogram + feed (observational front), with a
@@ -1923,12 +1942,13 @@ class MachineLab(QDialog):
         cards.get("builder") and cards["builder"].set_stat("generate kernel edits →")
         cards.get("memory") and cards["memory"].set_stat("page tables & faults →")
         cards.get("storage") and cards["storage"].set_stat("inodes & the log →")
+        cards.get("sleep") and cards["sleep"].set_stat("who is waiting, on what →")
 
     #: The faces this hub opens. Each is its own top-level window now, so Qt no longer closes them
     #: with their parent — closing the Machine Lab and leaving six orphaned faces on screen would
     #: be a surprising change to behaviour that has always worked the other way.
-    _FACES = ("_sclab", "_locklab", "_traplab", "_journey", "_memory", "_storage", "_console",
-              "_sched_win")
+    _FACES = ("_sclab", "_locklab", "_sleeplab", "_traplab", "_journey", "_memory", "_storage",
+              "_console", "_sched_win")
 
     def closeEvent(self, e) -> None:  # noqa: N802
         self._closed = True            # stop any in-flight worker from signalling a dead dialog

@@ -42,7 +42,8 @@ KIND = {
     # Modeless and standalone: opened with show(), lives alongside the canvas for as long as the
     # student wants it, and is therefore something they must be able to switch back to.
     "MachineLab": WINDOW, "Xv6Console": WINDOW, "TrapLab": WINDOW, "MemoryLab": WINDOW,
-    "StorageLab": WINDOW, "SyscallLab": WINDOW, "LockLab": WINDOW, "RouterLab": WINDOW,
+    "StorageLab": WINDOW, "SyscallLab": WINDOW, "LockLab": WINDOW, "SleepLab": WINDOW,
+    "RouterLab": WINDOW,
     "ZooLab": WINDOW, "CpuJourney": WINDOW, "TerminalView": WINDOW, "MarkDialog": WINDOW,
     # User Code is the one a student keeps open the LONGEST: it is what they alt-tab back to from
     # their editor after every edit, to see the checklist move. The hub above it is a window for
