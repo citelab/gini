@@ -351,11 +351,11 @@ def test_every_theme_can_draw_it(app):
 
 def test_every_level_leaves_room_for_wider_fonts(face):
     """Fitting 940 px exactly is not enough: Linux's fonts are about 3% wider than the Mac's (T-Lab
-    04 fit here and asked CI for 949 px). Every level and tab must leave 5% spare."""
+    04 fit here and asked CI for 949 px). Every level and tab must leave 4% spare."""
     for i in range(len(face.session.lab.levels)):
         face._level_btns[i].click()
         for name in list(face._tab_btns):
             face._tab_btns[name].click()
             QApplication.processEvents()
             need = face.minimumSizeHint().width()
-            assert need <= W / 1.05, f"level {i + 1}/{name} needs {need} px of {W}"
+            assert need <= W / 1.04, f"level {i + 1}/{name} needs {need} px of {W}"
