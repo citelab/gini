@@ -464,3 +464,16 @@ def test_the_disk_map_is_whole_on_level_4_after_visiting_the_other_levels(face):
     card = m.parentWidget()
     assert m.isVisible() and card.height() >= m.height(), (
         f"the disk map's card is {card.height()} px for a {m.height()} px map")
+
+
+def test_every_level_leaves_room_for_wider_fonts(face):
+    """Fitting 940 px exactly is not enough: Linux's fonts are about 3% wider than the Mac's, and
+    level 2's goals row asked CI for 949 px while it fit here. Every level and tab must leave
+    5% spare."""
+    for i in range(len(face.session.lab.levels)):
+        face._pick_level(i)
+        for name in list(face._tab_btns):
+            face._tab_btns[name].click()
+            QApplication.processEvents()
+            need = face.minimumSizeHint().width()
+            assert need <= W / 1.05, f"level {i + 1}/{name} needs {need} px of {W}"

@@ -1317,6 +1317,36 @@ if _QT:
             p.drawText(self.rect(), int(self.alignment()) | Qt.AlignVCenter,
                        fm.elidedText(self.text(), Qt.ElideRight, self.width()))
 
+    class _Chip(QLabel):
+        """A goal chip that gives way when the goals row runs out of room.
+
+        Level 2 has four goals beside Undo · Reset · Random · Try every block, and on Linux's
+        fonts that row asked for 949 px of a 940 px window. A chip keeps its full text whenever
+        there is room (every platform at 940 px so far); when there is not, it elides the end
+        and the tooltip, which already carries the whole goal, says the rest.
+        """
+
+        def __init__(self, text: str) -> None:
+            super().__init__(text)
+            self._full = text
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+        def minimumSizeHint(self) -> QSize:
+            full = super().minimumSizeHint()
+            return QSize(min(full.width(), 72), full.height())
+
+        def sizeHint(self) -> QSize:
+            return QLabel(self._full, styleSheet=self.styleSheet()).sizeHint()
+
+        def resizeEvent(self, e) -> None:
+            super().resizeEvent(e)
+            room = self.contentsRect().width()
+            fm = QFontMetrics(self.font())
+            text = (self._full if fm.horizontalAdvance(self._full) <= room
+                    else fm.elidedText(self._full, Qt.ElideRight, room))
+            if text != self.text():
+                self.setText(text)
+
     def _wrap(text: str = "", css: str = "") -> QLabel:
         lbl = QLabel(text)
         lbl.setWordWrap(True)
@@ -2726,7 +2756,7 @@ if _QT:
             _clear_layout(self._chips_row)
             self._chips = {}
             for c in goal_chips(lv, s.achieved):
-                lbl = QLabel(("✓ " if c.done else "○ ") + c.text)
+                lbl = _Chip(("✓ " if c.done else "○ ") + c.text)
                 lbl.setToolTip(c.tooltip + (" (done)" if c.done else " (not yet)"))
                 lbl.setStyleSheet(_scss(
                     "font-size:12px;padding:3px 9px;border-radius:12px;"
