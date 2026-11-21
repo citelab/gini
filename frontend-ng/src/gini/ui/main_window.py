@@ -116,6 +116,8 @@ class MainWindow(QMainWindow):
     # a link's cut/restore commands have run at every end: (link_id, up, why, ends that refused).
     # Emitted from the worker that sent them, received on the GUI thread (_on_link_applied).
     _link_applied = Signal(str, bool, str, list)
+    #: The GINI server pill's check (`_check_server`) runs on a worker; this carries the answer back.
+    _server_checked = Signal(dict)
 
     def __init__(self, app) -> None:
         super().__init__()
@@ -278,6 +280,7 @@ class MainWindow(QMainWindow):
         # the seam for whatever shows it next, since the state it reports is still real.
         self.mode_indicator.model_clicked.connect(self._open_settings)   # Model pill -> Settings
         self.mode_indicator.user_clicked.connect(self._user_menu)   # User pill -> the user menu
+        self.mode_indicator.server_clicked.connect(self._show_server_details)
         # Ask GINI messages live in the right-hand pane only; the Console is for
         # build/run logs, so we deliberately do NOT mirror chat into it.
         self._update_status()
@@ -375,6 +378,86 @@ class MainWindow(QMainWindow):
         from .about_dialog import AboutDialog
         AboutDialog(self, self.theme).exec()
 
+    # -- the GINI server pill ------------------------------------------------ #
+    def _check_server(self) -> None:
+        """Ask, off the GUI thread, whether the course server can be reached (services/tc_reach).
+        No course server configured: the pill is hidden and nothing is asked."""
+        url = (getattr(self.ctx.settings, "tc_url", "") or "").strip()
+        if not url:
+            self._server_last = {}
+            self.mode_indicator.set_server("")
+            return
+        if self._server_checking:
+            return
+        self._server_checking = True
+        from ..services import tc_reach
+
+        def work():
+            try:
+                r = tc_reach.probe(url)
+            except Exception as e:                       # noqa: BLE001 — a diagnosis never blocks
+                host, port = tc_reach.target(url)
+                r = {"configured": True, "online": False, "reason": "", "host": host,
+                     "port": port, "error": str(e), "checked": 0}
+            self._server_checked.emit(r)
+        run_off_gui(self, work)
+
+    def _on_server_checked(self, r: dict) -> None:
+        from ..services import tc_reach
+        self._server_checking = False
+        was = self._server_last.get("online") if self._server_last else None
+        self._server_last = r
+        if not r.get("configured"):
+            self.mode_indicator.set_server("")
+            return
+        online = bool(r.get("online"))
+        net = tc_reach.network_line(r)
+        tip = (f"The course server ({r.get('host')}) can be reached · network: {net}."
+               if online else f"{tc_reach.advice(r)}\nNetwork: {net}.")
+        self.mode_indicator.set_server(tc_reach.pill_text(r), online,
+                                       tip + "\nClick for details, and Copy for a report.")
+        if was is not None and was != online:
+            self.ctx.log(f"GINI server: {r.get('host')} is "
+                         f"{'reachable again' if online else 'not reachable'} · {net}.",
+                         "ok" if online else "error")
+        if online and was is False:
+            # It came back — the moment a student connects the VPN. Send what is owed, and if
+            # the code being recorded was armed while the server was out of reach, fetch what
+            # the arm reply would have brought: its questions and which lab it is.
+            self.proof_strip.flush_outbox()
+            rec = self.proof_recorder
+            if rec.armed and not rec.activity_title:
+                self.proof_strip.fetch_questions()
+
+    def _show_server_details(self) -> None:
+        """What the pill found, in full, with Copy — so a report arrives with the facts."""
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        from ..services import tc_reach
+        from ..version import gini_version
+        r = self._server_last
+        if not r:
+            self._check_server()
+            QMessageBox.information(self, "GINI server", "Checking the course server…")
+            return
+        online = bool(r.get("online"))
+        text = tc_reach.details(r, gini_version())
+        head = ("The course server can be reached from this computer." if online
+                else tc_reach.advice(r))
+        box = QMessageBox(self)
+        box.setWindowTitle("GINI server")
+        box.setIcon(QMessageBox.Information if online else QMessageBox.Warning)
+        box.setText(head)
+        box.setInformativeText(text)
+        copy = box.addButton("Copy", QMessageBox.ActionRole)
+        again = box.addButton("Check again", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is copy:
+            QApplication.clipboard().setText(f"{head}\n\n{text}")
+        elif box.clickedButton() is again:
+            self._check_server()
+
     def _open_settings(self) -> None:
         from ..app.paths import PERSISTED_KEYS, save_config
         from .settings_dialog import SettingsDialog
@@ -397,6 +480,7 @@ class MainWindow(QMainWindow):
         self._wire_llm()                               # re-create / clear the LLM loop
         if getattr(self.ctx, "teaching_center", None) is not None:
             self._connect_teaching_center()            # already signed in → pick up the new details
+        self._check_server()                           # a new course server address, or none
         # …but saving Settings does NOT sign you in. Signing in stays an explicit act (the User pill).
         self._rebill()                                 # prices may have changed
         save_config({k: getattr(s, k) for k in PERSISTED_KEYS})
@@ -1555,6 +1639,15 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         self._persist_current_project()      # never lose the active project's work / chat
+        # Quitting while recording is a pause. The bookmark is already on disk (it is written at
+        # arm, so a crash leaves it too); this adds the `stopped` mark, so the chain says when
+        # recording ended instead of just going quiet, and the next launch offers Resume.
+        try:
+            if self.proof_recorder.armed:
+                self.proof_recorder.pause()
+        except Exception as e:               # noqa: BLE001 — never block a quit
+            self.ctx.log(f"Could not pause the recording on quit ({e}); it resumes from the "
+                         f"code as usual.", "info")
         # Close the labs. They are top-level windows with no Qt parent now (ui/windowing), so
         # nothing destroys them with this one, and Qt counts each as a primary window — leaving
         # one open means quitOnLastWindowClosed never fires and gBuilder keeps running behind a
@@ -1957,6 +2050,19 @@ class MainWindow(QMainWindow):
         self._outbox_timer.setInterval(5 * 60 * 1000)
         self._outbox_timer.timeout.connect(self.proof_strip.flush_outbox)
         self._outbox_timer.start()
+        # The GINI server pill: can the course server be reached from here, and if not, why.
+        # Checked shortly after launch, every ninety seconds after that, after Settings is saved,
+        # and at once whenever the strip fails to reach the server — so a failed hand-in and the
+        # pill never disagree for long. See services/tc_reach.py.
+        self._server_last: dict = {}
+        self._server_checking = False
+        self._server_checked.connect(self._on_server_checked)
+        _QTimer.singleShot(1500, self._check_server)
+        self._server_timer = _QTimer(self)
+        self._server_timer.setInterval(90 * 1000)
+        self._server_timer.timeout.connect(self._check_server)
+        self._server_timer.start()
+        self.proof_strip.serverTrouble.connect(self._check_server)
         # The strip re-emits the recorder's own change callback, so this one connection covers
         # arming, answering, resuming, pausing and handing in — every transition the panel
         # renders. It is made here rather than beside the dock because the strip is built later.

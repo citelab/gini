@@ -509,19 +509,21 @@ def test_pausing_keeps_the_code_as_a_bookmark(rec):
     assert rec.store.paused() == _ticket.parse(CODE).code      # survives a restart
 
 
-def test_arming_anything_spends_the_bookmark(rec):
-    """One bookmark. Resuming clears it because the code is armed again; arming a DIFFERENT code
-    clears it because that is how a student says they are not coming back to the first one — it
-    is still on disk, and typing it later still resumes it."""
+def test_the_bookmark_is_always_the_code_last_recorded(rec):
+    """One bookmark, and it is the code being recorded — written at arm, not only at Pause, so a
+    quit or a crash leaves it too. It is SHOWN only while nothing is armed. Arming a different
+    code moves it there: the first chain is still on disk, and typing it later still resumes it."""
     other = mint(lambda n: bytes((i * 7 + 3) % 256 for i in range(n))).pretty
     rec.arm(CODE)
+    assert rec.status()["paused"] == "", "nothing is offered back while it is being recorded"
     rec.pause()
     rec.arm(other)
     assert rec.status()["paused"] == ""
+    assert rec.store.paused() == _ticket.parse(other).code
     rec.pause()
     assert rec.status()["paused"] == other
-    rec.arm(other)
-    assert rec.status()["paused"] == "" and rec.store.paused() == ""
+    rec.arm(CODE)
+    assert rec.store.paused() == _ticket.parse(CODE).code
 
 
 def test_a_bookmark_into_a_finished_code_is_not_a_pause(rec, tmp_path):

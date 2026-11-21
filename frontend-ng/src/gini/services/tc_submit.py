@@ -34,6 +34,7 @@ from __future__ import annotations
 import gzip
 import http.client
 import json
+import socket
 import ssl
 import time
 import urllib.error
@@ -172,6 +173,26 @@ def _wrap(e: Exception, url: str = "") -> Unreachable:
             f"the connection was closed while your work was being sent ({cause}). The server "
             f"was reached, so this is usually the network between you and it — a VPN that "
             f"dropped, or a proxy in front of the course server refusing a large upload.")
+    # The everyday case off campus, and until this the student was shown the operating system's
+    # words: "<urlopen error [Errno 8] nodename nor servname provided, or not known>", or on
+    # Windows "getaddrinfo failed". Both mean the server's NAME did not resolve, and the course
+    # server's name resolves only on the campus network or its VPN. Say that. The words match
+    # the toolbar's GINI server pill (services/tc_reach), so a report quoting one matches the other.
+    host = urllib.parse.urlsplit(url).hostname if url else ""
+    host = host or "the course server"
+    if isinstance(cause, socket.gaierror):
+        return Unreachable(
+            f"this computer cannot find {host}, which is only known on the campus network or "
+            f"its VPN. Connect to the campus VPN and try again ({cause})")
+    if isinstance(cause, TimeoutError) or "timed out" in str(e):     # socket.timeout too
+        return Unreachable(
+            f"{host} did not answer in time. If you are off campus, check that the campus VPN "
+            f"is connected — a half-connected VPN looks exactly like this; if it is, the server "
+            f"may be down")
+    if isinstance(cause, ConnectionRefusedError):
+        return Unreachable(
+            f"{host} turned the connection away — its machine is up but the course server is "
+            f"not answering. Tell your instructor ({cause})")
     return Unreachable(str(e))
 
 

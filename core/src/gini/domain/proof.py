@@ -457,7 +457,9 @@ class ChainStore:
     # One code at a time, in a file beside the chains rather than in the app's settings, so it
     # lives with the work it points at and survives a restart the same way the chain does. A
     # student who pauses, closes the laptop and opens gBuilder the next day is shown the paused
-    # code and a Resume button instead of being asked to find the printout again.
+    # code and a Resume button instead of being asked to find the printout again. Written at
+    # arm as well as at Pause, so recording that stopped any other way — a quit, a crash — is
+    # offered back the same way (see `services.proof_recorder.arm`).
     def mark_paused(self, ticket: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.paused_path().write_text(str(ticket), encoding="utf-8")

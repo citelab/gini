@@ -19,7 +19,8 @@ middle of a lab and carry on another day, and the chain always allowed it — it
 its code, and arming the code again appends to it. What was missing was the word: the button said
 *Cancel*, which to a student means "throw it away". So the two ways out of recording are now
 `pause()`, which writes a `stopped` mark and keeps the code as a bookmark the strip offers back as
-*Resume*, and `generate_proof()`, which hands the work in and CLOSES the code: a finished recording
+*Resume* (a quit or a crash while recording leaves the same bookmark — it is written at arm), and
+`generate_proof()`, which hands the work in and CLOSES the code: a finished recording
 cannot be reopened, and a student who wants to do the lab again needs a new code. A lab can be
 declared *one sitting* by the teacher, in which case the arm reply says so and there is no Pause.
 """
@@ -209,9 +210,15 @@ class ProofRecorder:
         # (`note_activity`), which follows this. Cleared here so a code armed offline is not
         # graded as the previous code's lab.
         self._gini_lab = ""
-        # Arming anything — this code or another — spends the bookmark. Pausing is "I will be
-        # back for this one"; typing a different code is the answer to that.
-        self.store.clear_paused()
+        # The bookmark is written HERE, at arm, not only by Pause. It used to be written only by
+        # Pause, so a student who quit gBuilder, or had it crash, or had the laptop restart for
+        # an update while recording, came back to an empty Record box: the work was safe on disk
+        # and retyping the code resumed it, but nothing on screen said so, and some took a new
+        # code. Reported as "pause and resume is unreliable". Now the code being recorded is
+        # always the bookmark; it is shown only while nothing is armed (`paused_code`), so it
+        # appears exactly when recording stopped without a hand-in, however it stopped. Arming a
+        # different code replaces it — that chain stays on disk, as it always did.
+        self.store.mark_paused(tk.code)
         # Pausable until the course server says otherwise. Reset per arm so one lab's one-sitting
         # rule does not follow the student into the next lab armed offline.
         self._pausable = True

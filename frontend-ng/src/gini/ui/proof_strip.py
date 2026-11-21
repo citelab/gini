@@ -35,6 +35,7 @@ Thin by design: every decision belongs to `services.proof_recorder`, which is te
 """
 from __future__ import annotations
 
+import html
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -86,6 +87,7 @@ class ProofStrip(QWidget):
     questionsFetched = Signal(dict)         # a re-ask came back ({} == still unreachable)
     answerFirst = Signal()                  # they chose to answer before handing in
     graded = Signal()                       # pre-submit measuring finished, back on the GUI thread
+    serverTrouble = Signal()                # the course server could not be reached just now
 
     def __init__(self, theme, recorder, parent=None) -> None:
         super().__init__(parent)
@@ -259,24 +261,36 @@ class ProofStrip(QWidget):
                 # A certificate problem is NOT a flaky network: retrying will never help, and
                 # recording locally under a code we could not verify hides a real misconfiguration.
                 answer = {"ok": False, "error": str(e)}
-            except tc_submit.Unreachable:
-                answer = {}                       # empty == could not ask, NOT a refusal
+            except tc_submit.Unreachable as e:
+                # Could not ask, which is NOT a refusal. Marked rather than empty, so the strip
+                # can say why — the reason is the whole of what a student off the VPN needs.
+                answer = {"unreachable": True, "error": str(e)}
             self.armChecked.emit(typed, answer)
 
         run_off_gui(self, work)
 
     def _on_arm_checked(self, typed: str, answer: dict) -> None:
-        if answer and not answer.get("ok"):
+        if not answer or answer.get("unreachable"):
+            # The code may be perfectly good and the network not. Recording locally is the only
+            # answer that cannot cost a student their evening — but it used to be all the strip
+            # said ("recording locally"), so a student off the VPN worked a whole lab without its
+            # questions and never learned the VPN was why. Now it names the reason, and the
+            # questions follow by themselves once the server is reachable (the GINI server pill
+            # turning green fetches them — MainWindow._on_server_checked).
+            self.serverTrouble.emit()
+            if self._arm_locally(typed, keep_hint=True):
+                why = str(answer.get("error") or "") if answer else ""
+                self._say("Recording on this computer — your work is safe. The course server "
+                          "could not be reached"
+                          + (f": {html.escape(why)}" if why else "")
+                          + ". This lab's questions will arrive by themselves once it can be "
+                          "(the GINI server pill at the top right turns green).", bad=True)
+            return
+        if not answer.get("ok"):
             self._say(answer.get("error", "That code cannot be used."), bad=True)
             self.refresh(keep_hint=True)
             if answer.get("reason") == tc_submit.UPDATE_GINI:
                 self._ask_to_update(answer)
-            return
-        if not answer:
-            # The code may be perfectly good and the wifi bad. Recording locally is the only
-            # answer that cannot cost a student their evening.
-            self._say("Could not reach the course server — recording locally.", bad=False)
-            self._arm_locally(typed, keep_hint=True)
             return
         if self._arm_locally(typed, keep_hint=True):
             self._announce(answer)
@@ -338,21 +352,28 @@ class ProofStrip(QWidget):
                 answer = tc_submit.check_code(url, tk.code)
             except (tc_submit.Insecure, tc_submit.Untrusted) as e:
                 answer = {"ok": False, "error": str(e)}
-            except tc_submit.Unreachable:
-                answer = {}
+            except tc_submit.Unreachable as e:
+                answer = {"unreachable": True, "error": str(e)}
             self.questionsFetched.emit(answer)
 
         run_off_gui(self, work)
 
     def _on_questions_fetched(self, answer: dict) -> None:
-        if not answer:
-            self._say("Still could not reach the course server.", bad=True)
+        if not answer or answer.get("unreachable"):
+            self.serverTrouble.emit()
+            why = str(answer.get("error") or "") if answer else ""
+            self._say("Still could not reach the course server"
+                      + (f": {html.escape(why)}" if why else "."), bad=True)
             return
         if not answer.get("ok"):
             self._say(answer.get("error", "The course server refused that code."), bad=True)
             return
         from ..domain import lab_questions as _lq
         qs = _lq.questions_from(answer)
+        # The rest of the arm reply too, not just the questions. A code armed out of reach, or
+        # resumed after a restart, has no record of which lab it is for — and hand-in grades
+        # that lab (`gini_lab`), so without this it fell back to guessing from the recording.
+        self._note_reply(answer)
         if self.recorder is not None and hasattr(self.recorder, "note_questions"):
             self.recorder.note_questions(qs)
         if qs:
@@ -378,22 +399,10 @@ class ProofStrip(QWidget):
         """
         activity = str(answer.get("activity") or "").strip()
         title = str(answer.get("title") or "").strip()
-        brief = str(answer.get("brief") or "").strip()
         # Kept, not just printed. The tutor asks the Teaching Center what the course says about a
         # question, and knowing WHICH lab is being recorded is what separates "your course mentions
         # this somewhere" from "this is the lab you are being marked on".
-        if self.recorder is not None and hasattr(self.recorder, "note_activity"):
-            # And which GINI lab it is, so hand-in checks that one — sent like the questions.
-            self.recorder.note_activity(activity, title, brief,
-                                        gini_lab=str(answer.get("gini_lab") or ""))
-        # Whether the teacher allows this lab to be paused. Absent from an older server's reply,
-        # and absent means pausable — that is what every lab was before the option existed.
-        pausable = bool(answer.get("pausable", True))
-        if self.recorder is not None and hasattr(self.recorder, "note_pausable"):
-            self.recorder.note_pausable(pausable)
-        # The lab's questions ride in on the same reply — prompts only; the server strips the key.
-        # Kept on the recorder rather than emitted onward, so the panel reads one source of truth
-        # and a restart or a resumed code finds the same place to look.
+        pausable = self._note_reply(answer)
         if self.recorder is not None and hasattr(self.recorder, "note_questions"):
             from ..domain import lab_questions as _lq
             qs = _lq.questions_from(answer)
@@ -414,6 +423,24 @@ class ProofStrip(QWidget):
                       f"course is set to <b>{mine}</b>.{due}{sitting}", bad=True)
         else:
             self._say(f"Recording for {what}.{due}{sitting}")
+
+    def _note_reply(self, answer: dict) -> bool:
+        """Keep what an arm reply says about the lab — which activity, which GINI lab, whether it
+        may be paused — on the recorder. Shared by arming and by a re-ask for the questions, which
+        gets the same reply. Returns whether the lab is pausable."""
+        activity = str(answer.get("activity") or "").strip()
+        title = str(answer.get("title") or "").strip()
+        brief = str(answer.get("brief") or "").strip()
+        if self.recorder is not None and hasattr(self.recorder, "note_activity"):
+            # And which GINI lab it is, so hand-in checks that one — sent like the questions.
+            self.recorder.note_activity(activity, title, brief,
+                                        gini_lab=str(answer.get("gini_lab") or ""))
+        # Whether the teacher allows this lab to be paused. Absent from an older server's reply,
+        # and absent means pausable — that is what every lab was before the option existed.
+        pausable = bool(answer.get("pausable", True))
+        if self.recorder is not None and hasattr(self.recorder, "note_pausable"):
+            self.recorder.note_pausable(pausable)
+        return pausable
 
     @staticmethod
     def _due_phrase(answer: dict) -> str:
@@ -672,6 +699,8 @@ class ProofStrip(QWidget):
 
         if answer.get("reason") in outbox.SETTLED:
             outbox.forget(receipt)               # an earlier attempt already landed
+        if answer.get("unreachable"):
+            self.serverTrouble.emit()            # the pill re-checks now, so it agrees with this
 
         if answer.get("insecure"):
             self._say(f"Not sent · the course server address is not HTTPS · "

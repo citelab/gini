@@ -101,7 +101,8 @@ def test_an_unreachable_server_still_records_locally():
     strip = _strip(course="cs4480-fall26")
     strip._on_arm_checked(CODE, {})                  # {} == could not ask
     assert strip.recorder.armed
-    assert "recording locally" in _hint(strip).lower()
+    text = _hint(strip).lower()
+    assert "recording on this computer" in text and "could not be reached" in text
 
 
 # -- when the lab is due ------------------------------------------------------------------------ #
