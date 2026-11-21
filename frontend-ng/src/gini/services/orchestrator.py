@@ -1756,7 +1756,13 @@ class Orchestrator:
         self._cids.clear()           # ids do not survive a teardown
         if not self.workdir:
             return True, "nothing running"
-        ok, msg = self._compose("down")
+        # `-v`: the project's ANONYMOUS volumes go with its containers. Images that declare a
+        # VOLUME (Postgres, Prometheus, k3s) get a fresh one on every `up` after a `down`, so the
+        # old ones can never be attached again and were pure disk: one maintainer's machine had
+        # 141 of them, 14.7 GB, against 6.3 GB of images. Nothing a student keeps lives in one —
+        # the compose file declares no named volumes, and everything meant to persist (the lab
+        # folders, the OS Zoo cache) is a bind mount of a host folder, which `-v` never touches.
+        ok, msg = self._compose("down", "-v")
         if ok:
             return True, msg
 
@@ -1808,7 +1814,7 @@ class Orchestrator:
         if not ids:
             return []
         try:
-            subprocess.run([*_engine_argv(), "rm", "-f", *ids],
+            subprocess.run([*_engine_argv(), "rm", "-f", "-v", *ids],   # -v: see down()
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=120)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

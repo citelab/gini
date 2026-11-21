@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from gini.domain.versions import version_tuple
+
 from . import IMAGES, REGISTRY
 from .runtime import engine_cli
 
@@ -439,6 +441,66 @@ def pull_images(refs, run=subprocess.run, on_progress=None, on_error=None
         except Exception:
             out.append((ref, False))
     return out
+
+
+def remove_superseded(refs, run=subprocess.run) -> list[str]:
+    """Remove the GINI images of versions OLDER than `refs`. Returns what was removed.
+
+    Every update pulls the new version's images under a new tag and nothing ever took the old
+    ones away, so they piled up for the whole term: students reported 20-30 GB, and the advice
+    going round to fix it was `docker system prune -af --volumes`, which also deletes everything
+    else they had in Docker and makes GINI download all four images again. A release whose big
+    layers did not change costs ~35 MB, because layers are shared; one whose base was rebuilt
+    costs ~2 GB, and it was those that were never given back.
+
+    Called only after this version's images are here and verified, so there is always a working
+    set. Narrow on purpose:
+
+    * only this registry's four GINI repositories, never a plain `gini-xv6:<anything>` — that is
+      a developer's own build, and `:latest` is what the runtime resolves;
+    * only tags that read as an OLDER version, plus untagged leftovers in those repositories.
+      The current version's own tags (`6.22.12`, `6.22.12-arm64`) and anything newer or
+      unreadable stay;
+    * never forced: an image a container still uses refuses, and is left for next time;
+    * nothing at all for an unversioned (`latest`) install, which has no "older" to speak of.
+    """
+    refs = list(refs)
+    tags = {r.rsplit(":", 1)[-1] for r in refs}
+    if len(tags) != 1:
+        return []
+    current = version_tuple(next(iter(tags)))
+    if current is None:
+        return []
+    repos = {r.rsplit(":", 1)[0] for r in refs}
+    try:
+        listed = run([*engine_cli(), "images", "--format", "{{.ID}} {{.Repository}}:{{.Tag}}"],
+                     capture_output=True, text=True, encoding="utf-8", errors="replace",
+                     timeout=60)
+    except Exception:                          # noqa: BLE001 — tidying must never fail an update
+        return []
+    if listed.returncode != 0:
+        return []
+    removed = []
+    for line in (listed.stdout or "").splitlines():
+        image_id, _, ref = line.strip().partition(" ")
+        repo, _, tag = ref.rpartition(":")
+        if repo not in repos:
+            continue
+        if tag == "<none>":
+            target = image_id
+        else:
+            v = version_tuple(tag)
+            if v is None or v >= current:
+                continue
+            target = ref
+        try:
+            r = run([*engine_cli(), "rmi", target], capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=120)
+        except Exception:                      # noqa: BLE001
+            continue
+        if r.returncode == 0:
+            removed.append(ref)
+    return removed
 
 
 # -- source builds (`gini-setup --build`) ---------------------------------------------------------#

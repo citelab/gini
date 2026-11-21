@@ -174,6 +174,15 @@ def execute(p: dict, *, on_step=None, on_progress=None, run=subprocess.run) -> d
 
     done = [n for n, ok in results if ok]
     failed = [n for n, ok in results if not ok]
+    if state != BUILD and done and not failed:
+        # Only once the whole new set is here and verified: then the older versions' images are
+        # nothing but disk, and leaving them is how students ended up 20-30 GB down.
+        try:
+            gone = images.remove_superseded(list(p["refs"]), run=run)
+        except Exception:                     # noqa: BLE001 — tidying must never fail an update
+            gone = []
+        if gone:
+            say(f"Removed {len(gone)} older GINI image tag{'' if len(gone) == 1 else 's'}.")
     if done:
         # Record what we actually got, so a partial success is not remembered as a full one.
         marker.write_marker({"version": p.get("app_version", ""),

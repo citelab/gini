@@ -95,6 +95,10 @@ def _pull(os_name: str) -> int:
         print("If you installed from a source checkout, build the images locally instead:")
         print("    gini-setup --build")
         return 2
+    if not bad:
+        gone = images.remove_superseded(refs)     # older versions' images: only disk now
+        if gone:
+            print(f"\nRemoved {len(gone)} older GINI image tag(s).")
     marker.write_marker({"version": _app_version(), "os": os_name,
                          "tag": images.image_tag(_app_version()), "images": ok})
     print("\nRecorded", marker.marker_path())
