@@ -1,4 +1,139 @@
-# T-Lab 04 — a placeholder tile; see t-lab-03.yaml.
+# T-Lab 04 — Simulate a file system. The toy UNIX-like file system of the FS tutorial (Nov 20).
+# The level file `gini.domain.fslab` loads (`engine: fs` is what tells `tlab_catalog` so);
+# tests/test_fslab_golden.py checks it against the engine's own builders of the two disks.
+#
+# The layout and the seven counting rules are fixed in the engine, word for word the tutorial's:
+# 1 KB blocks, 4-byte pointers (256 per index block), block 0 boot, block 1 superblock, blocks 2-33
+# the i-node table (i-node i in block 2 + i//8), data from block 34, 12 direct pointers, single,
+# double, triple; 16-byte directory entries (64 per block); root is i-node 1; free blocks are handed
+# out in increasing order.
+#
+# A disk lists its names. A list of blocks may write a run as [first, last]. A directory lists its
+# entries as [name, inode], or as [position, name, inode] with a `count` when it is bigger than
+# what is named. `other` blocks are in use by files that are not in the table.
+#
+# Every level opens on the tutorial's disk, so a student can follow the tutorial's answers with the
+# window. "Yours" starts have new numbers whose answers are printed nowhere — so nothing in this
+# file may say how to reach a goal on them. Random makes fresh ones from a seed (fslab.random_fs,
+# random_holes), which the chain records so the world can be rebuilt.
+
+engine: fs
+released: true
 id: t-lab-04
-title: "T-Lab 04"
-released: false
+title: "T-Lab 04 — Simulate a file system"
+summary: "Walk a path, follow the pointers to byte n, make a file with holes, and count every block a write reads and writes."
+
+disks:
+  tutorial:
+    first_free: 61
+    other: [[34, 39]]
+    names:
+      - {path: /, inode: 1, dir: [40], entries: [[".", 1], ["..", 1], [users, 10]]}
+      - {path: /users, inode: 10, dir: [41], entries: [[".", 10], ["..", 1], [raj, 19]]}
+      - {path: /users/raj, inode: 19, dir: [42], entries: [[".", 19], ["..", 10], [notes, 42], [lab, 37], [m, 20]]}
+      - {path: /users/raj/notes, inode: 42, size: 11500, data: [[43, 54]]}
+      - {path: /users/raj/lab, inode: 37, dir: [55], entries: [[".", 37], ["..", 19], [main.c, 52]]}
+      - {path: /users/raj/lab/main.c, inode: 52, size: 4000, data: [[56, 59]]}
+      - {path: /users/raj/m, inode: 20, link: /users/raj/lab/main.c, block: 60}
+  yours:
+    first_free: 66
+    names:
+      - {path: /, inode: 1, dir: [34], entries: [[".", 1], ["..", 1], [etc, 6], [courses, 26]]}
+      - {path: /etc, inode: 6, dir: [35], entries: [[".", 6], ["..", 1], [motd, 14]]}
+      - {path: /etc/motd, inode: 14, size: 300, data: [36]}
+      - {path: /courses, inode: 26, dir: [37, 38], count: 90, entries: [[0, ".", 26], [1, "..", 1], [70, os, 29]]}
+      - {path: /courses/os, inode: 29, dir: [39], entries: [[".", 29], ["..", 26], [labs, 45], [t4, 31]]}
+      - {path: /courses/os/labs, inode: 45, dir: [40], entries: [[".", 45], ["..", 29], [fs.c, 53], [out, 60]]}
+      - {path: /courses/os/labs/fs.c, inode: 53, size: 2500, data: [[41, 43]]}
+      - {path: /courses/os/t4, inode: 31, link: /courses/os/labs/fs.c, block: 44}
+      - {path: /courses/os/labs/out, inode: 60, size: 20000, data: [[45, 56], [58, 65]], single: 57}
+
+levels:
+
+  - id: walk
+    title: "Walk the path"
+    source: "Tutorial, Problem 1 · open()"
+    call: open
+    asks: "open() walks the path one name at a time, from the root. Click the blocks the kernel reads, in order. A block already read in this call costs nothing (rule 3)."
+    every: "Try every path"
+    starts:
+      - {label: Tutorial, disk: tutorial, path: /users/raj/lab/main.c}
+      - {label: Yours, disk: yours, path: /courses/os/labs/fs.c}
+      - {label: Random, random: true}
+    goals:
+      - {id: main, chip: "main.c in order", start: Tutorial, path: /users/raj/lab/main.c,
+         text: "Open /users/raj/lab/main.c on the Tutorial disk without Show me."}
+      - {id: link, chip: "Through a link", kind: link,
+         text: "Open a symbolic link without Show me: the kernel then walks the path the link holds."}
+      - {id: two, chip: "Second directory block", kind: second_block,
+         text: "Open a path with a name in the second block of a directory, without Show me."}
+
+  - id: byte
+    title: "Find byte n"
+    source: "Tutorial, Problem 2(b) · a 1-byte read of an open file"
+    call: read
+    asks: "The file is open, so its i-node is in memory. Pick an offset, then follow the pointers the kernel follows: the pointer in the i-node, then an entry in each index block."
+    every: "Try every block"
+    starts:
+      - label: Tutorial
+        disk: tutorial
+        new_file: {path: /users/raj/h, inode: 23, writes: [[0, 2000], [100000, 100], [600000, 1000]]}
+        offsets: [1500, 5000, 60000, 300000, 599500, 601000]
+        offset: 300000
+      - label: Yours
+        disk: yours
+        new_file: {path: /courses/os/labs/h, inode: 61, writes: [[0, 3000], [20000, 50], [280000, 200], [800000, 10]]}
+        offsets: [2500, 20010, 30000, 280100, 290000, 600000, 800009, 800010]
+        offset: 280100
+      - {label: Random, random: true}
+    goals:
+      - {id: three, chip: "Three reads", kind: reads, result: data, reads: 3,
+         text: "Follow a 1-byte read that costs 3 reads, without Show me."}
+      - {id: free, chip: "A hole for free", kind: reads, result: hole, reads: 0,
+         text: "Find a hole with 0 reads, without Show me."}
+      - {id: costly, chip: "A hole that costs", kind: reads, result: hole, reads_at_least: 1,
+         text: "Find a hole that the kernel finds only after reading an index block, without Show me."}
+      - {id: eof, chip: "Past the end", kind: reads, result: eof,
+         text: "Say that a read is at or past the end of the file."}
+
+  - id: make
+    title: "Make a file with holes"
+    source: "Tutorial, Problem 2(a), (d), (e) · writes into a new file"
+    call: write
+    asks: "A new, empty file is open. Write at any offset. Which blocks does the file system take? What are the size, the data blocks and the index blocks?"
+    every: "Try every block"
+    starts:
+      - label: New file
+        disk: tutorial
+        new_file: {path: /users/raj/new, inode: 23, writes: []}
+        presets: [[0, 100], [12288, 100], [12287, 2], [274432, 100], [1000000, 1], [5000, 1], [300000, 1]]
+    goals:
+      - {id: thin, chip: "Big and thin", kind: shape, size_at_least: 1000000, blocks_at_most: 3,
+         text: "Make a file of at least 1,000,000 bytes that uses at most 3 blocks in all."}
+      - {id: levels, chip: "All three ranges", kind: shape, ranges: [direct, single, double],
+         text: "Make a file with data in the direct, the single and the double range."}
+
+  - id: append
+    title: "Append and overwrite"
+    source: "Tutorial, Problem 3 · write() of an open file"
+    call: write
+    asks: "The file is open. Build the trace of this write: click a block on the disk, then R or W. An order is right if every block is read before it is written, and written before the block that points to it."
+    every: "Try every length"
+    allocation: index_first      # a missing index block is taken just before the blocks under it
+    starts:
+      - label: Tutorial
+        disk: tutorial
+        file: /users/raj/notes
+        writes: [{append: 3000}, {append: 788}, {append: 789}, {at: 1024, bytes: 1024}, {at: 1000, bytes: 1024}]
+      - label: Yours
+        disk: yours
+        file: /courses/os/labs/out
+        writes: [{append: 2000}, {append: 480}, {append: 481}, {at: 13312, bytes: 1024}]
+      - {label: Random, random: true}
+    goals:
+      - {id: nonew, chip: "No new block", kind: trace, takes: none,
+         text: "Build the trace of a write that takes no new block, without Show me."}
+      - {id: index, chip: "Index block first", kind: trace, takes: index,
+         text: "Build the trace of a write that takes a new index block, without Show me."}
+      - {id: noread, chip: "Write without reading", kind: trace, reads: 0,
+         text: "Build the trace of a write with no reads at all, without Show me."}

@@ -68,6 +68,8 @@ GINI coinage — say the textbook term, show the label. The glossary
 | os-known-issues | [os-15-known-issues.md](os-15-known-issues.md) | verified bugs and stale comments, as of 2026-08-30 |
 | os-glossary | [os-16-glossary.md](os-16-glossary.md) | every GINI label mapped to its textbook term ("asked/couldn't/seized" → system call/exception/device interrupt, "shadow" → pluggable policy, …) |
 | os-scheduler-lab | [os-17-scheduler-lab.md](os-17-scheduler-lab.md) | T-Lab 02: the student is the scheduler — a simulator, not xv6; every schedule enumerated; the level file; proofs the Teaching Center re-checks |
+| os-banker-lab | [os-18-banker-lab.md](os-18-banker-lab.md) | T-Lab 03: deadlock handling — the graph drawn the notes' way, reduction and the detector, the claim-edge proof, the banker's safety check by hand, recovery by termination, rollback and preemption; entries shown as not checked |
+| os-fs-lab | [os-19-fs-lab.md](os-19-fs-lab.md) | T-Lab 04: the student is the file system — a simulator, not xv6; the tutorial's disk and seven counting rules; path walks, pointers to byte n, files with holes, every block a write reads and writes; one chain entry per goal (Teaching Center: not checked yet) |
 
 ## Source-of-truth map
 

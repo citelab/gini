@@ -471,8 +471,26 @@ def recheck_tlabs(proof: dict) -> list:
     except Exception:                                   # noqa: BLE001 — an older gini-core
         _sl = None
     out = []
+    later = _later_tlab_kinds()
     for i, entry in enumerate(proof.get("entries") or []):
         kind = (entry or {}).get("kind", "")
+        if kind in later:
+            # T-Lab 03 and 04 (deadlock handling, the file system). Their engines are in
+            # gini-core too, but this server does not replay their entries yet, so it says
+            # "not checked" — never "does not re-check", which would accuse a student of an
+            # edit nobody looked for.
+            d = entry.get("data") or {}
+            out.append({"kind": "proof" if kind == later[0] else "goal",
+                        "lab": str(d.get("lab", "")), "level": str(d.get("level", "")),
+                        "version": str(d.get("version", "") or d.get("start", "")),
+                        "start": d.get("start") or 0, "goal": str(d.get("goal", "")),
+                        "claimed": (("proved" if d.get("ok")
+                                     else f"not proved: {d.get('reason', '')}")
+                                    if kind == later[0] else str(d.get("goal", ""))),
+                        "confirmed": None,
+                        "why": "not checked: this server does not re-check this T-Lab yet",
+                        "seq": entry.get("seq", i)})
+            continue
         if kind not in (_ev.SCHEDULE, _ev.PROVED):
             continue
         d = entry.get("data") or {}
@@ -493,6 +511,14 @@ def recheck_tlabs(proof: dict) -> list:
         except Exception as e:                          # noqa: BLE001 — a report must render
             row["confirmed"], row["why"] = None, f"could not re-check: {e}"
     return out
+
+
+def _later_tlab_kinds() -> tuple:
+    """T-Lab 03/04 entry kinds, `orders` first; empty on a gini-core that predates them."""
+    names = ("ORDERS", "ALLOCATE", "BANK", "FS_WALK", "FS_READ", "FS_MAKE", "FS_TRACE")
+    if not all(hasattr(_ev, n) for n in names):
+        return ()
+    return tuple(getattr(_ev, n) for n in names)
 
 
 def _recheck_one(sl, kind: str, d: dict) -> tuple:
@@ -618,7 +644,16 @@ def measurements(proof: dict) -> list[dict]:
                 "detail": f"{d.get('result', '')} in {len(moves)} step"
                           f"{'' if len(moves) == 1 else 's'}",
                 "summary": "", "seq": entry.get("seq", i), "t": entry.get("t", 0.0)})
-        elif kind == _ev.PROVED:
+        elif kind in _later_tlab_kinds()[1:]:
+            # A T-Lab 03/04 goal: like a schedule row, it exists only because the goal was met.
+            steps = d.get("moves") or d.get("clicks") or d.get("steps") or d.get("writes") or []
+            out.append({
+                "kind": "schedule", "name": f"{d.get('level', '')} · {d.get('goal', '')}",
+                "ok": True, "pending": False,
+                "detail": f"{d.get('lab', '')}, {len(steps)} step"
+                          f"{'' if len(steps) == 1 else 's'}",
+                "summary": "", "seq": entry.get("seq", i), "t": entry.get("t", 0.0)})
+        elif kind in (_ev.PROVED, *_later_tlab_kinds()[:1]):
             out.append({
                 "kind": "proof", "name": f"{d.get('level', '')} · {d.get('version', '')}",
                 "ok": bool(d.get("ok")), "pending": False,

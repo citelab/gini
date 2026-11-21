@@ -1,7 +1,193 @@
-# T-Lab 03 — a placeholder tile. The hub shows the whole term's T-Labs from the start so students
-# can see what is coming; this one has no levels and cannot be opened until it is released.
-# What it turns out to be is a teaching decision, so the tile says it is coming rather than
-# inventing what it is.
+# T-Lab 03 — Simulate deadlock handling. Deadlock handling, Chapter 14 of the notes.
+# The level file `gini.domain.banklab` loads (`engine: bank` is what tells `tlab_catalog` so);
+# tests/test_banklab_golden.py checks every level against the chapter's worked examples.
+#
+# Every level opens on a start taken from the notes, so a student can follow a worked example
+# with the solution beside them. Goals that could be answered by copying the notes are set on a
+# start called "Yours", a changed state whose answers are not printed anywhere — so nothing in
+# this file may say how to reach one.
+#
+# Vectors list one number per resource, in the order the resources are declared.
+# A run start's scripts say what each process does next: {ask: [...]} or finish.
+# `pending` is a request already waiting when the start opens.
+# A start that declares `resources` and `processes` brings its own world (banklab.world).
+
+engine: bank
+released: true
 id: t-lab-03
-title: "T-Lab 03"
-released: false
+title: "T-Lab 03 — Simulate deadlock handling"
+summary: "Grant or refuse requests, draw the graph, run the safety check by hand, and break a deadlock."
+
+levels:
+
+  - id: graph
+    title: "Read the graph"
+    mode: run
+    source: "Notes · 14.3, Worked examples 14.1 and 14.2, Figure 14.3"
+    setup: "Each process asks for units and holds them until it finishes. A request for units that are free is granted at once; otherwise the process waits."
+    asks: "A cycle with single-unit resources is a deadlock. Is a cycle enough when a resource has two units?"
+    early_finish: true
+    versions:
+      - {id: free, label: "Grant when free", policy: free}
+    starts:
+      - label: "Worked example 14.1"
+        resources: [{name: scanner, units: 1}, {name: printer, units: 1}, {name: plotter, units: 1}]
+        processes: [{name: P1}, {name: P2}, {name: P3}]
+        hold:    {P1: [1, 0, 0], P2: [0, 1, 0], P3: [0, 0, 1]}
+        pending: {P1: [0, 1, 0], P2: [0, 0, 1]}
+        scripts: {P1: [finish], P2: [finish], P3: [{ask: [1, 0, 0]}, finish]}
+        layout: {P1: [0.12, 0.45], printer: [0.36, 0.14], P2: [0.6, 0.45], plotter: [0.84, 0.14],
+                 P3: [0.88, 0.8], scanner: [0.45, 0.85]}
+      - label: "Figure 14.3"
+        resources: [{name: R1, units: 2}, {name: R2, units: 2}]
+        processes: [{name: P1}, {name: P2}, {name: P3}, {name: P4}]
+        hold:    {P1: [0, 1], P2: [1, 0], P3: [1, 0], P4: [0, 1]}
+        pending: {P1: [1, 0], P3: [0, 1]}
+        scripts: {P1: [finish], P2: [{ask: [0, 1]}, finish], P3: [finish], P4: [{ask: [1, 0]}, finish]}
+        layout: {P1: [0.1, 0.5], R1: [0.42, 0.2], R2: [0.42, 0.8], P2: [0.78, 0.1], P3: [0.78, 0.5], P4: [0.78, 0.9]}
+      - label: "Yours"
+        resources: [{name: R1, units: 2}, {name: R2, units: 2}]
+        processes: [{name: P1}, {name: P2}, {name: P3}, {name: P4}]
+        hold:    {P1: [1, 0], P2: [0, 1], P3: [0, 1], P4: [1, 0]}
+        scripts: {P1: [{ask: [0, 1]}, finish], P2: [{ask: [1, 0]}, finish],
+                  P3: [{ask: [1, 0]}, finish], P4: [{ask: [0, 1]}, finish]}
+        layout: {P1: [0.1, 0.5], R1: [0.42, 0.2], R2: [0.42, 0.8], P2: [0.78, 0.1], P3: [0.78, 0.5], P4: [0.78, 0.9]}
+    goals:
+      - {id: deadlock, chip: "Deadlock",           text: "Make the three processes deadlock",                     start: "Worked example 14.1", version: free, kind: deadlock}
+      - {id: cycle,    chip: "Cycle, no deadlock", text: "Make a cycle that is not a deadlock",                   start: "Yours", version: free, kind: cycle_no_deadlock}
+      - {id: knot,     chip: "Knot",               text: "Turn it into a deadlock: a knot with no way out",       start: "Yours", version: free, kind: deadlock}
+
+  - id: claims
+    title: "Claim edges"
+    mode: run
+    source: "Notes · 14.6.2, Worked example 14.4, Figure 14.8"
+    setup: "Each resource has one unit. Every process declares its claims first; they are drawn as dotted edges. Each process takes its two resources one at a time, then finishes."
+    asks: "The graph algorithm refuses a request although the resource is free. What does it see that you don't?"
+    resources: [{name: R1, units: 1}, {name: R2, units: 1}, {name: R3, units: 1}]
+    processes: [{name: P1, max: [1, 1, 0]}, {name: P2, max: [0, 1, 1]}, {name: P3, max: [1, 0, 1]}]
+    versions:
+      - {id: free,  label: "Grant when free", policy: free}
+      - {id: graph, label: "Graph algorithm", policy: graph,
+         proves: "Proved: counting claim edges, no order of requests ends in deadlock."}
+    starts:
+      - label: "Worked example 14.4"
+        hold: {}
+        scripts: {P1: [{ask: [1, 0, 0]}, {ask: [0, 1, 0]}, finish],
+                  P2: [{ask: [0, 1, 0]}, {ask: [0, 0, 1]}, finish],
+                  P3: [{ask: [0, 0, 1]}, {ask: [1, 0, 0]}, finish]}
+        layout: {P1: [0.2, 0.18], R2: [0.5, 0.08], P2: [0.8, 0.18], R3: [0.86, 0.75], P3: [0.5, 0.92], R1: [0.14, 0.75]}
+    goals:
+      - {id: deadlock, chip: "Deadlock",          text: "With every request granted when free, reach a deadlock", start: "Worked example 14.4", version: free,  kind: deadlock}
+      - {id: refused,  chip: "Wait, though free", text: "Make a process wait although its resource is free",      start: "Worked example 14.4", version: graph, kind: refused_free}
+      - {id: proof,    chip: "Proof: never stuck", text: "Show that no order of requests deadlocks under the graph algorithm", start: "Worked example 14.4", version: graph, kind: prove}
+
+  - id: banker
+    title: "The banker"
+    mode: bank
+    source: "Notes · 14.6.3, Worked examples 14.5 to 14.7"
+    setup: "Each process has declared its maximum. Pick a request, apply the three tests, and run the safety check yourself: choose which process finishes next."
+    asks: "P2 and P3 ask for exactly the same units. Why does the banker grant one and make the other wait?"
+    resources: [{name: A, units: 8}, {name: B, units: 5}, {name: C, units: 7}]
+    processes: [{name: P1, max: [5, 2, 3]}, {name: P2, max: [3, 2, 2]}, {name: P3, max: [6, 3, 4]}, {name: P4, max: [2, 2, 3]}]
+    starts:
+      - label: "Worked example 14.5"
+        resources: [{name: units, units: 6}]
+        processes: [{name: P1, max: [5]}, {name: P2, max: [4]}, {name: P3, max: [2]}]
+        hold: {P1: [2], P2: [1], P3: [1]}
+        requests: [{by: P1, vec: [1]}]
+      - label: "Worked example 14.7"
+        hold: {P1: [1, 1, 0], P2: [2, 0, 1], P3: [3, 1, 2], P4: [1, 1, 2]}
+        requests: [{by: P2, vec: [1, 0, 1]}, {by: P1, vec: [1, 0, 0]}, {by: P3, vec: [2, 0, 0]}, {by: P4, vec: [0, 2, 0]}]
+      - label: "Yours"
+        note: "Need and Avail are hidden: work them out from Max and Hold first."
+        hide_need: true
+        hold: {P1: [2, 0, 1], P2: [1, 1, 1], P3: [2, 2, 2], P4: [1, 1, 0]}
+        requests: [{by: P2, vec: [1, 0, 1]}, {by: P3, vec: [1, 0, 1]}, {by: P3, vec: [0, 2, 0]}, {by: P1, vec: [3, 0, 0]}]
+    goals:
+      - {id: safe,  chip: "Safe sequence", text: "Run the safety check by hand on this state, to the end",  start: "Yours", kind: safe_sequence}
+      - {id: grant, chip: "Grant",         text: "Grant a request that keeps the state safe",              start: "Yours", kind: grant}
+      - {id: wait,  chip: "Wait",          text: "Make a request wait because the state would be unsafe",  start: "Yours", kind: wait_unsafe}
+
+  - id: lucky
+    title: "Unsafe, but lucky"
+    mode: run
+    source: "Notes · Worked examples 14.6 and 14.11, Your turn 14.12"
+    setup: "No banker here: a request is granted whenever the units are free. Each process asks for one unit at a time, up to its maximum, and may decide it needs no more and finish."
+    asks: "The state is unsafe. Is a deadlock certain?"
+    early_finish: true
+    versions:
+      - {id: free, label: "Grant when free", policy: free}
+    starts:
+      - label: "Worked example 14.6"
+        note: "The state after P2's request was granted anyway."
+        resources: [{name: units, units: 6}]
+        processes: [{name: P1, max: [5]}, {name: P2, max: [5]}, {name: P3, max: [2]}]
+        hold: {P1: [2], P2: [2], P3: [1]}
+        scripts: {P1: [{ask: [1]}, {ask: [1]}, {ask: [1]}, finish],
+                  P2: [{ask: [1]}, {ask: [1]}, {ask: [1]}, finish],
+                  P3: [{ask: [1]}, finish]}
+        layout: {P1: [0.15, 0.2], P2: [0.85, 0.2], P3: [0.5, 0.9], units: [0.5, 0.42]}
+      - label: "Yours"
+        resources: [{name: units, units: 8}]
+        processes: [{name: P1, max: [6]}, {name: P2, max: [5]}, {name: P3, max: [3]}]
+        hold: {P1: [3], P2: [3], P3: [1]}
+        scripts: {P1: [{ask: [1]}, {ask: [1]}, {ask: [1]}, finish],
+                  P2: [{ask: [1]}, {ask: [1]}, finish],
+                  P3: [{ask: [1]}, {ask: [1]}, finish]}
+        layout: {P1: [0.15, 0.2], P2: [0.85, 0.2], P3: [0.5, 0.9], units: [0.5, 0.42]}
+    goals:
+      - {id: lucky,   chip: "Lucky",   text: "From the unsafe state, let every process finish", start: "Yours", version: free, kind: all_done}
+      - {id: unlucky, chip: "Unlucky", text: "From the same state, reach a deadlock",          start: "Yours", version: free, kind: deadlock}
+
+  - id: recover
+    title: "Detect and recover"
+    mode: run
+    source: "Notes · 14.7, Figure 14.9, Worked example 14.8"
+    setup: "Requests were granted whenever units were free, and the system has deadlocked. Find who is deadlocked, then get it moving again: terminate a process, roll it back to a checkpoint, or preempt a resource whose state can be saved. Every way out throws away work."
+    asks: "Terminating the process that has done the least work is not always the cheapest way out. Why?"
+    versions:
+      - {id: free, label: "Grant when free", policy: free}
+    starts:
+      - label: "Figure 14.9"
+        note: "Single-unit resources: switch to the wait-for graph."
+        resources: [{name: R1, units: 1}, {name: R2, units: 1}, {name: R3, units: 1}, {name: R4, units: 1}]
+        processes: [{name: P1}, {name: P2}, {name: P3}, {name: P4}]
+        hold:    {P2: [1, 0, 0, 1], P3: [0, 1, 0, 0], P4: [0, 0, 1, 0]}
+        pending: {P1: [1, 0, 0, 0], P2: [0, 1, 0, 0], P3: [0, 0, 1, 0], P4: [0, 0, 0, 1]}
+        scripts: {P1: [finish], P2: [finish], P3: [finish], P4: [finish]}
+        layout: {P1: [0.08, 0.42], R1: [0.27, 0.1], P2: [0.44, 0.42], R2: [0.62, 0.1], P3: [0.82, 0.42],
+                 R4: [0.27, 0.8], P4: [0.53, 0.9], R3: [0.76, 0.8]}
+      - label: "Worked example 14.8"
+        note: "The detector's table. Recovery: termination only."
+        recovery: [terminate]
+        resources: [{name: A, units: 7}, {name: B, units: 2}, {name: C, units: 4}]
+        processes: [{name: P1, cpu: 20}, {name: P2, cpu: 10}, {name: P3, cpu: 120}, {name: P4, cpu: 30}]
+        hold:    {P1: [0, 1, 0], P2: [2, 0, 0], P3: [3, 0, 3], P4: [2, 1, 1]}
+        pending: {P2: [2, 0, 2], P3: [0, 0, 1], P4: [1, 0, 0]}
+        scripts: {P1: [finish], P2: [finish], P3: [finish], P4: [finish]}
+        layout: {P1: [0.08, 0.5], A: [0.3, 0.2], P2: [0.52, 0.06], B: [0.74, 0.2], P3: [0.92, 0.5], C: [0.52, 0.86], P4: [0.52, 0.5]}
+      - label: "Yours: terminate"
+        note: "Recovery: termination only. Cost: the CPU time a process has used."
+        recovery: [terminate]
+        resources: [{name: A, units: 3}, {name: B, units: 1}, {name: C, units: 2}]
+        processes: [{name: P1, cpu: 3}, {name: P2, cpu: 40}, {name: P3, cpu: 35}, {name: P4, cpu: 20}, {name: P5, cpu: 6}]
+        hold:    {P1: [1, 0, 0], P2: [1, 0, 0], P3: [0, 1, 0], P4: [0, 0, 2], P5: [1, 0, 0]}
+        pending: {P1: [1, 0, 0], P3: [0, 0, 1], P4: [0, 1, 0], P5: [0, 0, 1]}
+        scripts: {P1: [finish], P2: [finish], P3: [finish], P4: [finish], P5: [finish]}
+        layout: {P1: [0.08, 0.2], A: [0.3, 0.45], P2: [0.08, 0.75], P5: [0.5, 0.82], C: [0.72, 0.5], P3: [0.5, 0.12], B: [0.9, 0.12], P4: [0.92, 0.85]}
+      - label: "Yours: three ways out"
+        note: "A and C can be saved and restored; B and D cannot. Cost: the minutes of work thrown away."
+        recovery: [terminate, rollback, preempt]
+        resources: [{name: A, units: 1, preemptable: true}, {name: B, units: 1}, {name: C, units: 1, preemptable: true}, {name: D, units: 1}]
+        processes:
+          - {name: P1, cpu: 30, took: {A: 15}, checkpoint: 10}
+          - {name: P2, cpu: 40, took: {B: 25}, checkpoint: 30}
+          - {name: P3, cpu: 90, took: {C: 50}}
+          - {name: P4, cpu: 6,  took: {D: 1},  checkpoint: 3}
+        hold:    {P1: [1, 0, 0, 0], P2: [0, 1, 0, 0], P3: [0, 0, 1, 0], P4: [0, 0, 0, 1]}
+        pending: {P1: [0, 1, 0, 0], P2: [0, 0, 1, 0], P3: [1, 0, 0, 0], P4: [0, 1, 0, 0]}
+        scripts: {P1: [finish], P2: [finish], P3: [finish], P4: [finish]}
+        layout: {P1: [0.12, 0.3], B: [0.45, 0.1], P2: [0.8, 0.3], C: [0.86, 0.78], P3: [0.5, 0.92], A: [0.14, 0.78], P4: [0.45, 0.5], D: [0.25, 0.55]}
+    goals:
+      - {id: victim,   chip: "Cheapest victim",   text: "Break the deadlock by terminating one process, the cheapest that works", start: "Yours: terminate", version: free, kind: cheapest_victim}
+      - {id: recovery, chip: "Cheapest recovery", text: "Break the deadlock throwing away as little work as possible",            start: "Yours: three ways out", version: free, kind: cheapest_recovery}

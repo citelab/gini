@@ -880,7 +880,7 @@ def test_the_narration_reads_a_schedule_in_the_threads_own_names(rec):
                         "no schedule finishes.")
     s = N.summarize(rec._chain.entries)
     assert (s["proved_ok"], s["proved_total"]) == (1, 2)
-    assert "Proved by GINI's scheduler simulator — 1/2 attempt(s)" in N.narrate(rec._chain.entries)
+    assert "Proved by GINI's simulators — 1/2 attempt(s)" in N.narrate(rec._chain.entries)
 
 
 def test_recording_a_t_lab_event_can_never_break_the_lab(rec):

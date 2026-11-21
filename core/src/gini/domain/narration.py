@@ -167,6 +167,34 @@ def describe(entry: Entry) -> str:
                    else f"not proved — {d.get('reason') or 'no reason recorded'}")
         return (f"GINI tried every schedule on {d.get('lab', '?')}, level {d.get('level', '?')} "
                 f"({d.get('version', '?')}) — {verdict}.")
+    if k == ev.ALLOCATE:
+        steps = len(d.get("moves") or [])
+        return (f"On {d.get('lab', '?')}, level {d.get('level', '?')} ({d.get('version', '?')}): "
+                f"reached {d.get('goal', '?')}"
+                + (f" ({d.get('result')})" if d.get("result") else "")
+                + f" in {_count(steps, 'step')}.")
+    if k == ev.BANK:
+        req = d.get("request")
+        what = (f"P{int(req[0]) + 1}'s request {tuple(req[1])}" if req
+                else "the state with no request")
+        return (f"On {d.get('lab', '?')}, as the banker: checked {what} by hand in "
+                f"{_count(len(d.get('rows') or []), 'row')}, decided {d.get('decision') or '—'}"
+                f" — goal {d.get('goal', '?')}.")
+    if k == ev.ORDERS:
+        verdict = ("proved" if d.get("ok")
+                   else f"not proved — {d.get('reason') or 'no reason recorded'}")
+        return (f"GINI tried every order on {d.get('lab', '?')}, level {d.get('level', '?')} "
+                f"({d.get('version', '?')}) — {verdict}.")
+    if k in (ev.FS_WALK, ev.FS_READ, ev.FS_MAKE, ev.FS_TRACE):
+        what = {ev.FS_WALK: f"walked open(\"{d.get('path', '?')}\")",
+                ev.FS_READ: f"followed the pointers to byte {d.get('offset', '?')}",
+                ev.FS_MAKE: f"made a file with {_count(len(d.get('writes') or []), 'write')}",
+                ev.FS_TRACE: (f"traced a {d.get('op', 'write')} of {d.get('n', '?')} bytes "
+                              f"block by block")}[k]
+        hints = int(d.get("hints") or 0)
+        return (f"On {d.get('lab', '?')}, level {d.get('level', '?')}: {what} — goal "
+                f"{d.get('goal', '?')}" + (f", with {_count(hints, 'hint')}" if hints else "")
+                + ".")
     if k == ev.ANSWER:
         # The question is quoted with it. A marker reading the transcript top to bottom should not
         # have to hold three prompts in their head to know which one this replies to.
@@ -204,7 +232,7 @@ def summarize(entries) -> dict:
     for e in entries:
         kinds[e.kind] = kinds.get(e.kind, 0) + 1
     witnesses = [e for e in entries if e.kind == ev.WITNESS]
-    proofs = [e for e in entries if e.kind == ev.PROVED]
+    proofs = [e for e in entries if e.kind in (ev.PROVED, ev.ORDERS)]
     return {
         "entries": len(entries),
         "kinds": kinds,
@@ -297,9 +325,12 @@ def narrate(entries, verdict=None) -> str:
         out.append("  Witnessed by GINI on the running network — none. Nothing in this chain was "
                    "measured on a live lab.")
     if s["proved_total"]:
-        out.append(f"  Proved by GINI's scheduler simulator — {s['proved_ok']}/{s['proved_total']} "
-                   f"attempt(s) at Try every schedule held, {k.get(ev.SCHEDULE, 0)} goal "
+        out.append(f"  Proved by GINI's simulators — {s['proved_ok']}/{s['proved_total']} "
+                   f"attempt(s) at Try every schedule or order held, {k.get(ev.SCHEDULE, 0)} goal "
                    f"schedule(s) found.")
+    others = sum(k.get(x, 0) for x in ev.TLAB_GOALS if x != ev.SCHEDULE)
+    if others:
+        out.append(f"  T-Lab goals reached in GINI's simulators — {others}.")
 
     acc = account_for_artifact(entries)
     if acc.total:

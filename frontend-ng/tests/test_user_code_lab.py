@@ -470,9 +470,10 @@ def test_a_t_lab_opens_with_no_provider_and_no_machine_and_is_recorded(two_labs,
 
 def test_an_unreleased_t_lab_is_shown_but_does_not_open(two_labs, app, monkeypatch):
     from gini.domain import schedlab as S
+    from gini.domain import tlab_catalog as TC
     real = S.get("t-lab-02")
     held = S.LevelFile(id="t-lab-03", title="T-Lab 03 — Monitors", released=False)
-    monkeypatch.setattr(S, "catalog", lambda: (real, held))
+    monkeypatch.setattr(TC, "catalog", lambda: (real, held))
     hub = _hub(app)
     assert hub._tcards["t-lab-03"].stat.text() == "not released yet"
     hub._open_tlab(held)
@@ -482,10 +483,11 @@ def test_an_unreleased_t_lab_is_shown_but_does_not_open(two_labs, app, monkeypat
 def test_a_t_lab_level_file_that_will_not_load_does_not_take_the_hub_down(two_labs, app,
                                                                              monkeypatch):
     from gini.domain import schedlab as S
+    from gini.domain import tlab_catalog as TC
 
     def boom():
         raise S.LevelError("level 2 uses a tile 'zz' that is not defined")
-    monkeypatch.setattr(S, "catalog", boom)
+    monkeypatch.setattr(TC, "catalog", boom)
     logs = []
     hub = _hub(app, on_log=lambda lvl, msg: logs.append((lvl, msg)))
     assert set(hub._cards) == {"lab-one", "lab-two"}

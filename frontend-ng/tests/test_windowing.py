@@ -52,6 +52,8 @@ KIND = {
     # A T-Lab is played for a whole sitting beside the notes, with no machine to go back to —
     # a student alt-tabs between it and the course PDF.
     "SchedLab": WINDOW,
+    # T-Lab 03 and 04, the same frame as T-Lab 02 and played the same way, beside the notes.
+    "BankLab": WINDOW, "FsLab": WINDOW,
 }
 
 #: The other side of the rule, with the reason spelled out for each.

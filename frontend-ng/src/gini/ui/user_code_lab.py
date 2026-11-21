@@ -40,6 +40,18 @@ from .windowing import standalone
 LAB_HUES = ("red", "blue", "green", "purple", "amber", "pink", "slate")
 
 
+#: A T-Lab's engine → the window that plays it (module in `gini.ui`, class).
+TLAB_WINDOWS = {"sched": ("sched_lab", "SchedLab"), "bank": ("bank_lab", "BankLab"),
+                "fs": ("fs_lab", "FsLab")}
+
+
+def tlab_window(engine: str):
+    """The window class for a T-Lab's engine, imported on first use (each is a large module)."""
+    import importlib
+    mod, cls = TLAB_WINDOWS.get(engine, TLAB_WINDOWS["sched"])
+    return getattr(importlib.import_module(f"gini.ui.{mod}"), cls)
+
+
 def hue_for(spec, index: int) -> str:
     """The tile's accent: the spec's own if it pinned one, otherwise by position."""
     return getattr(spec, "hue", "") or LAB_HUES[index % len(LAB_HUES)]
@@ -207,9 +219,9 @@ class UserCodeLab(QDialog):
         Hues continue from where the assignments stopped, so every tile on the page stays apart
         from every other — the seven-hue ceiling in `LAB_HUES` is for the whole page.
         """
-        from ..domain import schedlab as _sl
+        from ..domain import tlab_catalog as _tc
         try:
-            labs = _sl.catalog()
+            labs = _tc.catalog()
         except Exception as e:                     # noqa: BLE001 — a bad level file is logged
             self._log("error", f"a T-Lab level file would not load: {e}")
             labs = ()
@@ -234,7 +246,7 @@ class UserCodeLab(QDialog):
                 row.setSpacing(8)
                 v.addLayout(row)
             blurb = lab.summary or ("Details when this one is released." if not lab.released
-                                    else "A scheduler lab in GINI's own simulator.")
+                                    else "A lab in GINI's own simulator.")
             card = LayerCard(self.theme, lab.title, blurb, hue_for(lab, used_hues + i))
             card.set_stat("not released yet" if not lab.released
                           else f"{len(lab.levels)} level{'s' if len(lab.levels) != 1 else ''}")
@@ -258,7 +270,7 @@ class UserCodeLab(QDialog):
             return
         from .lab_record import record
         record(self._recorder, "note_lab_open", self._machine(), lab.id)
-        from .sched_lab import SchedLab
+        cls = tlab_window(getattr(lab, "engine", "sched"))
         old = self._tlab
         self._tlab = None
         if old is not None:
@@ -267,8 +279,8 @@ class UserCodeLab(QDialog):
                 old.deleteLater()
             except RuntimeError:
                 pass
-        self._tlab = SchedLab(self, self.theme, lab=lab, device=self.device,
-                              on_event=self._tlab_event)
+        self._tlab = cls(self, self.theme, lab=lab, device=self.device,
+                         on_event=self._tlab_event)
         self._tlab.show()
         self._tlab.raise_()
 
@@ -282,6 +294,9 @@ class UserCodeLab(QDialog):
             record(self._recorder, "note_proved", p.get("lab"), p.get("level"),
                    p.get("version"), p.get("code"), p.get("ok"), p.get("reason", ""),
                    p.get("starts", ()), p.get("summary"))
+        else:
+            # T-Lab 03 and 04: kinds of their own (proof_events.ALLOCATE, FS_WALK, …).
+            record(self._recorder, "note_tlab", kind, p)
 
     def closeEvent(self, e) -> None:  # noqa: N802
         # The T-Lab window is promoted (no Qt parent), so nothing closes it for us.

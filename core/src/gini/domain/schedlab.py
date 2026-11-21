@@ -206,6 +206,7 @@ class LevelFile:
     summary: str = ""
     hue: str = ""
     released: bool = True
+    engine: str = "sched"
 
     def level(self, level_id: str) -> Level | None:
         return next((lv for lv in self.levels if lv.id == level_id), None)
@@ -913,9 +914,11 @@ def catalog() -> tuple:
     one-sentence refusals exist to prevent. It raises, and the test suite loads every shipped
     file.
     """
-    if not TLABS_DIR.is_dir():
-        return ()
-    return tuple(load(p) for p in sorted(TLABS_DIR.glob("*.yaml")))
+    # Only the scheduler labs: T-Lab 03 and 04 have engines of their own (`tlab_catalog`), and
+    # this loader would refuse their level files. The Teaching Center replays `schedule` entries
+    # through `get`, so it must keep finding exactly the files this engine can read.
+    from .tlab_catalog import files
+    return tuple(load(p) for p in files("sched"))
 
 
 def get(lab_id: str) -> LevelFile | None:

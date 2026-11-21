@@ -667,6 +667,28 @@ class ProofRecorder:
             ev.proved(str(lab or ""), str(level or ""), str(version or ""), code, bool(ok),
                       str(reason or ""), starts, summary)))
 
+    #: T-Lab 03 and 04 entries: the window's event kind → the `proof_events` builder.
+    TLAB_KINDS = {"allocate": "allocate", "bank": "bank", "orders": "orders",
+                  "fs_walk": "fs_walk", "fs_read": "fs_read", "fs_make": "fs_make",
+                  "fs_trace": "fs_trace"}
+
+    def note_tlab(self, kind: str, payload: dict) -> None:
+        """A T-Lab 03 or 04 goal (or Try every order verdict), from the lab's window.
+
+        One method for all of them, because the windows already send a payload named exactly as
+        the builder's parameters: each builder is called with the fields it takes, so a window
+        cannot slip an extra field into the chain, and a missing one becomes the builder's
+        default. An unknown kind is ignored — it would be a window newer than this recorder.
+        """
+        import inspect
+        name = self.TLAB_KINDS.get(str(kind or ""))
+        if name is None:
+            return
+        build = getattr(ev, name)
+        p = dict(payload or {})
+        args = {k: p[k] for k in inspect.signature(build).parameters if k in p}
+        self._guard(lambda: self._record(build(**args)))
+
     def note_observed(self, device: str, kind: str, detail: str,
                       pid: int | None = None) -> None:
         """A phenomenon the kernel showed — from MachineState's watcher, off the poll thread.

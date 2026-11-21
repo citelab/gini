@@ -54,14 +54,26 @@ STOPPED, RESUMED = "stopped", "resumed"
 #: Teaching Center replays a `schedule` and re-explores a `proved` entry's code and says whether
 #: the chain's claim holds, the way `check_sources` pairs a file with the build that compiled it.
 SCHEDULE, PROVED = "schedule", "proved"
+#: T-Lab 03 (`domain.banklab`) and T-Lab 04 (`domain.fslab`). Kinds of their own rather than
+#: `schedule`, because the Teaching Center replays a `schedule` with `schedlab` and would report a
+#: deadlock lab's entry as "does not re-check". Same rule as above: one entry per goal the first
+#: time it is reached, carrying enough to replay it, and never one per click.
+#:   allocate  a run level's goal (requests, grants, recovery) — `banklab.replay` re-checks it
+#:   bank      a bank level's goal: the request, the hand-run safety check, the decision
+#:   orders    Try every order on a version that can be proved — held or not, like `proved`
+#:   fs_walk / fs_read / fs_make / fs_trace   the four T-Lab 04 faces (`fslab`'s replays)
+ALLOCATE, BANK, ORDERS = "allocate", "bank", "orders"
+FS_WALK, FS_READ, FS_MAKE, FS_TRACE = "fs_walk", "fs_read", "fs_make", "fs_trace"
+#: Every T-Lab entry that is a goal reached in a simulator (as opposed to a proof).
+TLAB_GOALS = (SCHEDULE, ALLOCATE, BANK, FS_WALK, FS_READ, FS_MAKE, FS_TRACE)
 
 CONSTRUCTION = (PLACE, REMOVE, CONNECT, DISCONNECT, CONFIGURE)
 OPERATION = (RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE, COMMAND,
-             LAB_OPEN, TUNE, SPAWN, BUILD, SCHEDULE)
+             LAB_OPEN, TUNE, SPAWN, BUILD, *TLAB_GOALS)
 #: `proved` sits with the witnessed tier: it is a fact GINI established by exhaustive search, not
 #: something the student typed — though over a simulator, not a running network, and
 #: `narration` says which.
-WITNESSED = (WITNESS, OBJECTIVE, OBSERVE, PROVED)
+WITNESSED = (WITNESS, OBJECTIVE, OBSERVE, PROVED, ORDERS)
 #: A student's own words, and the weakest tier there is — deliberately NOT folded in with
 #: `witnessed`, because a witness is something GINI measured and an answer is something a person
 #: typed. Nothing here checks it against the teacher's key; that is a person's job.
@@ -532,6 +544,89 @@ def proved(lab: str, level: str, version: str, code, ok: bool, reason: str = "",
         "lab": clip(lab, 40), "level": clip(level, 40), "version": clip(version, 40),
         "code": _code(code), "ok": bool(ok), "reason": clip(reason, 160),
         "starts": [int(s) for s in list(starts or [])[:16]], "summary": summ}
+
+
+def _pairs(rows, cap: int = 400) -> list:
+    return [[clip(str(x), 40) for x in list(r)[:4]] for r in list(rows or [])[:cap]]
+
+
+def allocate(lab: str, level: str, version: str, start: int, moves, goal: str,
+             result: str) -> tuple[str, dict]:
+    """T-Lab 03, a run level: the order of requests, finishes and recovery actions that reached a
+    goal. `moves` is `[[process, kind], ...]` exactly as `banklab.replay` takes them."""
+    return ALLOCATE, {
+        "lab": clip(lab, 40), "level": clip(level, 40), "version": clip(version, 40),
+        "start": int(start or 0), "moves": _pairs(moves), "goal": clip(goal, 40),
+        "result": clip(result, 120)}
+
+
+def bank(lab: str, level: str, start: int, request, rows, decision: str, verdict: str,
+         goal: str) -> tuple[str, dict]:
+    """T-Lab 03, the bank level: the request picked (None for "is this state safe?"), the rows of
+    the safety check the student ran by hand, the decision pressed, and GINI's verdict on it."""
+    req = None
+    if request is not None:
+        p, vec = request
+        req = [int(p), [int(x) for x in list(vec)[:16]]]
+    return BANK, {
+        "lab": clip(lab, 40), "level": clip(level, 40), "start": int(start or 0),
+        "request": req, "rows": _pairs(rows, 64), "decision": clip(decision, 20),
+        "verdict": clip(verdict, 200), "goal": clip(goal, 40)}
+
+
+def orders(lab: str, level: str, version: str, start: int, ok: bool, reason: str = "",
+           summary=None) -> tuple[str, dict]:
+    """T-Lab 03, Try every order on a version that can be proved, held or not. `summary` is
+    `{states, outcomes: [[label, paths], ...]}` — what the tab showed."""
+    s = dict(summary or {})
+    return ORDERS, {
+        "lab": clip(lab, 40), "level": clip(level, 40), "version": clip(version, 40),
+        "start": int(start or 0), "ok": bool(ok), "reason": clip(reason, 160),
+        "summary": {"states": int(s.get("states") or 0),
+                    "outcomes": [[clip(str(o[0]), 80), int(o[1] or 0)]
+                                 for o in list(s.get("outcomes") or [])[:32]]}}
+
+
+def _fs_base(lab: str, level: str, start: str, seed, goal: str, hints: int) -> dict:
+    return {"lab": clip(lab, 40), "level": clip(level, 40), "start": clip(start, 40),
+            "seed": (int(seed) if seed is not None else None), "goal": clip(goal, 40),
+            "hints": int(hints or 0)}
+
+
+def fs_walk(lab: str, level: str, start: str, seed, path: str, clicks, goal: str,
+            hints: int = 0) -> tuple[str, dict]:
+    """T-Lab 04, Walk the path: the blocks clicked for one `open()`, re-checked by
+    `fslab.walk_clicks`. A Random start keeps its seed so the disk can be rebuilt."""
+    d = _fs_base(lab, level, start, seed, goal, hints)
+    d.update(path=clip(path, 200), clicks=[int(b) for b in list(clicks or [])[:200]])
+    return FS_WALK, d
+
+
+def fs_read(lab: str, level: str, start: str, seed, offset: int, clicks, goal: str,
+            hints: int = 0) -> tuple[str, dict]:
+    """T-Lab 04, Find byte n: the pointers clicked (`["double", 1, 61]` or `["eof"]`)."""
+    d = _fs_base(lab, level, start, seed, goal, hints)
+    d.update(offset=int(offset or 0),
+             clicks=[c if isinstance(c, int) else clip(str(c), 20)
+                     for c in list(clicks or [])[:64]])   # wrong clicks are kept too
+    return FS_READ, d
+
+
+def fs_make(lab: str, level: str, writes, goal: str) -> tuple[str, dict]:
+    """T-Lab 04, Make a file with holes: the writes, `[[offset, n], ...]`, replayed in order."""
+    return FS_MAKE, {"lab": clip(lab, 40), "level": clip(level, 40),
+                     "writes": [[int(o), int(n)] for o, n in list(writes or [])[:64]],
+                     "goal": clip(goal, 40)}
+
+
+def fs_trace(lab: str, level: str, start: str, seed, op: str, offset: int, n: int, steps,
+             goal: str, hints: int = 0) -> tuple[str, dict]:
+    """T-Lab 04, Append and overwrite: the trace built click by click, `[[block, "R"|"W"], ...]`,
+    re-checked with `fslab.write_call` and `trace_steps`."""
+    d = _fs_base(lab, level, start, seed, goal, hints)
+    d.update(op=clip(op, 20), offset=int(offset or 0), n=int(n or 0),
+             steps=[[int(b), clip(str(o), 2)] for b, o in list(steps or [])[:200]])
+    return FS_TRACE, d
 
 
 def _field(row, key: str):
