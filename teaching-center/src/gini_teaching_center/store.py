@@ -78,8 +78,8 @@ CREATE TABLE IF NOT EXISTS activity (
   -- arm time to a gBuilder older than this -- and to one that does not say its version at all,
   -- which is every gBuilder from before this column, i.e. exactly the ones it is for.
   min_gini        TEXT DEFAULT '',
-  -- Which GINI lab this is ('a-lab-04', 't-lab-02'), so hand-in checks that lab and no other
-  -- (gini.domain.gini_labs). '' = not set: a lab id that is itself a GINI lab id still counts.
+  -- RETIRED, unread (6.22.16-6.22.19's "GINI lab" menu). Which GINI lab a lab is comes from its
+  -- id now (gini.domain.gini_labs); the column stays so an existing database needs no surgery.
   gini_lab        TEXT DEFAULT '',
   created         REAL DEFAULT 0,
   released        REAL DEFAULT 0
@@ -701,7 +701,7 @@ class Store:
     def activity_put(self, rec: dict) -> None:
         cols = ("id", "course", "lab", "title", "brief", "status", "vend_until",
                 "session_minutes", "grace_minutes", "show_n", "one_sitting", "release_code",
-                "min_gini", "gini_lab", "created", "released")
+                "min_gini", "created", "released")
         self._run(f"INSERT OR REPLACE INTO activity({','.join(cols)}) "
                   f"VALUES({','.join('?' * len(cols))})", tuple(rec.get(c, "") for c in cols))
 

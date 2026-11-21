@@ -152,12 +152,13 @@ def _data(e) -> dict:
     return d if isinstance(d, dict) else {}
 
 
-def grade_at_hand_in(spec, entries, code_lab: str = "") -> bool:
+def grade_at_hand_in(spec, entries, code_lab: str | None = None) -> bool:
     """Whether the hand-in should grade this armed A-Lab into THIS chain.
 
-    When the course said which GINI lab the code is for (`code_lab`, from the arm reply), that
-    decides it: this lab is graded if it is that lab, and not otherwise. The rest of this is the
-    fallback for a code whose course did not say.
+    `code_lab` is the GINI lab the code is for, read from its course lab id
+    (`ProofRecorder.gini_lab`). When it is known it decides: this lab is graded if it is that
+    lab, and not otherwise — "" (a "c-lab-01", a networking "lab1") grades no A-Lab at all. The
+    rest of this is the fallback for None, a code armed offline whose lab id never arrived.
 
     An assignment stays armed on a machine across course codes, so a student who looked at
     A-Lab 04 and then recorded T-Lab 02 under its own code had A-Lab 04 graded into the T-Lab
@@ -172,8 +173,8 @@ def grade_at_hand_in(spec, entries, code_lab: str = "") -> bool:
     """
     from gini.domain import proof_events as ev
     sid = str(getattr(spec, "id", "") or "")
-    if code_lab:
-        return sid == code_lab
+    if code_lab is not None:
+        return bool(code_lab) and sid == code_lab
     title = str(getattr(spec, "title", "") or "")
     tlab = set(ev.TLAB_GOALS) | {ev.PROVED, ev.ORDERS, ev.EXPLORED}
     saw_tlab = False

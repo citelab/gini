@@ -89,7 +89,6 @@ class ProofRecorder:
         # time. The strip has always received it and only ever printed it; keeping it is what lets
         # the tutor know which of a course's activities the student is actually being marked on.
         self._activity = ""
-        self._gini_lab = ""
         self._activity_title = ""
         # What the lab ASKS FOR, in the teacher's own words. The server has always sent it with
         # the arm reply and it was dropped on arrival, so the panel could name the lab but never
@@ -206,10 +205,11 @@ class ProofRecorder:
                 gini_version=gini_version())
             self.store.write_chain(tk.code, chain)
         self._chain, self._ticket = chain, tk
-        # Which GINI lab this code is for comes from the course server's arm reply
+        # Which GINI lab this code is for comes from its lab id in the course server's arm reply
         # (`note_activity`), which follows this. Cleared here so a code armed offline is not
-        # graded as the previous code's lab.
-        self._gini_lab = ""
+        # graded as the previous code's lab — and the title too, whose absence is what makes the
+        # main window ask again once the server can be reached.
+        self._activity = self._activity_title = self._activity_brief = ""
         # The bookmark is written HERE, at arm, not only by Pause. It used to be written only by
         # Pause, so a student who quit gBuilder, or had it crash, or had the laptop restart for
         # an update while recording, came back to an empty Record box: the work was safe on disk
@@ -266,8 +266,7 @@ class ProofRecorder:
         self._pausable = bool(pausable)
         self._changed()
 
-    def note_activity(self, activity: str, title: str = "", brief: str = "",
-                      gini_lab: str = "") -> None:
+    def note_activity(self, activity: str, title: str = "", brief: str = "") -> None:
         """Remember which lab the armed code belongs to, from the course server's arm reply.
 
         Set from OUTSIDE, because the recorder never talks to the network — a code is
@@ -278,15 +277,21 @@ class ProofRecorder:
         reason: the chain records what the student DID, and the assignment text is not that.
         """
         self._activity = str(activity or "")
-        self._gini_lab = str(gini_lab or "")
         self._activity_title = str(title or "")
         self._activity_brief = str(brief or "")
 
     @property
-    def gini_lab(self) -> str:
-        """The GINI lab this code is for ("a-lab-04", "t-lab-02"), as the course server said when
-        it was armed; "" when it did not say. Hand-in checks this lab and no other."""
-        return self._gini_lab
+    def gini_lab(self) -> str | None:
+        """The GINI lab this code is for ("a-lab-04", "t-lab-02"), read from its course lab id
+        (`activity` is "course/lab"); "" when that id names no GINI lab; None when the course has
+        not said which lab the code is for (armed offline). Hand-in checks this lab and no other.
+
+        Read here rather than taken from the reply's own `gini_lab`, so it does not depend on the
+        server's version: the rule is gini-core's (`gini_labs.resolve`), the same on both sides."""
+        if not self._activity:
+            return None
+        from gini.domain import gini_labs
+        return gini_labs.resolve(self._activity.rsplit("/", 1)[-1])
 
     @property
     def activity_title(self) -> str:

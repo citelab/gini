@@ -127,22 +127,20 @@ def gini_too_old(activity: dict | None, client_version: str) -> dict | None:
 # --------------------------------------------------------------------------- #
 # which GINI lab a course lab is
 # --------------------------------------------------------------------------- #
-def gini_lab_value(text) -> str | None:
-    """The console's "GINI lab" choice -> what to store: "" for none, a GINI lab id, or None
-    when it names no lab this server's gini-core knows."""
+def gini_lab_of(activity: dict | None) -> str | None:
+    """The GINI lab a code for this activity is for, from the lab's id ("" = it names none) — sent
+    with the code for gBuilders 6.22.16-6.22.19, which read it from the reply; later ones read the
+    same id themselves. None when there is no lab id to read. See `gini.domain.gini_labs`."""
     from gini.domain import gini_labs
-    t = str(text or "").strip()
-    if not t:
-        return ""
-    return t if gini_labs.find(t) else None
+    lab = str((activity or {}).get("lab") or "").strip()
+    return gini_labs.resolve(lab) if lab else None
 
 
-def gini_lab_of(activity: dict | None) -> str:
-    """The GINI lab a code for this activity is for — sent with the code, like its questions, so
-    gBuilder checks that lab at hand-in and no other. See `gini.domain.gini_labs.resolve`."""
+def gini_lab_title(activity: dict | None) -> str:
+    """"A-Lab 03", for the console's list; "" for a lab that names no GINI lab."""
     from gini.domain import gini_labs
-    a = activity or {}
-    return gini_labs.resolve(a.get("gini_lab") or "", a.get("lab") or "")
+    g = gini_lab_of(activity)
+    return gini_labs.title(g).split(" —")[0] if g else ""
 
 
 def activity_id(course: str, lab: str) -> str:

@@ -432,9 +432,8 @@ class ProofStrip(QWidget):
         title = str(answer.get("title") or "").strip()
         brief = str(answer.get("brief") or "").strip()
         if self.recorder is not None and hasattr(self.recorder, "note_activity"):
-            # And which GINI lab it is, so hand-in checks that one — sent like the questions.
-            self.recorder.note_activity(activity, title, brief,
-                                        gini_lab=str(answer.get("gini_lab") or ""))
+            # Its lab id ("comp310/t-lab-02") is also which GINI lab hand-in checks.
+            self.recorder.note_activity(activity, title, brief)
         # Whether the teacher allows this lab to be paused. Absent from an older server's reply,
         # and absent means pausable — that is what every lab was before the option existed.
         pausable = bool(answer.get("pausable", True))

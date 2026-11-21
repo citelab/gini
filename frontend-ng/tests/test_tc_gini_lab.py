@@ -1,15 +1,15 @@
-"""A course's lab names its GINI lab, and hand-in checks that lab and no other.
+"""A course's lab id names its GINI lab, and hand-in checks that lab and no other.
 
 A code is minted for one Teaching Center lab, and its questions travel with it, so a student always
-got the right questions. The checks do not: A-Lab 04's stages are gBuilder's, and the Teaching
-Center lab never said which GINI lab it was (its id is whatever the teacher typed, "lab4"). So
-at hand-in gBuilder graded every A-Lab armed on the student's machines — a student with A-Lab 03
-on M1 and A-Lab 04 on M2 had both graded into one hand-in, and one with A-Lab 04 armed from
-earlier had it graded, as failures, into T-Lab 02.
+got the right questions. The checks do not: A-Lab 04's stages are gBuilder's. So at hand-in
+gBuilder graded every A-Lab armed on the student's machines — a student with A-Lab 03 on M1 and
+A-Lab 04 on M2 had both graded into one hand-in, and one with A-Lab 04 armed from earlier had it
+graded, as failures, into T-Lab 02.
 
-Now the lab names its GINI lab in the console, the arm reply carries it like the questions, and
-the hand-in grades that lab; the cooked view reads that lab's checks and says when it was never
-checked. A lab that has not been told still works as before.
+The course names its labs after GINI's ("t-lab-02", "a-lab-01a"), so the lab id is the link, read
+by the same gini-core rule on both sides. 6.22.16 also added a "GINI lab" menu to the lab editor —
+a second place to say it, never set, silently winning where the two disagreed — and 6.22.20
+removed it. A lab id that names no GINI lab ("c-lab-01") is for none, and no A-Lab is graded in.
 """
 from __future__ import annotations
 
@@ -53,11 +53,27 @@ def test_every_a_lab_and_released_t_lab_can_be_chosen():
     assert gini_labs.kind("t-lab-02") == gini_labs.T_LAB and gini_labs.kind("lab4") == ""
 
 
-def test_the_teachers_choice_wins_then_a_lab_id_that_is_a_gini_lab_id():
-    assert gini_labs.resolve("a-lab-04", "lab4") == "a-lab-04"
-    assert gini_labs.resolve("", "t-lab-02") == "t-lab-02"
-    assert gini_labs.resolve("", "lab4") == ""
-    assert gini_labs.resolve("nonsense", "lab4") == ""
+def test_the_lab_id_is_the_link():
+    assert gini_labs.resolve("t-lab-02") == "t-lab-02"
+    assert gini_labs.resolve("a-lab-03") == "a-lab-03"
+    assert gini_labs.resolve("A-Lab-04") == "a-lab-04"
+
+
+def test_a_second_run_with_a_suffix_is_the_same_lab():
+    assert gini_labs.resolve("a-lab-01a") == "syscall-sysinfo"
+    assert gini_labs.resolve("t-lab-02-late") == "t-lab-02"
+    assert gini_labs.resolve("a-lab-03b") == "a-lab-03"
+
+
+def test_a_lab_01_is_reached_by_the_courses_name_for_it():
+    """Its own id predates the naming, and students' armed state is keyed by it."""
+    assert gini_labs.resolve("a-lab-01") == "syscall-sysinfo"
+    assert gini_labs.title(gini_labs.resolve("a-lab-01")).startswith("A-Lab 01")
+
+
+def test_an_id_that_names_no_gini_lab_is_for_none():
+    for lab in ("c-lab-01", "c-lab-02", "lab4", "", "a-lab-010", "t-lab-021"):
+        assert gini_labs.resolve(lab) == "", lab
 
 
 # --------------------------------------------------------------------------- #
@@ -75,9 +91,15 @@ def test_a_t_lab_code_grades_no_a_lab_even_one_worked_on_in_the_same_recording()
     assert X.grade_at_hand_in(A04, chain, "t-lab-02") is False
 
 
-def test_a_code_whose_course_did_not_say_falls_back_to_the_recording():
-    assert X.grade_at_hand_in(A04, [], "") is True
-    assert X.grade_at_hand_in(A04, [_e(ev.lab_open("M1", "t-lab-02"))], "") is False
+def test_a_code_for_no_gini_lab_grades_no_a_lab():
+    """A C-Lab code with A-Lab 04 still armed: the original mixup, closed for good."""
+    assert X.grade_at_hand_in(A04, [_e(ev.build("M1", "a-lab-04", True))], "") is False
+
+
+def test_a_code_whose_lab_is_not_known_yet_falls_back_to_the_recording():
+    """Armed offline, its lab id never arrived."""
+    assert X.grade_at_hand_in(A04, [], None) is True
+    assert X.grade_at_hand_in(A04, [_e(ev.lab_open("M1", "t-lab-02"))], None) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -116,7 +138,15 @@ def test_the_preview_names_the_lab_first():
     assert summary_lines(G.preview([], gini_lab="a-lab-04"))[0] == f"Lab: {A04.title}"
 
 
-def test_with_no_lab_named_the_view_is_what_it_was():
+def test_a_code_for_no_gini_lab_shows_no_a_lab_checks_or_loads():
+    chain = [_measured(A04.title, False), _e(ev.build("M1", "a-lab-04", True)),
+             _e(ev.measure("rtt h1→h2", {"ok": True}))]
+    c = G.preview(chain, gini_lab="")
+    assert c["grading"]["total"] == 1 and "builds" not in c and "lab" not in c
+    assert any("not part of this lab: 1 Load (A-Lab 04)" in x for x in c["look_at"])
+
+
+def test_with_the_lab_not_known_the_view_is_what_it_was():
     chain = [_measured(A03.title, False), _measured(A04.title, True)]
     c = G.preview(chain)
     assert c["grading"]["total"] == 1 and "lab" not in c      # one metric name, last reading wins
@@ -137,10 +167,13 @@ def test_arming_a_new_code_forgets_the_previous_codes_lab(tmp_path):
         topology = Topology()
     r = ProofRecorder(Ctx(), store=P.ChainStore(tmp_path))
     assert r.arm(T.mint().pretty)[0]
-    r.note_activity("comp310/lab4", "A-Lab 04", gini_lab="a-lab-04")
+    assert r.gini_lab is None
+    r.note_activity("comp310/a-lab-04", "Sems")
     assert r.gini_lab == "a-lab-04"
-    assert r.arm(T.mint().pretty)[0]                     # offline: no reply follows
+    r.note_activity("comp310/c-lab-01", "Catching the kernel")
     assert r.gini_lab == ""
+    assert r.arm(T.mint().pretty)[0]                     # offline: no reply follows
+    assert r.gini_lab is None and r.activity_title == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -158,43 +191,28 @@ def _row(call, tok, lab="lab1"):
 
 
 @needs_tc
-def test_the_console_lists_the_gini_labs(course):
+def test_the_list_shows_which_gini_lab_each_lab_id_names(course):
     _url, tok, call = course
-    ids = [g["id"] for g in call("/api/gini_labs", session=tok)]
-    assert "a-lab-04" in ids and "t-lab-02" in ids
+    for lab in ("t-lab-02", "a-lab-01a", "c-lab-01"):
+        call("/api/activities/save", {"course": "comp535", "lab": lab, "title": lab,
+                                      "vend_until": time.time() + HOUR}, tok)
+    got = {x["lab"]: x["gini_lab_title"]
+           for x in call("/api/activities?course=comp535", session=tok)}
+    assert got["t-lab-02"] == "T-Lab 02" and got["a-lab-01a"] == "A-Lab 01"
+    assert got["c-lab-01"] == "" and got["lab1"] == ""
 
 
 @needs_tc
-def test_the_teacher_sets_it_and_an_older_console_leaves_it_alone(course):
+def test_there_is_no_menu_any_more_and_an_old_consoles_choice_is_ignored(course):
     _url, tok, call = course
-    assert _save(call, tok, gini_lab="a-lab-04")["ok"]
-    assert _row(call, tok)["gini_lab"] == "a-lab-04"
-    _save(call, tok)                                           # no gini_lab at all
-    assert _row(call, tok)["gini_lab"] == "a-lab-04"
-    _save(call, tok, gini_lab="")
-    assert _row(call, tok)["gini_lab"] == ""
+    assert _save(call, tok, gini_lab="a-lab-04")["ok"]       # a console from 6.22.16-19
+    assert _row(call, tok)["gini_lab"] == ""                  # "lab1" names none
+    assert "error" in (call("/api/gini_labs", session=tok) or {"error": 1})
 
 
 @needs_tc
-def test_a_lab_this_server_does_not_know_is_refused(course):
-    _url, tok, call = course
-    r = _save(call, tok, gini_lab="a-lab-99")
-    assert not r["ok"] and "GINI lab" in r["error"]
-
-
-@needs_tc
-def test_the_code_carries_its_gini_lab_like_its_questions(course):
-    _url, tok, call = course
-    _save(call, tok, gini_lab="t-lab-02")
-    vend = call("/api/activity?course=comp535&lab=lab1&rc=" + _rc())
-    code = vend["code"].replace("-", "").replace(" ", "")
-    armed = call(f"/api/activity?code={code}")
-    assert armed["ok"] and armed["gini_lab"] == "t-lab-02" and armed["questions"]
-    assert vend["gini_lab"] == "t-lab-02"
-
-
-@needs_tc
-def test_a_lab_whose_id_is_a_gini_lab_id_needs_no_setting(course):
+def test_the_code_carries_the_gini_lab_its_lab_id_names(course):
+    """For gBuilders 6.22.16-6.22.19, which read it from the reply."""
     _url, tok, call = course
     call("/api/activities/save", {"course": "comp535", "lab": "a-lab-04", "title": "Sems",
                                   "vend_until": time.time() + HOUR, "questions": QS,
@@ -202,7 +220,8 @@ def test_a_lab_whose_id_is_a_gini_lab_id_needs_no_setting(course):
     call("/api/activities/release", {"course": "comp535", "lab": "a-lab-04"}, tok)
     vend = call("/api/activity?course=comp535&lab=a-lab-04&rc=" + _rc("a-lab-04"))
     assert vend["gini_lab"] == "a-lab-04"
-
+    code = vend["code"].replace("-", "").replace(" ", "")
+    assert call(f"/api/activity?code={code}")["gini_lab"] == "a-lab-04"
 
 
 # --------------------------------------------------------------------------- #

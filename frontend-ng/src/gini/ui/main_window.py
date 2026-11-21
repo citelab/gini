@@ -3277,7 +3277,7 @@ class MainWindow(QMainWindow):
         )
         chain = getattr(self.proof_recorder, "_chain", None)
         entries = list(chain.entries) if chain is not None else []
-        code_lab = str(getattr(self.proof_recorder, "gini_lab", "") or "")
+        code_lab = getattr(self.proof_recorder, "gini_lab", None)
         for dev in list(self.ctx.topology.devices.values()):
             if _role(dev.type_key) != "xv6":
                 continue

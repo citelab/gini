@@ -89,7 +89,7 @@ def confirm(parent, recorder) -> bool:
         chain = getattr(recorder, "_chain", None)
         cooked = _g.preview(chain.entries if chain else [],
                             list(getattr(recorder, "questions", []) or []),
-                            gini_lab=str(getattr(recorder, "gini_lab", "") or ""))
+                            gini_lab=getattr(recorder, "gini_lab", None))
     except Exception:                          # noqa: BLE001 — see the docstring
         return True
     look = list(cooked.get("look_at") or [])

@@ -164,6 +164,11 @@
       <div class="card">
         <h2 style="font-size:21px" id="a-heading">New lab</h2>
         <label>Lab id</label><input id="a-lab" placeholder="lab1">
+        <div class="note">For one of GINI's labs, use its name — <span class="mono">a-lab-03</span>,
+          <span class="mono">t-lab-02</span> — with a suffix for a second run
+          (<span class="mono">a-lab-01a</span>). Hand-in checks that lab and no other, and the list
+          shows which one. Any other id (<span class="mono">c-lab-01</span>,
+          <span class="mono">lab1</span>) is for no GINI lab, and nothing is graded into it.</div>
         <label>Title</label><input id="a-title" placeholder="Multi-LAN">
         <label>What the students are told</label>
         <textarea id="a-brief" placeholder="Build a few LANs joined by routers and show a machine on one LAN can talk to a machine on another."></textarea>
@@ -193,13 +198,6 @@ hand-in time: everyone is then due when code vending stops, however early they b
           to do so, and the code does not start. This includes every gBuilder from before this
           setting existed. It is checked when the code is entered, so raise it before students
           start; work already under way is not interrupted.</div>
-        <label style="margin-top:12px">GINI lab</label>
-        <select id="a-ginilab"><option value="">— not set —</option></select>
-        <div class="note">Which of GINI's labs this is. It travels with each code, like the
-          questions, and at hand-in gBuilder checks this lab and no other — so a student who has
-          another A-Lab set up on their machine does not get that one graded into this hand-in.
-          Not set: a lab id that is itself a GINI lab id (a-lab-04) counts as that lab; otherwise
-          gBuilder judges from the recording.</div>
         <label style="margin-top:16px">Questions</label>
         <div class="note">Short answers, in the student's own words. Write a few; each student is
           asked a random selection of them, fixed when their code is issued. The answers you give
@@ -617,26 +615,8 @@ async function newLink(lab){
 }
 
 // ---- activities -------------------------------------------------------------
-// The "GINI lab" menu, filled once from the labs this server's gini-core knows.
-let GINI_LABS = null;
-async function loadGiniLabs(){
-  if (GINI_LABS) return;
-  try { GINI_LABS = await api('/api/gini_labs'); } catch (e) { GINI_LABS = []; }
-  const sel = $('#a-ginilab');
-  for (const g of GINI_LABS) {
-    const o = document.createElement('option');
-    o.value = g.id; o.textContent = g.title;
-    sel.appendChild(o);
-  }
-}
-function giniLabTitle(id){
-  const g = (GINI_LABS || []).find(x => x.id === id);
-  return g ? g.title.split(' —')[0] : id;
-}
-
 async function loadActs(){
   $('#acts-sub').textContent = 'Labs in ' + COURSE;
-  await loadGiniLabs();
   loadSubs();
   const rows = await api('/api/activities?course=' + encodeURIComponent(COURSE));
   // Kept by lab id for the row buttons to look up. See ACTS for why a button carries only an id.
@@ -654,7 +634,7 @@ async function loadActs(){
         <td><span class="tag ${a.status==='released'?'live':'draft'}">${esc(a.status)}</span>
             ${Number(a.one_sitting) ? '<span class="tag draft" style="margin-left:6px" title="Students cannot pause this lab">one sitting</span>' : ''}
             ${a.min_gini ? `<span class="tag draft" style="margin-left:6px" title="Older gBuilders are told to update">GINI ≥ ${esc(a.min_gini)}</span>` : ''}
-            ${a.gini_lab ? `<span class="tag kind" style="margin-left:6px" title="Hand-in checks this GINI lab">${esc(giniLabTitle(a.gini_lab))}</span>` : ''}
+            ${a.gini_lab_title ? `<span class="tag kind" style="margin-left:6px" title="From the lab id: hand-in checks this GINI lab and no other">${esc(a.gini_lab_title)}</span>` : ''}
         <td class="mono">${a.vended}<td class="mono">${a.submitted}
         <td>${a.status==='released'
               ? `<button class="flat" data-lab="${esc(a.lab)}" onclick="release(this.dataset.lab,false)">Close</button>`
@@ -704,7 +684,6 @@ function actBody(){
           grace_minutes: g === '' ? null : parseInt(g, 10),
           one_sitting: $('#a-onesit').checked,
           min_gini: $('#a-mingini').value.trim(),
-          gini_lab: $('#a-ginilab').value,
           questions: readQs(),
           show_n: parseInt($('#a-shown').value, 10) || 0};
 }
@@ -737,7 +716,6 @@ function editAct(json){
   $('#a-grace').value = Number(a.grace_minutes) || 0;
   $('#a-onesit').checked = !!Number(a.one_sitting);
   $('#a-mingini').value = a.min_gini || '';
-  $('#a-ginilab').value = a.gini_lab || '';
   // datetime-local wants exactly YYYY-MM-DDTHH:mm in LOCAL time, which toISOString would shift.
   if (a.vend_until) {
     const d = new Date(a.vend_until*1000 - new Date().getTimezoneOffset()*60000);
@@ -791,7 +769,7 @@ async function saveAct(){
 function clearAct(){
   ['a-lab','a-title','a-brief','a-vend'].forEach(i=>$('#'+i).value='');
   $('#a-mins').value = '60';
-  $('#a-grace').value = '0'; $('#a-onesit').checked = false; $('#a-mingini').value = ''; $('#a-ginilab').value = '';
+  $('#a-grace').value = '0'; $('#a-onesit').checked = false; $('#a-mingini').value = '';
   $('#a-qs').innerHTML = ''; $('#a-shown').value = '0';
   $('#a-heading').textContent = 'New lab';
 }

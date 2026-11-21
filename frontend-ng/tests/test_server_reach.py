@@ -234,8 +234,9 @@ def test_an_offline_arm_records_and_says_why_and_that_questions_will_follow(stri
 def test_questions_fetched_later_also_say_which_lab_it_is(strip):
     """A re-ask gets the whole arm reply; hand-in grades the GINI lab it names."""
     strip._on_arm_checked(CODE, {"unreachable": True, "error": "x"})
-    strip._on_questions_fetched({"ok": True, "activity": "comp310/lab4", "title": "Sems",
-                                 "gini_lab": "a-lab-04", "questions": []})
+    assert strip.recorder.gini_lab is None                  # armed offline: not known yet
+    strip._on_questions_fetched({"ok": True, "activity": "comp310/a-lab-04", "title": "Sems",
+                                 "questions": []})
     assert strip.recorder.gini_lab == "a-lab-04" and strip.recorder.activity_title == "Sems"
 
 

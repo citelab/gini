@@ -475,10 +475,6 @@ class Handler(BaseHTTPRequestHandler):
                                      "activities": len(_STORE.activities(c["id"]))}
                                     for c in rows])
 
-        if p == "/api/gini_labs":
-            # The console's "GINI lab" menu: every lab this server's gini-core knows.
-            from gini.domain import gini_labs
-            return self._send(200, gini_labs.choices())
 
         if p == "/api/references":
             # The LIBRARY: global, and listed to every staff member. A shelf is not a course's
@@ -497,6 +493,10 @@ class Handler(BaseHTTPRequestHandler):
                 for a in _STORE.activities(course):
                     out.append({**a, "vended": _STORE.code_count(a["id"]),
                                 "submitted": _STORE.submission_count(a["id"]),
+                                # Which GINI lab hand-in checks, read from the lab id — shown
+                                # beside it so a misnamed lab is seen before students start.
+                                "gini_lab": _act.gini_lab_of(a),
+                                "gini_lab_title": _act.gini_lab_title(a),
                                 # Staff-only route (the auth gate is just above) and the
                                 # console needs these to fill the editor. Keys included:
                                 # this is the one place a teacher edits them.
@@ -756,12 +756,6 @@ class Handler(BaseHTTPRequestHandler):
         if min_gini is None:
             return {"ok": False, "error": "The minimum GINI version should look like 6.22.12, "
                                           "or be left blank."}
-        # The same rule: absent (an older console) leaves it alone; sent blank clears it.
-        gini_lab = (prev.get("gini_lab") or "") if b.get("gini_lab") is None \
-            else _act.gini_lab_value(b.get("gini_lab"))
-        if gini_lab is None:
-            return {"ok": False, "error": "That GINI lab is not one this server knows. Pick one "
-                                          "from the list, or leave it blank."}
         _STORE.activity_put({
             "id": aid, "course": course, "lab": lab, "show_n": show_n,
             # Minted on first save and kept. An edit must NOT rotate it: the link is already in a
@@ -772,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             "brief": b.get("brief", prev.get("brief", "")),
             "status": prev.get("status", "draft"),
             "vend_until": vend, "session_minutes": mins, "grace_minutes": grace,
-            "one_sitting": one_sitting, "min_gini": min_gini, "gini_lab": gini_lab,
+            "one_sitting": one_sitting, "min_gini": min_gini,
             "created": prev.get("created") or time.time(),
             "released": prev.get("released", 0)})
         _STORE.questions_put(aid, questions)

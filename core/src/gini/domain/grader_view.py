@@ -130,25 +130,31 @@ RECENT_COMMANDS = 8
 
 def cook(entries, title: str = "", answers: list | None = None,
          measurements: list | None = None, sources: list | None = None,
-         gini_lab: str = "") -> dict:
+         gini_lab: str | None = None) -> dict:
     """The cooked view of one submission, as plain data the console renders.
 
     `answers`, `measurements` and `sources` are the Teaching Center's own rows for the same
     submission (`activities.answered`, `.measurements`, `.check_sources`), passed in rather than
     recomputed, so the cooked view and the sections beside it can never disagree.
 
-    `gini_lab` is the GINI lab the code was for (`gini.domain.gini_labs`), when the course said.
+    `gini_lab` is the GINI lab the code was for (`gini.domain.gini_labs.resolve` of its lab id).
     Then the view reads THAT lab's checks and no other — a check of another A-Lab pressed during
     the same recording is not this lab's grade — and says so when that lab was never checked.
+    "" is a code for NO GINI lab ("c-lab-01", a networking "lab1"): no A-Lab's checks or Loads are
+    its own. None is not known (a code armed offline, whose lab id never arrived): read as before.
     """
     from . import gini_labs
-    lab_kind, lab_title = gini_labs.kind(gini_lab), gini_labs.title(gini_lab)
+    lab_kind, lab_title = gini_labs.kind(gini_lab or ""), gini_labs.title(gini_lab or "")
+    a_labs = [c["title"] for c in gini_labs.choices() if c["kind"] == gini_labs.A_LAB]
     if lab_kind == gini_labs.A_LAB:
         measurements = [r for r in measurements or []
                         if r.get("kind") != "measurement"
                         or str(r.get("name", "")).startswith(f"{lab_title} · ")]
     elif lab_kind == gini_labs.T_LAB:
         measurements = [r for r in measurements or [] if r.get("kind") != "measurement"]
+    elif gini_lab == "":
+        measurements = [r for r in measurements or [] if r.get("kind") != "measurement"
+                        or not any(str(r.get("name", "")).startswith(f"{t} · ") for t in a_labs)]
     es = list(entries or [])
     genesis = next((_d(e) for e in es if _k(e) == GENESIS), {})
     submitted = next((_t(e) for e in reversed(es) if _k(e) == SUBMIT), 0.0)
@@ -179,7 +185,7 @@ def cook(entries, title: str = "", answers: list | None = None,
     if lab_kind == gini_labs.T_LAB:
         kernel = (ev.BUILD, ev.SPAWN, ev.COMMAND)
         other = [e for e in es if _k(e) in kernel]
-    elif lab_kind == gini_labs.A_LAB:
+    elif lab_kind == gini_labs.A_LAB or gini_lab == "":
         other = [e for e in es if _k(e) == ev.BUILD and gini_labs.find(_d(e).get("shadow", ""))
                  and str(_d(e).get("shadow")) != gini_lab]
     if other:
@@ -193,7 +199,8 @@ def cook(entries, title: str = "", answers: list | None = None,
         parts = [f"{n} {w}{'' if n == 1 else 's'}" for n, w in
                  ((n_load, "Load"), (n_run, "program run"), (n_cmd, "console command")) if n]
         out["other_work"] = {"loads": n_load, "runs": n_run, "commands": n_cmd, "labs": named}
-        look.append(f"Also recorded under this code, and not part of {lab_title.split(' —')[0]}: "
+        look.append(f"Also recorded under this code, and not part of "
+                    f"{lab_title.split(' —')[0] if lab_kind else 'this lab'}: "
                     + ", ".join(parts) + (f" ({', '.join(named)})" if named else "")
                     + ". Left out of this view; the raw log below has them.")
 
@@ -409,7 +416,7 @@ def cook(entries, title: str = "", answers: list | None = None,
 
 
 def preview(entries, questions: list | None = None, title: str = "",
-            gini_lab: str = "") -> dict:
+            gini_lab: str | None = None) -> dict:
     """The cooked view of a chain that has NOT been handed in yet — what the student sees before
     they confirm, so "I did the work, honest" becomes something they can check and fix first.
 
