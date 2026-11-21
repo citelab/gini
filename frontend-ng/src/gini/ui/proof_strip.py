@@ -661,7 +661,8 @@ class ProofStrip(QWidget):
                 f"Your work has been sent to the course server.\n\n"
                 f"Receipt code: {receipt}\n\n"
                 f"Give this receipt to your instructor — it is how they find your work and record "
-                f"it as yours. Nothing else needs to be handed in.\n\n"
+                f"it as yours. Nothing else needs to be handed in. To see it again later, choose "
+                f"Course → My Receipts from the menu bar.\n\n"
                 f"This code is now finished and cannot be recorded under again. If you want "
                 f"another go at the lab, take a new code from your course page.\n\n"
                 f"A copy is also on disk at:\n{path}{late}")

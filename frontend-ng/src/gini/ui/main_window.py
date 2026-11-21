@@ -2053,6 +2053,11 @@ class MainWindow(QMainWindow):
         resubmit_act = add(cm, "&Resubmit to Course Server…",
                            lambda: self.proof_strip.resubmit())
         resubmit_act.setMenuRole(QAction.MenuRole.NoRole)
+        # The receipt was shown once, in the Handed-in dialog, and students who closed it without
+        # writing it down had no way to see it again. Every proof is still on disk, so it is read
+        # back from there (services/receipts).
+        receipts_act = add(cm, "My R&eceipts…", self._show_receipts)
+        receipts_act.setMenuRole(QAction.MenuRole.NoRole)
 
         # Teacher: verifying a student's proof is an action a marker takes repeatedly, not a
         # preference, so it gets a menu of its own rather than a corner of Settings.
@@ -2304,6 +2309,17 @@ class MainWindow(QMainWindow):
             self.ctx.log(f"GINI32: board '{dlg.applied_id}' set up for Wi-Fi "
                          f"'{s.board_wifi_ssid}'. Use that as the BoardID on the "
                          f"canvas.", "ok")
+
+    def _show_receipts(self) -> None:
+        """Course → My Receipts. Kept on `self` so it is not collected while open, and replaced
+        on every open so a hand-in made since the last one is in the list."""
+        from .receipts_dialog import ReceiptsDialog
+        old = getattr(self, "_receipts_dialog", None)
+        if old is not None:
+            old.close()
+        self._receipts_dialog = ReceiptsDialog(self)
+        self._receipts_dialog.show()
+        self._receipts_dialog.raise_()
 
     def _show_boards(self) -> None:
         """What the relay currently knows about real boards."""

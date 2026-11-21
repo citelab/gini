@@ -70,6 +70,9 @@ OWNED_BECAUSE = {
     "FragmentManager":
         "a Qt.Tool palette by the author's explicit choice (setWindowFlag(Qt.Tool, True)), which "
         "floats above the window it edits for; promoting it would overturn that decision",
+    "ReceiptsDialog":
+        "modeless only so the receipt can be copied into an email while it is open; it is read "
+        "once and closed, and one that slipped behind gBuilder would look like it never opened",
 }
 
 
