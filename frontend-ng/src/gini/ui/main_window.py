@@ -3162,13 +3162,27 @@ class MainWindow(QMainWindow):
         the metrics from the others.
         """
         from ..services.compiler import _role
-        from ..services.xv6_lab import active_spec, check_stages, grade_now, record_grades
+        from ..services.xv6_lab import (
+            active_spec,
+            check_stages,
+            grade_at_hand_in,
+            grade_now,
+            record_grades,
+        )
+        chain = getattr(self.proof_recorder, "_chain", None)
+        entries = list(chain.entries) if chain is not None else []
         for dev in list(self.ctx.topology.devices.values()):
             if _role(dev.type_key) != "xv6":
                 continue
             try:
                 spec = active_spec(dev.name)
                 if spec is None or not (getattr(spec, "grade", ()) or getattr(spec, "stages", ())):
+                    continue
+                if not grade_at_hand_in(spec, entries):
+                    # A T-Lab hand-in with an A-Lab still armed from earlier: grading it here put
+                    # failed stages of a lab never started into the T-Lab's submission.
+                    self.ctx.bus.log.emit("info", f"{dev.name}: {spec.title} is armed but not part "
+                                                  f"of this recording, so it is not graded.")
                     continue
                 ms = self.ctx.machine_states.get(dev.id)
                 live = ms is not None and getattr(ms, "mode", "") == "real" and self._running

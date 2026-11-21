@@ -288,6 +288,26 @@ def cook(entries, title: str = "", answers: list | None = None,
             "checks_passed": sum(1 for e in witnesses if _d(e).get("verdict") == "ok"),
             "checks": len(witnesses)}
 
+    # -- T-Labs: the goals reached in GINI's simulators --------------------------------------------
+    # A T-Lab's evidence is its goals and its Try every verdicts, and until this section a T-Lab
+    # hand-in showed neither: the student's preview listed time and the canvas, and nothing of
+    # the work, which read as "none of it was recorded".
+    goals = [e for e in es if _k(e) in ev.TLAB_GOALS]
+    proofs = [e for e in es if _k(e) in (ev.PROVED, ev.ORDERS)]
+    if goals or proofs:
+        labs: dict[str, dict] = {}
+        for e in goals:
+            d = _d(e)
+            lab = labs.setdefault(str(d.get("lab", "")), {"goals": set(), "levels": []})
+            lab["goals"].add((str(d.get("level", "")), str(d.get("goal", ""))))
+            if d.get("level") and d.get("level") not in lab["levels"]:
+                lab["levels"].append(str(d.get("level")))
+        out["tlabs"] = {
+            "labs": {k: {"goals": len(v["goals"]), "levels": v["levels"]}
+                     for k, v in labs.items()},
+            "goals": sum(len(v["goals"]) for v in labs.values()),
+            "proved": sum(1 for e in proofs if _d(e).get("ok")), "proofs": len(proofs)}
+
     # -- the code as sent, against the code as last built ------------------------------------------
     for s in sources or []:
         name = str(s.get("path", "")).rsplit("/", 1)[-1]

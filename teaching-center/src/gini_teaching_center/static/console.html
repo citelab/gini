@@ -1268,6 +1268,13 @@ function cookBlock(c){
     + `<pre style="margin:6px 0 0;max-height:180px;overflow:auto">${
         g2.out.length ? g2.out.map(esc).join('\n') : '(printed nothing)'}</pre>`));
   // Typed at the console. For A-Lab 02 and 03 this is where the student's own measurements are.
+  const tl = c.tlabs;
+  if (tl) {
+    for (const [lab, v] of Object.entries(tl.labs || {}))
+      rows.push(row(esc(lab.replace(/^t-lab-/, 'T-Lab ')), `<b>${v.goals}</b> goal${v.goals===1?'':'s'} reached`
+        + ((v.levels||[]).length ? ` on ${v.levels.map(esc).join(', ')}` : '')));
+    if (tl.proofs) rows.push(row('Try every', `held ${tl.proved} of ${tl.proofs} time${tl.proofs===1?'':'s'}`));
+  }
   const k = c.commands;
   if (k) rows.push(row('Console', `${k.count} command${k.count===1?'':'s'} typed`
     + (k.count > k.recent.length ? ` — the last ${k.recent.length}:` : ':')

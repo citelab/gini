@@ -15,6 +15,13 @@ it) only returns them to the lab — and says so in a dialog, because it is not 
 from __future__ import annotations
 
 
+def _tlab_name(lab_id: str) -> str:
+    """"t-lab-02" as the hub titles it: "T-Lab 02"."""
+    if lab_id.startswith("t-lab-"):
+        return "T-Lab " + lab_id[len("t-lab-"):]
+    return lab_id or "T-Lab"
+
+
 def summary_lines(c: dict) -> list[str]:
     """The cooked view as plain lines — the rows the marker's card shows, in the same order."""
     out = [f"Time: {c.get('minutes', 0)} min over {c.get('sittings', 0)} sitting(s), "
@@ -38,6 +45,13 @@ def summary_lines(c: dict) -> list[str]:
                    + ("" if t["last_out"] else " — the last run printed nothing"))
     for r in c.get("graded_runs") or []:
         out.append(f"Graded run {r['run']}: {len(r['out'])} line(s) of output kept")
+    tl = c.get("tlabs")
+    if tl:
+        for lab, v in sorted((tl.get("labs") or {}).items()):
+            out.append(f"{_tlab_name(lab)}: {v['goals']} goal(s) reached"
+                       + (f" on {', '.join(v['levels'])}" if v.get("levels") else ""))
+        if tl.get("proofs"):
+            out.append(f"Try every: held {tl['proved']} of {tl['proofs']} time(s)")
     k = c.get("commands")
     if k:
         out.append(f"Console: {k['count']} command(s) recorded")

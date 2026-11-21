@@ -143,6 +143,47 @@ def arm(machine_name: str, spec_id: str) -> bool:
     return True
 
 
+def _kind(e) -> str:
+    return str(getattr(e, "kind", "") if not isinstance(e, dict) else e.get("kind", ""))
+
+
+def _data(e) -> dict:
+    d = getattr(e, "data", None) if not isinstance(e, dict) else e.get("data")
+    return d if isinstance(d, dict) else {}
+
+
+def grade_at_hand_in(spec, entries) -> bool:
+    """Whether the hand-in should grade this armed A-Lab into THIS chain.
+
+    An assignment stays armed on a machine across course codes, so a student who looked at
+    A-Lab 04 and then recorded T-Lab 02 under its own code had A-Lab 04 graded into the T-Lab
+    hand-in — against work they had not started — and the preview pointed their marker at
+    "stage A1 failed" and ten stages "not run", with nothing about the T-Lab work that was the
+    point.
+
+    A code does not say which GINI lab it is for (the Teaching Center's lab name is the teacher's
+    own), so the chain decides. It is graded unless the chain holds T-Lab work and nothing at all
+    that ties it to this A-Lab: no Load of it, no picking it, no check of it. Narrow on purpose —
+    an A-Lab hand-in whose student never pressed Load (edit, Stop, Run) is still graded, as before.
+    """
+    from gini.domain import proof_events as ev
+    sid = str(getattr(spec, "id", "") or "")
+    title = str(getattr(spec, "title", "") or "")
+    tlab = set(ev.TLAB_GOALS) | {ev.PROVED, ev.ORDERS}
+    saw_tlab = False
+    for e in entries or ():
+        k, d = _kind(e), _data(e)
+        if k == ev.BUILD and str(d.get("shadow", "")) == sid:
+            return True
+        if k == ev.TUNE and d.get("knob") == "assignment" and str(d.get("to", "")) == sid:
+            return True
+        if k == ev.MEASURE and title and str(d.get("name", "")).startswith(f"{title} · "):
+            return True
+        if k in tlab or (k == ev.LAB_OPEN and str(d.get("face", "")).startswith("t-lab-")):
+            saw_tlab = True
+    return not saw_tlab
+
+
 def active_spec(machine_name: str = ""):
     """The assignment armed on this machine, or None.
 
