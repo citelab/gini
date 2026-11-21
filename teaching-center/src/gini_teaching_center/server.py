@@ -411,7 +411,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._may(act.get("course", "")):
             return {"ok": False, "error": "That is not your course."}
         try:
-            rec = _act.prepare({"proof": proof, "topology": b.get("topology")},
+            # The kernel code rides along when the teacher was handed an outbox entry, so an A-Lab
+            # taken in by hand is marked on the student's code like one that arrived on its own.
+            rec = _act.prepare({"proof": proof, "topology": b.get("topology"),
+                                "shadows": b.get("shadows") or None},
                                row, act, accepted_by=me["who"])
         except _act.Rejected as e:
             return {"ok": False, "reason": e.reason, "error": str(e)}

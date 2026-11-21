@@ -392,6 +392,55 @@ def session_seconds(proof: dict) -> tuple[float, float]:
     return float(entries[0].get("t") or 0), float(entries[-1].get("t") or 0)
 
 
+#: How far a student's clock may run ahead of the server's before a seal "from the future" stops
+#: being believed. Laptops drift by seconds, not hours; an hour covers a wrong time zone setting.
+CLOCK_SKEW = 3600.0
+
+
+def sealed_at(proof: dict) -> float:
+    """When the student pressed Hand in: the time of the chain's closing `submit` entry, or 0 when
+    the chain does not end in one. Inside the signed chain, like `session_seconds`."""
+    entries = (proof or {}).get("entries") or []
+    last = entries[-1] if entries else {}
+    return float(last.get("t") or 0) if last.get("kind") == _proof.SUBMIT else 0.0
+
+
+def sealed_in_time(proof: dict, code_row: dict | None, activity: dict | None,
+                   now: float | None = None) -> bool:
+    """Was this proof sealed before its code's deadline (grace included), however late it arrives?
+
+    The case it exists for: a student presses Hand in before the deadline, the upload fails (off
+    the VPN, a dropped connection), gBuilder keeps it in its outbox and resends it — and every
+    resend after the deadline was refused as `expired`, for ever, so the student held a correct
+    receipt for work the course never saw. Reported 2026-11-21: an A-Lab 03 hand-in sealed on
+    November 17 still "waiting to send" four days later, VPN or not.
+
+    Whether work is late is a question about when it was DONE, which the chain records and the
+    MAC binds; when the network let it through is not the student's doing. This reads the seal
+    time only. The caller still verifies the chain afterwards, exactly as for any upload, so a
+    proof that has been edited is refused as BAD_PROOF before its seal time means anything.
+
+    The limit, stated rather than hidden: the time comes from the student's clock. A student who
+    set their clock back, worked off the VPN (arming online checks the code's expiry, so this is
+    the only way to work under an expired code) and sealed "before" the deadline would pass this.
+    So the seal is held to the code's own life — not before it was issued, not ahead of the
+    server's clock by more than CLOCK_SKEW — and the submission is always shown to the teacher as
+    having arrived after the deadline (`resent_after_deadline` in the report), never silently.
+    """
+    sealed = sealed_at(proof)
+    row = code_row or {}
+    valid_until = float(row.get("valid_until") or 0)
+    if not sealed or not valid_until:
+        return False
+    t = now if now is not None else time.time()
+    if sealed > t + CLOCK_SKEW:
+        return False                         # sealed "in the future": a wrong clock, not a deadline met
+    issued = float(row.get("issued") or 0)
+    if issued and sealed < issued - CLOCK_SKEW:
+        return False                         # sealed before the code existed: the same
+    return sealed < valid_until + grace_seconds(activity)
+
+
 def paused_seconds(proof: dict) -> float:
     """How long the recording was paused, from the chain's own `resumed` marks.
 
@@ -729,6 +778,13 @@ def prepare(payload: dict, code_row: dict, activity: dict,
     should be able to launder a tampered proof through a kindness.
     """
     ok, reason = check_code(code_row, activity, now=now, staff=bool(accepted_by))
+    # A hand-in sealed before the deadline that is only now getting through: gBuilder's outbox
+    # resending an upload that failed at the time. Taken, judged on when it was sealed, and marked
+    # so the teacher sees it arrived late — see `sealed_in_time`. Every other check still runs.
+    resent = False
+    if (not ok and reason == EXPIRED and not accepted_by
+            and sealed_in_time(payload.get("proof") or {}, code_row, activity, now)):
+        ok, reason, resent = True, "", True
     if not ok:
         raise Rejected(reason)
 
@@ -755,6 +811,10 @@ def prepare(payload: dict, code_row: dict, activity: dict,
     if payload.get("shadows") and not isinstance(payload.get("shadows"), dict):
         raise Rejected(BAD_PROOF, "the submitted sources are not a mapping")
 
+    if resent:
+        # In the payload, like `accepted_by`, so it travels with the submission into the report.
+        payload = dict(payload, resent_after_deadline=now if now is not None else time.time(),
+                       sealed_at=sealed_at(proof))
     if accepted_by:
         # Recorded IN the payload, so it travels with the submission and shows in the report. A
         # late submission that looked like any other would quietly rewrite the deadline.
@@ -764,7 +824,9 @@ def prepare(payload: dict, code_row: dict, activity: dict,
     started, finished = session_seconds(proof)
     return {"code": code_row["code"],
             # Recorded, never a refusal — the teacher weighs it, as with an overrun session.
-            "late": 1 if is_late(code_row, now=now) else 0,
+            # A resend is judged on when it was SEALED: on time if the student pressed Hand in
+            # before the deadline, late if they did it inside the grace period.
+            "late": 1 if is_late(code_row, now=sealed_at(proof) if resent else now) else 0,
             # Carried from the code, which learned it at vend time. A TA's rehearsal on an
             # unreleased lab is a real submission and must not look like a student's.
             "draft": 1 if int(code_row.get("draft") or 0) else 0,
@@ -917,6 +979,10 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
         # Empty for an ordinary submission; the member of staff who took it, when it came in late
         # by hand. A marker must be able to see that the clock was overridden and by whom.
         "accepted_by": payload.get("accepted_by", ""),
+        # When a hand-in sealed before the deadline got through only after it (an upload that
+        # failed at the time, resent by gBuilder's outbox): the arrival time, else 0.
+        "resent_after_deadline": float(payload.get("resent_after_deadline") or 0),
+        "sealed_at": float(payload.get("sealed_at") or 0),
         "late": bool(row.get("late")),
         # A rehearsal run by a TA before the lab was released. Shown so a marker never wonders
         # which student this was.

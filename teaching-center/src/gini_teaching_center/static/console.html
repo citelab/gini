@@ -908,8 +908,11 @@ async function ingest(){
   const proof = payload.proof || (payload.ticket ? payload : null);
   if (!proof) {
     $('#ing-out').innerHTML = '<div class="err">That file is not a GINI proof.</div>'; return; }
+  // The kernel code too, when the file is an outbox entry (it carries `shadows`; a bare proof
+  // does not). Dropping it took an A-Lab in without the code the A-Lab is marked on.
   const r = await api('/api/submissions/accept',
-                      {proof: proof, topology: payload.topology || null});
+                      {proof: proof, topology: payload.topology || null,
+                       shadows: payload.shadows || null});
   if (!r.ok) { $('#ing-out').innerHTML = `<div class="err">${esc(r.error||'refused')}</div>`; return; }
   $('#ing-file').value = '';
   say(`Taken in — receipt ${r.receipt}.`, true);
@@ -1106,6 +1109,9 @@ async function openReceipt(receipt){
         <span class="tag draft">${r.entries} recorded actions</span>
         ${r.late ? `<span class="tag warn">LATE — arrived after the deadline</span>` : ''}
         ${r.accepted_by ? `<span class="tag warn">taken by ${esc(r.accepted_by)}</span>` : ''}
+        ${r.resent_after_deadline ? `<span class="tag warn" title="The student handed in at ${
+          esc(when(r.sealed_at))}; the upload failed and gBuilder sent it again. Judged on when it was handed in.">handed in ${
+          esc(when(r.sealed_at))} · arrived ${esc(when(r.resent_after_deadline))}</span>` : ''}
         ${twins ? `<span class="tag warn">same topology as ${twins} other</span>` : ''}
       </div>
       ${(r.contested_by||[]).length ? `<div class="note" style="color:var(--red)">

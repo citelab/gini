@@ -217,11 +217,13 @@ def test_a_submission_with_no_proof_is_refused(store):
 
 
 def test_an_expired_code_is_refused_at_submission_too(store):
-    """A code can expire between arming and submitting."""
+    """A code can expire between arming and handing in. Sealed AFTER the deadline: one sealed
+    before it and only arriving late is taken — see test_tc_resend.py."""
     act = an_activity(store)
     row = ACT.mint_code(act, now=NOW)
+    late_work = a_proof(row["code"], t0=row["valid_until"] + 1, minutes=1)
     with pytest.raises(ACT.Rejected) as e:
-        ACT.prepare({"proof": a_proof(row["code"])}, row, act, now=row["valid_until"] + 1)
+        ACT.prepare({"proof": late_work}, row, act, now=row["valid_until"] + 120)
     assert e.value.reason == ACT.EXPIRED
 
 
