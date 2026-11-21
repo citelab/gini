@@ -91,6 +91,16 @@ def test_hand_in_skips_the_armed_a_lab_and_says_so(tmp_path, monkeypatch):
     Chain.entries = [*_tlab_chain(), _e(ev.build("M1", "a-lab-04", True))]
     w._measure_armed_labs()
     assert len(graded) == 1
+
+    # When the course names the code's lab, that decides it, whatever the recording holds.
+    graded.clear()
+    w.proof_recorder._gini_lab = "t-lab-02"
+    w._measure_armed_labs()
+    assert graded == []
+    Chain.entries = _tlab_chain()
+    w.proof_recorder._gini_lab = "a-lab-04"
+    w._measure_armed_labs()
+    assert len(graded) == 1
     w.close()
 
 

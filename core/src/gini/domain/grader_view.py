@@ -129,13 +129,26 @@ RECENT_COMMANDS = 8
 
 
 def cook(entries, title: str = "", answers: list | None = None,
-         measurements: list | None = None, sources: list | None = None) -> dict:
+         measurements: list | None = None, sources: list | None = None,
+         gini_lab: str = "") -> dict:
     """The cooked view of one submission, as plain data the console renders.
 
     `answers`, `measurements` and `sources` are the Teaching Center's own rows for the same
     submission (`activities.answered`, `.measurements`, `.check_sources`), passed in rather than
     recomputed, so the cooked view and the sections beside it can never disagree.
+
+    `gini_lab` is the GINI lab the code was for (`gini.domain.gini_labs`), when the course said.
+    Then the view reads THAT lab's checks and no other — a check of another A-Lab pressed during
+    the same recording is not this lab's grade — and says so when that lab was never checked.
     """
+    from . import gini_labs
+    lab_kind, lab_title = gini_labs.kind(gini_lab), gini_labs.title(gini_lab)
+    if lab_kind == gini_labs.A_LAB:
+        measurements = [r for r in measurements or []
+                        if r.get("kind") != "measurement"
+                        or str(r.get("name", "")).startswith(f"{lab_title} · ")]
+    elif lab_kind == gini_labs.T_LAB:
+        measurements = [r for r in measurements or [] if r.get("kind") != "measurement"]
     es = list(entries or [])
     genesis = next((_d(e) for e in es if _k(e) == GENESIS), {})
     submitted = next((_t(e) for e in reversed(es) if _k(e) == SUBMIT), 0.0)
@@ -308,6 +321,16 @@ def cook(entries, title: str = "", answers: list | None = None,
             "goals": sum(len(v["goals"]) for v in labs.values()),
             "proved": sum(1 for e in proofs if _d(e).get("ok")), "proofs": len(proofs)}
 
+    if lab_kind:
+        out["lab"] = {"id": gini_lab, "title": lab_title, "kind": lab_kind}
+    if lab_kind == gini_labs.A_LAB and "grading" not in out:
+        look.append(f"This code is for {lab_title}, and nothing in this recording checks it: it "
+                    f"was not the assignment armed on a machine when the work was handed in.")
+    if lab_kind == gini_labs.T_LAB and not ((out.get("tlabs") or {}).get("labs") or {}).get(
+            gini_lab, {}).get("goals"):
+        look.append(f"This code is for {lab_title}, and no {lab_title.split(' —')[0]} goal was "
+                    f"reached in this recording.")
+
     # -- the code as sent, against the code as last built ------------------------------------------
     for s in sources or []:
         name = str(s.get("path", "")).rsplit("/", 1)[-1]
@@ -328,7 +351,8 @@ def cook(entries, title: str = "", answers: list | None = None,
     return out
 
 
-def preview(entries, questions: list | None = None, title: str = "") -> dict:
+def preview(entries, questions: list | None = None, title: str = "",
+            gini_lab: str = "") -> dict:
     """The cooked view of a chain that has NOT been handed in yet — what the student sees before
     they confirm, so "I did the work, honest" becomes something they can check and fix first.
 
@@ -357,7 +381,7 @@ def preview(entries, questions: list | None = None, title: str = "") -> dict:
         turns = said.get(qid, [])
         answers.append({"id": qid, "answered": bool(turns),
                         "given": (turns[-1].get("text", "") if turns else "")})
-    return cook(es, title, answers or None, measured)
+    return cook(es, title, answers or None, measured, gini_lab=gini_lab)
 
 
 def table(cooked: dict, measurements: list | None = None) -> dict:

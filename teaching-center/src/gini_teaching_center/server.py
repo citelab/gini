@@ -265,6 +265,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, {"ok": True, "activity": act["id"], "title": act["title"],
                              "min_gini": act.get("min_gini") or "",
+                             # Which GINI lab to check at hand-in, sent with the code like its
+                             # questions. "" when the teacher has not said.
+                             "gini_lab": _act.gini_lab_of(act),
                              "brief": act.get("brief", ""),
                              "session_minutes": act["session_minutes"],
                              "grace_minutes": act.get("grace_minutes") or 0,
@@ -306,6 +309,7 @@ class Handler(BaseHTTPRequestHandler):
                          "vend_until": act["vend_until"], "valid_until": issued["valid_until"],
                          "session_minutes": act["session_minutes"],
                          "min_gini": act.get("min_gini") or "",
+                         "gini_lab": _act.gini_lab_of(act),
                          "pausable": _act.pausable(act)})
 
     def _submit(self) -> None:
@@ -467,6 +471,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, [{**c, "staff": _STORE.course_staff(c["id"]),
                                      "activities": len(_STORE.activities(c["id"]))}
                                     for c in rows])
+
+        if p == "/api/gini_labs":
+            # The console's "GINI lab" menu: every lab this server's gini-core knows.
+            from gini.domain import gini_labs
+            return self._send(200, gini_labs.choices())
 
         if p == "/api/references":
             # The LIBRARY: global, and listed to every staff member. A shelf is not a course's
@@ -741,6 +750,12 @@ class Handler(BaseHTTPRequestHandler):
         if min_gini is None:
             return {"ok": False, "error": "The minimum GINI version should look like 6.22.12, "
                                           "or be left blank."}
+        # The same rule: absent (an older console) leaves it alone; sent blank clears it.
+        gini_lab = (prev.get("gini_lab") or "") if b.get("gini_lab") is None \
+            else _act.gini_lab_value(b.get("gini_lab"))
+        if gini_lab is None:
+            return {"ok": False, "error": "That GINI lab is not one this server knows. Pick one "
+                                          "from the list, or leave it blank."}
         _STORE.activity_put({
             "id": aid, "course": course, "lab": lab, "show_n": show_n,
             # Minted on first save and kept. An edit must NOT rotate it: the link is already in a
@@ -751,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             "brief": b.get("brief", prev.get("brief", "")),
             "status": prev.get("status", "draft"),
             "vend_until": vend, "session_minutes": mins, "grace_minutes": grace,
-            "one_sitting": one_sitting, "min_gini": min_gini,
+            "one_sitting": one_sitting, "min_gini": min_gini, "gini_lab": gini_lab,
             "created": prev.get("created") or time.time(),
             "released": prev.get("released", 0)})
         _STORE.questions_put(aid, questions)

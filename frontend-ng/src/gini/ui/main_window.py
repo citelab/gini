@@ -3171,6 +3171,7 @@ class MainWindow(QMainWindow):
         )
         chain = getattr(self.proof_recorder, "_chain", None)
         entries = list(chain.entries) if chain is not None else []
+        code_lab = str(getattr(self.proof_recorder, "gini_lab", "") or "")
         for dev in list(self.ctx.topology.devices.values()):
             if _role(dev.type_key) != "xv6":
                 continue
@@ -3178,11 +3179,12 @@ class MainWindow(QMainWindow):
                 spec = active_spec(dev.name)
                 if spec is None or not (getattr(spec, "grade", ()) or getattr(spec, "stages", ())):
                     continue
-                if not grade_at_hand_in(spec, entries):
-                    # A T-Lab hand-in with an A-Lab still armed from earlier: grading it here put
-                    # failed stages of a lab never started into the T-Lab's submission.
-                    self.ctx.bus.log.emit("info", f"{dev.name}: {spec.title} is armed but not part "
-                                                  f"of this recording, so it is not graded.")
+                if not grade_at_hand_in(spec, entries, code_lab):
+                    # Another lab's code (a T-Lab, or a different A-Lab) with this one still armed
+                    # from earlier: grading it put failed stages of a lab never started into the
+                    # submission.
+                    self.ctx.bus.log.emit("info", f"{dev.name}: {spec.title} is armed but this "
+                                                  f"code is not for it, so it is not graded.")
                     continue
                 ms = self.ctx.machine_states.get(dev.id)
                 live = ms is not None and getattr(ms, "mode", "") == "real" and self._running

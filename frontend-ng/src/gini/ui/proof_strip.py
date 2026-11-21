@@ -383,7 +383,9 @@ class ProofStrip(QWidget):
         # question, and knowing WHICH lab is being recorded is what separates "your course mentions
         # this somewhere" from "this is the lab you are being marked on".
         if self.recorder is not None and hasattr(self.recorder, "note_activity"):
-            self.recorder.note_activity(activity, title, brief)
+            # And which GINI lab it is, so hand-in checks that one — sent like the questions.
+            self.recorder.note_activity(activity, title, brief,
+                                        gini_lab=str(answer.get("gini_lab") or ""))
         # Whether the teacher allows this lab to be paused. Absent from an older server's reply,
         # and absent means pausable — that is what every lab was before the option existed.
         pausable = bool(answer.get("pausable", True))

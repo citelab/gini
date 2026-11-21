@@ -88,6 +88,7 @@ class ProofRecorder:
         # time. The strip has always received it and only ever printed it; keeping it is what lets
         # the tutor know which of a course's activities the student is actually being marked on.
         self._activity = ""
+        self._gini_lab = ""
         self._activity_title = ""
         # What the lab ASKS FOR, in the teacher's own words. The server has always sent it with
         # the arm reply and it was dropped on arrival, so the panel could name the lab but never
@@ -204,6 +205,10 @@ class ProofRecorder:
                 gini_version=gini_version())
             self.store.write_chain(tk.code, chain)
         self._chain, self._ticket = chain, tk
+        # Which GINI lab this code is for comes from the course server's arm reply
+        # (`note_activity`), which follows this. Cleared here so a code armed offline is not
+        # graded as the previous code's lab.
+        self._gini_lab = ""
         # Arming anything — this code or another — spends the bookmark. Pausing is "I will be
         # back for this one"; typing a different code is the answer to that.
         self.store.clear_paused()
@@ -254,7 +259,8 @@ class ProofRecorder:
         self._pausable = bool(pausable)
         self._changed()
 
-    def note_activity(self, activity: str, title: str = "", brief: str = "") -> None:
+    def note_activity(self, activity: str, title: str = "", brief: str = "",
+                      gini_lab: str = "") -> None:
         """Remember which lab the armed code belongs to, from the course server's arm reply.
 
         Set from OUTSIDE, because the recorder never talks to the network — a code is
@@ -265,8 +271,15 @@ class ProofRecorder:
         reason: the chain records what the student DID, and the assignment text is not that.
         """
         self._activity = str(activity or "")
+        self._gini_lab = str(gini_lab or "")
         self._activity_title = str(title or "")
         self._activity_brief = str(brief or "")
+
+    @property
+    def gini_lab(self) -> str:
+        """The GINI lab this code is for ("a-lab-04", "t-lab-02"), as the course server said when
+        it was armed; "" when it did not say. Hand-in checks this lab and no other."""
+        return self._gini_lab
 
     @property
     def activity_title(self) -> str:

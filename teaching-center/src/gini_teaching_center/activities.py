@@ -124,6 +124,27 @@ def gini_too_old(activity: dict | None, client_version: str) -> dict | None:
                      f"reopen gBuilder, and enter the code again."}
 
 
+# --------------------------------------------------------------------------- #
+# which GINI lab a course lab is
+# --------------------------------------------------------------------------- #
+def gini_lab_value(text) -> str | None:
+    """The console's "GINI lab" choice -> what to store: "" for none, a GINI lab id, or None
+    when it names no lab this server's gini-core knows."""
+    from gini.domain import gini_labs
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    return t if gini_labs.find(t) else None
+
+
+def gini_lab_of(activity: dict | None) -> str:
+    """The GINI lab a code for this activity is for — sent with the code, like its questions, so
+    gBuilder checks that lab at hand-in and no other. See `gini.domain.gini_labs.resolve`."""
+    from gini.domain import gini_labs
+    a = activity or {}
+    return gini_labs.resolve(a.get("gini_lab") or "", a.get("lab") or "")
+
+
 def activity_id(course: str, lab: str) -> str:
     return f"{course}/{lab}"
 
@@ -804,12 +825,15 @@ def narrate(proof: dict) -> str:
         return f"(could not narrate this chain: {e})"
 
 
-def cook(proof: dict, title: str, answers: list, measured: list, sources: list) -> dict:
+def cook(proof: dict, title: str, answers: list, measured: list, sources: list,
+         gini_lab: str = "") -> dict:
     """The grader's cooked view of this submission. Like `narrate`, it never takes the report
-    down with it: a chain it cannot read yields an empty view and the raw log still renders."""
+    down with it: a chain it cannot read yields an empty view and the raw log still renders.
+    `gini_lab` is the GINI lab the activity is for, so the view reads that lab's checks only."""
     try:
         from gini.domain import grader_view as _g
-        return _g.cook(proof.get("entries") or [], title, answers, measured, sources)
+        return _g.cook(proof.get("entries") or [], title, answers, measured, sources,
+                       gini_lab=gini_lab)
     except Exception as e:                      # noqa: BLE001 — a report must still render
         return {"error": f"could not build the grader's view: {e}", "look_at": []}
 
@@ -867,7 +891,8 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
     qa = answered(proof, questions)
     srcs = check_sources(payload.get("shadows"), proof)
     rechecks = recheck_tlabs(proof)
-    cooked = cook(proof, (activity or {}).get("title", ""), qa, measured, srcs)
+    cooked = cook(proof, (activity or {}).get("title", ""), qa, measured, srcs,
+                  gini_lab=gini_lab_of(activity))
     # A T-Lab claim that did not re-check is the one thing a marker must not skim past, so it
     # joins the cooked view's look-at list beside a failed Load or a mismatched file.
     for r in rechecks:

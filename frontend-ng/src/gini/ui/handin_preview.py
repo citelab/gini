@@ -24,8 +24,9 @@ def _tlab_name(lab_id: str) -> str:
 
 def summary_lines(c: dict) -> list[str]:
     """The cooked view as plain lines — the rows the marker's card shows, in the same order."""
-    out = [f"Time: {c.get('minutes', 0)} min over {c.get('sittings', 0)} sitting(s), "
-           f"{c.get('events', 0)} recorded actions"]
+    out = [f"Lab: {c['lab']['title']}"] if c.get("lab") else []
+    out.append(f"Time: {c.get('minutes', 0)} min over {c.get('sittings', 0)} sitting(s), "
+               f"{c.get('events', 0)} recorded actions")
     g = c.get("grading")
     if g:
         out.append(f"Measured: {g['passed']}/{g['total']} agreed"
@@ -79,7 +80,8 @@ def confirm(parent, recorder) -> bool:
         from ..domain import grader_view as _g
         chain = getattr(recorder, "_chain", None)
         cooked = _g.preview(chain.entries if chain else [],
-                            list(getattr(recorder, "questions", []) or []))
+                            list(getattr(recorder, "questions", []) or []),
+                            gini_lab=str(getattr(recorder, "gini_lab", "") or ""))
     except Exception:                          # noqa: BLE001 — see the docstring
         return True
     look = list(cooked.get("look_at") or [])
