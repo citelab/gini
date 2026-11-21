@@ -240,8 +240,8 @@ def test_the_agent_is_found_even_when_the_lab_is_showing_demo_data(app, theme, m
     """The race behind "sometimes the apps appear and sometimes they do not".
 
     `MachineState.provider` is the plane matching the DISPLAY mode, not the live bridge. A state
-    created before the bridge existed is a Demo state, and `attach_real` deliberately leaves a demo
-    user in Demo — so the bridge sits in `_real`, and a lookup through `.provider` finds a
+    created before the bridge existed is a Demo state, and `attach_real` leaves a student who
+    CHOSE Demo in Demo — so the bridge sits in `_real`, and a lookup through `.provider` finds a
     DemoScheduler with no `.agent`. GINI Source then said "No running xv6 machine" about a machine
     that was running. Whether it happened depended on whether anything had touched the state first,
     which is why it looked random.
@@ -269,8 +269,10 @@ def test_the_agent_is_found_even_when_the_lab_is_showing_demo_data(app, theme, m
     w._running = True
     w._xv6_providers = {"d1": _Bridge()}
 
-    # The state exists ALREADY and is in demo mode — the situation that made this intermittent.
+    # The state exists ALREADY and the student has pressed Demo — the one Demo a kernel starting
+    # no longer replaces, and so the one where this lookup still matters.
     ms = MachineState(DemoScheduler(), device_id="d1", mode="demo")
+    ms.set_mode("demo")
     ms.attach_real(_Bridge(), vm=None, fs=None)
     w.ctx.machine_states["d1"] = ms
     assert getattr(ms.provider, "agent", None) is None, "the demo plane must have no agent"

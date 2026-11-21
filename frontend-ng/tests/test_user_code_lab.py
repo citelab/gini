@@ -194,8 +194,10 @@ def test_switching_is_recorded_in_the_chain(two_labs, app):
     assert all(c[1] == "assignment" for c in calls)
 
 
-def test_rearming_the_same_assignment_does_not_relink_or_re_record(two_labs, app):
-    """Opening the one you are already on is a navigation, not a change."""
+def test_rearming_the_same_assignment_relinks_but_does_not_re_record(two_labs, app):
+    """Opening the one you are already on is not a change, so the chain does not get a second
+    entry. It is re-linked, though: choosing it again is what a student whose files did not
+    arrive tries, and the link is idempotent."""
     a, _b = two_labs
     relinks, tunes = [], []
 
@@ -207,7 +209,7 @@ def test_rearming_the_same_assignment_does_not_relink_or_re_record(two_labs, app
                on_relink=lambda n, s: relinks.append(n))
     hub._choose(a)
     hub._choose(a)
-    assert len(relinks) == 1 and len(tunes) == 1
+    assert len(relinks) == 2 and len(tunes) == 1
 
 
 # --------------------------------------------------------------------------- #

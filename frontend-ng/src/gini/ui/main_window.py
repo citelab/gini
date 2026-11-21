@@ -1777,8 +1777,9 @@ class MainWindow(QMainWindow):
         Read from `_xv6_providers` — the registry `_wire_xv6_providers` fills on Run — and NOT from
         the MachineState's provider. Those are not the same thing, and the difference was an
         intermittent bug: `MachineState.provider` is the plane matching the DISPLAY mode, so a state
-        created before the live bridge existed is a *demo* state, and `attach_real` then stores the
-        bridge in `_real` while deliberately leaving a demo user in Demo. The live bridge was
+        created before the live bridge existed was a *demo* state, and `attach_real` then stored the
+        bridge in `_real` while deliberately leaving it in Demo. (It now goes Real unless the
+        student chose Demo, but a chosen Demo still hides the bridge here.) The live bridge was
         therefore sitting right there, invisible to this method, and GINI Source told the student
         "No running xv6 machine" about a machine that was running perfectly.
 
@@ -3060,7 +3061,8 @@ class MainWindow(QMainWindow):
 
         from ..services.compiler import _role, _svc
         from ..services.orchestrator import exec_argv_for
-        from ..services.xv6_lab import active_spec, ensure_layout, link_script, seed_host_files
+        from ..services.xv6_lab import (active_spec, ensure_layout, link_report, link_script,
+                                        seed_host_files)
         orch = getattr(self.ctx, "orchestrator", None)
         if orch is None:
             return
@@ -3088,7 +3090,7 @@ class MainWindow(QMainWindow):
 
         def work():
             import time
-            done, failed = [], []
+            done, failed, short = [], [], []
             for name, spec, script in jobs:
                 try:
                     seed_host_files(spec, name)
@@ -3096,22 +3098,31 @@ class MainWindow(QMainWindow):
                     failed.append(f"{name}: {e}")
                     continue
                 cmd = [*exec_argv_for(orch, _svc(name)), "sh", "-c", script]
-                err = ""
+                err, out = "", b""
                 for attempt in range(4):        # the container may not take execs yet
                     try:
                         r = subprocess.run(cmd, cwd=str(wd) if wd else None,
                                            capture_output=True, timeout=30)
                         if r.returncode == 0:
-                            err = ""
+                            err, out = "", r.stdout or b""
                             break
                         err = _runtime.compose_error(r.stderr) or f"exit {r.returncode}"
                     except Exception as e:      # noqa: BLE001 — best-effort
                         err = str(e)[:120]
                     time.sleep(0.75 * (attempt + 1))
-                (failed.append(f"{name}: {err}") if err else done.append(f"{name} ({spec.title})"))
+                if err:
+                    failed.append(f"{name}: {err}")
+                    continue
+                # Exit 0 is not "every file arrived" (see link_report), so only a complete
+                # folder is announced as linked.
+                gap = link_report(spec, name, out.decode("utf-8", "replace"))
+                (short.append(f"{name}, {spec.title}: {gap}") if gap
+                 else done.append(f"{name} ({spec.title})"))
             if done:
                 self.ctx.log("Your files are linked into " + ", ".join(done) +
                              ". Edit them, then press Load.", "ok")
+            for line in short:
+                self.ctx.log("Some of your assignment's files are missing on " + line, "warn")
             if failed:
                 self.ctx.log("Could not attach the assignment on: " + ", ".join(failed[:3]),
                              "warn")
@@ -3173,31 +3184,51 @@ class MainWindow(QMainWindow):
         Best-effort and never fatal, like the attach. Arming is already written to disk before
         this is called, so a machine that is down or not taking execs yet still comes up on the
         right assignment at the next Run; all that is lost is the convenience.
+
+        Also called when the student picks the assignment that is ALREADY armed: that is what a
+        student whose files did not arrive tries, and the script is idempotent.
         """
         import subprocess
 
         from ..services.compiler import _svc
         from ..services.orchestrator import exec_argv_for
-        from ..services.xv6_lab import link_script, seed_host_files
+        from ..services.xv6_lab import link_report, link_script, seed_host_files
         orch = getattr(self.ctx, "orchestrator", None)
-        if orch is None or spec is None or not name:
+        if spec is None or not name:
+            return
+        if orch is None or not self._running:
+            # Nothing to exec into. Said out loud, because the files the student was promised are
+            # not in their folder yet and the only thing that puts them there is Run. The ones
+            # the assignment carries itself go in now, so the folder is not empty meanwhile.
+            try:
+                seed_host_files(spec, name)
+            except OSError:
+                pass
+            self.ctx.log(f"{name}: {spec.title} is armed. Press Run — the rest of its files are "
+                         "copied into your folder when the machine starts.", "info")
             return
         script = link_script(spec)          # built HERE: only finished strings cross the thread
         wd = getattr(orch, "workdir", None)
 
         def work():
+            gap = ""
             try:
                 seed_host_files(spec, name)
                 r = subprocess.run([*exec_argv_for(orch, _svc(name)), "sh", "-c", script],
                                    cwd=str(wd) if wd else None, capture_output=True, timeout=30)
                 ok = r.returncode == 0
                 why = _runtime.compose_error(r.stderr) or f"exit {r.returncode}"
+                if ok:
+                    gap = link_report(spec, name, (r.stdout or b"").decode("utf-8", "replace"))
             except Exception as e:          # noqa: BLE001 — a failed re-link must not take the UI
                 ok, why = False, str(e)[:120]
+            if ok and gap:
+                self.ctx.bus.log.emit("warn", f"{name}: {spec.title} is linked, but {gap}")
+                return
             self.ctx.bus.log.emit(
                 "ok" if ok else "warn",
                 f"{name}: {spec.title} is linked — press Load to build it." if ok else
-                f"{name}: could not link {spec.title} now ({why}). It will link at the next Run.")
+                f"{name}: could not link {spec.title} ({why}). Stop and Run to try again.")
 
         run_off_gui(self, work)
 
@@ -4475,12 +4506,20 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.ctx.log(f"xv6 live bridge unavailable for {s.name}: {e}", "info")
                 continue
-            # Attach the live plane to any already-open state so its Real toggle now works (and a
-            # Lab already in Real mode goes live immediately). Never force a demo user to Real.
+            # Attach the live plane to any already-open state. A state that was Demo only
+            # because it was made before anything ran goes Real now (see attach_real); a Demo the
+            # student chose stays. An open Machine Lab is told either way: its A-Lab windows use
+            # the real kernel whatever the toggle says, so they come alive now regardless.
             ms = self.ctx.machine_states.get(did)
             if ms is not None and hasattr(ms, "attach_real"):
                 ms.attach_real(bridge, vm=getattr(bridge, "vm", None),
                                fs=getattr(bridge, "fs", None))
+                lab = getattr(self, "_machine_lab", None)
+                if lab is not None and getattr(getattr(lab, "device", None), "id", None) == did:
+                    try:
+                        lab.kernel_attached()
+                    except Exception as e:              # noqa: BLE001 — never fail a Run
+                        self.ctx.log(f"Machine Lab could not go live: {e}", "warn")
         self._xv6_providers = providers
         # GINI Source may have been pointed at a machine BEFORE any of this existed, in which case
         # it is sitting on "No running xv6 machine" and has no reason of its own to ask again. This
@@ -4504,9 +4543,10 @@ class MainWindow(QMainWindow):
             bridge = None
             if self._running:
                 bridge = getattr(self, "_xv6_providers", {}).get(device_id)
-            # Default DATA MODE (a user choice thereafter, never auto-switched): Real when a live
-            # bridge exists at open, Demo otherwise. The bridge is the Real plane; the demo feed
-            # is built lazily by MachineState when the user toggles to Demo.
+            # Default DATA MODE: Real when a live bridge exists at open, Demo otherwise, and that
+            # default Demo becomes Real when a kernel attaches (MachineState.attach_real). Only a
+            # Demo the student picks is kept. The bridge is the Real plane; the demo feed is built
+            # lazily by MachineState when the user toggles to Demo.
             if bridge is not None:
                 ms = MachineState(bridge, device_id=device_id, mode="real",
                                   vm=getattr(bridge, "vm", None), fs=getattr(bridge, "fs", None))

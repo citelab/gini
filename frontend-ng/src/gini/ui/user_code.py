@@ -79,6 +79,18 @@ def reveal(path) -> bool:
         return False
 
 
+
+def missing_note(names, live: bool) -> str:
+    """What to tell a student whose folder lacks some of the assignment's files. `""` if none."""
+    if not names:
+        return ""
+    lst = ", ".join(names)
+    if not live:
+        return (f"Not in your folder yet: {lst}. They are copied in from the machine when it "
+                "starts — press Run.")
+    return (f"Not in your folder: {lst}. Stop and Run again; if they still do not appear, the "
+            "GINI console says why.")
+
 class UserCode(QDialog):
     load_result = Signal(bool, str)       # (ok, log) from the Load worker thread
     test_result = Signal(bool, object)    # (ok, printed lines) from the Run test worker
@@ -168,6 +180,16 @@ class UserCode(QDialog):
     def _build_files(self, col) -> None:
         t = self.theme.theme
         col.addWidget(self._section("FILES YOU OWN"))
+        # Which of them are not in the folder, and what brings them. Most of an assignment's
+        # files are copied in from the machine at Run, so a folder looked at before that is
+        # short, and a student who sees three of five files with no word why decides GINI is
+        # broken. Hidden while nothing is missing.
+        self._missing = QLabel("")
+        self._missing.setWordWrap(True)
+        self._missing.setStyleSheet(_scss(f"color:{t.accent_for('amber')};font-size:11px;"
+                                          f"padding:2px 8px;"))
+        self._missing.setVisible(False)
+        col.addWidget(self._missing)
         groups = (self.spec.files_by_part() if hasattr(self.spec, "files_by_part")
                   else (("", tuple(getattr(self.spec, "files", ()))),))
         grouped = len(groups) > 1 or (groups and groups[0][0])
@@ -516,7 +538,10 @@ class UserCode(QDialog):
         self._grade_btn.setEnabled(False)
         self._log.setPlainText("Checking…")
         prov, spec = self.provider, self.spec
-        vm = getattr(self.state, "vm", None)
+        # The real kernel's memory reader, not whichever plane the Machine Lab is displaying:
+        # grading the Demo stand-in's free list would measure nothing the student wrote.
+        real = self.state.real_plane() if hasattr(self.state, "real_plane") else None
+        vm = real[1] if real else getattr(self.state, "vm", None)
         machine = str(getattr(self.device, "name", "") or "")
 
         def work():
@@ -614,6 +639,28 @@ class UserCode(QDialog):
 
         run_off_gui(self, work)
 
+    def _enable_actions(self) -> None:
+        """Load, Run test, Check — each only with a live kernel to do it on."""
+        on = bool(self.live and self.provider is not None)
+        self._load_btn.setEnabled(on)
+        self._test_btn.setEnabled(on and bool(self._test_prog()))
+        self._grade_btn.setEnabled(on and bool(getattr(self.spec, "grade", ())))
+        for b in self._check_btns:
+            b.setEnabled(on)
+
+    def kernel_attached(self, provider) -> None:
+        """The machine's kernel came up while this panel was open: the buttons work now.
+
+        Before this a panel opened ahead of Run stayed on "Start the machine to build your code"
+        for as long as it was open, over a machine that was running."""
+        if provider is None:
+            return
+        self.provider, self.live = provider, True
+        self._enable_actions()
+        if self._log.toPlainText().startswith("Start the machine"):
+            self._say("Press Load to compile your kernel and restart the machine with it.")
+        self.refresh()
+
     def _on_load_result(self, ok: bool, log: str) -> None:
         self._load_btn.setEnabled(bool(self.live and self.provider is not None))
         self._record_build(ok, log, "load")
@@ -689,8 +736,11 @@ class UserCode(QDialog):
         machine = str(getattr(self.device, "name", "") or "")
         if self.spec is None:
             return
+        gone = []
         for f in getattr(self.spec, "files", ()):
             st = _lab.state_of(self.spec, machine, f.name)
+            if st == "missing":
+                gone.append(f.name)
             lab = self._rows.get(f.name)
             if lab is None:
                 continue
@@ -698,6 +748,10 @@ class UserCode(QDialog):
             col = {"edited": t.accent_for("amber"), "untouched": t.muted,
                    "missing": t.danger}.get(st, t.faint)
             lab.setStyleSheet(_scss(f"color:{col};font-size:11px;"))
+        miss = getattr(self, "_missing", None)
+        if miss is not None:
+            miss.setText(missing_note(gone, bool(self.live)))
+            miss.setVisible(bool(gone))
 
         results = _ls.evaluate(self.spec, _lab.reader_for(self.spec, machine),
                                _lab.pristine_reader_for(self.spec, machine))

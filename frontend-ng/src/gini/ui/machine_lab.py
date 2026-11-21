@@ -541,8 +541,9 @@ class MachineLab(QDialog):
         self._title_lbl = QLabel(f"  Machine Lab — {self.device.name}")
         self._title_lbl.setStyleSheet(_scss(f"color:{t.text};font-size:16px;font-weight:600;"))
         head.addWidget(ic); head.addWidget(self._title_lbl); head.addStretch(1)
-        # Real/Demo is a user choice (never auto-switched). Real = live kernel; Demo = the stand-in
-        # feed for exploring the interface with nothing running.
+        # Real/Demo. Real = live kernel; Demo = the stand-in feed for exploring the interface with
+        # nothing running. Demo by default turns Real when the kernel starts (kernel_attached);
+        # a Demo the student pressed stays Demo. The A-Labs ignore this toggle altogether.
         from PySide6.QtWidgets import QButtonGroup
         dlbl = QLabel("data"); dlbl.setStyleSheet(_scss(f"color:{t.faint};font-size:11px;"))
         head.addWidget(dlbl)
@@ -601,7 +602,8 @@ class MachineLab(QDialog):
 
     def _set_data_mode(self, mode: str) -> None:
         """User flipped Real/Demo. Swap the state's data plane, realign behaviour, and repaint.
-        NEVER called automatically — the state also never auto-falls-back, so Real stays Real."""
+        Only ever from the toggle: this is what makes the choice the student's own, which is the
+        one thing that keeps Demo in place when a kernel starts (see kernel_attached)."""
         if self._running:
             self._toggle_run()                    # stop the poll loop before swapping the source
         # Recorded because it changes how every entry AROUND it should be read: work done against
@@ -609,12 +611,35 @@ class MachineLab(QDialog):
         # cannot tell the two apart is being misled by a chain that looks busy.
         self._rec("note_tune", self._dev_name(), "data mode", self.state.mode, mode)
         self.state.set_mode(mode)
+        self._follow_mode()
+
+    def _follow_mode(self) -> None:
+        """Bring the window into line with the state's data mode, however it got there."""
+        mode = self.state.mode
         self.live = (mode == "real")
         for k, b in self._mode_btns.items():
             b.setChecked(k == mode)
+        self._reboot_btn.setEnabled(self.live)
         self._render()
         if self.live and self.state.has_real():
             self._fetch(step=False)               # kick a live read on entering Real
+
+    def kernel_attached(self) -> None:
+        """The machine's kernel is up. Called by the main window on Run, after `attach_real`.
+
+        If that moved the state from a default Demo to Real, follow it: this window was opened
+        before Run, and staying on the stand-in with a real kernel running is what left students
+        unable to arm an A-Lab. Recorded, like the toggle, because work either side of it reads
+        differently. A-Lab windows are told regardless of the toggle, because they always work
+        on the real kernel."""
+        if self.state.mode == "real" and not self.live:
+            if self._running:
+                self._toggle_run()                # the poll loop was reading the stand-in
+            self._rec("note_tune", self._dev_name(), "data mode", "demo", "real")
+            self._follow_mode()
+        uc = getattr(self, "_usercode", None)
+        if uc is not None:
+            uc.kernel_attached(self.state)
 
     # -- overview: the layered OS stack of drill-down cards --------------- #
     def _build_overview(self) -> QWidget:
@@ -939,8 +964,12 @@ class MachineLab(QDialog):
         self._retire("_usercode")
         self._rec("note_lab_open", self._dev_name(), "User Code")
         from .user_code_lab import UserCodeLab
+        # The REAL kernel, whatever the Real/Demo toggle shows. An assignment is built, tested and
+        # checked on the student's kernel or not at all; handing these windows the Demo feed only
+        # greyed out Load with "Start the machine" over a machine that was running.
+        real = self.state.real_plane() if hasattr(self.state, "real_plane") else None
         self._usercode = UserCodeLab(self, self.theme, device=self.device,
-                                     provider=self.state.provider, live=self.live,
+                                     provider=real[0] if real else None, live=real is not None,
                                      recorder=self._recorder, on_log=self.on_log,
                                      on_relink=self.on_relink, state=self.state)
         self._usercode.show(); self._usercode.raise_()

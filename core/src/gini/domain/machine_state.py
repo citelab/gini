@@ -250,8 +250,10 @@ class MachineState:
     provider: object                              # scheduler feed (snapshot()/step()/…)
     device_id: str = ""
     policy: str = "round-robin"
-    mode: str = "real"                            # "real" (live kernel) | "demo" (stand-in). A
-    #                                               USER choice — never auto-switched (see set_mode)
+    mode: str = "real"                            # "real" (live kernel) | "demo" (stand-in)
+    # Whether `mode` is the student's own choice (they pressed Real or Demo) rather than the
+    # default it was born with. Only a CHOSEN Demo survives a kernel starting: see attach_real.
+    mode_chosen: bool = False
     latest: Snapshot | None = None
     # An honest one-line note from the last Step switch: set when a step caught no context
     # switch (idle kernel), cleared by the next Run poll. The Lab shows it in the stack panel
@@ -312,9 +314,25 @@ class MachineState:
         """True when a live kernel plane is attached (an xv6 is running)."""
         return bool(self._real and self._real[0] is not None)
 
-    def attach_real(self, provider, vm=None, fs=None) -> None:
-        """Wire the live bridge as the Real plane (called when the topology starts). If we're
-        currently in Real mode, switch to it now so an already-open Lab goes live.
+    def real_plane(self) -> tuple | None:
+        """(provider, vm, fs) of the live kernel, whatever the Lab is showing — or None.
+
+        For the A-Labs. Building, testing and checking a student's kernel only mean anything
+        against the real one, so they read this rather than `provider`, and the Real/Demo toggle
+        cannot point them at the stand-in."""
+        return self._real if self.has_real() else None
+
+    def attach_real(self, provider, vm=None, fs=None) -> bool:
+        """Wire the live bridge as the Real plane (called when the topology starts). Returns True
+        when this switched the state from Demo to Real.
+
+        Real is used at once if the state is already Real, AND if it is in Demo only because it
+        was created before anything was running. That second case used to stay Demo for the rest
+        of the session ("never force a demo user to Real"), which was right for a student who had
+        pressed Demo and wrong for everyone else: a student who opened the Machine Lab before
+        pressing Run was left on the stand-in with a real kernel running, so arming an A-Lab
+        copied no files and Load stayed greyed out with "Start the machine". A Demo the student
+        CHOSE is still left alone.
 
         A fresh kernel is a fresh EPISODE: the timelines, the last snapshot and the watcher's
         edge state are cleared, exactly as `set_mode` does — otherwise a Stop/Run cycle leaves
@@ -323,9 +341,13 @@ class MachineState:
         self._real = (provider, vm if vm is not None else getattr(provider, "vm", None),
                       fs if fs is not None else getattr(provider, "fs", None))
         self.new_episode()
+        went_live = self.mode == "demo" and not self.mode_chosen
+        if went_live:
+            self.mode = "real"
         if self.mode == "real":
             self.provider, self.vm, self.fs = self._real
             self.refresh()
+        return went_live
 
     def stall(self, now: float, grace_s: float = 8.0) -> str:
         """SOFT-wedge detector — the failure the agent's liveness check cannot see.
@@ -372,10 +394,13 @@ class MachineState:
         self._prev_card = {}
 
     def set_mode(self, mode: str) -> None:
-        """Switch the active data plane. This is the ONLY place the source changes, and only when
-        the user asks — nothing auto-falls-back from real to demo. Clears the timelines so demo
-        and real samples never blend on the Gantt."""
-        if mode not in ("real", "demo") or mode == self.mode:
+        """Switch the active data plane because the USER asked. Nothing ever falls back from Real
+        to Demo; the one automatic move is the other way, in `attach_real`, and only over a Demo
+        nobody chose. Clears the timelines so demo and real samples never blend on the Gantt."""
+        if mode not in ("real", "demo"):
+            return
+        self.mode_chosen = True
+        if mode == self.mode:
             return
         self.mode = mode
         prov, vm, fs = self._plane(mode)

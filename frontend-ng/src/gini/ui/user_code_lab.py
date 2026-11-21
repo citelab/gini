@@ -359,12 +359,29 @@ class UserCodeLab(QDialog):
             from .lab_record import record
             record(self._recorder, "note_tune", machine, "assignment", "", spec.id)
             self._log("ok", f"{spec.title} is now armed on {machine}.")
-            if self._on_relink and self.live:
-                self._on_relink(machine, spec)
-            elif self.live:
-                self._log("warn", "Press Run again so the machine picks up the new assignment.")
+        # Every time, and whether or not this window thinks the machine is live. Gating it on
+        # `live` is how students lost their files: a Machine Lab opened before Run sat in Demo, so
+        # arming copied nothing and said nothing, and the next chance was the next Run. The owner
+        # of the orchestrator knows whether anything is running and says what happens next. Again
+        # on an assignment already armed, because choosing it again is what a student whose files
+        # did not arrive will try, and the link is idempotent.
+        if self._on_relink:
+            self._on_relink(machine, spec)
         self.refresh()
         self._open_panel(spec)
+
+    def kernel_attached(self, state) -> None:
+        """The machine's kernel has just come up: switch on, and switch on the open panel.
+
+        From the REAL plane, never from what the Machine Lab is displaying. See
+        MachineLab._open_user_code."""
+        real = state.real_plane() if hasattr(state, "real_plane") else None
+        if real is None:
+            return
+        self.provider, self.live = real[0], True
+        self.refresh()
+        if self._panel is not None:
+            self._panel.kernel_attached(real[0])
 
     def _open_panel(self, spec) -> None:
         from .user_code import UserCode

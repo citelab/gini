@@ -997,8 +997,48 @@ def link_script(spec) -> str:
             " Makefile > /tmp/gini_mk && mv /tmp/gini_mk Makefile",
             "fi",
         ]
+    # Say which of the assignment's files the container could not put in the folder. Run with
+    # `set -e` still on, so each test is an `if`, never a bare `[ ]` (see above).
+    for f in getattr(spec, "files", ()):
+        mine = shlex.quote(f"{lab}/{f.name}")
+        lines.append(f"if [ ! -f {mine} ]; then echo {shlex.quote(MISSING + f.name)}; fi")
     lines.append("echo gini-lab-linked")
     return "\n".join(lines)
+
+
+#: Prefix of the line the link script prints for each file it could not provide.
+MISSING = "gini-lab-missing "
+
+
+def link_report(spec, machine_name: str, output: str) -> str:
+    """After a link that SUCCEEDED, what the student still does not have. `""` when nothing.
+
+    A link script that exits 0 used to be reported as "your files are linked", full stop, and
+    two ways of being wrong hid behind it. Telling them apart is the point, because the remedies
+    are opposite:
+
+    * the CONTAINER has no copy — its image predates the assignment, so there was nothing to
+      copy (`output` names these, from the script's own check);
+    * the container has it, but the folder on THIS computer does not — the machine is writing
+      into a directory the student cannot see. That is the engine's file sharing, not GINI, and
+      no number of Runs fixes it.
+    """
+    in_box = {ln[len(MISSING):].strip() for ln in str(output or "").splitlines()
+              if ln.startswith(MISSING)}
+    d = lab_dir(machine_name, getattr(spec, "id", ""))
+    names = [f.name for f in getattr(spec, "files", ())]
+    no_image = [n for n in names if n in in_box]
+    not_here = [n for n in names if n not in in_box and not (d / n).is_file()]
+    say = []
+    if no_image:
+        say.append(f"{', '.join(no_image)}: this machine's image does not have "
+                   f"{'it' if len(no_image) == 1 else 'them'} — it is older than the assignment. "
+                   "Restart gBuilder so it can update its images, then Stop and Run.")
+    if not_here:
+        say.append(f"{', '.join(not_here)} reached the machine but not your folder ({d}). "
+                   "Docker is not sharing that folder with the machine — check its file-sharing "
+                   "settings.")
+    return " ".join(say)
 
 
 def state_of(spec, machine_name: str, name: str) -> str:
