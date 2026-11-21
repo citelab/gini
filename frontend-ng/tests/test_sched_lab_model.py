@@ -392,8 +392,10 @@ def test_the_session_tells_its_listener_about_goals_and_proofs(lab):
     s.show((0, 0, 1, 1, 0, 1))
     assert len(seen) == 1, "once per goal, not once per click"
     s.explore_all()
-    assert len(seen) == 1, "Instructions is not provable, so no proof entry"
+    assert len(seen) == 2 and seen[1][0] == "explored", "not provable: what it showed, no proof"
+    assert seen[1][1]["played"] == 1 and seen[1][1]["summary"][0]["total"] == 20
     level(s, "rdv", "fix")
+    assert seen[2][0] == "level" and seen[2][1]["level"] == "rdv"
     s.explore_all()
     assert seen[-1][0] == "proved" and seen[-1][1]["ok"] is False
     assert seen[-1][1]["reason"] == "no schedule finishes"

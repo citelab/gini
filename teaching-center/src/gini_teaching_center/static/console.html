@@ -1109,6 +1109,7 @@ async function openReceipt(receipt){
         <span class="tag draft">${r.entries} recorded actions</span>
         ${r.late ? `<span class="tag warn">LATE — arrived after the deadline</span>` : ''}
         ${r.accepted_by ? `<span class="tag warn">taken by ${esc(r.accepted_by)}</span>` : ''}
+        ${r.gini_version ? `<span class="tag" title="The gBuilder that recorded and sent this work">gBuilder ${esc(r.gini_version)}</span>` : ''}
         ${r.resent_after_deadline ? `<span class="tag warn" title="The student handed in at ${
           esc(when(r.sealed_at))}; the upload failed and gBuilder sent it again. Judged on when it was handed in.">handed in ${
           esc(when(r.sealed_at))} · arrived ${esc(when(r.resent_after_deadline))}</span>` : ''}
@@ -1305,9 +1306,18 @@ function cookBlock(c){
   if (c.lab) rows.push(row('GINI lab', esc(c.lab.title)));
   const tl = c.tlabs;
   if (tl) {
-    for (const [lab, v] of Object.entries(tl.labs || {}))
-      rows.push(row(esc(lab.replace(/^t-lab-/, 'T-Lab ')), `<b>${v.goals}</b> goal${v.goals===1?'':'s'} reached`
+    for (const [lab, v] of Object.entries(tl.labs || {})) {
+      const name = esc(lab.replace(/^t-lab-/, 'T-Lab '));
+      rows.push(row(name, `<b>${v.goals}</b> goal${v.goals===1?'':'s'} reached`
         + ((v.levels||[]).length ? ` on ${v.levels.map(esc).join(', ')}` : '')));
+      // What the lab asked that is not a goal (recorded from gBuilder 6.22.19).
+      if ((v.opened||[]).length) rows.push(row(`${name} · levels`, `opened ${v.opened.map(esc).join(', ')}`));
+      const pl = Object.entries(v.played || {});
+      if (pl.length) rows.push(row(`${name} · schedules run`, pl.map(([lv, n]) => `${n} on ${esc(lv)}`).join(', ')));
+      for (const x of (v.explored || []))
+        rows.push(row(`Try every · ${esc(x.level)}`, `<span class="mono">${esc(x.version)}</span>: `
+          + (x.outcomes.length ? x.outcomes.map(esc).join(', ') : 'nothing finished')));
+    }
     if (tl.proofs) rows.push(row('Try every', `held ${tl.proved} of ${tl.proofs} time${tl.proofs===1?'':'s'}`));
   }
   const k = c.commands;

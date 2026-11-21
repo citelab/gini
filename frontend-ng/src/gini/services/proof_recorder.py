@@ -673,19 +673,34 @@ class ProofRecorder:
 
     # -- the T-Labs ----------------------------------------------------------- #
     def note_schedule(self, lab: str, level: str, version: str, start: int, code, moves,
-                      goal: str, result: str, threads=()) -> None:
+                      goal: str, result: str, threads=(), played: int = 0) -> None:
         """A schedule the student played reached one of the level's goals. Once per goal per
         level — `sched_lab.Session` keeps the set, so Undo and replay do not repeat it."""
         self._guard(lambda: self._record(
             ev.schedule(str(lab or ""), str(level or ""), str(version or ""), int(start or 0),
-                        code, moves, str(goal or ""), str(result or ""), threads)))
+                        code, moves, str(goal or ""), str(result or ""), threads,
+                        int(played or 0))))
 
     def note_proved(self, lab: str, level: str, version: str, code, ok: bool, reason: str = "",
-                    starts=(), summary=None) -> None:
+                    starts=(), summary=None, played: int = 0) -> None:
         """Try every schedule, on a version that can be proved: the verdict, held or not."""
         self._guard(lambda: self._record(
             ev.proved(str(lab or ""), str(level or ""), str(version or ""), code, bool(ok),
-                      str(reason or ""), starts, summary)))
+                      str(reason or ""), starts, summary, int(played or 0))))
+
+    def note_explored(self, lab: str, level: str, version: str, code, starts=(), summary=None,
+                      played: int = 0) -> None:
+        """Try every schedule on a version that cannot be proved: what it showed. Once per
+        (level, version, code) per armed session, like a face — pressing it again on the same
+        code shows the same numbers and says nothing new."""
+        key = ("explored", str(lab or ""), str(level or ""), str(version or ""),
+               repr(tuple(tuple(t) for t in (code or ()))))
+        if key in self._faces_seen:
+            return
+        self._faces_seen.add(key)
+        self._guard(lambda: self._record(
+            ev.explored(str(lab or ""), str(level or ""), str(version or ""), code, starts,
+                        summary, int(played or 0))))
 
     #: T-Lab 03 and 04 entries: the window's event kind → the `proof_events` builder.
     TLAB_KINDS = {"allocate": "allocate", "bank": "bank", "orders": "orders",

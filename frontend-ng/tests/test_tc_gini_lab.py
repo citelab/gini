@@ -29,6 +29,7 @@ _TC = Path(__file__).resolve().parents[2] / "teaching-center" / "src"
 if str(_TC) not in sys.path:
     sys.path.insert(0, str(_TC))
 
+from test_tc_handin import tc  # noqa: F401  (a fixture)
 from test_tc_questions import HOUR, QS, _rc, course  # noqa: F401  (course is a fixture)
 
 needs_tc = pytest.mark.skipif(not _TC.exists(), reason="teaching-center not checked out")
@@ -201,3 +202,72 @@ def test_a_lab_whose_id_is_a_gini_lab_id_needs_no_setting(course):
     call("/api/activities/release", {"course": "comp535", "lab": "a-lab-04"}, tok)
     vend = call("/api/activity?course=comp535&lab=a-lab-04&rc=" + _rc("a-lab-04"))
     assert vend["gini_lab"] == "a-lab-04"
+
+
+
+# --------------------------------------------------------------------------- #
+# what was still mixed up after 6.22.16 (reported 2026-11-21)
+# --------------------------------------------------------------------------- #
+# The course's labs are named for their GINI labs ("t-lab-02"), so every code already said which
+# lab it was for. Two things still mixed them: the class view read its rows without the lab, and
+# every view read kernel work done under a T-Lab code (Loads, runs) as that T-Lab's.
+
+def _k(built, t):
+    kind, data = built
+    return {"kind": kind, "data": data, "t": float(t), "seq": 0}
+
+
+def test_a_t_lab_view_leaves_out_kernel_work_done_under_its_code_and_says_so():
+    chain = [_k(ev.schedule("t-lab-02", "lost", "instr", 0, [], [0], "g4", "ends at 4",
+                            ("p", "c")), 1),
+             _k(ev.build("M1", "a-lab-04", True), 2), _k(ev.spawn("M1", "semtest"), 3)]
+    c = G.preview(chain, gini_lab="t-lab-02")
+    assert "builds" not in c and "tests" not in c and c["tlabs"]["goals"] == 1
+    assert c["other_work"]["loads"] == 1 and c["other_work"]["labs"] == ["A-Lab 04"]
+    assert any(x.startswith("Also recorded under this code, and not part of T-Lab 02")
+               for x in c["look_at"])
+    assert "builds" in G.preview(chain)                       # no lab known: as it was
+
+
+def test_an_a_lab_view_reads_only_its_own_loads():
+    chain = [_k(ev.build("M1", "a-lab-03", True), 1), _k(ev.build("M2", "a-lab-04", False), 2)]
+    c = G.preview(chain, gini_lab="a-lab-03")
+    assert c["builds"]["loads"] == 1 and c["builds"]["last_ok"]
+    assert c["other_work"]["labs"] == ["A-Lab 04"]
+
+
+def _old_t_lab_hand_in(code, topo):
+    """What a gBuilder before 6.22.15 sent for a T-Lab: the armed A-Lab's stages at the end."""
+    from gini.domain import proof as P
+    from gini_teaching_center import activities as ACT
+    t0 = time.time()
+    chain = P.Chain.start(ACT.normalize(code), assignment="comp310/t-lab-02",
+                          gini_version="6.22.8", t=t0)
+    for i, built in enumerate([
+            ev.schedule("t-lab-02", "lost", "instr", 0, [], [0], "g4", "ends at 4", ("p", "c")),
+            ev.build("M1", "a-lab-04", True),
+            ev.measure(f"{A04.title} · stage A1", {"ok": False, "summary": "failed"})]):
+        chain.append(*built, t=t0 + 60 * (i + 1))
+    chain.append("submit", {"artifact": P.artifact_summary(topo)}, t=t0 + 300)
+    return P.build_proof(chain)
+
+
+@needs_tc
+def test_a_lab_named_t_lab_02_shows_only_t_lab_02_in_the_receipt_and_the_class_view(tc):
+    from test_tc_handin import _call, a_topology
+    from test_tc_handin import _rc as release_code
+
+    from gini.services import tc_submit
+    _call(tc.url, "/api/activities/save",
+          {"course": "comp535", "lab": "t-lab-02", "title": "You are the scheduler",
+           "vend_until": time.time() + HOUR, "session_minutes": 60}, tc.token)
+    _call(tc.url, "/api/activities/release", {"course": "comp535", "lab": "t-lab-02"}, tc.token)
+    code = _call(tc.url, "/api/activity?course=comp535&lab=t-lab-02&rc=" + release_code("t-lab-02"))["code"]
+    topo = a_topology()
+    r = tc_submit.submit(tc.url, code, _old_t_lab_hand_in(code, topo), topo)
+    assert r["ok"], r
+    rep = tc.staff("/api/receipt?receipt=" + r["receipt"])
+    assert rep["cooked"]["lab"]["id"] == "t-lab-02" and rep["gini_version"] == "6.22.8"
+    assert "grading" not in rep["cooked"] and "builds" not in rep["cooked"]
+    table = tc.staff("/api/activity/table?course=comp535&lab=t-lab-02")
+    assert table["metrics"] == [] and table["rows"][0]["loads"] == 0

@@ -983,6 +983,9 @@ def report(row: dict, activity: dict, twins: list, attempts: list | None = None,
         # failed at the time, resent by gBuilder's outbox): the arrival time, else 0.
         "resent_after_deadline": float(payload.get("resent_after_deadline") or 0),
         "sealed_at": float(payload.get("sealed_at") or 0),
+        # The gBuilder that recorded it, from the proof. "Which version are you on?" asked of a
+        # student gets "6.22.8" for "6.22.18"; the submission itself does not misremember.
+        "gini_version": str(proof.get("gini_version") or ""),
         "late": bool(row.get("late")),
         # A rehearsal run by a TA before the lab was released. Shown so a marker never wonders
         # which student this was.
@@ -1063,8 +1066,11 @@ def summarize(row: dict, activity: dict, questions: list[dict] | None) -> dict:
     proof = payload.get("proof") or {}
     measured = measurements(proof)
     qa = answered(proof, questions)
+    # The GINI lab too, as `report` passes it. Without it (6.22.16-17) the class view read every
+    # A-Lab check in a T-Lab hand-in while the receipt it opened read none — the mixup fixed
+    # everywhere but the one table a teacher marks from.
     c = cook(proof, (activity or {}).get("title", ""), qa, measured,
-             check_sources(payload.get("shadows"), proof))
+             check_sources(payload.get("shadows"), proof), gini_lab=gini_lab_of(activity))
     b = c.get("builds") or {}
     return {"table": c.get("table") or {"checks": [], "parts": {}, "metrics": [], "questions": []},
             "minutes": c.get("minutes", 0), "sittings": c.get("sittings", 0),

@@ -448,7 +448,7 @@ def test_a_t_lab_opens_with_no_provider_and_no_machine_and_is_recorded(two_labs,
     hub._open_tlab(S.get("t-lab-02"))
     try:
         assert hub._tlab is not None and hub._tlab.isVisible()
-        assert calls == [("lab_open", ("M1", "t-lab-02"))]
+        assert calls == [("lab_open", ("M1", "t-lab-02")), ("lab_open", ("M1", "t-lab-02/lost"))]
         # the student finds level 3's deadlock and then proves a fix
         hub._tlab._level_btns[2].click()
         for t in (0, 0, 1, 1):
@@ -457,11 +457,12 @@ def test_a_t_lab_opens_with_no_provider_and_no_machine_and_is_recorded(two_labs,
         hub._tlab._pick_tile(0, 1); hub._tlab._down.click()
         hub._tlab._explore.click()
         kinds = [k for k, _ in calls]
-        assert kinds == ["lab_open", "schedule", "proved"]
-        sched = calls[1][1]
+        assert kinds == ["lab_open", "lab_open", "lab_open", "schedule", "proved"]
+        assert calls[2][1] == ("M1", "t-lab-02/rdv")
+        sched = calls[3][1]
         assert sched[:3] == ("t-lab-02", "rdv", "bad") and sched[5] == (0, 0, 1, 1)
         assert sched[6:8] == ("dl", "deadlock")
-        proved = calls[2][1]
+        proved = calls[4][1]
         assert proved[:3] == ("t-lab-02", "rdv", "fix") and proved[4] is True
     finally:
         hub.close()

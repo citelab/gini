@@ -564,8 +564,11 @@ class Handler(BaseHTTPRequestHandler):
     def _class_table(self, act: dict) -> dict:
         """Every submission to one activity, as rows. Each row is computed from its proof ONCE and
         cached (`submission_summary`): a submission never changes, and re-reading thirty proofs per
-        click is the lag the Activities tab used to have."""
-        ver = _act.summary_version()
+        click is the lag the Activities tab used to have.
+
+        Keyed on the lab's GINI lab and title as well as the code that computed it: a row is read
+        through them, and rows cached before they were (6.22.16-18) must be read again."""
+        ver = f"{_act.summary_version()}:{_act.gini_lab_of(act)}:{act.get('title', '')}"
         subs = []
         for row in _STORE.activity_submission_list(act["id"]):
             summ = _STORE.summary_get(row["receipt"], ver)

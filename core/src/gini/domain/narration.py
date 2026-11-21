@@ -106,7 +106,13 @@ def describe(entry: Entry) -> str:
             return head + "   (no output)"
         return head + "".join(f"\n            {line}" for line in out)
     if k == ev.LAB_OPEN:
-        return f"Opened the {d.get('face', '?')} face on {d.get('on', '?')}."
+        face = str(d.get("face", "?"))
+        if face.startswith("t-lab-") and "/" in face:
+            lab, level = face.split("/", 1)
+            return f"On {lab}, opened level {level}."
+        if face.startswith("t-lab-"):
+            return f"Opened {face}."
+        return f"Opened the {face} face on {d.get('on', '?')}."
     if k == ev.TUNE:
         return (f"On {d.get('on', '?')}, changed {d.get('knob', '?')} from "
                 f"{d.get('from', '?')} to {d.get('to', '?')}.")
@@ -167,6 +173,20 @@ def describe(entry: Entry) -> str:
                    else f"not proved — {d.get('reason') or 'no reason recorded'}")
         return (f"GINI tried every schedule on {d.get('lab', '?')}, level {d.get('level', '?')} "
                 f"({d.get('version', '?')}) — {verdict}.")
+    if k == ev.EXPLORED:
+        n = len(d.get("starts") or [])
+        parts = []
+        for s in (d.get("summary") or {}).values():
+            # A count only where the level counts schedules; elsewhere `paths` is 0 and the
+            # outcome alone is what the tab showed.
+            outs = ", ".join(f"{o[1]} {o[0]}" if o[1] else str(o[0])
+                             for o in s.get("outcomes") or [])
+            total = s.get("total")
+            parts.append((f"{total} schedule(s)" if total is not None else
+                          f"{s.get('states', 0)} state(s)") + (f": {outs}" if outs else ""))
+        return (f"GINI ran every schedule on {d.get('lab', '?')}, level {d.get('level', '?')} "
+                f"({d.get('version', '?')})" + (f" from {_count(n, 'start')}" if n > 1 else "")
+                + (" — " + "; ".join(parts) if parts else "") + ".")
     if k == ev.ALLOCATE:
         steps = len(d.get("moves") or [])
         return (f"On {d.get('lab', '?')}, level {d.get('level', '?')} ({d.get('version', '?')}): "

@@ -281,6 +281,10 @@ class UserCodeLab(QDialog):
                 pass
         self._tlab = cls(self, self.theme, lab=lab, device=self.device,
                          on_event=self._tlab_event)
+        # The level it opens on, as every later level pick is (`_tlab_event`, "level").
+        first = getattr(getattr(getattr(self._tlab, "session", None), "level", None), "id", "")
+        if first:
+            record(self._recorder, "note_lab_open", self._machine(), f"{lab.id}/{first}")
         self._tlab.show()
         self._tlab.raise_()
 
@@ -289,11 +293,19 @@ class UserCodeLab(QDialog):
         if kind == "goal":
             record(self._recorder, "note_schedule", p.get("lab"), p.get("level"),
                    p.get("version"), p.get("start", 0), p.get("code"), p.get("moves"),
-                   p.get("goal"), p.get("result"), p.get("threads", ()))
+                   p.get("goal"), p.get("result"), p.get("threads", ()), p.get("played", 0))
         elif kind == "proved":
             record(self._recorder, "note_proved", p.get("lab"), p.get("level"),
                    p.get("version"), p.get("code"), p.get("ok"), p.get("reason", ""),
-                   p.get("starts", ()), p.get("summary"))
+                   p.get("starts", ()), p.get("summary"), p.get("played", 0))
+        elif kind == "explored":
+            record(self._recorder, "note_explored", p.get("lab"), p.get("level"),
+                   p.get("version"), p.get("code"), p.get("starts", ()), p.get("summary"),
+                   p.get("played", 0))
+        elif kind == "level":
+            # A face of its own, recorded once per level per recording by the recorder.
+            record(self._recorder, "note_lab_open", self._machine(),
+                   f"{p.get('lab', '')}/{p.get('level', '')}")
         else:
             # T-Lab 03 and 04: kinds of their own (proof_events.ALLOCATE, FS_WALK, …).
             record(self._recorder, "note_tlab", kind, p)

@@ -446,6 +446,17 @@ class Session:
     schedule is pressed on a version that can be proved ("proved", with `ok`): both the proof and
     the failed attempt are part of the story the chain tells. It is a callback and not a signal
     so this class stays importable without Qt.
+
+    And, since 2026-11-21, of what the lab ASKS for that is not a goal. A marker found T-Lab 02
+    transcripts "quite minimal", and they were: a student who worked every level, ~370 actions,
+    left nine entries. The lab's own first question — "of all the orders, how many end at 5?
+    Guess, then switch to Lines of C and guess again" — is answered by Try every on a version
+    that cannot be proved, which recorded nothing; nor did which levels were opened, so a level
+    never tried read the same as one tried and abandoned. So, still never one per click:
+      "level"     a level picked (the first is the window's own lab_open)
+      "explored"  Try every on a version that cannot be proved, with the counts it showed
+    and every payload carries `played`: how many schedules the student ran to the end on this
+    level so far (Undo and run on counts again — it is effort, not distinct schedules).
     """
 
     def __init__(self, lab: S.LevelFile, on_event=None) -> None:
@@ -461,6 +472,8 @@ class Session:
         self.achieved: set = set()
         self.tab = "graph"
         self._proofs: dict = {}
+        self._played: dict = {}
+        self._last_end: dict = {}
 
     # -- what is loaded ------------------------------------------------------ #
     @property
@@ -535,8 +548,16 @@ class Session:
     def pick_level(self, index: int) -> None:
         if not (0 <= index < len(self.lab.levels)):
             return
+        moved = index != self.level_index
         self.level_index = index
         self._clear()
+        if moved:
+            self._emit("level", {})
+
+    @property
+    def played(self) -> int:
+        """Schedules run to the end (finished or stuck) on this level so far."""
+        return self._played.get(self.level.id, 0)
 
     def pick_version(self, version_id: str) -> None:
         if version_id not in self.version_ids():
@@ -557,6 +578,10 @@ class Session:
             self._start[lv.id] = start
         self.moves = tuple(moves)
         rep = self.replay()
+        if self.moves and (rep.done or rep.deadlock) and self._last_end.get(lv.id) != (
+                self._key(), self.moves):
+            self._played[lv.id] = self._played.get(lv.id, 0) + 1
+            self._last_end[lv.id] = (self._key(), self.moves)
         met = S.goals_reached(lv, self.version_id, self.code, list(self.moves), self.start)
         for gid in met:
             k = f"{lv.id}:{gid}"
@@ -578,7 +603,8 @@ class Session:
         if self.on_event is None:
             return
         base = {"lab": self.lab.id, "level": self.level.id, "version": self.version_id,
-                "start": self.start, "code": self.code, "threads": self.level.threads}
+                "start": self.start, "code": self.code, "threads": self.level.threads,
+                "played": self.played}
         base.update(payload)
         self.on_event(kind, base)
 
@@ -616,13 +642,17 @@ class Session:
                     self.achieved.add(f"{lv.id}:{g.id}")
         self._results_key = self._key()
         self.tab = "all"
+        summary = {s: {"states": r.states, "total": r.total,
+                       "outcomes": tuple((o.label, o.paths) for o in r.outcomes)}
+                   for s, r in proof.results}
+        starts = tuple(s for s, _ in proof.results)
         if provable:
             self._emit("proved", {"ok": proof.proved, "reason": proof.reason,
-                                  "starts": tuple(s for s, _ in proof.results),
-                                  "summary": {s: {"states": r.states, "total": r.total,
-                                                  "outcomes": tuple((o.label, o.paths)
-                                                                    for o in r.outcomes)}
-                                              for s, r in proof.results}})
+                                  "starts": starts, "summary": summary})
+        else:
+            # The counting question: what every order does to THIS code. Not a proof, so not a
+            # `proved` entry ("held 0 of 3" would be a lie about a version nobody was asked to fix).
+            self._emit("explored", {"starts": starts, "summary": summary})
         return proof
 
     # -- fix it -------------------------------------------------------------- #

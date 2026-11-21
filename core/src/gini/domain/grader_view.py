@@ -168,6 +168,35 @@ def cook(entries, title: str = "", answers: list | None = None,
     }
     look = out["look_at"]
 
+    # -- work recorded under this code that belongs to another lab --------------------------------
+    # A code is minted for one lab, but the recorder writes whatever the student does while it is
+    # armed. A student with T-Lab 02's code armed who also Loads and tests their A-Lab 04 kernel
+    # puts that work in the T-Lab chain, and until this the T-Lab view (the preview and the
+    # marker's card) read it as this lab's: "Loads: 1, semtest printed nothing" under "Lab: T-Lab
+    # 02". Measurements were filtered at 6.22.16; the Loads, runs and console commands were not.
+    # Left out of the sections below and named in one line, never dropped: the raw log has it all.
+    work, other = es, []
+    if lab_kind == gini_labs.T_LAB:
+        kernel = (ev.BUILD, ev.SPAWN, ev.COMMAND)
+        other = [e for e in es if _k(e) in kernel]
+    elif lab_kind == gini_labs.A_LAB:
+        other = [e for e in es if _k(e) == ev.BUILD and gini_labs.find(_d(e).get("shadow", ""))
+                 and str(_d(e).get("shadow")) != gini_lab]
+    if other:
+        ids = {id(e) for e in other}
+        work = [e for e in es if id(e) not in ids]
+        named = sorted({gini_labs.title(str(_d(e).get("shadow"))).split(" —")[0]
+                        for e in other if _k(e) == ev.BUILD and _d(e).get("shadow")})
+        n_load = sum(1 for e in other if _k(e) == ev.BUILD)
+        n_run = sum(1 for e in other if _k(e) == ev.SPAWN)
+        n_cmd = sum(1 for e in other if _k(e) == ev.COMMAND)
+        parts = [f"{n} {w}{'' if n == 1 else 's'}" for n, w in
+                 ((n_load, "Load"), (n_run, "program run"), (n_cmd, "console command")) if n]
+        out["other_work"] = {"loads": n_load, "runs": n_run, "commands": n_cmd, "labs": named}
+        look.append(f"Also recorded under this code, and not part of {lab_title.split(' —')[0]}: "
+                    + ", ".join(parts) + (f" ({', '.join(named)})" if named else "")
+                    + ". Left out of this view; the raw log below has them.")
+
     # -- what GINI measured: the LAST reading of each metric, i.e. the one at submit --------------
     rows = [r for r in (measurements or []) if r.get("kind") == "measurement"]
     if rows:
@@ -205,7 +234,7 @@ def cook(entries, title: str = "", answers: list | None = None,
             out["stages"] = stages
 
     # -- builds (OS labs): Loads, failures, the first working kernel, reverts -------------------
-    builds = [e for e in es if _k(e) == ev.BUILD]
+    builds = [e for e in work if _k(e) == ev.BUILD]
     loads = [e for e in builds if _d(e).get("action") != "revert"]
     reverts = [e for e in builds if _d(e).get("action") == "revert"]
     if loads:
@@ -252,7 +281,7 @@ def cook(entries, title: str = "", answers: list | None = None,
         out["reverts"] = rv
 
     # -- the prescribed test, and what it PRINTED -------------------------------------------------
-    tests = [e for e in es if _k(e) == ev.SPAWN and _d(e).get("test")]
+    tests = [e for e in work if _k(e) == ev.SPAWN and _d(e).get("test")]
     if tests:
         lt = tests[-1]
         printed = list(_d(lt).get("out") or [])
@@ -261,7 +290,7 @@ def cook(entries, title: str = "", answers: list | None = None,
         if not printed:
             look.append(f"The last run of {_d(lt).get('what', 'the test')} printed nothing.")
     elif loads:
-        typed = sum(1 for e in es if _k(e) == ev.COMMAND)
+        typed = sum(1 for e in work if _k(e) == ev.COMMAND)
         look.append("The prescribed test was never run from the assignment panel"
                     + (f" — {typed} command(s) were typed at the console instead; see them below."
                        if typed else "."))
@@ -270,7 +299,7 @@ def cook(entries, title: str = "", answers: list | None = None,
     # The transcript behind the metrics above. The LAST run of each name, matching the metrics,
     # which are also the last reading of each.
     graded: dict[str, dict] = {}
-    for e in es:
+    for e in work:
         d = _d(e)
         if _k(e) == ev.SPAWN and d.get("run"):
             graded[str(d["run"])] = {"run": str(d["run"]), "what": str(d.get("what", "")),
@@ -281,7 +310,7 @@ def cook(entries, title: str = "", answers: list | None = None,
     # -- what was typed at a console, and what it printed -----------------------------------------
     # A-Lab 02 and 03 are driven from the xv6 console, so for them this is where the student's own
     # measurements are. The most recent few, newest last; the raw log has every one.
-    cmds = [e for e in es if _k(e) == ev.COMMAND]
+    cmds = [e for e in work if _k(e) == ev.COMMAND]
     if cmds:
         out["commands"] = {
             "count": len(cmds),
@@ -305,21 +334,49 @@ def cook(entries, title: str = "", answers: list | None = None,
     # A T-Lab's evidence is its goals and its Try every verdicts, and until this section a T-Lab
     # hand-in showed neither: the student's preview listed time and the canvas, and nothing of
     # the work, which read as "none of it was recorded".
+    # Since 2026-11-21 also what the lab asked that is not a goal: the levels opened, Try every on
+    # the versions that cannot be proved (its counting questions), and how many schedules the
+    # student ran on each level — `sched_lab.Session` says why.
     goals = [e for e in es if _k(e) in ev.TLAB_GOALS]
     proofs = [e for e in es if _k(e) in (ev.PROVED, ev.ORDERS)]
-    if goals or proofs:
+    explored = [e for e in es if _k(e) == ev.EXPLORED]
+    opened = [str(_d(e).get("face", "")).split("/", 1) for e in es if _k(e) == ev.LAB_OPEN
+              and str(_d(e).get("face", "")).startswith("t-lab-") and "/" in str(_d(e).get("face"))]
+    if goals or proofs or explored or opened:
         labs: dict[str, dict] = {}
+
+        def _lab(name: str) -> dict:
+            return labs.setdefault(name, {"goals": set(), "levels": [], "opened": [],
+                                          "explored": [], "played": {}})
         for e in goals:
             d = _d(e)
-            lab = labs.setdefault(str(d.get("lab", "")), {"goals": set(), "levels": []})
+            lab = _lab(str(d.get("lab", "")))
             lab["goals"].add((str(d.get("level", "")), str(d.get("goal", ""))))
             if d.get("level") and d.get("level") not in lab["levels"]:
                 lab["levels"].append(str(d.get("level")))
+        for name, level in opened:
+            if level not in _lab(name)["opened"]:
+                _lab(name)["opened"].append(level)
+        for e in explored:
+            d = _d(e)
+            outs = [f"{o[1]} {o[0]}" if o[1] else str(o[0])
+                    for v in (d.get("summary") or {}).values() for o in v.get("outcomes") or []]
+            _lab(str(d.get("lab", "")))["explored"].append(
+                {"level": str(d.get("level", "")), "version": str(d.get("version", "")),
+                 "outcomes": outs})
+        for e in goals + proofs + explored:
+            d = _d(e)
+            if d.get("played"):
+                played = _lab(str(d.get("lab", "")))["played"]
+                lv = str(d.get("level", ""))
+                played[lv] = max(played.get(lv, 0), int(d.get("played") or 0))
         out["tlabs"] = {
-            "labs": {k: {"goals": len(v["goals"]), "levels": v["levels"]}
+            "labs": {k: {"goals": len(v["goals"]), "levels": v["levels"], "opened": v["opened"],
+                         "explored": v["explored"], "played": v["played"]}
                      for k, v in labs.items()},
             "goals": sum(len(v["goals"]) for v in labs.values()),
-            "proved": sum(1 for e in proofs if _d(e).get("ok")), "proofs": len(proofs)}
+            "proved": sum(1 for e in proofs if _d(e).get("ok")), "proofs": len(proofs),
+            "explored": len(explored)}
 
     if lab_kind:
         out["lab"] = {"id": gini_lab, "title": lab_title, "kind": lab_kind}

@@ -175,7 +175,7 @@ def grade_at_hand_in(spec, entries, code_lab: str = "") -> bool:
     if code_lab:
         return sid == code_lab
     title = str(getattr(spec, "title", "") or "")
-    tlab = set(ev.TLAB_GOALS) | {ev.PROVED, ev.ORDERS}
+    tlab = set(ev.TLAB_GOALS) | {ev.PROVED, ev.ORDERS, ev.EXPLORED}
     saw_tlab = False
     for e in entries or ():
         k, d = _kind(e), _data(e)

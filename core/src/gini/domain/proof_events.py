@@ -54,6 +54,10 @@ STOPPED, RESUMED = "stopped", "resumed"
 #: Teaching Center replays a `schedule` and re-explores a `proved` entry's code and says whether
 #: the chain's claim holds, the way `check_sources` pairs a file with the build that compiled it.
 SCHEDULE, PROVED = "schedule", "proved"
+#: Try every schedule on a version that CANNOT be proved — the lab's counting questions ("how many
+#: orders end at 5?"). What it showed, once per version and code per recording. Not a proof: kept
+#: out of `proved` so "held N of M" counts only the attempts that were attempts. Added 2026-11-21.
+EXPLORED = "explored"
 #: T-Lab 03 (`domain.banklab`) and T-Lab 04 (`domain.fslab`). Kinds of their own rather than
 #: `schedule`, because the Teaching Center replays a `schedule` with `schedlab` and would report a
 #: deadlock lab's entry as "does not re-check". Same rule as above: one entry per goal the first
@@ -69,7 +73,7 @@ TLAB_GOALS = (SCHEDULE, ALLOCATE, BANK, FS_WALK, FS_READ, FS_MAKE, FS_TRACE)
 
 CONSTRUCTION = (PLACE, REMOVE, CONNECT, DISCONNECT, CONFIGURE)
 OPERATION = (RUN, STOP, OPEN_CONSOLE, MEASURE, INVOKE, COMMAND,
-             LAB_OPEN, TUNE, SPAWN, BUILD, *TLAB_GOALS)
+             LAB_OPEN, TUNE, SPAWN, BUILD, *TLAB_GOALS, EXPLORED)
 #: `proved` sits with the witnessed tier: it is a fact GINI established by exhaustive search, not
 #: something the student typed — though over a simulator, not a running network, and
 #: `narration` says which.
@@ -504,7 +508,7 @@ def _code(code) -> list:
 
 
 def schedule(lab: str, level: str, version: str, start: int, code, moves, goal: str,
-             result: str, threads=()) -> tuple[str, dict]:
+             result: str, threads=(), played: int = 0) -> tuple[str, dict]:
     """A student's schedule reached one of a T-Lab level's goals — the deadlock, both inside, a
     counter that ends at 4. Recorded ONCE per goal per level, when the goal is first met; the
     lab's session enforces that, not this.
@@ -519,11 +523,13 @@ def schedule(lab: str, level: str, version: str, start: int, code, moves, goal: 
         "start": int(start or 0), "code": _code(code),
         "moves": [int(m) for m in list(moves or [])[:400]],
         "goal": clip(goal, 40), "result": clip(result, 120),
-        "threads": [clip(str(n), 24) for n in list(threads or [])[:8]]}
+        "threads": [clip(str(n), 24) for n in list(threads or [])[:8]],
+        # Schedules the student ran to the end on this level so far — effort, not a score.
+        "played": int(played or 0)}
 
 
 def proved(lab: str, level: str, version: str, code, ok: bool, reason: str = "",
-           starts=(), summary=None) -> tuple[str, dict]:
+           starts=(), summary=None, played: int = 0) -> tuple[str, dict]:
     """Try every schedule was pressed on a version that can be proved — a shipped correct version
     or the student's fix — and this is what GINI found. FAILED ATTEMPTS ARE RECORDED, with the
     reason the student was shown: "tried and was told why not" is part of the story, as a probe
@@ -533,6 +539,14 @@ def proved(lab: str, level: str, version: str, code, ok: bool, reason: str = "",
     the numbers the Every schedule tab showed. Small, and enough for a marker to read "20
     schedules, 2 end at 5" without re-running anything.
     """
+    return PROVED, {
+        "lab": clip(lab, 40), "level": clip(level, 40), "version": clip(version, 40),
+        "code": _code(code), "ok": bool(ok), "reason": clip(reason, 160),
+        "starts": [int(s) for s in list(starts or [])[:16]], "summary": _summary(summary),
+        "played": int(played or 0)}
+
+
+def _summary(summary) -> dict:
     summ = {}
     for s, v in (summary or {}).items():
         v = v or {}
@@ -540,10 +554,18 @@ def proved(lab: str, level: str, version: str, code, ok: bool, reason: str = "",
                         "total": (int(v["total"]) if v.get("total") is not None else None),
                         "outcomes": [[clip(str(o[0]), 80), int(o[1] or 0)]
                                      for o in list(v.get("outcomes") or [])[:32]]}
-    return PROVED, {
+    return summ
+
+
+def explored(lab: str, level: str, version: str, code, starts=(), summary=None,
+             played: int = 0) -> tuple[str, dict]:
+    """Try every schedule on a version that cannot be proved, and what it showed: "20 schedules,
+    2 end at 5". The answer to a T-Lab's counting question, recorded once per (level, version,
+    code) per recording — the recorder keeps that set. `summary` is shaped as `proved`'s."""
+    return EXPLORED, {
         "lab": clip(lab, 40), "level": clip(level, 40), "version": clip(version, 40),
-        "code": _code(code), "ok": bool(ok), "reason": clip(reason, 160),
-        "starts": [int(s) for s in list(starts or [])[:16]], "summary": summ}
+        "code": _code(code), "starts": [int(s) for s in list(starts or [])[:16]],
+        "summary": _summary(summary), "played": int(played or 0)}
 
 
 def _pairs(rows, cap: int = 400) -> list:

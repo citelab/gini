@@ -41,7 +41,7 @@ def _recorded():
         if kind == "goal":
             entries.append(ev.schedule(p["lab"], p["level"], p["version"], p["start"], p["code"],
                                        p["moves"], p["goal"], p["result"], p["threads"]))
-        else:
+        elif kind == "proved":
             entries.append(ev.proved(p["lab"], p["level"], p["version"], p["code"], p["ok"],
                                      p["reason"], p["starts"], p["summary"]))
     s = V.Session(S.get("t-lab-02"), on_event=on_event)
