@@ -390,7 +390,8 @@ def test_the_session_tells_its_listener_about_goals_and_proofs(lab):
     assert seen[0][1]["moves"] == (0, 0, 1, 1, 0, 1)
     assert seen[0][1]["code"] == s.code
     s.show((0, 0, 1, 1, 0, 1))
-    assert len(seen) == 1, "once per goal, not once per click"
+    assert len(seen) == 2 and seen[1][0] == "goal", "told again; the recorder keeps one"
+    del seen[1]
     s.explore_all()
     assert len(seen) == 2 and seen[1][0] == "explored", "not provable: what it showed, no proof"
     assert seen[1][1]["played"] == 1 and seen[1][1]["summary"][0]["total"] == 20

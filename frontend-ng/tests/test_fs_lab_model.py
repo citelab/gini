@@ -117,7 +117,8 @@ def test_main_c_walked_in_order_reaches_its_goal_once_with_the_chains_fields(s, 
     s.reset()
     for b in MAIN:
         s.walk_click(b)
-    assert len(events) == 1, "a goal is reached once"
+    # Told again: the recorder keeps one per recording (test_tlab_transcript).
+    assert [k for k, _ in events] == ["fs_walk", "fs_walk"] and events[1][1]["goal"] == "main"
 
 
 def test_the_link_passes_over_buffer_hits_with_a_sentence_and_shows_them_as_no_read_rows(s,

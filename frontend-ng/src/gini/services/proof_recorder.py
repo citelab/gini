@@ -680,7 +680,10 @@ class ProofRecorder:
     def note_schedule(self, lab: str, level: str, version: str, start: int, code, moves,
                       goal: str, result: str, threads=(), played: int = 0) -> None:
         """A schedule the student played reached one of the level's goals. Once per goal per
-        level — `sched_lab.Session` keeps the set, so Undo and replay do not repeat it."""
+        recording: the window tells every time the goal is met (`sched_lab.Session._commit` says
+        why), and the set is kept here, with the faces, so it is cleared with the code."""
+        if self._seen_already(("goal", str(lab or ""), str(level or ""), str(goal or ""))):
+            return
         self._guard(lambda: self._record(
             ev.schedule(str(lab or ""), str(level or ""), str(version or ""), int(start or 0),
                         code, moves, str(goal or ""), str(result or ""), threads,
@@ -724,10 +727,26 @@ class ProofRecorder:
         name = self.TLAB_KINDS.get(str(kind or ""))
         if name is None:
             return
-        build = getattr(ev, name)
         p = dict(payload or {})
+        # A goal, once per recording, as `note_schedule`. Try every order (`orders`) is a verdict,
+        # recorded every time it is pressed, held or not.
+        if kind != "orders" and self._seen_already(
+                (kind, str(p.get("lab", "")), str(p.get("level", "")), str(p.get("goal", "")))):
+            return
+        build = getattr(ev, name)
         args = {k: p[k] for k in inspect.signature(build).parameters if k in p}
         self._guard(lambda: self._record(build(**args)))
+
+    def _seen_already(self, key: tuple) -> bool:
+        """True when `key` was ALREADY recorded under this code (so: skip it). Shares the faces'
+        set, which is cleared on arm, pause and disarm — and does not mark a key while nothing is
+        recording, so a goal met before the code was entered is recorded once it is."""
+        if self._chain is None:
+            return True
+        if key in self._faces_seen:
+            return True
+        self._faces_seen.add(key)
+        return False
 
     def note_observed(self, device: str, kind: str, detail: str,
                       pid: int | None = None) -> None:

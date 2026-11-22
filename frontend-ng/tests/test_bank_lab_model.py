@@ -283,7 +283,9 @@ def test_goal_chips_say_where_each_goal_is_met(session):
     assert [c.done for c in chips] == [True, False, False]
 
 
-def test_a_goal_sends_one_allocate_entry_the_first_time_and_never_again(session, seen):
+def test_a_goal_sends_its_allocate_entry_each_time_it_is_met(session, seen):
+    """Each time: a goal met while nothing was recording must reach the chain once something is.
+    One entry per recording is the recorder's rule (test_tlab_transcript)."""
     level(session, "graph")
     play(session, ("P3", "step"))
     assert [(k, p["goal"]) for k, p in seen] == [("allocate", "deadlock")]
@@ -293,7 +295,7 @@ def test_a_goal_sends_one_allocate_entry_the_first_time_and_never_again(session,
     assert set(p) >= {"lab", "level", "version", "start", "moves", "goal", "result"}
     session.reset()
     play(session, ("P3", "step"))
-    assert len(seen) == 1, "once per goal, not once per click"
+    assert len(seen) == 2 and seen[1] == seen[0]
 
 
 def test_a_goal_on_another_start_is_not_met_from_this_one(session, seen):
@@ -310,7 +312,7 @@ def test_an_allocate_entry_replays_to_a_state_that_meets_its_goal(session, seen)
     level(session, "graph", "Yours")
     play(session, ("P1", "step"), ("P2", "step"), ("P3", "step"), ("P4", "step"))
     lv = session.level
-    assert [p["goal"] for _, p in seen] == ["cycle", "knot"]
+    assert list(dict.fromkeys(p["goal"] for _, p in seen)) == ["cycle", "knot"]
     for kind, p in seen:
         assert kind == "allocate"
         s = lv.start(lv.starts[p["start"]].label)
@@ -325,7 +327,7 @@ def test_an_allocate_entry_replays_to_a_state_that_meets_its_goal(session, seen)
 def test_a_goal_met_mid_order_is_recorded_with_the_moves_up_to_that_step(session, seen):
     level(session, "claims", version="graph")
     play(session, ("P1", "step"), ("P2", "step"), ("P3", "step"), ("P1", "step"))
-    assert [p["moves"] for _, p in seen] == [[[0, "step"], [1, "step"], [2, "step"]]]
+    assert seen and all(p["moves"] == [[0, "step"], [1, "step"], [2, "step"]] for _, p in seen)
 
 
 def test_a_recovery_goal_is_met_through_the_recover_moves(session, seen):

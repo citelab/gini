@@ -585,8 +585,10 @@ class Session:
         met = S.goals_reached(lv, self.version_id, self.code, list(self.moves), self.start)
         for gid in met:
             k = f"{lv.id}:{gid}"
-            if k in self.achieved:
-                continue
+            # Told every time a goal is met, not only the first time in this window: the chip is the
+            # window's, the entry is the RECORDING's. A goal met before the code was entered, or
+            # while paused, lit its chip and wrote nothing, and meeting it again wrote nothing
+            # either. The recorder keeps "once per goal per recording" (reported 2026-11-21).
             self.achieved.add(k)
             g = next(x for x in lv.goals if x.id == gid)
             if rep.deadlock:

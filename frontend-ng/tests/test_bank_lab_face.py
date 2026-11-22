@@ -176,7 +176,8 @@ def test_a_goal_chip_turns_and_sends_exactly_one_entry(face, events):
         "moves": [[2, "step"]], "result": "deadlock: P1, P2, P3"}
     face._undo.click()
     _press(face, "P3", "step")
-    assert len(events) == 1
+    # Told again — the recorder keeps one per recording (test_tlab_transcript).
+    assert {(k, p["goal"]) for k, p in events} == {("allocate", "deadlock")}
     assert face._trace_end.text() == "Deadlock: nobody can move. P1, P2, P3 wait forever."
 
 

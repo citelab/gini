@@ -772,7 +772,8 @@ class Session:
         for gid in goal_ids:
             g = lv.goal(gid)
             k = f"{lv.id}:{gid}"
-            if g is None or k in self.achieved or (hints and g.needs_no_hints):
+            # Told every time, not once per window: see `sched_lab.Session._commit`.
+            if g is None or (hints and g.needs_no_hints):
                 continue
             self.achieved.add(k)
             if self.on_event is not None:

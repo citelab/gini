@@ -775,8 +775,7 @@ class Session:
             if g.start != self.start_label or g.version != self.version_id:
                 continue
             k = f"{lv.id}:{g.id}"
-            if k in self.achieved:
-                continue
+            # Every time, not once per window: see `sched_lab.Session._commit`.
             i = next((i for i, st in enumerate(states) if B.reach_met(w, g, st)), None)
             if i is None:
                 continue
@@ -967,9 +966,7 @@ class Session:
             if g.kind != kind or g.start != self.start_label:
                 continue
             k = f"{lv.id}:{g.id}"
-            if k in self.achieved:
-                continue
-            self.achieved.add(k)
+            self.achieved.add(k)                 # told every time: see `sched_lab.Session._commit`
             req = None
             if b.sel is not None and b.sel >= 0:
                 p, vec = w.starts[self.start].requests[b.sel]

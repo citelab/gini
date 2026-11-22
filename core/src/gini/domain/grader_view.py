@@ -361,6 +361,21 @@ def cook(entries, title: str = "", answers: list | None = None,
             lab["goals"].add((str(d.get("level", "")), str(d.get("goal", ""))))
             if d.get("level") and d.get("level") not in lab["levels"]:
                 lab["levels"].append(str(d.get("level")))
+        # A proof goal ("Proof: always 5", "Fix: never stuck") is reached by Try every holding on
+        # its version, and is recorded as that verdict, not as a goal. Until 2026-11-21 only the
+        # played goals were counted, so a student who reached all nine of T-Lab 02's was shown
+        # "5 goal(s) reached" — four short, by construction.
+        for e in proofs:
+            d = _d(e)
+            if not d.get("ok"):
+                continue
+            lab_id, lv = str(d.get("lab", "")), str(d.get("level", ""))
+            for (glv, gid), g in _tlab_goals(lab_id).items():
+                if glv == lv and g["prove"] and g["version"] == str(d.get("version", "")):
+                    lab = _lab(lab_id)
+                    lab["goals"].add((lv, gid))
+                    if lv not in lab["levels"]:
+                        lab["levels"].append(lv)
         for name, level in opened:
             if level not in _lab(name)["opened"]:
                 _lab(name)["opened"].append(level)
@@ -377,9 +392,14 @@ def cook(entries, title: str = "", answers: list | None = None,
                 played = _lab(str(d.get("lab", "")))["played"]
                 lv = str(d.get("level", ""))
                 played[lv] = max(played.get(lv, 0), int(d.get("played") or 0))
+        def _of(k: str, v: dict) -> dict:
+            defs = _tlab_goals(k)
+            return {"of": len(defs),
+                    "missing": [f"{lv} · {g['chip']}" for (lv, gid), g in defs.items()
+                                if (lv, gid) not in v["goals"]]} if defs else {}
         out["tlabs"] = {
             "labs": {k: {"goals": len(v["goals"]), "levels": v["levels"], "opened": v["opened"],
-                         "explored": v["explored"], "played": v["played"]}
+                         "explored": v["explored"], "played": v["played"], **_of(k, v)}
                      for k, v in labs.items()},
             "goals": sum(len(v["goals"]) for v in labs.values()),
             "proved": sum(1 for e in proofs if _d(e).get("ok")), "proofs": len(proofs),
@@ -412,6 +432,25 @@ def cook(entries, title: str = "", answers: list | None = None,
             look.append("Unanswered: question " + ", ".join(map(str, blank)) + ".")
 
     out["table"] = table(out, measurements)
+    return out
+
+
+def _tlab_goals(lab_id: str) -> dict:
+    """Every goal of a T-Lab, in the level file's order: `{(level, goal): {chip, version,
+    prove}}`. {} for a lab this gini-core does not ship (or whose file will not load) — the view
+    then counts what the chain holds and does not claim a total."""
+    try:
+        from . import tlab_catalog
+        lab = next((x for x in tlab_catalog.catalog() if x.id == lab_id), None)
+    except Exception:                                   # noqa: BLE001 — a view must still render
+        return {}
+    out: dict = {}
+    for lv in getattr(lab, "levels", ()) or ():
+        for g in getattr(lv, "goals", ()) or ():
+            out[(str(lv.id), str(g.id))] = {
+                "chip": str(getattr(g, "chip", "") or g.id),
+                "version": str(getattr(g, "version", "") or ""),
+                "prove": bool(getattr(g, "prove", False)) or getattr(g, "kind", "") == "prove"}
     return out
 
 

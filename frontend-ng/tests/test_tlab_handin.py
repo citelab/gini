@@ -126,7 +126,7 @@ def test_the_same_goal_reached_in_two_sittings_counts_once():
 def test_the_preview_says_what_the_t_lab_work_was():
     from gini.ui.handin_preview import summary_lines
     lines = summary_lines(G.preview(_tlab_chain()))
-    assert "T-Lab 02: 2 goal(s) reached on race, deadlock" in lines
+    assert any(x.startswith("T-Lab 02: 2 of 9 goals reached — not yet: ") for x in lines)
     assert "Try every: held 1 of 2 time(s)" in lines
 
 

@@ -127,3 +127,76 @@ def test_the_server_does_not_call_an_exploration_unconfirmed():
     ACT = pytest.importorskip("gini_teaching_center.activities")
     kind, data = ev.explored("t-lab-02", "lost", "instr", [["p1"], ["c1"]], (0,), {})
     assert ACT.recheck_tlabs({"entries": [{"kind": kind, "data": data, "seq": 0}]}) == []
+
+
+# --------------------------------------------------------------------------- #
+# all nine goals, and a goal met while nothing was recording (reported 2026-11-21)
+# --------------------------------------------------------------------------- #
+# A marker saw "5 goal(s) reached" for a student whose chain held all nine of T-Lab 02's: the four
+# proof goals are recorded as Try every verdicts, and only the played ones were counted. And a
+# goal met before the code was entered, or while paused, lit its chip and never reached the
+# chain, even when met again — the window kept "once per goal" for as long as it was open.
+
+def _all_nine(s):
+    s.show((0, 0, 1, 1, 0, 1)); s.show((1, 1, 0, 0, 1, 0))          # lost: ends at 4, at 6
+    s.pick_version("locked"); s.explore_all()                        # lost: proof
+    _level(s, "lockvar", "plain"); s.show((0, 1, 0, 1))              # both inside
+    s.pick_version("tas"); s.explore_all()
+    _level(s, "rdv", "bad"); s.show((0, 0, 1, 1))                    # deadlock
+    s.pick_version("fix"); s.pick_tile(0, 1); s.move_sel(+1); s.explore_all()
+    _level(s, "buffer", "swapped"); s.show((0, 0, 1, 1))             # deadlock
+    s.pick_version("fix"); s.pick_tile(0, 0); s.move_sel(+1); s.explore_all()
+
+
+def test_all_nine_goals_count_and_the_missing_are_named(tmp_path):
+    from gini.ui.handin_preview import summary_lines
+    rec, s = _wired(tmp_path)
+    _all_nine(s)
+    lab = G.preview(_entries(rec), gini_lab="t-lab-02")["tlabs"]["labs"]["t-lab-02"]
+    assert (lab["goals"], lab["of"], lab["missing"]) == (9, 9, [])
+    assert "T-Lab 02: 9 of 9 goals reached" in summary_lines(
+        G.preview(_entries(rec), gini_lab="t-lab-02"))
+    without_rdv = [e for e in _entries(rec) if e["data"].get("level") != "rdv"]
+    lab = G.preview(without_rdv)["tlabs"]["labs"]["t-lab-02"]
+    assert lab["goals"] == 7 and lab["missing"] == ["rdv · Deadlock", "rdv · Fix: never stuck"]
+
+
+def test_a_failed_proof_reaches_no_goal(tmp_path):
+    rec, s = _wired(tmp_path)
+    _level(s, "rdv", "fix")
+    s.explore_all()                                                  # not fixed: no schedule ends
+    assert G.preview(_entries(rec))["tlabs"]["labs"]["t-lab-02"]["goals"] == 0
+
+
+def test_a_goal_met_before_the_code_was_entered_is_recorded_when_met_again(tmp_path):
+    class Ctx:
+        topology = Topology()
+    rec = ProofRecorder(Ctx(), store=P.ChainStore(tmp_path))
+    recorded = []
+
+    def on_event(kind, p):
+        if kind == "goal":
+            rec.note_schedule(p["lab"], p["level"], p["version"], p["start"], p["code"],
+                              p["moves"], p["goal"], p["result"], p["threads"], p["played"])
+    s = V.Session(S.get("t-lab-02"), on_event=on_event)
+    _level(s, "rdv")
+    s.show((0, 0, 1, 1))                                             # nothing armed yet
+    assert s.goal_met("dl")
+    assert rec.arm(CODE)[0]
+    s.reset(); s.show((0, 0, 1, 1))
+    s.reset(); s.show((0, 0, 1, 1))                                  # and again: still one
+    recorded = [e for e in _entries(rec) if e["kind"] == ev.SCHEDULE]
+    assert [e["data"]["goal"] for e in recorded] == ["dl"]
+
+
+def test_t_lab_03_and_04_goals_are_once_per_recording_too(tmp_path):
+    rec, _s = _wired(tmp_path)
+    p = {"lab": "t-lab-03", "level": "graph", "start": 0, "version": "free",
+         "moves": [[2, "step"]], "goal": "deadlock", "result": "deadlock: P1, P2, P3"}
+    rec.note_tlab("allocate", p)
+    rec.note_tlab("allocate", p)
+    orders = {"lab": "t-lab-03", "level": "claims", "version": "graph", "start": 0, "ok": True}
+    rec.note_tlab("orders", orders)
+    rec.note_tlab("orders", orders)                                   # a verdict: every press
+    kinds = [e["kind"] for e in _entries(rec) if e["kind"] in (ev.ALLOCATE, ev.ORDERS)]
+    assert kinds == [ev.ALLOCATE, ev.ORDERS, ev.ORDERS]

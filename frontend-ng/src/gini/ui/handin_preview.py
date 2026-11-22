@@ -49,8 +49,13 @@ def summary_lines(c: dict) -> list[str]:
     tl = c.get("tlabs")
     if tl:
         for lab, v in sorted((tl.get("labs") or {}).items()):
-            out.append(f"{_tlab_name(lab)}: {v['goals']} goal(s) reached"
-                       + (f" on {', '.join(v['levels'])}" if v.get("levels") else ""))
+            if v.get("of"):
+                out.append(f"{_tlab_name(lab)}: {v['goals']} of {v['of']} goals reached"
+                           + (f" — not yet: {', '.join(v['missing'])}" if v.get("missing")
+                              else ""))
+            else:
+                out.append(f"{_tlab_name(lab)}: {v['goals']} goal(s) reached"
+                           + (f" on {', '.join(v['levels'])}" if v.get("levels") else ""))
             if v.get("opened"):
                 out.append(f"{_tlab_name(lab)}: levels opened — {', '.join(v['opened'])}")
             if v.get("played"):

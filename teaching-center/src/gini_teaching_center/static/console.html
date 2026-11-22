@@ -1286,8 +1286,11 @@ function cookBlock(c){
   if (tl) {
     for (const [lab, v] of Object.entries(tl.labs || {})) {
       const name = esc(lab.replace(/^t-lab-/, 'T-Lab '));
-      rows.push(row(name, `<b>${v.goals}</b> goal${v.goals===1?'':'s'} reached`
-        + ((v.levels||[]).length ? ` on ${v.levels.map(esc).join(', ')}` : '')));
+      rows.push(row(name, v.of
+        ? `<b>${v.goals} of ${v.of}</b> goals reached`
+          + ((v.missing||[]).length ? ` — not reached: ${v.missing.map(esc).join(', ')}` : '')
+        : `<b>${v.goals}</b> goal${v.goals===1?'':'s'} reached`
+          + ((v.levels||[]).length ? ` on ${v.levels.map(esc).join(', ')}` : '')));
       // What the lab asked that is not a goal (recorded from gBuilder 6.22.19).
       if ((v.opened||[]).length) rows.push(row(`${name} · levels`, `opened ${v.opened.map(esc).join(', ')}`));
       const pl = Object.entries(v.played || {});
