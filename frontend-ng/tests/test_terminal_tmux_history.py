@@ -138,7 +138,7 @@ def test_the_command_reads_the_history_size_before_capturing():
     would then appear twice; the size check returns nothing instead."""
     assert "#{history_size}" in HISTORY_CMD
     assert HISTORY_CMD.index("history_size") < HISTORY_CMD.index("capture-pane")
-    assert "-E -1" in HISTORY_CMD and "-t gini" in HISTORY_CMD
+    assert "-E -1" in HISTORY_CMD and "-t =gini:" in HISTORY_CMD
 
 
 def test_the_panel_points_the_source_at_the_selected_element(app, tmp_path):
@@ -146,9 +146,9 @@ def test_the_panel_points_the_source_at_the_selected_element(app, tmp_path):
     from gini.ui.theme import ThemeManager
     seen = []
     p = TerminalPanel(ThemeManager(app), history_fn=lambda dev, cmd: seen.append((dev, cmd)) or "")
-    p._embed("http://127.0.0.1:37601/", "M2", "")
-    assert p._view._history_source is not None
-    p._view._history_source()
+    p.active._embed("http://127.0.0.1:37601/", "M2", "")
+    assert p.active._view._history_source is not None
+    p.active._view._history_source()
     assert seen == [("M2", HISTORY_CMD)]
-    p._detach()
-    assert p._view._history_source is None
+    p.active._detach()
+    assert p.active._view._history_source is None

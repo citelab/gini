@@ -66,8 +66,8 @@ def _spin(until, secs=5.0):
 def test_says_what_to_do_before_anything_runs(app, theme):
     p = _panel(theme, workdir="")
     p.show_device("m1", "Machine")
-    assert "Run" in p._sub.text()
-    assert p._connected_to == ""
+    assert "Run" in p.active._sub.text()
+    assert p.active._connected_to == ""
 
 
 def test_an_element_with_no_terminal_says_so_by_name(app, theme, tmp_path):
@@ -75,8 +75,8 @@ def test_an_element_with_no_terminal_says_so_by_name(app, theme, tmp_path):
     it failed."""
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 37600, "cmd": ""}}))
     p.show_device("xv1", "xv6 Machine")
-    assert "xv6 Machine" in p._sub.text() and "does not serve" in p._sub.text()
-    assert p._connected_to == ""
+    assert "xv6 Machine" in p.active._sub.text() and "does not serve" in p.active._sub.text()
+    assert p.active._connected_to == ""
 
 
 def test_a_corrupt_or_missing_map_is_not_fatal(app, theme, tmp_path):
@@ -92,18 +92,18 @@ def test_a_stale_map_from_a_previous_run_is_inert(app, theme, tmp_path):
     wd = _project(tmp_path, {"m1": {"port": 37600, "cmd": ""}})
     stopped = _panel(theme, wd, running=False)
     stopped.show_device("m1", "Machine")
-    assert "37600" not in stopped._sub.text()
-    assert "Run" in stopped._sub.text()
+    assert "37600" not in stopped.active._sub.text()
+    assert "Run" in stopped.active._sub.text()
     started = _panel(theme, wd, running=True)
     started.show_device("m1", "Machine")
-    assert "37600" in started._sub.text()
+    assert "37600" in started.active._sub.text()
 
 
 def test_selection_of_empty_space_clears_the_pane(app, theme, tmp_path):
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
     p.on_selection(None, None)
-    assert p._name == ""
-    assert "Select a machine" in p._sub.text()
+    assert p.active._name == ""
+    assert "Select a machine" in p.active._sub.text()
 
 
 # -- what the terminal fronts ------------------------------------------------ #
@@ -111,9 +111,9 @@ def test_a_running_element_shows_its_own_port(app, theme, tmp_path):
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 37603, "cmd": ""},
                                           "r1": {"port": 37600, "cmd": "exec grconsole"}}))
     p.show_device("m1", "Machine")
-    assert "37603" in p._sub.text()
+    assert "37603" in p.active._sub.text()
     p.show_device("r1", "Router")
-    assert "37600" in p._sub.text()
+    assert "37600" in p.active._sub.text()
 
 
 def test_the_subtitle_distinguishes_a_router_cli_from_a_shell(app, theme, tmp_path):
@@ -122,9 +122,9 @@ def test_the_subtitle_distinguishes_a_router_cli_from_a_shell(app, theme, tmp_pa
                                                                   "\"python3 grconsole.py\""},
                                           "ovs1": {"port": 2, "cmd": "tmux new -A -s gini"}}))
     p.show_device("r1", "Router")
-    assert "router CLI" in p._sub.text()
+    assert "router CLI" in p.active._sub.text()
     p.show_device("ovs1", "Switch")
-    assert "shell" in p._sub.text()
+    assert "shell" in p.active._sub.text()
 
 
 # -- connecting -------------------------------------------------------------- #
@@ -133,56 +133,56 @@ def test_a_hidden_tab_opens_no_connection(app, theme, tmp_path):
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
     assert not p.isVisible()
     p.show_device("m1", "Machine")
-    assert p._connected_to == "", "connected for a hidden tab"
-    assert p._pending is not None, "did not remember what to attach to once the tab opens"
+    assert p.active._connected_to == "", "connected for a hidden tab"
+    assert p.active._pending is not None, "did not remember what to attach to once the tab opens"
 
 
 def test_it_waits_for_ttyd_instead_of_failing_once(app, theme, tmp_path):
     """`docker compose up` returns before ttyd inside the container binds its port, and a
     WebSocket that failed once does not retry itself. Port 1 is never listening."""
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
-    p._pending = ("http://127.0.0.1:1/", "m1", "")
-    p._tries = 0
-    p._probe_port()
-    assert _spin(lambda: p._tries > 0), "a refused port never reported back"
-    assert p._connected_to == "", "attached to a port nothing is listening on"
+    p.active._pending = ("http://127.0.0.1:1/", "m1", "")
+    p.active._tries = 0
+    p.active._probe_port()
+    assert _spin(lambda: p.active._tries > 0), "a refused port never reported back"
+    assert p.active._connected_to == "", "attached to a port nothing is listening on"
 
 
 def test_a_refused_port_is_retried_not_abandoned(app, theme, tmp_path):
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
-    p.PROBE_MS = 10
-    p._pending = ("http://127.0.0.1:1/", "m1", "")
-    p._tries = 0
-    p._probe_port()
-    assert _spin(lambda: p._tries >= 3), f"gave up after {p._tries} attempt(s)"
+    p.active.PROBE_MS = 10
+    p.active._pending = ("http://127.0.0.1:1/", "m1", "")
+    p.active._tries = 0
+    p.active._probe_port()
+    assert _spin(lambda: p.active._tries >= 3), f"gave up after {p.active._tries} attempt(s)"
 
 
 def test_it_gives_up_eventually_and_says_so(app, theme, tmp_path):
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
-    p._pending = ("http://127.0.0.1:1/", "m1", "")
-    p._tries = p.MAX_PROBES + 1
-    p._probe_failed()
-    assert "No terminal answered" in p._sub.text()
+    p.active._pending = ("http://127.0.0.1:1/", "m1", "")
+    p.active._tries = p.active.MAX_PROBES + 1
+    p.active._probe_failed()
+    assert "No terminal answered" in p.active._sub.text()
 
 
 def test_switching_element_abandons_the_previous_probe(app, theme, tmp_path):
     """A probe left in flight would attach the PREVIOUS element under the current element's
     name."""
     p = _panel(theme, _project(tmp_path, {"a": {"port": 1, "cmd": ""}, "b": {"port": 2, "cmd": ""}}))
-    p._pending = ("http://127.0.0.1:1/", "a", "")
-    p._tries = 0
-    p._probe_port()
-    assert p._probe is not None
+    p.active._pending = ("http://127.0.0.1:1/", "a", "")
+    p.active._tries = 0
+    p.active._probe_port()
+    assert p.active._probe is not None
     p.show_device("b", "B")
-    assert p._probe is None, "the old element's probe is still armed"
+    assert p.active._probe is None, "the old element's probe is still armed"
 
 
 def test_clearing_the_pane_cancels_an_in_flight_probe(app, theme, tmp_path):
     p = _panel(theme, _project(tmp_path, {"m1": {"port": 1, "cmd": ""}}))
-    p._pending = ("http://127.0.0.1:1/", "m1", "")
-    p._probe_port()
+    p.active._pending = ("http://127.0.0.1:1/", "m1", "")
+    p.active._probe_port()
     p.show_none()
-    assert p._probe is None and p._pending is None
+    assert p.active._probe is None and p.active._pending is None
 
 
 # -- the design that replaced the web view ----------------------------------- #
@@ -191,11 +191,11 @@ def test_there_is_exactly_one_terminal_widget_for_the_panel(app, theme, tmp_path
     process — per selection, which stalled slow machines on every click."""
     p = _panel(theme, _project(tmp_path, {"a": {"port": 1, "cmd": ""}, "b": {"port": 2, "cmd": ""}}))
     p.show()
-    view, client = p._view, p._client
+    view, client = p.active._view, p.active._client
     for name in ("a", "b", "a", "b"):
         p.show_device(name, name.upper())
-    assert p._view is view, "rebuilt the terminal widget on a selection change"
-    assert p._client is client, "rebuilt the transport on a selection change"
+    assert p.active._view is view, "rebuilt the terminal widget on a selection change"
+    assert p.active._client is client, "rebuilt the transport on a selection change"
 
 
 def test_qtwebengine_is_not_on_the_terminal_path(app, theme, tmp_path):
@@ -221,10 +221,10 @@ def test_switching_elements_clears_the_previous_screen(app, theme, tmp_path):
     name. The WORK is safe regardless — it is a tmux session in the container."""
     p = _panel(theme, _project(tmp_path, {"a": {"port": 1, "cmd": ""}, "b": {"port": 2, "cmd": ""}}))
     p.show()
-    p._view.feed(b"secrets from a\r\n")
-    p._pending = ("http://127.0.0.1:2/", "b", "")
-    p._attach()
-    assert p._view._screen.display[0].strip() == "", "previous element's output survived the switch"
+    p.active._view.feed(b"secrets from a\r\n")
+    p.active._pending = ("http://127.0.0.1:2/", "b", "")
+    p.active._attach()
+    assert p.active._view._screen.display[0].strip() == "", "previous element's output survived the switch"
 
 
 def test_the_terminal_follows_the_theme(app, theme, tmp_path):
@@ -247,11 +247,11 @@ def test_a_text_size_change_reaches_the_terminal_font(app, theme, tmp_path):
     p.resize(700, 380)
     theme.set_font_scale(1.0)
     p.refresh_theme("dark")
-    before = p._view._font.pointSizeF()
+    before = p.active._view._font.pointSizeF()
     theme.set_font_scale(1.6)
     p.refresh_theme("dark")
     try:
-        assert p._view._font.pointSizeF() > before, (
+        assert p.active._view._font.pointSizeF() > before, (
             "Settings › Text size changed and the terminal font did not")
     finally:
         theme.set_font_scale(1.0)

@@ -31,7 +31,8 @@ def _cmds(**kw) -> dict:
     t.add_link(o.id, c.id)
     t.add_link(r.id, o.id)
     doc = yaml.safe_load(_compose(RuntimeCompiler().compile(t)))
-    return {s: ((v or {}).get("environment") or {}).get("TTYD_CMD", "")
+    # As the CONTAINER sees it: Compose turns the file's `$$` back into `$`.
+    return {s: ((v or {}).get("environment") or {}).get("TTYD_CMD", "").replace("$$", "$")
             for s, v in (doc.get("services") or {}).items()}
 
 
@@ -56,9 +57,12 @@ def test_reconnecting_attaches_rather_than_starting_a_second_session():
 
 
 def test_the_session_name_is_stable():
-    """A name derived from the connection, the port, or a timestamp would reattach to nothing."""
+    """A name derived from the connection, the port, or a timestamp would reattach to nothing.
+    The only thing that varies it is the pane's session number, and only to `gini-2` … `gini-9`."""
     for svc, cmd in _cmds().items():
-        assert f"-s {TMUX_SESSION}" in cmd, f"{svc}: unstable session name — {cmd}"
+        assert f"S={TMUX_SESSION};" in cmd and '-s "$S"' in cmd, (
+            f"{svc}: unstable session name — {cmd}")
+        assert f'case "$0" in [2-9]) S={TMUX_SESSION}-$0;; esac' in cmd, cmd
 
 
 def test_an_image_without_tmux_still_gives_a_working_shell():

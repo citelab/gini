@@ -117,11 +117,16 @@ def token_url(base: str) -> str:
     return base.rstrip("/") + TOKEN_PATH
 
 
-def ws_url(base: str) -> str:
-    """http://host:port/ -> ws://host:port/ws (and https -> wss, for symmetry)."""
+def ws_url(base: str, session: int = 1) -> str:
+    """http://host:port/ -> ws://host:port/ws (and https -> wss, for symmetry).
+
+    `session` > 1 asks for that element's Nth terminal session as `?arg=N`, which ttyd (run with
+    `-a`) appends to the command; `orchestrator._persist` turns it into the tmux session. The first
+    session sends nothing, so it is the URL every terminal used before there were panes.
+    """
     b = base.rstrip("/")
     if b.startswith("https://"):
         b = "wss://" + b[len("https://"):]
     elif b.startswith("http://"):
         b = "ws://" + b[len("http://"):]
-    return b + WS_PATH
+    return b + WS_PATH + (f"?arg={int(session)}" if int(session) > 1 else "")

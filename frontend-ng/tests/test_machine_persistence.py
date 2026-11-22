@@ -117,20 +117,27 @@ def test_the_machine_terminal_lands_in_the_persistent_home():
         assert f"cd {MACHINE_HOME}" in l
 
 
+# Every terminal command now opens by picking its tmux session (`gini`, or `gini-2` … for a second
+# pane on the element — see test_terminal_panes.py). What follows the pick is what these pin.
+_PICK = 'S=gini; case "$0" in [2-9]) S=gini-$0;; esac; '
+
+
 def test_persist_lands_where_told_and_still_reattaches():
     cmd = _persist(workdir=MACHINE_HOME)
-    assert cmd.startswith(f"cd {MACHINE_HOME} 2>/dev/null;")
+    assert cmd.startswith(_PICK + f"cd {MACHINE_HOME} 2>/dev/null;")
     assert "tmux new -A" in cmd, "must still attach-or-create, not start a second session"
-    assert f"-s gini -c {MACHINE_HOME}" in cmd
+    assert f'-s "$S" -c {MACHINE_HOME}' in cmd
 
 
 def test_a_router_shell_is_unchanged():
     """Routers land where they always did — no persistent-home cd. `_persist()` with no argument
     must be byte-for-byte what it was, or every router terminal test would have to move."""
     cmd = _persist()
+    assert cmd.startswith(_PICK), cmd
+    cmd = cmd[len(_PICK):]
     assert not cmd.startswith("cd ")
     assert " -c " not in cmd
-    assert cmd.startswith('TERM=') and "tmux new -A -s gini" in cmd
+    assert cmd.startswith('TERM=') and 'tmux new -A -s "$S"' in cmd
 
 
 def test_the_native_login_also_lands_in_the_home():

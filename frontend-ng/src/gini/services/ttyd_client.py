@@ -49,15 +49,18 @@ class TtydClient(QObject):
         self._net = None
         self._reply = None
         self._base = ""
+        self._session = 1
         self._cols, self._rows = 80, 24
         self._debug = os.environ.get("GINI_TTYD_DEBUG") == "1"
         self._capture = os.environ.get("GINI_TTYD_CAPTURE") or ""
 
     # -- lifecycle ----------------------------------------------------------- #
-    def connect_to(self, base_url: str, columns: int, rows: int) -> None:
-        """Point at http://127.0.0.1:<port>/ and open a session."""
+    def connect_to(self, base_url: str, columns: int, rows: int, session: int = 1) -> None:
+        """Point at http://127.0.0.1:<port>/ and open a session — the element's `session`th, so
+        two panes on one element are two shells rather than one shell shown twice."""
         self.disconnect_from()
         self._base = base_url
+        self._session = max(1, int(session))
         self._cols, self._rows = max(1, columns), max(1, rows)
         from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
         # Built ONCE and reused. Every QNetworkAccessManager owns a thread, and this used to
@@ -71,9 +74,17 @@ class TtydClient(QObject):
 
     def disconnect_from(self) -> None:
         if self._reply is not None:
-            self._reply.abort()
-            self._reply.deleteLater()
-            self._reply = None
+            # Taken off `self` and cut loose BEFORE the abort: abort() emits `finished`
+            # synchronously, which ran `_on_token` mid-teardown — it opened a socket to the element
+            # being left and cleared `_reply`, so the deleteLater below raised on None. Reached by
+            # switching element (or closing a pane) while the token request was still in flight.
+            reply, self._reply = self._reply, None
+            try:
+                reply.finished.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            reply.abort()
+            reply.deleteLater()
         if self._sock is not None:
             sock, self._sock = self._sock, None
             try:
@@ -135,7 +146,7 @@ class TtydClient(QObject):
             lambda _e: self.failed.emit(self._sock.errorString() if self._sock else "socket error"))
         opts = QWebSocketHandshakeOptions()
         opts.setSubprotocols([proto.SUBPROTOCOL])
-        url = proto.ws_url(self._base)
+        url = proto.ws_url(self._base, self._session)
         if self._debug:
             print(f"[ttyd] opening {url} subprotocol={proto.SUBPROTOCOL}")
         self._sock.open(QNetworkRequest(QUrl(url)), opts)

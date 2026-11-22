@@ -87,8 +87,10 @@ COPY --from=ttyd /ttyd /usr/local/bin/ttyd
 # What the terminal fronts is per-ELEMENT: this one image serves both gRouters and OVS switches,
 # and a student wants the router CLI on one and a shell on the other. TTYD_CMD carries that from
 # compose; it defaults to a shell so the terminal always works even if compose says nothing.
+# `-a` lets a second terminal on this element ask for its own tmux session (`/ws?arg=2`);
+# see `_persist` in gini.services.orchestrator. Without it two panes share one shell.
 RUN printf 'set -g status off\nset -g history-limit 10000\nset -g mouse on\n' > /etc/tmux.conf \
- && printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
+ && printf '#!/bin/sh\nexec /usr/local/bin/ttyd -W -a -p 7681 -i 0.0.0.0 /bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n' \
     > /usr/local/bin/gini-term && chmod +x /usr/local/bin/gini-term
 
 WORKDIR /run

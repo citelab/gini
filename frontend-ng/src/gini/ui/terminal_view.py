@@ -171,6 +171,7 @@ class TerminalView(QWidget):
 
     key_bytes = Signal(bytes)          # user typed something; hand it to the transport
     size_changed = Signal(int, int)    # (columns, rows) — the PTY needs to be told
+    focused = Signal()                 # took the keyboard: the Terminal tab's panes follow it
     _history_loaded = Signal(object, int)   # (rows or None, generation) from the fetch thread
 
     def __init__(self, theme=None, parent=None) -> None:
@@ -700,6 +701,13 @@ class TerminalView(QWidget):
             return
         self._scroll = 0
         self.key_bytes.emit(text.replace("\r\n", "\r").replace("\n", "\r").encode("utf-8"))
+
+    def focusInEvent(self, e) -> None:                # noqa: N802 - Qt naming
+        """The pane holding this view becomes the one the canvas selection points. A signal
+        rather than the panel watching for focus: an event filter is what terminal_panel.py must
+        never install (see its tests)."""
+        super().focusInEvent(e)
+        self.focused.emit()
 
     # -- mouse ---------------------------------------------------------------- #
     def mousePressEvent(self, e) -> None:             # noqa: N802 - Qt naming

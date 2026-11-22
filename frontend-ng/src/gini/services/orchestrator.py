@@ -273,6 +273,20 @@ TERMINALS_FILE = "gini-terminals.json"
 # runs its own tmux server — there is nothing to collide with.
 TMUX_SESSION = "gini"
 
+# How many terminals one element can show at once: the Terminal tab's panes. Pane-sessions past
+# the first are `gini-2` … `gini-4`, each as persistent as the first. See `tmux_session`.
+MAX_SESSIONS = 4
+
+
+def tmux_session(slot: int = 1) -> str:
+    """The tmux session a terminal's `slot` attaches to: `gini`, then `gini-2`, `gini-3`, ….
+
+    Slot 1 keeps the old name, so the work a student left running before there were panes is
+    still the session the first pane opens. Mirrored by the `case` in `_persist`, which is what
+    actually picks it inside the container.
+    """
+    return TMUX_SESSION if slot <= 1 else f"{TMUX_SESSION}-{slot}"
+
 # element name -> {"port", "cmd"}, refreshed by every _compose(). Module level because _compose
 # returns a string and has nowhere else to put it, while write_project needs it immediately
 # afterwards; one write per Run, on one thread, so there is no sharing hazard.
@@ -308,8 +322,12 @@ def _ttyd_layers() -> str:
     #     "/bin/sh": line 0: syntax error: unterminated quoted string
     # Plain quotes are safe here because the whole format string is already inside the RUN's
     # single quotes, which is also what the hand-written grouter/sdn Dockerfiles do.
+    #
+    # `-a` lets the connection say WHICH session it wants (`/ws?arg=2`): ttyd appends the value to
+    # the command, where `_persist` reads it as `$0`. Without it every terminal on an element joins
+    # the one session, and two panes on M1 are one shell typed into from two places.
     script = (r"#!/bin/sh\n"
-              r"exec /usr/local/bin/ttyd -W -p %d -i 0.0.0.0 "
+              r"exec /usr/local/bin/ttyd -W -a -p %d -i 0.0.0.0 "
               r'/bin/sh -c "${TTYD_CMD:-exec /bin/sh}"\n') % TTYD_PORT
     # tmux is what makes a session OUTLIVE its browser tab: leave a ping running on M1, look at
     # M2, come back, and the ping is still there with its scrollback. Without it the view is torn
@@ -342,16 +360,24 @@ def _persist(cmd: str = "", workdir: str = "") -> str:
     student's first `pwd` is the directory that survives a restart, rather than /app (the image's
     own code). The `cd` sets ttyd's cwd, which tmux and the fallback shell both inherit; the `-c`
     is belt-and-suspenders for the session tmux creates. Routers pass nothing and are unchanged.
+
+    A second terminal on the same element (a second pane in the Terminal tab) asks for its own
+    session by connecting to `/ws?arg=N`; ttyd (`-a`) appends N to `sh -c "$TTYD_CMD"`, where it
+    arrives as `$0`. Only a single digit 2-9 is honoured — anything else, including the `/bin/sh`
+    that `$0` is when no argument came, is the first session — so the value from the URL never
+    reaches tmux as anything but a session-name suffix the case statement wrote itself.
     """
     cd = f"cd {workdir} 2>/dev/null; " if workdir else ""
     c_opt = f" -c {workdir}" if workdir else ""
     inner = f' "{cmd}; exec /bin/sh"' if cmd else ""
+    pick = f'S={TMUX_SESSION}; case "$0" in [2-9]) S={TMUX_SESSION}-$0;; esac; '
+
     # TERM must be set or tmux refuses to start — "TERM environment variable not set." — and the
     # student silently gets the fallback shell with no persistence instead. ttyd does set TERM for
     # its PTY child, but the launcher runs `/bin/sh -c "$TTYD_CMD"` and not every sh passes it
     # through the way tmux needs; setting it here costs nothing and removes the doubt. `${TERM:-…}`
     # keeps whatever ttyd did provide.
-    return (f'{cd}TERM="${{TERM:-xterm-256color}}" tmux new -A -s {TMUX_SESSION}{c_opt}{inner}'
+    return (f'{pick}{cd}TERM="${{TERM:-xterm-256color}}" tmux new -A -s "$S"{c_opt}{inner}'
             f"; exec /bin/sh")
 
 
@@ -1012,8 +1038,11 @@ def _compose(config: RuntimeConfig, auto_internet: bool = True,
         return f'      - "127.0.0.1:{port}:{TTYD_PORT}"'
 
     def _term_env(name: str) -> list:
+        # Through `_yamlish`: the command is shell, and Compose substitutes `$` before the YAML
+        # is parsed. `${TERM:-…}` used to be filled from gBuilder's OWN environment rather than
+        # ttyd's, and the session pick's `$0` / `$S` would be emptied outright.
         cmd = _term.get(name, {}).get("cmd", "")
-        return [f"      TTYD_CMD: '{cmd}'"] if cmd else []
+        return [f"      TTYD_CMD: '{_yamlish(cmd)}'"] if cmd else []
 
 
     lines = [f"name: {COMPOSE_PROJECT}", "networks:", *net, "services:"]
